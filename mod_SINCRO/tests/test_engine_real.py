@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import dicom_loader
 from core.phase_analysis import phase_analysis
 from core.metrics import calculate_phase_metrics
+from core.segmentation import segment_myocardium
 from core.console_utf8 import enable_utf8
 
 enable_utf8()
@@ -41,8 +42,12 @@ def main():
         print(f"[SKIP] no existe: {SA_GATED_PATH}")
         return 0
     study = dicom_loader.load(SA_GATED_PATH, verbose=True)
-    mask = provisional_mask(study.cube, frac=0.35)
-    print(f"\nMáscara provisional: {int(mask.sum())} voxels (de {mask.size}).")
+    seg = segment_myocardium(study.cube, method="auto", threshold_frac=0.35)
+    mask = seg.mask
+    if int(mask.sum()) == 0:
+        print("\n[WARN] segmentación auto vacía. Fallback a máscara provisional por umbral.")
+        mask = provisional_mask(study.cube, frac=0.35)
+    print(f"\nMáscara usada: {int(mask.sum())} voxels (de {mask.size}).")
 
     res = phase_analysis(study.cube, mask, harmonics=1, amplitude_threshold_frac=0.10)
     print(f"Voxels analizados: {res.n_voxels_kept}/{res.n_voxels_total} "
