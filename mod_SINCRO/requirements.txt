@@ -1,5 +1,8 @@
 # SINCRO - dependencias
-# Todas estándar; instalar con: pip install -r requirements.txt
+# Todas estándar. Instalar en el venv propio del módulo:
+#   py -3.13 -m venv .venv
+#   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+# (Probado con numpy 2.x y scipy 1.18; el código usa API estable compatible con 1.26+.)
 
 pydicom>=3.0
 numpy>=1.26

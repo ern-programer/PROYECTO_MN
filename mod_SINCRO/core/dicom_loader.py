@@ -268,6 +268,8 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
 
 
 def _cli() -> int:
+    from core.console_utf8 import enable_utf8
+    enable_utf8()
     if len(sys.argv) < 2:
         print("Uso: python -m core.dicom_loader <archivo.dcm>")
         return 1

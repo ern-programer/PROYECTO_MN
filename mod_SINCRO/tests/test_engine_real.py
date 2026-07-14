@@ -19,6 +19,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import dicom_loader
 from core.phase_analysis import phase_analysis
 from core.metrics import calculate_phase_metrics
+from core.console_utf8 import enable_utf8
+
+enable_utf8()
 
 SA_GATED_PATH = (
     r"C:\Users\Ernesto\Desktop\INTERCAMBIO\varios stress cardiacos de xeleris"

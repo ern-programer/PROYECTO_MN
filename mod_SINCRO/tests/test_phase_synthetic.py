@@ -17,6 +17,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.phase_analysis import phase_analysis  # noqa: E402
 from core.metrics import calculate_phase_metrics, circular_mean_deg  # noqa: E402
+from core.console_utf8 import enable_utf8  # noqa: E402
+
+enable_utf8()
 
 
 def _make_gated(phase_map_deg, n_gates=16, amplitude=100.0, dc=200.0):

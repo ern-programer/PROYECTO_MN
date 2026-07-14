@@ -9,9 +9,11 @@ Uso:
 import sys
 
 from core import dicom_loader
+from core.console_utf8 import enable_utf8
 
 
 def main(argv: list[str]) -> int:
+    enable_utf8()
     if len(argv) < 2:
         print(__doc__)
         return 1
