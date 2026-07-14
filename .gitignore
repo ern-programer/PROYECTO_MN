@@ -1,0 +1,64 @@
+# =====================================================================
+# MONOREPO PROYECTO_MN — solo versionamos los MÓDULOS nuevos + motor.
+# Los proyectos legacy (FUSION, OPEN, visor_dicom) y los datos quedan FUERA.
+# Estrategia: ignorar TODO por defecto y "des-ignorar" (!) lo que sí va.
+# =====================================================================
+
+# --- Ignorar todo por defecto ---
+/*
+
+# --- Permitir la raíz del monorepo ---
+!.gitignore
+!README.md
+
+# --- Módulos que SÍ versionamos (agregar aquí cada nuevo módulo) ---
+!mod_SINCRO/
+# !motor_principal/          # descomentar cuando exista
+# !mod_XXX/                  # otros módulos futuros
+
+# =====================================================================
+# Reglas internas (aplican dentro de los módulos versionados)
+# =====================================================================
+
+# --- Datos médicos (NUNCA versionar) ---
+*.dcm
+*.DCM
+*.ima
+*.IMA
+*.dicom
+data_test/
+data_import/
+
+# --- Salidas ---
+output/
+*.pdf
+*.xlsx
+*.csv
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Entornos virtuales ---
+.venv/
+venv/
+env/
+
+# --- IDE / SO ---
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# --- Logs ---
+*.log
+*.tmp
