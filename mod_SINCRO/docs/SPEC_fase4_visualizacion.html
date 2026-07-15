@@ -1,0 +1,234 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SPEC_fase4_visualizacion</title><style>
+body{font-family:Segoe UI,Arial,sans-serif;max-width:980px;margin:24px auto;padding:0 16px;line-height:1.55;color:#1f2937}
+h1,h2,h3,h4{color:#0f172a}
+pre{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;overflow:auto}
+code{background:#f1f5f9;padding:1px 4px;border-radius:4px}
+ul,ol{padding-left:24px}
+li{margin:2px 0}
+.meta{color:#64748b;font-size:12px;margin-bottom:16px}
+</style></head><body><div class="meta">Generado desde SPEC_fase4_visualizacion.md</div><h1>SPEC Fase 4 — Visualización (polar map bullseye + histograma de fase)</h1>
+
+<p><strong>Autor de la especificación:</strong> Opus 4.8 (diseño).</p>
+<p><strong>Implementa:</strong> GPT 5.3-codex.</p>
+<p><strong>Fecha:</strong> 2026-07-14.</p>
+<p><strong>Contexto:</strong> módulo SINCRO, <code>mod_SINCRO/</code>. Fases 1 (motor de fase) y 3 (segmentación +</p>
+<p>mapeo AHA) ya están hechas y validadas. Esta fase produce las DOS visualizaciones</p>
+<p>estándar del análisis de fase: el <strong>Phase Polar Map (bullseye 17 segmentos)</strong> y el</p>
+<p><strong>Phase Histogram</strong>. Todo con matplotlib, generando imágenes (PNG / array RGB) SIN UI</p>
+<p>(la UI PyQt6 es Fase 6; acá solo se generan figuras guardables/embebibles).</p>
+
+<p>&gt; <strong>Cómo usar esta spec (Codex):</strong> implementá EXACTAMENTE las firmas y comportamientos.</p>
+<p>&gt; No cambies nombres. Donde algo quede abierto, elegí lo simple y dejá <code># TODO</code>.</p>
+<p>&gt; Corré los tests al final con el venv propio.</p>
+
+<p>---</p>
+
+<h2>0. Contexto (ya resuelto)</h2>
+
+<ul>
+<li><code>core/aha_segments.py</code> → <code>AHAResult.segment_map</code> (n_slices,H,W) int 1..17, <code>phase_by_segment(phase_map, aha)</code> → <code>dict[int,float]</code> (fase circular media por segmento 1..17), <code>TERRITORY_MAP</code>.</li>
+<li><code>core/phase_analysis.py</code> → <code>PhaseResult.phases_deg</code> (array de fases 0-360 por voxel) y <code>phase_map</code>.</li>
+<li><code>core/metrics.py</code> → <code>calculate_phase_metrics(phases_deg)</code> → dict con phase_sd, bandwidth, entropy, mean_phase, peak_phase, classification, etc. + <code>circular_mean_deg</code>.</li>
+<li><code>core/console_utf8.py</code> → <code>enable_utf8()</code>.</li>
+</ul>
+
+<p>Dependencias permitidas: numpy, matplotlib (+ scipy si hace falta). Ya instaladas. NO usar PyQt en esta fase.</p>
+
+<p>Backend matplotlib: usar <code>matplotlib.use(&quot;Agg&quot;)</code> al inicio de los módulos viz (renderizado sin ventana, para generar PNG en cualquier entorno).</p>
+
+<p>---</p>
+
+<h2>1. Archivos a crear/editar</h2>
+
+<ol>
+<li><code>viz/colormaps.py</code> — colormap CÍCLICO para fase (0-360°).</li>
+<li><code>viz/polar_map.py</code> — bullseye de 17 segmentos.</li>
+<li><code>viz/histogram.py</code> — histograma de fase con métricas.</li>
+<li><code>tests/test_viz.py</code> — tests (generan PNG y verifican que no crashea + propiedades básicas).</li>
+</ol>
+
+<p>---</p>
+
+<h2>2. <code>viz/colormaps.py</code> — colormap cíclico (LO IMPORTANTE #1)</h2>
+
+<p><strong>Por qué cíclico:</strong> la fase es un ÁNGULO (0° y 360° son el mismo instante del ciclo).</p>
+<p>Un colormap lineal (jet/viridis) pondría colores muy distintos en 1° y 359°, que en</p>
+<p>realidad están casi juntos. Hay que usar un colormap <strong>cíclico</strong> donde el color en 0°</p>
+<p>== color en 360°.</p>
+
+<h3>Firmas</h3>
+<p>```python</p>
+<p>import numpy as np</p>
+<p>import matplotlib.cm as cm</p>
+
+<p>def get_phase_cmap(name: str = &quot;hsv&quot;):</p>
+<p>    &quot;&quot;&quot;</p>
+<p>    Devuelve un colormap matplotlib CÍCLICO para mapear fase 0-360°.</p>
+<p>    Opciones válidas: &#x27;hsv&#x27; (clásico de MUGA/SyncTool), &#x27;twilight&#x27;, &#x27;twilight_shifted&#x27;.</p>
+<p>    Default &#x27;hsv&#x27; (el estándar en cardiología nuclear).</p>
+<p>    &quot;&quot;&quot;</p>
+
+<p>def phase_to_rgb(phase_deg, cmap_name: str = &quot;hsv&quot;, nan_color=(0.1, 0.1, 0.1)):</p>
+<p>    &quot;&quot;&quot;</p>
+<p>    Mapea un array de fase (0-360°, puede tener NaN) a RGB (…,3) float 0-1.</p>
+<p>    NaN → nan_color (gris oscuro). Normaliza 0-360 → 0-1 antes de aplicar el cmap.</p>
+<p>    &quot;&quot;&quot;</p>
+<p>```</p>
+<ul>
+<li>Normalización: <code>norm = (phase_deg % 360) / 360.0</code>.</li>
+<li>El cmap se aplica sobre <code>norm</code>; devolver solo los 3 canales RGB (descartar alpha).</li>
+<li>Documentar en docstring: rojo/inicio = contracción temprana, otros colores = más tardía</li>
+</ul>
+<p>  (la interpretación exacta depende de la referencia de fase).</p>
+
+<p>---</p>
+
+<h2>3. <code>viz/polar_map.py</code> — bullseye 17 segmentos (LO IMPORTANTE #2)</h2>
+
+<h3>3.1 Geometría del bullseye (diseño Opus)</h3>
+<p>El bullseye son <strong>anillos concéntricos</strong> divididos en sectores, vista &quot;ojo de buey&quot;</p>
+<p>(el ápex en el centro, la base en el borde externo):</p>
+
+<p>```</p>
+<p>Anillo EXTERNO  (r 0.75–1.00): 6 sectores de 60° → segmentos BASALES  1-6</p>
+<p>Anillo MEDIO    (r 0.50–0.75): 6 sectores de 60° → segmentos MEDIOS    7-12</p>
+<p>Anillo INTERNO  (r 0.25–0.50): 4 sectores de 90° → segmentos APICALES 13-16</p>
+<p>CENTRO          (r 0.00–0.25): 1 disco            → ÁPEX               17</p>
+<p>```</p>
+
+<p><strong>Ángulos de inicio de cada sector (convención, calibrable):</strong></p>
+<ul>
+<li>Basal/medio: sector k ocupa <code>[k<em>60, (k+1)</em>60)</code> grados, k=0..5.</li>
+<li>Apical: sector k ocupa <code>[k<em>90, (k+1)</em>90)</code> grados, k=0..3.</li>
+<li><code>angle_offset_deg</code> (default 0) rota todo el bullseye para calibrar contra MyoVation.</li>
+<li><code># TODO calibrar orientación del bullseye vs MyoVation/GE</code> (igual que en aha_segments).</li>
+</ul>
+
+<p><strong>Mapeo sector→nº de segmento:</strong> usar los mismos LUT que <code>core/aha_segments.py</code></p>
+<p>(<code>SECTOR_TO_SEGMENT_BASAL/MEDIO/APICAL</code>) para consistencia. Importarlos de ahí.</p>
+
+<h3>3.2 Implementación (matplotlib con wedges)</h3>
+<p>Dibujar con <code>matplotlib.patches.Wedge</code> en un eje con <code>aspect=&quot;equal&quot;</code>:</p>
+<ul>
+<li>Para cada segmento, un <code>Wedge((0,0), r_out, theta1, theta2, width=r_out-r_in)</code>.</li>
+<li>El ápex (17) es un <code>Circle</code>/<code>Wedge</code> completo de radio 0.25.</li>
+<li>Color del wedge = <code>phase_to_rgb(fase_del_segmento)</code> (de §2). Segmento sin dato → gris.</li>
+<li>Etiqueta opcional: número de segmento y/o valor de fase en el centro de cada wedge.</li>
+<li>Colorbar lateral: escala 0-360° con el cmap cíclico.</li>
+</ul>
+
+<h3>3.3 Firmas</h3>
+<p>```python</p>
+<p>@dataclass</p>
+<p>class PolarMapFigure:</p>
+<p>    fig: &quot;matplotlib.figure.Figure&quot;</p>
+<p>    segment_values: dict[int, float]      # fase por segmento usada</p>
+<p>    cmap_name: str</p>
+
+<p>def build_polar_map(</p>
+<p>    phase_by_seg: dict[int, float],       # de aha_segments.phase_by_segment</p>
+<p>    cmap_name: str = &quot;hsv&quot;,</p>
+<p>    angle_offset_deg: float = 0.0,</p>
+<p>    show_values: bool = True,</p>
+<p>    title: str | None = None,</p>
+<p>) -&gt; PolarMapFigure:</p>
+<p>    ...</p>
+
+<p>def save_polar_map(pmfig: &quot;PolarMapFigure&quot;, path: str, dpi: int = 150) -&gt; str:</p>
+<p>    &quot;&quot;&quot;Guarda la figura a PNG. Devuelve el path.&quot;&quot;&quot;</p>
+<p>```</p>
+
+<h3>3.4 Comportamiento</h3>
+<ul>
+<li>Debe funcionar aunque falten segmentos (dibuja los presentes, el resto gris).</li>
+<li>No abrir ventanas (backend Agg). No llamar plt.show().</li>
+</ul>
+
+<p>---</p>
+
+<h2>4. <code>viz/histogram.py</code> — histograma de fase</h2>
+
+<h3>4.1 Qué mostrar (estándar SyncTool/Emory)</h3>
+<ul>
+<li>Histograma de las fases (0-360°, típicamente 36–72 bins para visual; el cálculo de</li>
+</ul>
+<p>  entropy usa 360, pero el gráfico puede agrupar).</p>
+<ul>
+<li>Líneas verticales: media de fase (P50 circular) y P5/P95 (bandwidth).</li>
+<li>Caja de texto con métricas: Phase SD, Bandwidth, Entropy, Peak Phase, Classification.</li>
+<li>Título con la clasificación (NORMAL/MILD/MODERATE/SEVERE).</li>
+</ul>
+
+<h3>4.2 Firmas</h3>
+<p>```python</p>
+<p>def build_phase_histogram(</p>
+<p>    phases_deg: np.ndarray,</p>
+<p>    metrics: dict | None = None,          # de calculate_phase_metrics; si None, se calcula</p>
+<p>    bins: int = 72,</p>
+<p>    title: str | None = None,</p>
+<p>):</p>
+<p>    &quot;&quot;&quot;Devuelve la Figure de matplotlib. Si metrics es None, llamar calculate_phase_metrics.&quot;&quot;&quot;</p>
+
+<p>def save_histogram(fig, path: str, dpi: int = 150) -&gt; str:</p>
+<p>    ...</p>
+<p>```</p>
+
+<p>---</p>
+
+<h2>5. <code>tests/test_viz.py</code></h2>
+
+<h3>5.1 Test colormap</h3>
+<ul>
+<li><code>phase_to_rgb(np.array([0., 360.]))</code> → los dos colores casi iguales (cíclico):</li>
+</ul>
+<p>  <code>np.allclose(rgb[0], rgb[1], atol=0.05)</code>.</p>
+<ul>
+<li><code>phase_to_rgb(np.array([np.nan]))</code> → devuelve el nan_color.</li>
+</ul>
+
+<h3>5.2 Test polar map (sintético)</h3>
+<ul>
+<li>Construir <code>phase_by_seg = {i: (i*20) % 360 for i in range(1,18)}</code>.</li>
+<li><code>build_polar_map(phase_by_seg)</code> no crashea; <code>save_polar_map(..., tmp.png)</code> crea el archivo.</li>
+<li>Verificar que la figura tiene ejes y que el PNG pesa &gt; 0 bytes.</li>
+</ul>
+
+<h3>5.3 Test histograma (sintético)</h3>
+<ul>
+<li><code>phases = np.random.default_rng(0).normal(120, 30, 2000) % 360</code>.</li>
+<li><code>build_phase_histogram(phases)</code> no crashea; <code>save_histogram(..., tmp.png)</code> crea archivo.</li>
+</ul>
+
+<h3>5.4 Test integración real (skip-safe)</h3>
+<ul>
+<li>Si existe <code>REST_IRNCG_SA001_DS.dcm</code>: load → segment(auto) → phase_analysis →</li>
+</ul>
+<p>  map_to_17_segments → phase_by_segment → build_polar_map + build_histogram → guardar 2 PNG</p>
+<p>  en carpeta temporal. Aserción laxa: ambos PNG creados y &gt; 0 bytes.</p>
+
+<p>Usar <code>tempfile</code> o una carpeta <code>output/</code> (ignorada por git) para los PNG. Llamar <code>enable_utf8()</code>.</p>
+
+<p>---</p>
+
+<h2>6. Criterios de aceptación (Definition of Done)</h2>
+
+<ul>
+<li>[ ] <code>.\.venv\Scripts\python.exe tests\test_viz.py</code> pasa.</li>
+<li>[ ] <code>tests/test_phase_synthetic.py</code> y <code>tests/test_segmentation.py</code> SIGUEN pasando (no romper F1/F3).</li>
+<li>[ ] Colormap es cíclico (0°≈360°).</li>
+<li>[ ] <code>build_polar_map</code> genera bullseye con 17 segmentos en la geometría descrita.</li>
+<li>[ ] PNGs se generan sin abrir ventanas (backend Agg).</li>
+<li>[ ] Sin dependencias nuevas (numpy/matplotlib/scipy). UTF-8. Cambios solo en <code>mod_SINCRO/**</code>.</li>
+</ul>
+
+<h2>7. Fuera de esta fase (no hacer)</h2>
+<ul>
+<li>UI PyQt6 / interactividad / animación del ciclo → Fase 6.</li>
+<li>Informe PDF → Fase 5.</li>
+<li>Calibración fina de orientación vs MyoVation → dejar <code>angle_offset_deg</code> + <code># TODO</code>.</li>
+</ul>
+
+<h2>8. AL TERMINAR (handoff)</h2>
+<p>No avanzar a otra fase. Terminar con el mensaje exacto:</p>
+<p>&gt; &quot;✅ Fase 4 implementada y tests en verde. <strong>Volvé a Opus 4.8 para la revisión</strong> (QA del bullseye + colormap cíclico + no regresión F1/F3) antes de avanzar a la Fase 5.&quot;</p>
+<p>Incluir resumen de archivos tocados, tests que pasan y TODO abiertos. Commits locales SIN push.</p></body></html>

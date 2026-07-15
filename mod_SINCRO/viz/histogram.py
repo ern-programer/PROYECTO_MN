@@ -41,7 +41,7 @@ def build_phase_histogram(
 	ax.axvline(p95_abs, color="#fdae61", linestyle="--", linewidth=1.8, label=f"P95 {p95_abs:.1f}°")
 
 	cls = metrics.get("classification", "N/A")
-	ax.set_title(title or f"Phase Histogram — {cls}")
+	ax.set_title(title or f"Phase Histogram — {cls}", fontsize=13, fontweight="bold", pad=12)
 	ax.set_xlabel("Fase (°)")
 	ax.set_ylabel("Frecuencia")
 	ax.set_xlim(0.0, 360.0)
@@ -55,18 +55,16 @@ def build_phase_histogram(
 		f"Peak Phase: {metrics.get('peak_phase', np.nan)}°\n"
 		f"Class: {cls}"
 	)
-	ax.text(
-		0.985,
-		0.97,
+	fig.subplots_adjust(left=0.15, right=0.86, top=0.86, bottom=0.16)
+	fig.text(
+		0.015,
+		0.94,
 		txt,
-		transform=ax.transAxes,
-		ha="right",
+		ha="left",
 		va="top",
 		fontsize=8,
 		bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.9, edgecolor="#999999"),
 	)
-
-	fig.tight_layout()
 	return fig
 
 

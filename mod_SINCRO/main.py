@@ -1,29 +1,37 @@
-"""
-SINCRO - entry point.
-
-Por ahora solo expone el loader. La UI (Fase 6) y el pipeline completo se agregan luego.
+"""SINCRO - entry point.
 
 Uso:
-    python main.py <archivo_SA_gated.dcm>     # carga y muestra resumen + auto-QC
+    python main.py                     # abre la interfaz visual
+    python main.py archivo.dcm         # abre la interfaz y carga el estudio
 """
+from __future__ import annotations
+
 import sys
 
-from core import dicom_loader
 from core.console_utf8 import enable_utf8
 
 
 def main(argv: list[str]) -> int:
     enable_utf8()
-    if len(argv) < 2:
-        print(__doc__)
-        return 1
+
+    file_path = argv[1] if len(argv) > 1 and not argv[1].startswith("-") else None
+
     try:
-        study = dicom_loader.load(argv[1], verbose=True)
-    except dicom_loader.LoaderError as e:
-        print(f"[LoaderError] {e}")
+        from PyQt6.QtWidgets import QApplication
+    except ImportError:
+        print("PyQt6 no está instalado. Instala las dependencias del módulo y vuelve a intentar.")
         return 2
-    print("\n[Loader OK]" if study.qc_passed else "\n[Loader con advertencias de QC]")
-    return 0
+
+    app = QApplication(argv)
+    app.setApplicationName("GammaSync")
+    app.setApplicationDisplayName("GammaSync")
+    app.setOrganizationName("Gammasys")
+
+    from ui.main_window import MainWindow
+
+    window = MainWindow(initial_path=file_path)
+    window.show()
+    return app.exec()
 
 
 if __name__ == "__main__":

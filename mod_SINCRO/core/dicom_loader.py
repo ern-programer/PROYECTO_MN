@@ -58,6 +58,9 @@ class GatedStudy:
     cols: int
     pixel_spacing: tuple[float, float] | None
     source_path: str
+    z_spacing_mm: float | None = None
+    slice_thickness_mm: float | None = None
+    spacing_between_slices_mm: float | None = None
     image_type: list[str] = field(default_factory=list)
     series_description: str = ""
     study_description: str = ""
@@ -81,6 +84,10 @@ class GatedStudy:
             f"Auto-QC latido : 1er armónico={self.qc_first_harmonic:.3f}  "
             f"→ {'OK (late)' if self.qc_passed else 'REVISAR (posible gating error / reshape)'}",
         ]
+        if self.pixel_spacing is not None:
+            lines.append(f"Pixel spacing  : {self.pixel_spacing[0]:.3f} x {self.pixel_spacing[1]:.3f} mm")
+        if self.z_spacing_mm is not None:
+            lines.append(f"Espesor Z      : {self.z_spacing_mm:.3f} mm")
         if self.notes:
             lines.append("Notas          :")
             lines.extend(f"  - {n}" for n in self.notes)
@@ -121,6 +128,17 @@ def _first_harmonic_fraction(cube: np.ndarray) -> float:
     power = np.abs(np.fft.fft(curve)) ** 2
     denom = power[1: t // 2 + 1].sum()
     return float(power[1] / denom) if denom > 0 else 0.0
+
+
+def _to_float_or_none(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (list, tuple)) and value:
+            return float(value[0])
+        return float(value)
+    except Exception:
+        return None
 
 
 def _unpack_montage(frames: np.ndarray, n_slices: int) -> np.ndarray:
@@ -166,6 +184,9 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
     cols = int(_get(ds, (0x0028, 0x0011), 0) or 0)
     px = _get(ds, (0x0028, 0x0030), None)
     pixel_spacing = (float(px[0]), float(px[1])) if px else None
+    slice_thickness_mm = _to_float_or_none(_get(ds, (0x0018, 0x0050), None))
+    spacing_between_slices_mm = _to_float_or_none(_get(ds, (0x0018, 0x0088), None))
+    z_spacing_mm = spacing_between_slices_mm if spacing_between_slices_mm else slice_thickness_mm
 
     # --- Caso 1: proyecciones crudas → no soportado aún (requiere reconstrucción) ---
     if _is_raw_projections(ds):
@@ -250,6 +271,9 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
         rows=rows,
         cols=cols,
         pixel_spacing=pixel_spacing,
+        z_spacing_mm=z_spacing_mm,
+        slice_thickness_mm=slice_thickness_mm,
+        spacing_between_slices_mm=spacing_between_slices_mm,
         source_path=path,
         image_type=itype,
         series_description=series_desc,

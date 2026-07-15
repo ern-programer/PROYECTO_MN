@@ -1,0 +1,85 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>INSTRUCCIONES_CODEX_fase3</title><style>
+body{font-family:Segoe UI,Arial,sans-serif;max-width:980px;margin:24px auto;padding:0 16px;line-height:1.55;color:#1f2937}
+h1,h2,h3,h4{color:#0f172a}
+pre{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;overflow:auto}
+code{background:#f1f5f9;padding:1px 4px;border-radius:4px}
+ul,ol{padding-left:24px}
+li{margin:2px 0}
+.meta{color:#64748b;font-size:12px;margin-bottom:16px}
+</style></head><body><div class="meta">Generado desde INSTRUCCIONES_CODEX_fase3.md</div><h1>Instrucciones para Codex — Implementar Fase 3 (SINCRO)</h1>
+
+<p>&gt; Copiá y pegá el bloque de abajo en tu sesión con GPT 5.3-codex.</p>
+
+<p>---</p>
+
+<h2>PROMPT PARA CODEX</h2>
+
+<p>Estás trabajando en el proyecto <strong>mod_SINCRO</strong> (análisis de asincronía cardíaca por fase, Gated SPECT). Ubicación: <code>D:\- PROGRAMACIÓN\PROYECTO_MN\mod_SINCRO\</code>.</p>
+
+<h3>Tu tarea</h3>
+<p>Implementá la <strong>Fase 3</strong> siguiendo AL PIE DE LA LETRA la especificación en:</p>
+<p><code>mod_SINCRO/docs/SPEC_fase3_segmentacion_AHA.md</code></p>
+
+<p>Tenés que crear/completar:</p>
+<ol>
+<li><code>core/segmentation.py</code> — segmentación del miocardio (métodos auto/manual/threshold).</li>
+<li><code>core/aha_segments.py</code> — mapeo voxel → 17 segmentos AHA + territorios coronarios.</li>
+<li><code>tests/test_segmentation.py</code> — tests sintético + real (skip-safe).</li>
+</ol>
+
+<h3>Contexto que DEBÉS leer antes de escribir (ya existe, NO lo modifiques salvo lo indicado)</h3>
+<ul>
+<li><code>core/dicom_loader.py</code> — cómo se carga el estudio y qué devuelve (<code>GatedStudy.cube</code>, shape <code>(n_gates, n_slices, H, W)</code>).</li>
+<li><code>core/phase_analysis.py</code> — el motor de fase (Fase 1, ya validado). Devuelve <code>PhaseResult</code> con <code>phase_map</code>.</li>
+<li><code>core/metrics.py</code> — <strong>reutilizá</strong> <code>circular_mean_deg</code> y <code>circular_std_deg</code> para TODO promedio angular. NO reimplementes medias circulares.</li>
+<li><code>core/console_utf8.py</code> — llamá <code>enable_utf8()</code> al inicio de cualquier script con <code>print</code> (evita crash en consola Windows).</li>
+</ul>
+
+<h3>Reglas obligatorias</h3>
+<ul>
+<li>Respetá EXACTAMENTE las firmas, nombres de funciones, dataclasses y campos de la spec. No los cambies.</li>
+<li>Sin dependencias nuevas: solo <code>numpy</code>, <code>scipy</code>, <code>opencv-python</code> (cv2). Ya están instaladas.</li>
+<li>Todos los archivos en UTF-8. Todo entry point con <code>print</code> debe llamar <code>enable_utf8()</code>.</li>
+<li>Donde la spec deje una decisión abierta, elegí lo más simple y dejá un comentario <code># TODO</code>.</li>
+<li>NO implementes cosas marcadas como &quot;FUERA de esta fase&quot; (LVSD 6 etapas, reorientación oblicua, polar map visual).</li>
+</ul>
+
+<h3>Entorno para correr (IMPORTANTE)</h3>
+<p>Usá el venv propio del módulo, NO el global ni el de FUSION:</p>
+<p>```powershell</p>
+<p>cd &quot;d:\- PROGRAMACIÓN\PROYECTO_MN\mod_SINCRO&quot;</p>
+<p>.\.venv\Scripts\python.exe tests\test_segmentation.py</p>
+<p>.\.venv\Scripts\python.exe tests\test_phase_synthetic.py   # verificá que NO se rompió</p>
+<p>```</p>
+
+<h3>Criterios de aceptación (Definition of Done) — verificalos vos antes de terminar</h3>
+<ul>
+<li>[ ] <code>tests/test_segmentation.py</code> pasa (sintético con anillo cubre segmentos 1..17; real es skip-safe si no está el DICOM).</li>
+<li>[ ] <code>tests/test_phase_synthetic.py</code> SIGUE pasando (no rompiste la Fase 1).</li>
+<li>[ ] <code>.\.venv\Scripts\python.exe -m core.segmentation &lt;un_dcm_SA&gt;</code> imprime resumen sin error.</li>
+<li>[ ] Sin dependencias nuevas. UTF-8 en todo.</li>
+<li>[ ] El pipeline de integración de la §5 de la spec funciona end-to-end.</li>
+</ul>
+
+<h3>Commits</h3>
+<ul>
+<li>Hacé commits locales descriptivos (<code>git commit</code>), pero <strong>NO hagas <code>git push</code></strong> (regla del repo: el push lo autoriza el usuario).</li>
+</ul>
+
+<h3>⛔ AL TERMINAR — MUY IMPORTANTE</h3>
+<p>Cuando completes la implementación y los tests pasen, <strong>NO sigas con la Fase 4 ni con nada más</strong>.</p>
+<p>Terminá tu respuesta con este mensaje EXACTO al usuario:</p>
+
+<p>&gt; &quot;✅ Fase 3 implementada y tests en verde. <strong>Volvé a Opus 4.8 para la revisión</strong> (control de calidad del mapeo AHA + validación de que no se rompió la Fase 1) antes de avanzar a la Fase 4.&quot;</p>
+
+<p>Dejá un resumen de: qué archivos tocaste, qué tests pasan, y cualquier decisión/<code>TODO</code> que hayas dejado abierto, para que Opus lo revise.</p>
+
+<p>---</p>
+
+<h2>Por qué este reparto</h2>
+<ul>
+<li><strong>Opus</strong> diseñó el algoritmo difícil (mapeo AHA, detección ápex/base) en la spec.</li>
+<li><strong>Codex</strong> (vos) implementás el código mecánico siguiendo la spec.</li>
+<li><strong>Opus</strong> revisa al final (control de calidad clínico + arquitectura).</li>
+</ul>
+<p>Esto optimiza costos: la cabeza cara (Opus) solo diseña y revisa; el grueso del tipeo lo hace el modelo intermedio.</p></body></html>

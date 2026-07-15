@@ -1,0 +1,182 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GUIA_AUDITORIA_VALIDACION_CALCULOS</title><style>
+body{font-family:Segoe UI,Arial,sans-serif;max-width:980px;margin:24px auto;padding:0 16px;line-height:1.55;color:#1f2937}
+h1,h2,h3,h4{color:#0f172a}
+pre{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;overflow:auto}
+code{background:#f1f5f9;padding:1px 4px;border-radius:4px}
+ul,ol{padding-left:24px}
+li{margin:2px 0}
+.meta{color:#64748b;font-size:12px;margin-bottom:16px}
+</style></head><body><div class="meta">Generado desde GUIA_AUDITORIA_VALIDACION_CALCULOS.md</div><h1>GUIA DE AUDITORIA Y VALIDACION DE CALCULOS (SINCRO)</h1>
+
+<p>Fecha: 2026-07-15</p>
+<p>Estado: operativo (uso interno de validacion)</p>
+
+<h2>1. Objetivo clinico</h2>
+<p>Esta guia describe:</p>
+<ul>
+<li>Como se construyen los resultados (segmentacion, fase, volumenes, FE preliminar).</li>
+<li>Como usar ROI en slices apicales y basales cuando no se visualiza cavidad.</li>
+<li>Que impacto tiene cada decision sobre los indicadores reportados.</li>
+</ul>
+
+<h2>2. Flujo de calculo (resumen)</h2>
+<ol>
+<li>Se carga estudio gated SPECT (cubo: gates x slices x H x W).</li>
+<li>Se segmenta miocardio (auto/threshold/manual).</li>
+<li>Se calcula fase sobre la mascara de miocardio final.</li>
+<li>Se derivan metricas globales de fase y analisis AHA/territorios.</li>
+<li>Se estiman volumenes geometricos y FE preliminar (si hay condiciones minimas).</li>
+</ol>
+
+<h2>2.1 Que es AHA y que es el mapa AHA</h2>
+<ul>
+<li>AHA significa American Heart Association.</li>
+<li>El mapa AHA (modelo de 17 segmentos) divide el VI en regiones estandarizadas:</li>
+<li>Basal: 6 segmentos</li>
+<li>Medio: 6 segmentos</li>
+<li>Apical: 4 segmentos</li>
+<li>Apex: 1 segmento</li>
+<li>Finalidad clinica:</li>
+<li>Ubicar regionalmente la alteracion de fase/perfusion.</li>
+<li>Estandarizar reportes entre software y entre estudios seriados.</li>
+<li>Resumir informacion por territorios coronarios (LAD/LCx/RCA) para decision clinica.</li>
+</ul>
+
+<p>Donde se muestra en SINCRO:</p>
+<ul>
+<li>UI: pestaña/panel &quot;polar_map&quot; (mapa polar AHA).</li>
+<li>PDF: figura del mapa polar AHA (Figura 2, bullseye 17 segmentos).</li>
+</ul>
+
+<p>Como se usa en los calculos:</p>
+<ul>
+<li>La fase se calcula voxel a voxel sobre la mascara segmentada.</li>
+<li>Luego se proyecta esa fase a los 17 segmentos AHA.</li>
+<li>De ahi salen fase por segmento y por territorio, ademas de la clasificacion global.</li>
+</ul>
+
+<h2>3. Segmentacion manual por ROI</h2>
+<p>Formato por slice:</p>
+<ul>
+<li>slice,cy,cx,r_inner,r_outer</li>
+</ul>
+
+<p>Ejemplos:</p>
+<ul>
+<li>Con cavidad visible: 9,12,11,4,7</li>
+<li>Apex/base sin cavidad visible: 9,12,11,-,7</li>
+</ul>
+
+<p>Reglas:</p>
+<ul>
+<li>Centro y radio externo son obligatorios.</li>
+<li>r_inner puede ser &#x27;-&#x27; (sin interno) solo cuando no hay cavidad distinguible.</li>
+<li>Si r_inner existe, debe cumplir: 0 &lt;= r_inner &lt; r_outer.</li>
+</ul>
+
+<p>Interpretacion geometrica:</p>
+<ul>
+<li>ROI con interno: anillo miocardico.</li>
+<li>ROI sin interno: disco hasta r_outer (sin exclusion central).</li>
+</ul>
+
+<h2>4. Recomendacion clinica de uso (apex y base)</h2>
+<p>Usar ROI sin interno (r_inner=&#x27;-&#x27;) cuando:</p>
+<ul>
+<li>El frame/slice no muestra cavidad ventricular clara.</li>
+<li>Se trata de apex extremo o base extrema con colapso/indistincion de la luz.</li>
+</ul>
+
+<p>No usar ROI sin interno cuando:</p>
+<ul>
+<li>La cavidad es visible y delimitable.</li>
+<li>El objetivo es cuantificacion volumetrica mas estable de cavidad.</li>
+</ul>
+
+<p>Criterio practico:</p>
+<ul>
+<li>Slices medios: preferir anillo completo (interno + externo).</li>
+<li>Apex/base extremos: permitido sin interno, con justificacion visual.</li>
+</ul>
+
+<h2>5. Impacto en resultados</h2>
+<h3>5.1 Metricas de fase</h3>
+<ul>
+<li>La fase se calcula sobre la mascara segmentada final.</li>
+<li>Si un slice se dibuja sin interno, entran mas voxeles centrales en la mascara de ese slice.</li>
+<li>Puede modificar histogramas y dispersion de fase si esos voxeles agregados tienen señal distinta.</li>
+</ul>
+
+<h3>5.2 Volumenes</h3>
+<ul>
+<li>Volumen miocardico: puede aumentar en slices sin interno.</li>
+<li>Volumen de cavidad: en slices sin interno no hay contribucion directa de cavidad por radio interno.</li>
+<li>Resultado esperado: tendencia a mayor miocardio y menor cavidad en esos niveles.</li>
+</ul>
+
+<h3>5.3 FE preliminar</h3>
+<ul>
+<li>La FE preliminar excluye slices sin radio interno finito.</li>
+<li>Esto reduce sesgo por cavidad no visible, pero puede bajar cantidad de slices validos.</li>
+<li>Si hay muy pocos slices validos, FE puede quedar no disponible.</li>
+</ul>
+
+<h2>6. Ecuaciones y definiciones usadas</h2>
+<h3>6.1 Volumen de voxel</h3>
+<ul>
+<li>voxel_ml = (dx_mm <em> dy_mm </em> dz_mm) / 1000</li>
+</ul>
+
+<h3>6.2 Volumen miocardico</h3>
+<ul>
+<li>myocardial_ml = numero_de_voxeles_en_mascara * voxel_ml</li>
+</ul>
+
+<h3>6.3 Volumen de cavidad (geometrico)</h3>
+<ul>
+<li>Se estima por conteo de pixeles dentro de r_inner por slice valido.</li>
+<li>cavity_ml = cavity_voxels * voxel_ml</li>
+</ul>
+
+<h3>6.4 FE preliminar</h3>
+<ul>
+<li>EDV = max(volumen_cavidad_por_gate)</li>
+<li>ESV = min(volumen_cavidad_por_gate)</li>
+<li>EF(%) = ((EDV - ESV) / EDV) * 100</li>
+</ul>
+
+<p>Nota:</p>
+<ul>
+<li>FE en este modulo se considera preliminar (investigacion/validacion), no sustituto de paquete comercial validado.</li>
+</ul>
+
+<h2>7. Requisitos de auditoria recomendados</h2>
+<p>Registrar por estudio:</p>
+<ul>
+<li>Metodo de segmentacion usado (auto/manual/threshold).</li>
+<li>Slices con ROI sin interno y justificacion.</li>
+<li>Parametros activos (threshold, sigma, harmonics, filtro amplitud).</li>
+<li>Version del software y fecha.</li>
+</ul>
+
+<p>Checklist minimo:</p>
+<ul>
+<li>Revision visual de ROI por slice.</li>
+<li>Confirmar consistencia apex-&gt;medio-&gt;base.</li>
+<li>Verificar que FE preliminar tenga slices suficientes.</li>
+</ul>
+
+<h2>8. Limitaciones actuales</h2>
+<ul>
+<li>FE marcada como preliminar.</li>
+<li>Segmentacion manual depende del operador.</li>
+<li>Slices sin interno pueden afectar comparabilidad entre estudios si se usan de forma inconsistente.</li>
+</ul>
+
+<h2>9. Uso para validacion</h2>
+<p>Este documento sirve para:</p>
+<ul>
+<li>Justificar tecnicamente el pipeline durante auditorias internas.</li>
+<li>Estandarizar criterios de carga manual ROI.</li>
+<li>Facilitar trazabilidad de decisiones y reproducibilidad.</li>
+</ul></body></html>

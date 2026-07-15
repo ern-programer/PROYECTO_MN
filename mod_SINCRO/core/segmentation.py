@@ -151,14 +151,23 @@ def segment_myocardium(
             if roi is None or len(roi) != 4:
                 continue
             cy, cx, r_inner, r_outer = roi
-            d = np.sqrt((ys - float(cy)) ** 2 + (xs - float(cx)) ** 2)
-            ring = (d >= float(r_inner)) & (d <= float(r_outer))
+            cy = float(cy)
+            cx = float(cx)
+            ri = float(r_inner)
+            ro = float(r_outer)
+            if not np.isfinite(cy) or not np.isfinite(cx) or not np.isfinite(ro) or ro <= 0.0:
+                continue
+            has_inner = np.isfinite(ri) and ri > 0.0
+            if has_inner and ro <= ri:
+                continue
+            d = np.sqrt((ys - cy) ** 2 + (xs - cx) ** 2)
+            ring = ((d >= ri) & (d <= ro)) if has_inner else (d <= ro)
             if int(ring.sum()) < 1:
                 continue
             mask[s] = ring
-            centers[s] = [float(cy), float(cx)]
-            inner[s] = float(r_inner)
-            outer[s] = float(r_outer)
+            centers[s] = [cy, cx]
+            inner[s] = ri if has_inner else np.nan
+            outer[s] = ro
 
         return SegmentationResult(
             mask=mask,

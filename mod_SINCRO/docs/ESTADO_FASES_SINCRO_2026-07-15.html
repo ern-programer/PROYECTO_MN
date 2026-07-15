@@ -1,0 +1,234 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ESTADO_FASES_SINCRO_2026-07-15</title><style>
+body{font-family:Segoe UI,Arial,sans-serif;max-width:980px;margin:24px auto;padding:0 16px;line-height:1.55;color:#1f2937}
+h1,h2,h3,h4{color:#0f172a}
+pre{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;overflow:auto}
+code{background:#f1f5f9;padding:1px 4px;border-radius:4px}
+ul,ol{padding-left:24px}
+li{margin:2px 0}
+.meta{color:#64748b;font-size:12px;margin-bottom:16px}
+</style></head><body><div class="meta">Generado desde ESTADO_FASES_SINCRO_2026-07-15.md</div><h1>ESTADO DE FASES SINCRO (2026-07-15)</h1>
+
+<h2>Resumen ejecutivo</h2>
+
+<ul>
+<li>Estado general: en desarrollo funcional, con UI operativa y pipeline clínico básico end-to-end.</li>
+<li>Prioridad actual: consolidar flujo clínico de uso diario (robustez, presets, visualización, reporte).</li>
+<li>Riesgo principal: sumar funciones avanzadas (3D, DICOM SC/SEG, calcium score) sin cerrar primero persistencia y trazabilidad por estudio.</li>
+</ul>
+
+<h2>Roadmap propuesto y estado</h2>
+
+<h3>Fase 0 - Ingesta y normalización DICOM</h3>
+
+<p>Objetivo:</p>
+<ul>
+<li>Cargar gated SPECT Short Axis de forma robusta.</li>
+<li>Resolver montage, frame sumado y reshape 4D.</li>
+</ul>
+
+<p>Estado:</p>
+<ul>
+<li>Completada funcional.</li>
+</ul>
+
+<p>Evidencia:</p>
+<ul>
+<li>Loader con detección gated, desempaquetado y auto-QC.</li>
+<li>Salida normalizada (gates, slices, H, W).</li>
+</ul>
+
+<p>Pendiente:</p>
+<ul>
+<li>Mejor metadata de paciente/estudio para persistencia clínica (PatientID/StudyUID en UI).</li>
+</ul>
+
+<h3>Fase 1 - Motor de fase y métricas</h3>
+
+<p>Objetivo:</p>
+<ul>
+<li>FFT armónico 1 por voxel, mapa de fase/amplitud, métricas globales.</li>
+</ul>
+
+<p>Estado:</p>
+<ul>
+<li>Completada funcional.</li>
+</ul>
+
+<p>Evidencia:</p>
+<ul>
+<li>Métricas principales calculadas y usadas en UI/reportes.</li>
+<li>Tests sintéticos existentes.</li>
+<li>Cálculo de volumen miocárdico (mL) y volumen de cavidad estimado (mL) cuando el DICOM incluye spacing válido.</li>
+<li>Estimación preliminar de FEVI por dinámica de gates (EDV/ESV/SV/FEVI), marcada como investigación y no equivalente a Emory/4DM/CEqual/QGS.</li>
+</ul>
+
+<p>Pendiente:</p>
+<ul>
+<li>Suite de regresión más amplia con casos clínicos reales.</li>
+</ul>
+
+<h3>Fase 2 - Segmentación</h3>
+
+<p>Objetivo:</p>
+<ul>
+<li>Segmentación auto/threshold/manual, ROI por slice.</li>
+</ul>
+
+<p>Estado:</p>
+<ul>
+<li>Completada funcional.</li>
+</ul>
+
+<p>Evidencia:</p>
+<ul>
+<li>Flujo manual con edición en cine y replicado por volumen.</li>
+<li>Limpieza/borrado de ROIs y validación de ROIs inválidas.</li>
+<li>Auto ROI por slice y en todo el volumen, con opción de aplicar solo en slices sin ROI (preserva correcciones manuales).</li>
+</ul>
+
+<p>Pendiente:</p>
+<ul>
+<li>Asistente guiado de ROI para reducir interacción manual.</li>
+</ul>
+
+<h3>Fase 3 - Visualización clínica</h3>
+
+<p>Objetivo:</p>
+<ul>
+<li>Slices con overlay de fase, polar map, histograma, cine y ejes ortogonales.</li>
+</ul>
+
+<p>Estado:</p>
+<ul>
+<li>Completada funcional (iterativa).</li>
+</ul>
+
+<p>Evidencia:</p>
+<ul>
+<li>Tabs de visualización, zoom, colormaps ampliados.</li>
+<li>Ejes SA/HLA/VLA (HLA/VLA reconstruidos desde SA si no hay serie original).</li>
+<li>Histograma con referencias y métricas sin superposición.</li>
+</ul>
+
+<p>Pendiente:</p>
+<ul>
+<li>Si llegan series originales HLA/VLA, priorizar esas sobre reconstrucción desde SA.</li>
+</ul>
+
+<h3>Fase 4 - Reporte PDF clínico</h3>
+
+<p>Objetivo:</p>
+<ul>
+<li>Informe legible con tablas, figuras y resumen interpretativo.</li>
+</ul>
+
+<p>Estado:</p>
+<ul>
+<li>Completada funcional.</li>
+</ul>
+
+<p>Evidencia:</p>
+<ul>
+<li>PDF con imágenes de resultados y captions.</li>
+<li>Escalado proporcional de imágenes (sin estiramiento).</li>
+</ul>
+
+<p>Pendiente:</p>
+<ul>
+<li>Firma digital/plantillas institucionales.</li>
+</ul>
+
+<h3>Fase 5 - Persistencia de procesamiento por estudio/paciente</h3>
+
+<p>Objetivo:</p>
+<ul>
+<li>Guardar solo parámetros y configuraciones (no imágenes pesadas).</li>
+<li>Soportar varios presets por paciente.</li>
+</ul>
+
+<p>Estado:</p>
+<ul>
+<li>En progreso (ya iniciado en UI).</li>
+</ul>
+
+<p>Evidencia:</p>
+<ul>
+<li>Presets por paciente (guardar/cargar/borrar) en JSON local.</li>
+</ul>
+
+<p>Pendiente:</p>
+<ul>
+<li>Identificación robusta por PatientID + StudyInstanceUID.</li>
+<li>Historial de versiones de preset y auditoría mínima.</li>
+</ul>
+
+<h3>Fase 6 - DICOM de salida y networking</h3>
+
+<p>Objetivo:</p>
+<ul>
+<li>Exportar resultados para envío DICOM (SC/encapsulado y, luego, objetos estructurados).</li>
+<li>Integrar con recepción/envío DICOM del flujo clínico.</li>
+</ul>
+
+<p>Estado:</p>
+<ul>
+<li>Pendiente.</li>
+</ul>
+
+<p>Pendiente clave:</p>
+<ul>
+<li>Definir formato inicial: Secondary Capture primero, luego SEG/SR si aplica.</li>
+</ul>
+
+<h3>Fase 7 - Visualización 3D avanzada</h3>
+
+<p>Objetivo:</p>
+<ul>
+<li>Render 3D interactivo del VI y overlay por territorios coronarios.</li>
+</ul>
+
+<p>Estado:</p>
+<ul>
+<li>Pendiente.</li>
+</ul>
+
+<p>Recomendación:</p>
+<ul>
+<li>Implementar después de cerrar Fase 5 y 6 para evitar deuda técnica.</li>
+</ul>
+
+<h3>Fase 8 - Calcium Score (CT)</h3>
+
+<p>Objetivo:</p>
+<ul>
+<li>Pipeline de score de calcio (Agatston y variantes) basado en CT.</li>
+</ul>
+
+<p>Estado:</p>
+<ul>
+<li>Pendiente estratégico (alta prioridad clínica, módulo recomendado separado).</li>
+</ul>
+
+<p>Recomendación técnica:</p>
+<ul>
+<li>Módulo separado pero integrado al ecosistema SINCRO/FUSION.</li>
+<li>Requiere CT adecuado y calibración HU. No debe mezclarse con pipeline SPECT puro.</li>
+</ul>
+
+<h2>Dónde estamos hoy</h2>
+
+<p>Estamos entre Fase 4 y Fase 5:</p>
+<ul>
+<li>Pipeline SPECT de sincronía usable de punta a punta.</li>
+<li>Reporte y visualización clínicamente útiles.</li>
+<li>Persistencia de presets recién iniciada (base correcta, falta robustecer identidad clínica).</li>
+</ul>
+
+<h2>Próximos pasos sugeridos (orden)</h2>
+
+<ol>
+<li>Cerrar Fase 5 (persistencia robusta por paciente/estudio, auditoría mínima).</li>
+<li>Iniciar Fase 6 (export y envío DICOM de resultados).</li>
+<li>Definir arquitectura del módulo Calcium Score (Fase 8), con dataset CT de validación.</li>
+<li>Recién después abordar Fase 7 (3D interactivo).</li>
+</ol></body></html>

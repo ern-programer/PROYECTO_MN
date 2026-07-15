@@ -1,0 +1,289 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SPEC_fase3_segmentacion_AHA</title><style>
+body{font-family:Segoe UI,Arial,sans-serif;max-width:980px;margin:24px auto;padding:0 16px;line-height:1.55;color:#1f2937}
+h1,h2,h3,h4{color:#0f172a}
+pre{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;overflow:auto}
+code{background:#f1f5f9;padding:1px 4px;border-radius:4px}
+ul,ol{padding-left:24px}
+li{margin:2px 0}
+.meta{color:#64748b;font-size:12px;margin-bottom:16px}
+</style></head><body><div class="meta">Generado desde SPEC_fase3_segmentacion_AHA.md</div><h1>SPEC Fase 3 — Segmentación miocárdica + mapeo AHA 17 segmentos</h1>
+
+<p><strong>Autor de la especificación:</strong> Opus 4.8 (diseño).</p>
+<p><strong>Implementa:</strong> GPT 5.3-codex.</p>
+<p><strong>Fecha:</strong> 2026-07-14.</p>
+<p><strong>Contexto:</strong> módulo SINCRO, <code>mod_SINCRO/</code>. El motor de fase (Fase 1) ya está hecho y</p>
+<p>validado. Esta fase reemplaza la &quot;máscara provisional por umbral&quot; por una segmentación</p>
+<p>real del miocardio del VI y agrega el mapeo a los 17 segmentos AHA + territorios.</p>
+
+<p>&gt; <strong>Cómo usar esta spec (Codex):</strong> implementá EXACTAMENTE las firmas y comportamientos</p>
+<p>&gt; descritos. No cambies nombres de funciones ni de campos. Cuando una decisión quede</p>
+<p>&gt; abierta, elegí lo más simple y dejá un <code># TODO</code> comentado. Corré los tests al final.</p>
+
+<p>---</p>
+
+<h2>0. Contexto de datos (ya resuelto en Fase 0/1)</h2>
+
+<ul>
+<li>El cubo de entrada es <code>(n_gates, n_slices, H, W)</code> float64 (salida de <code>core.dicom_loader.load(...).cube</code>).</li>
+<li>Para el estudio de referencia: <code>(8, 19, 22, 22)</code>.</li>
+<li><strong>Eje corto (Short Axis):</strong> cada <code>slice</code> es un corte perpendicular al eje largo del VI.</li>
+</ul>
+<p>  El VI aparece como un <strong>anillo (dona)</strong> de actividad; el centro es la cavidad.</p>
+<ul>
+<li>Orden de slices: del ápex a la base (o al revés). NO asumir; ver §3.4 (detección).</li>
+</ul>
+
+<p>Dependencias permitidas: numpy, scipy, opencv-python (cv2). Ya instaladas.</p>
+
+<p>---</p>
+
+<h2>1. Archivos a crear/editar</h2>
+
+<ol>
+<li><code>core/segmentation.py</code> — segmentación del miocardio (máscara 3D booleana).</li>
+<li><code>core/aha_segments.py</code> — mapeo voxel → segmento AHA (1-17) + territorios.</li>
+<li><code>tests/test_segmentation.py</code> — tests (sintético + real).</li>
+</ol>
+
+<p>---</p>
+
+<h2>2. <code>core/segmentation.py</code></h2>
+
+<h3>2.1 Firma principal</h3>
+
+<p>```python</p>
+<p>@dataclass</p>
+<p>class SegmentationResult:</p>
+<p>    mask: np.ndarray          # (n_slices, H, W) bool — miocardio</p>
+<p>    center_per_slice: np.ndarray   # (n_slices, 2) float — (cy, cx) centro de cavidad por slice</p>
+<p>    inner_radius: np.ndarray  # (n_slices,) float — radio endocárdico aprox (px)</p>
+<p>    outer_radius: np.ndarray  # (n_slices,) float — radio epicárdico aprox (px)</p>
+<p>    method: str</p>
+<p>    n_voxels: int</p>
+
+<p>def segment_myocardium(</p>
+<p>    cube: np.ndarray,</p>
+<p>    method: str = &quot;auto&quot;,       # &quot;auto&quot; | &quot;manual&quot; | &quot;threshold&quot;</p>
+<p>    threshold_frac: float = 0.35,</p>
+<p>    smooth_sigma: float = 1.0,</p>
+<p>    manual_rois: dict | None = None,   # solo si method=&quot;manual&quot; (ver 2.4)</p>
+<p>) -&gt; SegmentationResult:</p>
+<p>    ...</p>
+<p>```</p>
+
+<h3>2.2 Imagen base para segmentar</h3>
+<p>Usar la <strong>imagen sumada temporal</strong>: <code>mean_img = cube.mean(axis=0)</code> → <code>(n_slices, H, W)</code>.</p>
+<p>(La perfusión es estable en el tiempo; sumar mejora SNR para segmentar.)</p>
+
+<h3>2.3 method=&quot;auto&quot; (thresholding adaptativo + morfología) — PRINCIPAL para el MVP</h3>
+<p>Por cada slice:</p>
+<ol>
+<li>Suavizar con <code>scipy.ndimage.gaussian_filter(img, smooth_sigma)</code>.</li>
+<li>Umbral relativo: <code>thr = threshold_frac * img.max()</code> (por slice). <code>bin = img &gt; thr</code>.</li>
+<li>Limpieza morfológica (cv2 o scipy): abrir (quitar puntos), cerrar (rellenar huecos del anillo).</li>
+<li>Quedarse con el <strong>componente conexo más grande</strong> (<code>scipy.ndimage.label</code> + tamaño).</li>
+<li>Guardar en <code>mask[s]</code>.</li>
+<li>Centro de cavidad <code>center_per_slice[s]</code>: centroide de los píxeles del anillo</li>
+</ol>
+<p>   (<code>scipy.ndimage.center_of_mass</code> sobre la máscara del slice). Si el slice está vacío</p>
+<p>   (ápex/base sin miocardio), marcar centro = NaN y máscara vacía.</p>
+<ol>
+<li><code>inner_radius</code>/<code>outer_radius</code>: estimar como percentil 20 y 80 de la distancia de los</li>
+</ol>
+<p>   voxels de máscara al centro (aprox; sirve para el mapeo radial de §3).</p>
+
+<p>Slices sin anillo válido (área &lt; mínimo, ej &lt; 8 px) → máscara vacía en ese slice.</p>
+
+<h3>2.4 method=&quot;manual&quot; (para validar contra LVSD)</h3>
+<p><code>manual_rois</code> = dict <code>{slice_index: (cy, cx, r_inner, r_outer)}</code>. Construir un anillo</p>
+<p>booleano por slice: voxels con <code>r_inner &lt;= dist_al_centro &lt;= r_outer</code>. Slices no provistos</p>
+<p>quedan vacíos. (Sirve para dibujar la ROI a mano y comparar con la auto.)</p>
+
+<h3>2.5 method=&quot;threshold&quot;</h3>
+<p>Igual que &quot;auto&quot; pero SIN quedarse con el componente más grande ni morfología (la máscara</p>
+<p>provisional que ya usa <code>test_engine_real.py</code>). Se mantiene para retrocompatibilidad.</p>
+
+<h3>2.6 CLI</h3>
+<p>```python</p>
+<p>if __name__ == &quot;__main__&quot;:</p>
+<p>    # python -m core.segmentation &lt;archivo_SA_gated.dcm&gt;</p>
+<p>    # carga con dicom_loader, segmenta method=&quot;auto&quot;, imprime resumen (nº voxels, nº slices con anillo).</p>
+<p>```</p>
+
+<p>---</p>
+
+<h2>3. <code>core/aha_segments.py</code> — mapeo AHA 17 segmentos (LO DIFÍCIL, ya diseñado)</h2>
+
+<h3>3.1 Concepto</h3>
+<p>El modelo AHA de 17 segmentos divide el VI en:</p>
+<ul>
+<li><strong>Basal (1-6):</strong> 6 sectores angulares (60° c/u).</li>
+<li><strong>Medio (7-12):</strong> 6 sectores angulares (60° c/u).</li>
+<li><strong>Apical (13-16):</strong> 4 sectores angulares (90° c/u).</li>
+<li><strong>Ápex (17):</strong> el/los slice(s) más apicales, sin división angular.</li>
+</ul>
+
+<p>Dos coordenadas por voxel miocárdico:</p>
+<ul>
+<li><strong>Longitudinal (nivel):</strong> según la posición del slice entre ápex y base → basal/medio/apical/ápex.</li>
+<li><strong>Circunferencial (ángulo):</strong> según el ángulo del voxel respecto del centro de la cavidad de su slice.</li>
+</ul>
+
+<h3>3.2 División longitudinal (nivel) — ALGORITMO</h3>
+<ol>
+<li>Determinar el rango de slices con miocardio válido (máscara no vacía): <code>s_first..s_last</code>.</li>
+<li><strong>Detectar orientación ápex→base</strong> (§3.4). Reordenar índices para que vayan de BASE (0) a ÁPEX (1).</li>
+<li>Sea <code>L = nº de slices válidos</code>. Repartir a lo largo del eje normalizado <code>u∈[0,1]</code> (0=base, 1=ápex):</li>
+</ol>
+<ul>
+<li><code>u &lt; 0.35</code>  → <strong>basal</strong></li>
+<li><code>0.35 ≤ u &lt; 0.70</code> → <strong>medio</strong></li>
+<li><code>0.70 ≤ u &lt; 0.90</code> → <strong>apical</strong></li>
+<li><code>u ≥ 0.90</code> → <strong>ápex (segmento 17)</strong></li>
+</ul>
+<p>   (Proporciones estándar aproximadas; ajustables. El ápex se lleva la punta.)</p>
+
+<h3>3.3 División circunferencial (ángulo) — ALGORITMO</h3>
+<p>Para cada voxel miocárdico de un slice, con centro de cavidad <code>(cy, cx)</code>:</p>
+<p>```</p>
+<p>angle = atan2(y - cy, x - cx)  →  grados 0-360</p>
+<p>```</p>
+<p><strong>Referencia angular (convención AHA):</strong> 0° apunta a la unión anteroseptal y se numera en</p>
+<p>sentido antihorario, pero para el MVP adoptamos una convención FIJA y documentada:</p>
+<ul>
+<li>0° = dirección +x (derecha), ángulos crecientes antihorario.</li>
+<li><strong>El usuario podrá rotar/espejar después</strong> (dejar parámetro <code>angle_offset_deg=0.0</code> y</li>
+</ul>
+<p>  <code>clockwise=False</code> para calibrar contra el polar map de MyoVation).</p>
+
+<p><strong>Asignación de sector según nivel:</strong></p>
+<ul>
+<li>Basal y medio (6 sectores de 60°): <code>sector6 = int((angle + angle_offset) % 360 // 60)</code> → 0..5.</li>
+<li>Apical (4 sectores de 90°): <code>sector4 = int((angle + angle_offset) % 360 // 90)</code> → 0..3.</li>
+</ul>
+
+<p><strong>Numeración AHA (mapear sector→nº de segmento):</strong></p>
+<p>```python</p>
+<h1>nivel basal:  sectores 0..5 → segmentos 1..6</h1>
+<h1>nivel medio:  sectores 0..5 → segmentos 7..12</h1>
+<h1>nivel apical: sectores 0..3 → segmentos 13..16</h1>
+<h1>ápex:                        → segmento 17</h1>
+<p>```</p>
+<p>El mapeo exacto sector→segmento (qué sector es &quot;anterior&quot;, etc.) queda como</p>
+<p><code>SECTOR_TO_SEGMENT_BASAL = [1,2,3,4,5,6]</code> (y análogos), <strong>calibrable</strong> después contra</p>
+<p>MyoVation. Para el MVP usar orden directo y dejar <code># TODO calibrar orientación vs GE</code>.</p>
+
+<h3>3.4 Detección de orientación ápex↔base — ALGORITMO</h3>
+<p>El ápex es el extremo donde el anillo se cierra (cavidad chica / radio interno → 0) y el</p>
+<p>área de miocardio disminuye. Heurística:</p>
+<ul>
+<li>Calcular por slice válido el <code>inner_radius</code> (de SegmentationResult) y el área de máscara.</li>
+<li>El extremo con <strong>inner_radius menor y área menor</strong> = ÁPEX. El otro = BASE.</li>
+<li>Devolver el orden base→ápex.</li>
+</ul>
+
+<h3>3.5 Firmas</h3>
+
+<p>```python</p>
+<p>TERRITORY_MAP = {</p>
+<p>    &quot;LAD&quot;: [1, 2, 7, 8, 13, 14, 17],</p>
+<p>    &quot;LCx&quot;: [5, 6, 11, 12, 16],</p>
+<p>    &quot;RCA&quot;: [3, 4, 9, 10, 15],</p>
+<p>}</p>
+
+<p>@dataclass</p>
+<p>class AHAResult:</p>
+<p>    segment_map: np.ndarray      # (n_slices, H, W) int, 0=fuera, 1..17=segmento</p>
+<p>    apex_to_base_order: list[int]</p>
+<p>    n_per_segment: dict[int, int]</p>
+
+<p>def map_to_17_segments(</p>
+<p>    seg: &quot;SegmentationResult&quot;,</p>
+<p>    angle_offset_deg: float = 0.0,</p>
+<p>    clockwise: bool = False,</p>
+<p>) -&gt; AHAResult:</p>
+<p>    ...</p>
+
+<p>def phase_by_segment(phase_map: np.ndarray, aha: &quot;AHAResult&quot;) -&gt; dict[int, float]:</p>
+<p>    &quot;&quot;&quot;Media CIRCULAR de fase por segmento (usar core.metrics.circular_mean_deg).&quot;&quot;&quot;</p>
+
+<p>def territory_analysis(phase_by_seg: dict[int, float]) -&gt; dict[str, dict]:</p>
+<p>    &quot;&quot;&quot;</p>
+<p>    Para cada territorio (LAD/LCx/RCA): mean (circular), std (circular), min, max</p>
+<p>    de las fases de sus segmentos. Usar core.metrics.circular_mean_deg / circular_std_deg.</p>
+<p>    &quot;&quot;&quot;</p>
+<p>```</p>
+
+<p>---</p>
+
+<h2>4. <code>tests/test_segmentation.py</code></h2>
+
+<h3>4.1 Test sintético (anillo conocido)</h3>
+<ul>
+<li>Construir un cubo sintético: para cada slice, un <strong>anillo</strong> (dona) de actividad</li>
+</ul>
+<p>  centrado, radio interno 4 px, externo 8 px, matriz 32×32, 8 gates, 10 slices.</p>
+<ul>
+<li><code>segment_myocardium(cube, method=&quot;auto&quot;)</code> debe:</li>
+<li>Detectar máscara no vacía en todos los slices con anillo.</li>
+<li><code>center_per_slice</code> ≈ centro real (±1.5 px).</li>
+<li><code>map_to_17_segments(...)</code>:</li>
+<li><code>segment_map</code> debe contener valores en 1..17.</li>
+<li>Cada uno de los 17 segmentos debe tener al menos 1 voxel (con 10 slices y anillo completo).</li>
+<li>Suma de <code>n_per_segment</code> == nº de voxels de la máscara.</li>
+</ul>
+
+<h3>4.2 Test real (smoke, sobre REST_IRNCG_SA)</h3>
+<ul>
+<li>Cargar con <code>dicom_loader</code>, segmentar <code>method=&quot;auto&quot;</code>, mapear AHA.</li>
+<li>Imprimir: nº voxels por nivel, nº segmentos no vacíos, y <code>phase_by_segment</code> + <code>territory_analysis</code></li>
+</ul>
+<p>  usando el <code>phase_map</code> del motor (Fase 1).</p>
+<ul>
+<li>Aserción laxa: al menos 15 de 17 segmentos con voxels; los 3 territorios con datos.</li>
+<li>Ruta de referencia (NO versionada):</li>
+</ul>
+<p>  <code>C:\Users\Ernesto\Desktop\INTERCAMBIO\varios stress cardiacos de xeleris\estudio uno\MYOMETRIX\myometrix results\REST_IRNCG_SA001_DS.dcm</code></p>
+<p>  (si no existe → <code>[SKIP]</code>).</p>
+
+<p>---</p>
+
+<h2>5. Integración con lo existente (NO romper)</h2>
+
+<ul>
+<li>Reutilizar <code>core.metrics.circular_mean_deg</code> y <code>circular_std_deg</code> para todo promedio angular.</li>
+<li>El pipeline nuevo debe encajar así:</li>
+</ul>
+<p>  ```</p>
+<p>  study = dicom_loader.load(path)</p>
+<p>  seg   = segmentation.segment_myocardium(study.cube, method=&quot;auto&quot;)</p>
+<p>  res   = phase_analysis(study.cube, seg.mask)        # Fase 1 (ya hecho)</p>
+<p>  aha   = aha_segments.map_to_17_segments(seg)</p>
+<p>  pbs   = aha_segments.phase_by_segment(res.phase_map, aha)</p>
+<p>  terr  = aha_segments.territory_analysis(pbs)</p>
+<p>  ```</p>
+<ul>
+<li>Actualizar <code>tests/test_engine_real.py</code> para usar <code>segment_myocardium(method=&quot;auto&quot;)</code></li>
+</ul>
+<p>  en vez de la máscara provisional por umbral (dejar la provisional como fallback).</p>
+
+<p>---</p>
+
+<h2>6. Criterios de aceptación (Definition of Done)</h2>
+
+<ul>
+<li>[ ] <code>py tests/test_segmentation.py</code> pasa (sintético + real-skip-safe).</li>
+<li>[ ] <code>py tests/test_phase_synthetic.py</code> sigue pasando (no romper Fase 1).</li>
+<li>[ ] <code>py -m core.segmentation &lt;dcm&gt;</code> imprime resumen sin error.</li>
+<li>[ ] El mapeo AHA cubre 1..17 en el test sintético (anillo completo).</li>
+<li>[ ] Sin dependencias nuevas (solo numpy/scipy/cv2).</li>
+<li>[ ] UTF-8 en todos los archivos.</li>
+</ul>
+
+<h2>7. Cosas deliberadamente FUERA de esta fase (no hacer)</h2>
+<ul>
+<li>LVSD estilo GE (6 etapas) → futuro.</li>
+<li>Reorientación oblicua a SA → el input ya viene en SA.</li>
+<li>Polar map bullseye visual → Fase 4.</li>
+<li>Calibración exacta de orientación angular vs MyoVation → dejar parámetros y <code># TODO</code>.</li>
+</ul></body></html>

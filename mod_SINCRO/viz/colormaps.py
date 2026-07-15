@@ -7,19 +7,32 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import LinearSegmentedColormap
+
+
+_FRENCH_CMAP = LinearSegmentedColormap.from_list(
+	"french",
+	[
+		(0.0, "#0b3fa5"),   # azul
+		(0.5, "#ffffff"),   # blanco
+		(1.0, "#d62828"),   # rojo
+	],
+)
 
 
 def get_phase_cmap(name: str = "hsv"):
 	"""
 	Devuelve un colormap matplotlib CÍCLICO para mapear fase 0-360°.
-	Opciones válidas: 'hsv', 'twilight', 'twilight_shifted'.
+	Opciones válidas: 'hsv', 'twilight', 'twilight_shifted', 'cool', 'prism', 'french'.
 
 	Nota: en fase cardíaca se suele interpretar inicio (temprano) en rojo y colores
 	posteriores como contracción más tardía según la referencia de fase utilizada.
 	"""
-	valid = {"hsv", "twilight", "twilight_shifted"}
+	valid = {"hsv", "twilight", "twilight_shifted", "cool", "prism", "french"}
 	if name not in valid:
 		raise ValueError(f"cmap inválido '{name}'. Válidos: {sorted(valid)}")
+	if name == "french":
+		return _FRENCH_CMAP
 	return plt.get_cmap(name)
 
 
