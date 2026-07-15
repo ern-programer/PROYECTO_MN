@@ -217,11 +217,14 @@ def generate_report(
 	img_files = [
 		("slices_fase.png", "Slice medio con máscara y fase superpuesta."),
 		("polar_map.png", "Mapa polar AHA (17 segmentos)."),
+		("bullseye_directo.png", "Bull's eye de perfusión directa (colores de intensidad)."),
 		("histograma.png", "Histograma de fase."),
 		("ejes_ortogonales.png", "Ejes SA/HLA/VLA."),
 		("panel_clinico_convencion.png", "Panel clínico A/B (ED/ES)."),
+		("ventriculograma.png", "Panel funcional tipo ventriculograma (ED/ES + curvas)."),
 		("comparacion_ejes.png", "Comparación original vs reconstruido."),
 		("curva_tac.png", "Curva de actividad por gate."),
+		("curva_fevi.png", "Curva FEVI preliminar con volumen y derivada."),
 	]
 	for fname, caption in img_files:
 		path = os.path.join(output_dir, fname)
