@@ -208,7 +208,8 @@ def generate_report(
 		f"Threshold={_safe_float(processing_params.get('threshold'), 2)} | "
 		f"Sigma={_safe_float(processing_params.get('smooth_sigma'), 1)} | "
 		f"Harmonics={processing_params.get('harmonics', 'N/D')} | "
-		f"Amp filter={_safe_float(processing_params.get('amp_filter'), 2)}"
+		f"Amp filter={_safe_float(processing_params.get('amp_filter'), 2)} | "
+		f"Estilo visual={processing_params.get('visual_style', 'N/D')}"
 	)
 	story.append(Paragraph(f"<b>Parámetros usados:</b> {proc_txt}", body_style))
 

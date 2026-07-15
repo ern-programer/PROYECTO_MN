@@ -141,6 +141,10 @@ class MainWindow(QMainWindow):
 		self.cmap_combo.addItems(["hsv", "twilight", "twilight_shifted", "cool", "prism", "french"])
 		self.cmap_combo.setCurrentText("french")
 
+		self.visual_style_combo = QComboBox()
+		self.visual_style_combo.addItems(["GammaSync", "Xeleris-like", "QGS-like"])
+		self.visual_style_combo.setCurrentText("Xeleris-like")
+
 		self.manual_rois = QPlainTextEdit()
 		self.manual_rois.setPlaceholderText(
 			"Modo manual: slice,cy,cx,r_inner,r_outer\n"
@@ -155,6 +159,7 @@ class MainWindow(QMainWindow):
 		controls_form.addRow("Harmonics", self.harmonics_spin)
 		controls_form.addRow("Amplitude filter", self.phase_threshold_spin)
 		controls_form.addRow("Colormap fase", self.cmap_combo)
+		controls_form.addRow("Estilo visual", self.visual_style_combo)
 		controls_form.addRow(self.normalize_check)
 		controls_form.addRow(self.auto_run_check)
 
@@ -164,6 +169,7 @@ class MainWindow(QMainWindow):
 		self.harmonics_spin.setToolTip("Cantidad de armónicos usados para estabilizar la fase.")
 		self.phase_threshold_spin.setToolTip("Filtro de amplitud: descarta voxels débiles o ruidosos.")
 		self.cmap_combo.setToolTip("Colormap cíclico para visualizar fase.")
+		self.visual_style_combo.setToolTip("Tema visual de los paneles clínicos (curva FEVI, ventriculograma y bull's eye).")
 		self.normalize_check.setToolTip("Resta una referencia global de fase para comparar estudios.")
 
 		self._sidebar_layout.addWidget(controls_box)
@@ -575,6 +581,7 @@ class MainWindow(QMainWindow):
 			"amp_filter": float(self.phase_threshold_spin.value()),
 			"normalize_reference": bool(self.normalize_check.isChecked()),
 			"phase_cmap": str(self.cmap_combo.currentText()),
+			"visual_style": str(self.visual_style_combo.currentText()),
 			"auto_run": bool(self.auto_run_check.isChecked()),
 			"auto_center_gain": int(self.auto_center_gain_slider.value()),
 			"auto_inner_delta": int(self.auto_inner_delta_slider.value()),
@@ -601,6 +608,8 @@ class MainWindow(QMainWindow):
 			self.normalize_check.setChecked(bool(params["normalize_reference"]))
 		if "phase_cmap" in params:
 			self.cmap_combo.setCurrentText(str(params["phase_cmap"]))
+		if "visual_style" in params:
+			self.visual_style_combo.setCurrentText(str(params["visual_style"]))
 		if "auto_run" in params:
 			self.auto_run_check.setChecked(bool(params["auto_run"]))
 		if "auto_center_gain" in params:
@@ -1530,6 +1539,50 @@ class MainWindow(QMainWindow):
 			ed_gate = mid_gate
 			es_gate = (mid_gate + max(1, n_gates // 2)) % n_gates
 
+		style_name = str(self.visual_style_combo.currentText()).strip().lower()
+		style_catalog = {
+			"xeleris-like": {
+				"fig_bg": "#04070e",
+				"ax_bg": "#060b16",
+				"grid": "#334155",
+				"fg": "#e2e8f0",
+				"subtle": "#94a3b8",
+				"vol": "#f6c453",
+				"deriv": "#4fd1c5",
+				"ed": "#7dd3fc",
+				"es": "#fda4af",
+				"amp_cmap": "turbo",
+				"bull_cmap": "turbo",
+			},
+			"qgs-like": {
+				"fig_bg": "#050811",
+				"ax_bg": "#0a1424",
+				"grid": "#1f3a5f",
+				"fg": "#dbeafe",
+				"subtle": "#93c5fd",
+				"vol": "#fde047",
+				"deriv": "#60a5fa",
+				"ed": "#86efac",
+				"es": "#fca5a5",
+				"amp_cmap": "viridis",
+				"bull_cmap": "plasma",
+			},
+			"gammasync": {
+				"fig_bg": "#f8fafc",
+				"ax_bg": "#ffffff",
+				"grid": "#cbd5e1",
+				"fg": "#0f172a",
+				"subtle": "#475569",
+				"vol": "#b45309",
+				"deriv": "#0f766e",
+				"ed": "#0ea5e9",
+				"es": "#e11d48",
+				"amp_cmap": "turbo",
+				"bull_cmap": "turbo",
+			},
+		}
+		style = style_catalog.get(style_name, style_catalog["xeleris-like"])
+
 		sa_ed, hla_ed, vla_ed, _ed_hla_original, _ed_vla_original = _oriented_axes_views(ed_gate)
 		sa_es, hla_es, vla_es, _es_hla_original, _es_vla_original = _oriented_axes_views(es_gate)
 
@@ -1579,8 +1632,8 @@ class MainWindow(QMainWindow):
 		fig3.savefig(os.path.join(self.output_dir, "curva_tac.png"), dpi=150, bbox_inches="tight")
 		plt.close(fig3)
 
-		fig_ef, ax_ef = plt.subplots(figsize=(10, 4.4), facecolor="#05080f")
-		ax_ef.set_facecolor("#070d18")
+		fig_ef, ax_ef = plt.subplots(figsize=(10, 4.4), facecolor=style["fig_bg"])
+		ax_ef.set_facecolor(style["ax_bg"])
 		gate_axis = np.arange(self.study.cube.shape[0]) + 1
 		t_pct = np.linspace(0.0, 100.0, self.study.cube.shape[0], endpoint=False)
 		if ef.get("available"):
@@ -1588,29 +1641,29 @@ class MainWindow(QMainWindow):
 			if gate_volumes.size != gate_axis.size:
 				gate_volumes = np.full_like(gate_axis, np.nan, dtype=np.float64)
 			dv_dt = np.gradient(gate_volumes)
-			ax_ef.plot(gate_axis, gate_volumes, "o-", color="#f6c453", linewidth=2.0, markersize=4.5, label="Volumen VI (mL)")
+			ax_ef.plot(gate_axis, gate_volumes, "o-", color=style["vol"], linewidth=2.0, markersize=4.5, label="Volumen VI (mL)")
 			ax_ef_2 = ax_ef.twinx()
-			ax_ef_2.plot(gate_axis, dv_dt, "-", color="#4fd1c5", linewidth=1.7, label="dV/dgate")
-			ax_ef_2.set_ylabel("dV/dgate", color="#7de7df")
-			ax_ef_2.tick_params(axis="y", colors="#7de7df")
+			ax_ef_2.plot(gate_axis, dv_dt, "-", color=style["deriv"], linewidth=1.7, label="dV/dgate")
+			ax_ef_2.set_ylabel("dV/dgate", color=style["deriv"])
+			ax_ef_2.tick_params(axis="y", colors=style["deriv"])
 			ed_gate = int(ef.get("ed_gate", 1))
 			es_gate = int(ef.get("es_gate", 1))
-			ax_ef.axvline(ed_gate, color="#7dd3fc", linestyle="--", linewidth=1.2)
-			ax_ef.axvline(es_gate, color="#fda4af", linestyle="--", linewidth=1.2)
-			ax_ef.text(ed_gate, float(np.nanmax(gate_volumes)) * 1.01, "ED", color="#7dd3fc", ha="center", va="bottom", fontsize=9, fontweight="bold")
-			ax_ef.text(es_gate, float(np.nanmax(gate_volumes)) * 1.01, "ES", color="#fda4af", ha="center", va="bottom", fontsize=9, fontweight="bold")
-			ax_ef.set_title(f"Curva FEVI preliminar por gate — FEVI {float(ef.get('ef_pct', 0.0)):.1f}%", color="#e2e8f0", fontsize=12, fontweight="bold")
-			ax_ef.set_ylabel("Volumen estimado (mL)", color="#e2e8f0")
-			ax_ef.tick_params(axis="x", colors="#cbd5e1")
-			ax_ef.tick_params(axis="y", colors="#fcd34d")
-			ax_ef.grid(True, color="#334155", alpha=0.45)
-			ax_ef.set_xlabel("Gate", color="#cbd5e1")
+			ax_ef.axvline(ed_gate, color=style["ed"], linestyle="--", linewidth=1.2)
+			ax_ef.axvline(es_gate, color=style["es"], linestyle="--", linewidth=1.2)
+			ax_ef.text(ed_gate, float(np.nanmax(gate_volumes)) * 1.01, "ED", color=style["ed"], ha="center", va="bottom", fontsize=9, fontweight="bold")
+			ax_ef.text(es_gate, float(np.nanmax(gate_volumes)) * 1.01, "ES", color=style["es"], ha="center", va="bottom", fontsize=9, fontweight="bold")
+			ax_ef.set_title(f"Curva FEVI preliminar por gate — FEVI {float(ef.get('ef_pct', 0.0)):.1f}%", color=style["fg"], fontsize=12, fontweight="bold")
+			ax_ef.set_ylabel("Volumen estimado (mL)", color=style["fg"])
+			ax_ef.tick_params(axis="x", colors=style["subtle"])
+			ax_ef.tick_params(axis="y", colors=style["vol"])
+			ax_ef.grid(True, color=style["grid"], alpha=0.45)
+			ax_ef.set_xlabel("Gate", color=style["subtle"])
 			ax_top = ax_ef.twiny()
 			ax_top.set_xlim(ax_ef.get_xlim())
 			ax_top.set_xticks(gate_axis)
 			ax_top.set_xticklabels([f"{int(v)}" for v in t_pct], fontsize=8)
-			ax_top.set_xlabel("% ciclo", color="#94a3b8")
-			ax_top.tick_params(axis="x", colors="#94a3b8")
+			ax_top.set_xlabel("% ciclo", color=style["subtle"])
+			ax_top.tick_params(axis="x", colors=style["subtle"])
 		else:
 			ax_ef.plot([], [])
 			ax_ef.text(
@@ -1621,20 +1674,20 @@ class MainWindow(QMainWindow):
 				va="center",
 				transform=ax_ef.transAxes,
 				fontsize=11,
-				color="#cbd5e1",
+				color=style["fg"],
 			)
-			ax_ef.set_title("Curva FEVI preliminar por gate", color="#e2e8f0", fontsize=12, fontweight="bold")
-			ax_ef.set_xlabel("Gate", color="#cbd5e1")
-			ax_ef.set_ylabel("Volumen estimado (mL)", color="#e2e8f0")
-			ax_ef.tick_params(axis="x", colors="#cbd5e1")
-			ax_ef.tick_params(axis="y", colors="#cbd5e1")
-			ax_ef.grid(True, color="#334155", alpha=0.45)
+			ax_ef.set_title("Curva FEVI preliminar por gate", color=style["fg"], fontsize=12, fontweight="bold")
+			ax_ef.set_xlabel("Gate", color=style["subtle"])
+			ax_ef.set_ylabel("Volumen estimado (mL)", color=style["fg"])
+			ax_ef.tick_params(axis="x", colors=style["subtle"])
+			ax_ef.tick_params(axis="y", colors=style["fg"])
+			ax_ef.grid(True, color=style["grid"], alpha=0.45)
 		fig_ef.tight_layout()
 		fig_ef.savefig(os.path.join(self.output_dir, "curva_fevi.png"), dpi=160, bbox_inches="tight", facecolor=fig_ef.get_facecolor())
 		plt.close(fig_ef)
 
 		# Panel tipo ventriculograma funcional (estilo clínico): ED/ES + mapas + curvas.
-		fig_v = plt.figure(figsize=(14.0, 8.4), facecolor="#04070e")
+		fig_v = plt.figure(figsize=(14.0, 8.4), facecolor=style["fig_bg"])
 		gs = fig_v.add_gridspec(3, 4, width_ratios=[1.1, 1.1, 1.45, 1.15], hspace=0.28, wspace=0.22)
 		ax_ed_sa = fig_v.add_subplot(gs[0, 0])
 		ax_es_sa = fig_v.add_subplot(gs[1, 0])
@@ -1646,31 +1699,31 @@ class MainWindow(QMainWindow):
 		ax_metrics = fig_v.add_subplot(gs[2, 2:4])
 
 		for ax in [ax_ed_sa, ax_es_sa, ax_ed_hla, ax_es_hla, ax_phase, ax_amp, ax_curve, ax_metrics]:
-			ax.set_facecolor("#060b16")
+			ax.set_facecolor(style["ax_bg"])
 			for spine in ax.spines.values():
-				spine.set_color("#1e293b")
+				spine.set_color(style["grid"])
 
 		for ax in [ax_ed_sa, ax_es_sa, ax_ed_hla, ax_es_hla, ax_phase, ax_amp]:
 			ax.set_xticks([])
 			ax.set_yticks([])
 
 		ax_ed_sa.imshow(sa_ed, cmap="hot")
-		ax_ed_sa.set_title(f"ED SA (gate {ed_gate + 1})", color="#e2e8f0", fontsize=9)
+		ax_ed_sa.set_title(f"ED SA (gate {ed_gate + 1})", color=style["fg"], fontsize=9)
 		ax_es_sa.imshow(sa_es, cmap="hot")
-		ax_es_sa.set_title(f"ES SA (gate {es_gate + 1})", color="#e2e8f0", fontsize=9)
+		ax_es_sa.set_title(f"ES SA (gate {es_gate + 1})", color=style["fg"], fontsize=9)
 		ax_ed_hla.imshow(hla_ed, cmap="hot", aspect="auto")
-		ax_ed_hla.set_title("ED HLA", color="#e2e8f0", fontsize=9)
+		ax_ed_hla.set_title("ED HLA", color=style["fg"], fontsize=9)
 		ax_es_hla.imshow(hla_es, cmap="hot", aspect="auto")
-		ax_es_hla.set_title("ES HLA", color="#e2e8f0", fontsize=9)
+		ax_es_hla.set_title("ES HLA", color=style["fg"], fontsize=9)
 
 		phase_mid = np.asarray(self.phase_result.phase_map[mid_slice], dtype=np.float64)
 		amp_mid = np.asarray(self.phase_result.amplitude_map[mid_slice], dtype=np.float64)
 		phase_show = np.where(np.isfinite(phase_mid), phase_mid, 0.0)
 		amp_show = amp_mid / (float(np.nanmax(amp_mid)) + 1e-8)
 		ax_phase.imshow(phase_show, cmap=str(self.cmap_combo.currentText()), vmin=0.0, vmax=360.0)
-		ax_phase.set_title("Mapa de fase", color="#e2e8f0", fontsize=9)
-		ax_amp.imshow(amp_show, cmap="turbo", vmin=0.0, vmax=1.0)
-		ax_amp.set_title("Mapa de amplitud", color="#e2e8f0", fontsize=9)
+		ax_phase.set_title("Mapa de fase", color=style["fg"], fontsize=9)
+		ax_amp.imshow(amp_show, cmap=style["amp_cmap"], vmin=0.0, vmax=1.0)
+		ax_amp.set_title("Mapa de amplitud", color=style["fg"], fontsize=9)
 
 		t_gate = np.arange(1, n_gates + 1)
 		if ef.get("available"):
@@ -1678,23 +1731,23 @@ class MainWindow(QMainWindow):
 			if v.size != t_gate.size:
 				v = np.full_like(t_gate, np.nan, dtype=np.float64)
 			dv = np.gradient(v)
-			ax_curve.plot(t_gate, v, color="#facc15", linewidth=2.2, marker="o", markersize=4, label="Volumen")
+			ax_curve.plot(t_gate, v, color=style["vol"], linewidth=2.2, marker="o", markersize=4, label="Volumen")
 			ax_curve_2 = ax_curve.twinx()
-			ax_curve_2.plot(t_gate, dv, color="#22d3ee", linewidth=1.8, label="dV/dgate")
-			ax_curve_2.tick_params(axis="y", colors="#67e8f9")
-			ax_curve_2.set_ylabel("dV/dgate", color="#67e8f9")
-			ax_curve.axvline(ed_gate + 1, color="#93c5fd", linestyle="--", linewidth=1.2)
-			ax_curve.axvline(es_gate + 1, color="#fda4af", linestyle="--", linewidth=1.2)
+			ax_curve_2.plot(t_gate, dv, color=style["deriv"], linewidth=1.8, label="dV/dgate")
+			ax_curve_2.tick_params(axis="y", colors=style["deriv"])
+			ax_curve_2.set_ylabel("dV/dgate", color=style["deriv"])
+			ax_curve.axvline(ed_gate + 1, color=style["ed"], linestyle="--", linewidth=1.2)
+			ax_curve.axvline(es_gate + 1, color=style["es"], linestyle="--", linewidth=1.2)
 		else:
 			ax_curve.plot([], [])
-			ax_curve.text(0.5, 0.5, "Sin FEVI preliminar", transform=ax_curve.transAxes, ha="center", va="center", color="#cbd5e1")
+			ax_curve.text(0.5, 0.5, "Sin FEVI preliminar", transform=ax_curve.transAxes, ha="center", va="center", color=style["fg"])
 
-		ax_curve.set_title("Time/Volume y derivada", color="#e2e8f0", fontsize=10, fontweight="bold")
-		ax_curve.set_xlabel("Gate", color="#cbd5e1")
-		ax_curve.set_ylabel("Volumen (mL)", color="#fde047")
-		ax_curve.tick_params(axis="x", colors="#cbd5e1")
-		ax_curve.tick_params(axis="y", colors="#fde047")
-		ax_curve.grid(True, color="#334155", alpha=0.45)
+		ax_curve.set_title("Time/Volume y derivada", color=style["fg"], fontsize=10, fontweight="bold")
+		ax_curve.set_xlabel("Gate", color=style["subtle"])
+		ax_curve.set_ylabel("Volumen (mL)", color=style["vol"])
+		ax_curve.tick_params(axis="x", colors=style["subtle"])
+		ax_curve.tick_params(axis="y", colors=style["vol"])
+		ax_curve.grid(True, color=style["grid"], alpha=0.45)
 
 		ax_metrics.axis("off")
 		metrics_lines = [
@@ -1718,12 +1771,17 @@ class MainWindow(QMainWindow):
 			transform=ax_metrics.transAxes,
 			va="top",
 			ha="left",
-			color="#e2e8f0",
+			color=style["fg"],
 			fontsize=10,
-			bbox=dict(boxstyle="round,pad=0.45", facecolor="#0b1220", edgecolor="#334155", alpha=0.95),
+			bbox=dict(boxstyle="round,pad=0.45", facecolor=style["ax_bg"], edgecolor=style["grid"], alpha=0.95),
 		)
 
-		fig_v.suptitle("Ventriculograma funcional (estilo clínico)", color="#f8fafc", fontsize=13, fontweight="bold")
+		fig_v.suptitle(
+			f"Ventriculograma funcional (estilo clínico: {self.visual_style_combo.currentText()})",
+			color=style["fg"],
+			fontsize=13,
+			fontweight="bold",
+		)
 		fig_v.savefig(os.path.join(self.output_dir, "ventriculograma.png"), dpi=155, bbox_inches="tight", facecolor=fig_v.get_facecolor())
 		plt.close(fig_v)
 
@@ -1742,13 +1800,13 @@ class MainWindow(QMainWindow):
 			else:
 				seg_uptake[seg_id] = np.nan
 
-		fig_b, ax_b = plt.subplots(figsize=(7.2, 7.2), facecolor="#070910")
-		ax_b.set_facecolor("#070910")
+		fig_b, ax_b = plt.subplots(figsize=(7.2, 7.2), facecolor=style["fig_bg"])
+		ax_b.set_facecolor(style["fig_bg"])
 		ax_b.set_xlim(-1.08, 1.08)
 		ax_b.set_ylim(-1.08, 1.08)
 		ax_b.set_aspect("equal")
 		ax_b.axis("off")
-		cmap_b = matplotlib.colormaps.get("turbo")
+		cmap_b = matplotlib.colormaps.get(style["bull_cmap"])
 
 		def _segment_color(seg_id: int):
 			v = seg_uptake.get(int(seg_id), np.nan)
@@ -1762,21 +1820,21 @@ class MainWindow(QMainWindow):
 			for i, sid in enumerate(seg_ids):
 				theta1 = start_deg - (i + 1) * (360.0 / n)
 				theta2 = start_deg - i * (360.0 / n)
-				wedge = Wedge((0.0, 0.0), r_outer, theta1, theta2, width=r_outer - r_inner, facecolor=_segment_color(sid), edgecolor="#0f172a", linewidth=1.4)
+				wedge = Wedge((0.0, 0.0), r_outer, theta1, theta2, width=r_outer - r_inner, facecolor=_segment_color(sid), edgecolor=style["grid"], linewidth=1.4)
 				ax_b.add_patch(wedge)
 				mid_a = np.deg2rad((theta1 + theta2) * 0.5)
 				r_t = (r_inner + r_outer) * 0.5
-				ax_b.text(r_t * np.cos(mid_a), r_t * np.sin(mid_a), str(sid), color="#e2e8f0", fontsize=8, ha="center", va="center", fontweight="bold")
+				ax_b.text(r_t * np.cos(mid_a), r_t * np.sin(mid_a), str(sid), color=style["fg"], fontsize=8, ha="center", va="center", fontweight="bold")
 
 		_draw_ring([1, 2, 3, 4, 5, 6], 0.68, 0.98, start_deg=90.0)
 		_draw_ring([7, 8, 9, 10, 11, 12], 0.40, 0.68, start_deg=90.0)
 		_draw_ring([13, 14, 15, 16], 0.18, 0.40, start_deg=45.0)
-		apex = Circle((0.0, 0.0), radius=0.18, facecolor=_segment_color(17), edgecolor="#0f172a", linewidth=1.4)
+		apex = Circle((0.0, 0.0), radius=0.18, facecolor=_segment_color(17), edgecolor=style["grid"], linewidth=1.4)
 		ax_b.add_patch(apex)
-		ax_b.text(0.0, 0.0, "17", color="#e2e8f0", fontsize=8, ha="center", va="center", fontweight="bold")
+		ax_b.text(0.0, 0.0, "17", color=style["fg"], fontsize=8, ha="center", va="center", fontweight="bold")
 
-		ax_b.text(0.0, 1.04, "Bull's eye perfusión directa", ha="center", va="bottom", color="#f8fafc", fontsize=12, fontweight="bold")
-		ax_b.text(0.0, -1.02, "Colores de intensidad normalizada (gate medio)", ha="center", va="top", color="#94a3b8", fontsize=9)
+		ax_b.text(0.0, 1.04, f"Bull's eye perfusión directa ({self.visual_style_combo.currentText()})", ha="center", va="bottom", color=style["fg"], fontsize=12, fontweight="bold")
+		ax_b.text(0.0, -1.02, "Colores de intensidad normalizada (gate medio)", ha="center", va="top", color=style["subtle"], fontsize=9)
 		fig_b.savefig(os.path.join(self.output_dir, "bullseye_directo.png"), dpi=170, bbox_inches="tight", facecolor=fig_b.get_facecolor())
 		plt.close(fig_b)
 
@@ -1801,6 +1859,7 @@ class MainWindow(QMainWindow):
 			"smooth_sigma": float(self.sigma_spin.value()),
 			"harmonics": int(self.harmonics_spin.value()),
 			"amp_filter": float(self.phase_threshold_spin.value()),
+			"visual_style": str(self.visual_style_combo.currentText()),
 		}
 		vol = self._compute_volumes_ml()
 		ef = self._estimate_lv_ef_preliminary()
