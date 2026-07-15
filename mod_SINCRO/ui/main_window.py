@@ -1716,11 +1716,14 @@ class MainWindow(QMainWindow):
 		ax_es_hla.imshow(hla_es, cmap="hot", aspect="auto")
 		ax_es_hla.set_title("ES HLA", color=style["fg"], fontsize=9)
 
+		from viz.colormaps import phase_to_rgb
+
 		phase_mid = np.asarray(self.phase_result.phase_map[mid_slice], dtype=np.float64)
 		amp_mid = np.asarray(self.phase_result.amplitude_map[mid_slice], dtype=np.float64)
 		phase_show = np.where(np.isfinite(phase_mid), phase_mid, 0.0)
 		amp_show = amp_mid / (float(np.nanmax(amp_mid)) + 1e-8)
-		ax_phase.imshow(phase_show, cmap=str(self.cmap_combo.currentText()), vmin=0.0, vmax=360.0)
+		phase_rgb = phase_to_rgb(phase_mid, cmap_name=str(self.cmap_combo.currentText()), nan_color=(0.05, 0.07, 0.10))
+		ax_phase.imshow(phase_rgb)
 		ax_phase.set_title("Mapa de fase", color=style["fg"], fontsize=9)
 		ax_amp.imshow(amp_show, cmap=style["amp_cmap"], vmin=0.0, vmax=1.0)
 		ax_amp.set_title("Mapa de amplitud", color=style["fg"], fontsize=9)
