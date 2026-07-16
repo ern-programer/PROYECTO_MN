@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core import dicom_loader
+from core import normal_db
 from core.aha_segments import map_to_17_segments, phase_by_segment, territory_analysis
 from core.metrics import calculate_phase_metrics
 from core.phase_analysis import phase_analysis
@@ -141,6 +142,14 @@ class MainWindow(QMainWindow):
 		self.normalize_check = QCheckBox("Normalizar referencia de fase")
 		self.normalize_check.setChecked(False)
 
+		# Base de datos normal (comparación de PSD/BW contra valores publicados).
+		self.normal_sex_combo = QComboBox()
+		self.normal_sex_combo.addItems(["Hombre", "Mujer"])
+		self.normal_protocol_combo = QComboBox()
+		self.normal_protocol_combo.addItems(["Stress", "Rest"])
+		self.normal_db_combo = QComboBox()
+		self.normal_db_combo.addItems(normal_db.available_datasets())
+
 		self.auto_run_check = QCheckBox("Procesar automáticamente al cargar")
 		self.auto_run_check.setChecked(True)
 		self.auto_run_check.setToolTip("Si está activo, el estudio se procesa apenas se carga con los parámetros actuales.")
@@ -187,6 +196,9 @@ class MainWindow(QMainWindow):
 		controls_form.addRow("Velocidad polar cine", self.polar_cine_speed_spin)
 		controls_form.addRow(self.export_polar_mp4_check)
 		controls_form.addRow(self.normalize_check)
+		controls_form.addRow("Sexo (DB normal)", self.normal_sex_combo)
+		controls_form.addRow("Protocolo (DB normal)", self.normal_protocol_combo)
+		controls_form.addRow("DB normal", self.normal_db_combo)
 		controls_form.addRow(self.auto_run_check)
 
 		self.seg_method.setToolTip("auto: segmentación automática; threshold: umbral simple; manual: usa los ROIs que dibujes o pegues.")
@@ -200,6 +212,9 @@ class MainWindow(QMainWindow):
 		self.polar_cine_speed_spin.setToolTip("Duración por frame del GIF del cine polar (en milisegundos).")
 		self.export_polar_mp4_check.setToolTip("Además del GIF, intenta exportar un MP4 del cine polar gatillado.")
 		self.normalize_check.setToolTip("Resta una referencia global de fase para comparar estudios.")
+		self.normal_sex_combo.setToolTip("Sexo del paciente: los valores normales de PSD/BW difieren por sexo (Mukherjee 2016).")
+		self.normal_protocol_combo.setToolTip("Protocolo del estudio: stress da PSD/BW mayores que rest.")
+		self.normal_db_combo.setToolTip("Base de datos normal usada para z-score y flag de disincronía (media + 2 SD).")
 
 		self._sidebar_layout.addWidget(controls_box)
 
@@ -723,6 +738,9 @@ class MainWindow(QMainWindow):
 			"auto_adjust_range": int(self.auto_adjust_range_spin.value()),
 			"compare_gate": int(self.compare_gate_spin.value()),
 			"compare_slice_pct": int(self.compare_slice_slider.value()),
+			"normal_sex": str(self.normal_sex_combo.currentText()),
+			"normal_protocol": str(self.normal_protocol_combo.currentText()),
+			"normal_db": str(self.normal_db_combo.currentText()),
 			"manual_rois_text": self.manual_rois.toPlainText(),
 			"updated_at": datetime.now().isoformat(timespec="seconds"),
 		}
@@ -783,6 +801,12 @@ class MainWindow(QMainWindow):
 			self.compare_gate_spin.setValue(int(params["compare_gate"]))
 		if "compare_slice_pct" in params:
 			self.compare_slice_slider.setValue(int(params["compare_slice_pct"]))
+		if "normal_sex" in params:
+			self.normal_sex_combo.setCurrentText(str(params["normal_sex"]))
+		if "normal_protocol" in params:
+			self.normal_protocol_combo.setCurrentText(str(params["normal_protocol"]))
+		if "normal_db" in params:
+			self.normal_db_combo.setCurrentText(str(params["normal_db"]))
 		if "manual_rois_text" in params:
 			self.manual_rois.setPlainText(str(params["manual_rois_text"]))
 			self.cine.set_manual_rois(self._parse_manual_rois())
@@ -1515,6 +1539,34 @@ class MainWindow(QMainWindow):
 		clinical.append(f"  Phase SD: {self.metrics.get('phase_sd')}°")
 		clinical.append(f"  Bandwidth: {self.metrics.get('bandwidth')}°")
 		clinical.append(f"  Entropy: {self.metrics.get('entropy')}")
+		clinical.append("")
+
+		# Comparación contra base de datos normal (por sexo/protocolo).
+		sex = "male" if self.normal_sex_combo.currentText() == "Hombre" else "female"
+		protocol = "stress" if self.normal_protocol_combo.currentText() == "Stress" else "rest"
+		dataset = self.normal_db_combo.currentText()
+		try:
+			nd = normal_db.evaluate(
+				float(self.metrics.get("phase_sd", 0.0)),
+				float(self.metrics.get("bandwidth", 0.0)),
+				dataset=dataset,
+				sex=sex,
+				protocol=protocol,
+			)
+			clinical.append(f"Vs DB normal [{dataset} · {self.normal_sex_combo.currentText()} · {self.normal_protocol_combo.currentText()}]")
+			for mkey, mlabel in (("phase_sd", "PSD"), ("bandwidth", "BW")):
+				m = nd["metrics"].get(mkey, {})
+				if not m.get("available"):
+					clinical.append(f"  {mlabel}: sin referencia en la DB")
+					continue
+				flag = "ANORMAL" if m["abnormal"] else "normal"
+				zt = f"{m['z']:+.1f}" if m.get("z") is not None else "n/d"
+				clinical.append(
+					f"  {mlabel}: {m['value']:.1f}° | normal {m['mean']:.1f}±{m['sd']:.1f} | cutoff {m['cutoff']:.1f}° | z={zt} → {flag}"
+				)
+			clinical.append(f"  Disincronía vs DB: {'SÍ' if nd['dyssynchrony'] else 'no'}")
+		except Exception:
+			clinical.append("Vs DB normal: no disponible")
 		clinical.append("")
 		clinical.append("Volúmenes")
 		if vol["myocardial_ml"] is not None:
