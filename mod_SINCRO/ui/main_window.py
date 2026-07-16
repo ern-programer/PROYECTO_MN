@@ -9,9 +9,9 @@ import os
 from datetime import datetime
 
 import numpy as np
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtCore import QUrl
-from PyQt6.QtGui import QDesktopServices, QIcon, QPixmap
+from PyQt6.QtGui import QDesktopServices, QIcon, QMovie, QPixmap
 from PyQt6.QtWidgets import (
 	QApplication,
 	QFileDialog,
@@ -74,7 +74,9 @@ class MainWindow(QMainWindow):
 		self.territory = None
 		self.preview_zoom: dict[str, float] = {}
 		self.preview_pixmaps: dict[str, QPixmap] = {}
+		self.preview_movies: dict[str, QMovie] = {}
 		self.preview_zoom_labels: dict[str, QLabel] = {}
+		self.polar_cine_toggle_btn: QToolButton | None = None
 
 		self.output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output_demo")
 		os.makedirs(self.output_dir, exist_ok=True)
@@ -522,7 +524,6 @@ class MainWindow(QMainWindow):
 			"slices_fase": "slices_fase",
 			"polar_map": "polar_map",
 			"polar_perfusion_directa": "polar_perfusion_directa",
-			"polar_perfusion_directa_apexfill": "polar_perfusion_apexfill",
 			"polar_cine_montaje": "polar_cine_montaje",
 			"histograma": "histograma",
 			"ejes_ortogonales": "ejes_ortogonales",
@@ -536,7 +537,6 @@ class MainWindow(QMainWindow):
 			"slices_fase",
 			"polar_map",
 			"polar_perfusion_directa",
-			"polar_perfusion_directa_apexfill",
 			"polar_cine_montaje",
 			"histograma",
 			"ejes_ortogonales",
@@ -567,6 +567,16 @@ class MainWindow(QMainWindow):
 			toolbar.addWidget(zoom_in)
 			toolbar.addWidget(zoom_reset)
 			toolbar.addWidget(zoom_label)
+			if name == "polar_cine_montaje":
+				play_btn = QToolButton()
+				play_btn.setText("Play")
+				play_btn.clicked.connect(self._toggle_polar_cine_preview)
+				self.polar_cine_toggle_btn = play_btn
+				restart_btn = QToolButton()
+				restart_btn.setText("Restart")
+				restart_btn.clicked.connect(self._restart_polar_cine_preview)
+				toolbar.addWidget(play_btn)
+				toolbar.addWidget(restart_btn)
 			toolbar.addStretch(1)
 			tab_layout.addLayout(toolbar)
 
@@ -2134,40 +2144,6 @@ class MainWindow(QMainWindow):
 			fig_pp.savefig(os.path.join(self.output_dir, "polar_perfusion_directa.png"), dpi=170, bbox_inches="tight", facecolor=fig_pp.get_facecolor())
 			plt.close(fig_pp)
 
-			# Variante nueva: refuerzo apical para evitar centros artificialmente vacíos por efecto de anillo.
-			polar_map_apexfill = np.asarray(polar_map_smooth, dtype=np.float64).copy()
-			k_apex = max(1, int(round(0.12 * profiles_arr.shape[0])))
-			apical_profiles = profiles_arr[:k_apex]
-			apical_per_angle = np.nanmedian(apical_profiles, axis=0)
-			apical_scalar = float(np.nanpercentile(apical_profiles, 70)) if np.isfinite(apical_profiles).any() else 0.0
-			target_apex = np.maximum(apical_per_angle, apical_scalar)
-			cap_bins = max(2, int(round(0.16 * nr)))
-			for ir in range(cap_bins):
-				w = 1.0 - (ir / max(1, cap_bins - 1))
-				blended = (w * target_apex) + ((1.0 - w) * polar_map_apexfill[ir])
-				polar_map_apexfill[ir] = np.maximum(polar_map_apexfill[ir], blended)
-			mx_ap = float(np.nanmax(polar_map_apexfill)) if np.isfinite(polar_map_apexfill).any() else 0.0
-			polar_map_apexfill = polar_map_apexfill / (mx_ap + 1e-8)
-			cart_apexfill = _polar_to_cartesian(polar_map_apexfill)
-
-			fig_ap, ax_ap = plt.subplots(1, 1, figsize=(6.4, 6.2), facecolor=style["fig_bg"])
-			ax_ap.set_facecolor(style["ax_bg"])
-			ax_ap.set_aspect("equal")
-			ax_ap.set_xticks([])
-			ax_ap.set_yticks([])
-			ax_ap.imshow(cart_apexfill, cmap=cmap_polar_perf, vmin=0.0, vmax=1.0)
-			_annotate_polar_guides(ax_ap, int(cart_apexfill.shape[0]))
-			ax_ap.set_title("Perfusión polar directa (refuerzo apical)", color=style["fg"], fontsize=10, fontweight="bold")
-			fig_ap.suptitle(
-				f"Mapa polar de perfusión con relleno apical — rotación {rotation_deg:+d}°",
-				color=style["fg"],
-				fontsize=12,
-				fontweight="bold",
-			)
-			fig_ap.text(0.5, 0.04, "Mantiene apex en el centro y base en el borde, con centro reforzado clínicamente.", ha="center", color=style["subtle"], fontsize=9)
-			fig_ap.savefig(os.path.join(self.output_dir, "polar_perfusion_directa_apexfill.png"), dpi=170, bbox_inches="tight", facecolor=fig_ap.get_facecolor())
-			plt.close(fig_ap)
-
 			# Cine polar gatillado por gate: genera GIF y un montaje estático para preview/PDF.
 			try:
 				from PIL import Image
@@ -2272,6 +2248,9 @@ class MainWindow(QMainWindow):
 
 	def _load_previews(self):
 		for name in self.preview_labels:
+			if name == "polar_cine_montaje":
+				self._load_polar_cine_preview()
+				continue
 			path = os.path.join(self.output_dir, f"{name}.png")
 			label = self.preview_labels[name]
 			if os.path.exists(path):
@@ -2281,6 +2260,37 @@ class MainWindow(QMainWindow):
 			else:
 				self.preview_pixmaps.pop(name, None)
 				label.setText("Sin imagen")
+
+	def _load_polar_cine_preview(self):
+		name = "polar_cine_montaje"
+		label = self.preview_labels[name]
+		gif_path = os.path.join(self.output_dir, "polar_cine.gif")
+		png_path = os.path.join(self.output_dir, "polar_cine_montaje.png")
+		movie = self.preview_movies.pop(name, None)
+		if movie is not None:
+			movie.stop()
+			label.clear()
+			label.setMovie(None)
+		if os.path.exists(gif_path):
+			movie = QMovie(gif_path)
+			if movie.isValid():
+				self.preview_movies[name] = movie
+				self.preview_pixmaps.pop(name, None)
+				label.setText("")
+				label.setMovie(movie)
+				movie.start()
+				self._update_polar_cine_toggle_text()
+				self._apply_preview_zoom(name)
+				return
+		if os.path.exists(png_path):
+			pix = QPixmap(png_path)
+			self.preview_pixmaps[name] = pix
+			self._update_polar_cine_toggle_text(enabled=False)
+			self._apply_preview_zoom(name)
+		else:
+			self.preview_pixmaps.pop(name, None)
+			self._update_polar_cine_toggle_text(enabled=False)
+			label.setText("Sin cine polar")
 
 	def _generate_pdf_report(self):
 		if self.study is None or self.seg is None or self.metrics is None or self.territory is None:
@@ -2324,6 +2334,21 @@ class MainWindow(QMainWindow):
 
 	def _apply_preview_zoom(self, name: str):
 		label = self.preview_labels[name]
+		movie = self.preview_movies.get(name)
+		if movie is not None and movie.isValid():
+			base_size = movie.currentPixmap().size()
+			if base_size.isEmpty():
+				base_size = movie.frameRect().size()
+			if base_size.isEmpty():
+				base_size = QSize(500, 320)
+			zoom = max(0.20, min(4.00, self.preview_zoom.get(name, 1.0)))
+			w = max(1, int(base_size.width() * zoom))
+			h = max(1, int(base_size.height() * zoom))
+			movie.setScaledSize(QSize(w, h))
+			label.resize(w, h)
+			if name in self.preview_zoom_labels:
+				self.preview_zoom_labels[name].setText(f"{int(zoom * 100)}%")
+			return
 		pix = self.preview_pixmaps.get(name)
 		if pix is None or pix.isNull():
 			label.setText("Sin imagen")
@@ -2344,6 +2369,40 @@ class MainWindow(QMainWindow):
 	def _set_preview_zoom(self, name: str, value: float):
 		self.preview_zoom[name] = max(0.20, min(4.00, float(value)))
 		self._apply_preview_zoom(name)
+
+	def _toggle_polar_cine_preview(self):
+		movie = self.preview_movies.get("polar_cine_montaje")
+		if movie is not None and movie.isValid():
+			state = movie.state()
+			if state == QMovie.MovieState.Running:
+				movie.setPaused(True)
+			else:
+				movie.start()
+				movie.setPaused(False)
+		self._update_polar_cine_toggle_text()
+
+	def _restart_polar_cine_preview(self):
+		movie = self.preview_movies.get("polar_cine_montaje")
+		if movie is not None and movie.isValid():
+			movie.stop()
+			movie.start()
+		self._update_polar_cine_toggle_text()
+
+	def _update_polar_cine_toggle_text(self, enabled: bool = True):
+		if self.polar_cine_toggle_btn is None:
+			return
+		self.polar_cine_toggle_btn.setEnabled(enabled)
+		if not enabled:
+			self.polar_cine_toggle_btn.setText("Play/Pause")
+			return
+		movie = self.preview_movies.get("polar_cine_montaje")
+		if movie is None or not movie.isValid():
+			self.polar_cine_toggle_btn.setText("Play/Pause")
+			return
+		if movie.state() == QMovie.MovieState.Running:
+			self.polar_cine_toggle_btn.setText("Pause")
+		else:
+			self.polar_cine_toggle_btn.setText("Play")
 
 	def resizeEvent(self, event):
 		super().resizeEvent(event)
