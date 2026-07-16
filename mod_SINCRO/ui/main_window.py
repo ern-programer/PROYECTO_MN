@@ -1958,6 +1958,30 @@ class MainWindow(QMainWindow):
 			cart_raw = _polar_to_cartesian(polar_map)
 			cart_smooth = _polar_to_cartesian(polar_map_smooth)
 
+			def _annotate_polar_guides(ax, canvas_size: int):
+				c = canvas_size * 0.5
+				r = canvas_size * 0.5
+				for frac in (0.25, 0.50, 0.75, 1.0):
+					ax.add_patch(
+						plt.Circle(
+							(c, c),
+							radius=r * frac,
+							fill=False,
+							color=style["grid"],
+							linewidth=0.8,
+							alpha=0.75,
+						)
+					)
+				# Cruces anatómicas simplificadas para lectura rápida clínica.
+				ax.plot([c - r, c + r], [c, c], color=style["grid"], linewidth=0.8, alpha=0.8)
+				ax.plot([c, c], [c - r, c + r], color=style["grid"], linewidth=0.8, alpha=0.8)
+				ax.text(c, c - r * 1.03, "ANT", ha="center", va="bottom", color=style["fg"], fontsize=8, fontweight="bold")
+				ax.text(c + r * 1.03, c, "LAT", ha="left", va="center", color=style["fg"], fontsize=8, fontweight="bold")
+				ax.text(c, c + r * 1.03, "INF", ha="center", va="top", color=style["fg"], fontsize=8, fontweight="bold")
+				ax.text(c - r * 1.03, c, "SEP", ha="right", va="center", color=style["fg"], fontsize=8, fontweight="bold")
+				ax.text(c, c, "APEX", ha="center", va="center", color=style["fg"], fontsize=7, fontweight="bold")
+				ax.text(c, c + r * 0.98, "BASE", ha="center", va="top", color=style["subtle"], fontsize=7, fontweight="bold")
+
 			fig_pp, axes_pp = plt.subplots(1, 2, figsize=(12, 6.2), facecolor=style["fig_bg"])
 			for ax, img_pp, ttl in [
 				(axes_pp[0], cart_raw, "Perfusión polar directa (crudo)"),
@@ -1968,8 +1992,7 @@ class MainWindow(QMainWindow):
 				ax.set_xticks([])
 				ax.set_yticks([])
 				ax.imshow(img_pp, cmap=style["bull_cmap"], vmin=0.0, vmax=1.0)
-				for frac in (0.33, 0.66, 1.0):
-					ax.add_patch(plt.Circle((img_pp.shape[1] * 0.5, img_pp.shape[0] * 0.5), radius=img_pp.shape[0] * 0.5 * frac, fill=False, color=style["grid"], linewidth=0.8, alpha=0.7))
+				_annotate_polar_guides(ax, int(img_pp.shape[0]))
 				ax.set_title(ttl, color=style["fg"], fontsize=10, fontweight="bold")
 
 			fig_pp.suptitle(
