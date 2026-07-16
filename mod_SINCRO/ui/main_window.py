@@ -509,6 +509,7 @@ class MainWindow(QMainWindow):
 			"slices_fase": "slices_fase",
 			"polar_map": "polar_map",
 			"polar_perfusion_directa": "polar_perfusion_directa",
+			"polar_perfusion_directa_apexfill": "polar_perfusion_apexfill",
 			"histograma": "histograma",
 			"ejes_ortogonales": "ejes_ortogonales",
 			"comparacion_ejes": "comparacion_ejes",
@@ -521,6 +522,7 @@ class MainWindow(QMainWindow):
 			"slices_fase",
 			"polar_map",
 			"polar_perfusion_directa",
+			"polar_perfusion_directa_apexfill",
 			"histograma",
 			"ejes_ortogonales",
 			"comparacion_ejes",
@@ -2087,6 +2089,40 @@ class MainWindow(QMainWindow):
 			fig_pp.text(0.5, 0.04, "Reconstrucción polar continua desde short-axis: \"aplastado\" apex->base", ha="center", color=style["subtle"], fontsize=9)
 			fig_pp.savefig(os.path.join(self.output_dir, "polar_perfusion_directa.png"), dpi=170, bbox_inches="tight", facecolor=fig_pp.get_facecolor())
 			plt.close(fig_pp)
+
+			# Variante nueva: refuerzo apical para evitar centros artificialmente vacíos por efecto de anillo.
+			polar_map_apexfill = np.asarray(polar_map_smooth, dtype=np.float64).copy()
+			k_apex = max(1, int(round(0.12 * profiles_arr.shape[0])))
+			apical_profiles = profiles_arr[:k_apex]
+			apical_per_angle = np.nanmedian(apical_profiles, axis=0)
+			apical_scalar = float(np.nanpercentile(apical_profiles, 70)) if np.isfinite(apical_profiles).any() else 0.0
+			target_apex = np.maximum(apical_per_angle, apical_scalar)
+			cap_bins = max(2, int(round(0.16 * nr)))
+			for ir in range(cap_bins):
+				w = 1.0 - (ir / max(1, cap_bins - 1))
+				blended = (w * target_apex) + ((1.0 - w) * polar_map_apexfill[ir])
+				polar_map_apexfill[ir] = np.maximum(polar_map_apexfill[ir], blended)
+			mx_ap = float(np.nanmax(polar_map_apexfill)) if np.isfinite(polar_map_apexfill).any() else 0.0
+			polar_map_apexfill = polar_map_apexfill / (mx_ap + 1e-8)
+			cart_apexfill = _polar_to_cartesian(polar_map_apexfill)
+
+			fig_ap, ax_ap = plt.subplots(1, 1, figsize=(6.4, 6.2), facecolor=style["fig_bg"])
+			ax_ap.set_facecolor(style["ax_bg"])
+			ax_ap.set_aspect("equal")
+			ax_ap.set_xticks([])
+			ax_ap.set_yticks([])
+			ax_ap.imshow(cart_apexfill, cmap=cmap_polar_perf, vmin=0.0, vmax=1.0)
+			_annotate_polar_guides(ax_ap, int(cart_apexfill.shape[0]))
+			ax_ap.set_title("Perfusión polar directa (refuerzo apical)", color=style["fg"], fontsize=10, fontweight="bold")
+			fig_ap.suptitle(
+				f"Mapa polar de perfusión con relleno apical — rotación {rotation_deg:+d}°",
+				color=style["fg"],
+				fontsize=12,
+				fontweight="bold",
+			)
+			fig_ap.text(0.5, 0.04, "Mantiene apex en el centro y base en el borde, con centro reforzado clínicamente.", ha="center", color=style["subtle"], fontsize=9)
+			fig_ap.savefig(os.path.join(self.output_dir, "polar_perfusion_directa_apexfill.png"), dpi=170, bbox_inches="tight", facecolor=fig_ap.get_facecolor())
+			plt.close(fig_ap)
 
 	def _load_previews(self):
 		for name in self.preview_labels:

@@ -220,6 +220,7 @@ def generate_report(
 		("slices_fase.png", "Slice medio con máscara y fase superpuesta."),
 		("polar_map.png", "Mapa polar AHA (17 segmentos)."),
 		("polar_perfusion_directa.png", "Mapa polar de perfusión continua (apex-centro, base-borde)."),
+		("polar_perfusion_directa_apexfill.png", "Mapa polar de perfusión con refuerzo apical (centro no vaciado espurio)."),
 		("bullseye_directo.png", "Bull's eye de perfusión directa (colores de intensidad)."),
 		("histograma.png", "Histograma de fase."),
 		("ejes_ortogonales.png", "Ejes SA/HLA/VLA."),
