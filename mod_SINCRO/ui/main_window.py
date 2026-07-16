@@ -510,6 +510,7 @@ class MainWindow(QMainWindow):
 			"polar_map": "polar_map",
 			"polar_perfusion_directa": "polar_perfusion_directa",
 			"polar_perfusion_directa_apexfill": "polar_perfusion_apexfill",
+			"polar_cine_montaje": "polar_cine_montaje",
 			"histograma": "histograma",
 			"ejes_ortogonales": "ejes_ortogonales",
 			"comparacion_ejes": "comparacion_ejes",
@@ -523,6 +524,7 @@ class MainWindow(QMainWindow):
 			"polar_map",
 			"polar_perfusion_directa",
 			"polar_perfusion_directa_apexfill",
+			"polar_cine_montaje",
 			"histograma",
 			"ejes_ortogonales",
 			"comparacion_ejes",
@@ -1997,6 +1999,29 @@ class MainWindow(QMainWindow):
 					prof[b] = float(np.percentile(vb, 70))
 			return _fill_profile_nans_circular(prof)
 
+		def _slice_angular_profile_from_gate(gate_cube: np.ndarray, s_idx: int) -> np.ndarray | None:
+			img = np.asarray(gate_cube[int(s_idx)], dtype=np.float64)
+			mask_s = np.asarray(self.seg.mask[int(s_idx)], dtype=bool)
+			if not np.any(mask_s):
+				return None
+			cy, cx = self.seg.center_per_slice[int(s_idx)]
+			if not (np.isfinite(cy) and np.isfinite(cx)):
+				ys0, xs0 = np.nonzero(mask_s)
+				if ys0.size == 0:
+					return None
+				cy = float(np.mean(ys0))
+				cx = float(np.mean(xs0))
+			ys, xs = np.nonzero(mask_s)
+			vals = img[ys, xs]
+			ang = (np.degrees(np.arctan2(ys - cy, xs - cx)) + 360.0) % 360.0
+			bins = np.floor(ang).astype(np.int32) % 360
+			prof = np.full((360,), np.nan, dtype=np.float64)
+			for b in range(360):
+				vb = vals[bins == b]
+				if vb.size:
+					prof[b] = float(np.percentile(vb, 70))
+			return _fill_profile_nans_circular(prof)
+
 		apex_to_base = list(getattr(self.aha, "apex_to_base_order", []) or [])
 		if not apex_to_base:
 			apex_to_base = [int(s) for s in np.where(self.seg.mask.reshape(self.seg.mask.shape[0], -1).any(axis=1))[0].tolist()]
@@ -2123,6 +2148,81 @@ class MainWindow(QMainWindow):
 			fig_ap.text(0.5, 0.04, "Mantiene apex en el centro y base en el borde, con centro reforzado clínicamente.", ha="center", color=style["subtle"], fontsize=9)
 			fig_ap.savefig(os.path.join(self.output_dir, "polar_perfusion_directa_apexfill.png"), dpi=170, bbox_inches="tight", facecolor=fig_ap.get_facecolor())
 			plt.close(fig_ap)
+
+			# Cine polar gatillado por gate: genera GIF y un montaje estático para preview/PDF.
+			try:
+				from PIL import Image
+			except Exception:
+				Image = None
+
+			gate_frames: list[np.ndarray] = []
+			for g in range(int(self.study.cube.shape[0])):
+				gate_cube = np.asarray(self.study.cube[int(g)], dtype=np.float64)
+				profiles_g = []
+				for s in apex_to_base:
+					pg = _slice_angular_profile_from_gate(gate_cube, int(s))
+					if pg is not None:
+						profiles_g.append(pg)
+				if len(profiles_g) < 2:
+					continue
+				arr_g = np.asarray(profiles_g, dtype=np.float64)
+				pm_g = np.zeros((nr, nt), dtype=np.float64)
+				for ir in range(nr):
+					t = (ir / max(1, nr - 1)) * (arr_g.shape[0] - 1)
+					i0 = int(np.floor(t))
+					i1 = min(i0 + 1, arr_g.shape[0] - 1)
+					a = float(t - i0)
+					pm_g[ir] = (1.0 - a) * arr_g[i0] + a * arr_g[i1]
+				if rotation_bins:
+					pm_g = np.roll(pm_g, shift=rotation_bins, axis=1)
+				mx_g = float(np.nanmax(pm_g)) if np.isfinite(pm_g).any() else 0.0
+				pm_g = pm_g / (mx_g + 1e-8)
+				pm_g = gaussian_filter(pm_g, sigma=(1.7, 1.1))
+				cart_g = _polar_to_cartesian(pm_g)
+
+				fig_g, ax_g = plt.subplots(1, 1, figsize=(5.2, 5.2), facecolor=style["fig_bg"])
+				ax_g.set_facecolor(style["ax_bg"])
+				ax_g.set_aspect("equal")
+				ax_g.set_xticks([])
+				ax_g.set_yticks([])
+				ax_g.imshow(cart_g, cmap=cmap_polar_perf, vmin=0.0, vmax=1.0)
+				_annotate_polar_guides(ax_g, int(cart_g.shape[0]))
+				ax_g.set_title(f"Polar cine gate {g + 1}/{self.study.cube.shape[0]}", color=style["fg"], fontsize=10, fontweight="bold")
+				fig_g.tight_layout()
+				fig_g.canvas.draw()
+				w, h = fig_g.canvas.get_width_height()
+				buf = np.frombuffer(fig_g.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)[..., :3].copy()
+				gate_frames.append(buf)
+				plt.close(fig_g)
+
+			if gate_frames:
+				if Image is not None:
+					pil_frames = [Image.fromarray(frm) for frm in gate_frames]
+					pil_frames[0].save(
+						os.path.join(self.output_dir, "polar_cine.gif"),
+						save_all=True,
+						append_images=pil_frames[1:],
+						duration=180,
+						loop=0,
+					)
+
+				# Montaje estático para preview/PDF
+				n_show = min(8, len(gate_frames))
+				idx = np.linspace(0, len(gate_frames) - 1, n_show).astype(int)
+				fig_m, axes_m = plt.subplots(2, int(np.ceil(n_show / 2.0)), figsize=(12, 6.2), facecolor=style["fig_bg"])
+				axes_arr = np.atleast_1d(axes_m).ravel()
+				for i, ax in enumerate(axes_arr):
+					ax.set_facecolor(style["ax_bg"])
+					ax.set_xticks([])
+					ax.set_yticks([])
+					if i < n_show:
+						ax.imshow(gate_frames[int(idx[i])])
+						ax.set_title(f"Gate {int(idx[i]) + 1}", color=style["fg"], fontsize=9)
+					else:
+						ax.axis("off")
+				fig_m.suptitle("Polar cine gatillado (muestra de gates)", color=style["fg"], fontsize=12, fontweight="bold")
+				fig_m.savefig(os.path.join(self.output_dir, "polar_cine_montaje.png"), dpi=160, bbox_inches="tight", facecolor=fig_m.get_facecolor())
+				plt.close(fig_m)
 
 	def _load_previews(self):
 		for name in self.preview_labels:
