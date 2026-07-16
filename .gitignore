@@ -16,6 +16,9 @@
 # !motor_principal/          # descomentar cuando exista
 # !mod_XXX/                  # otros módulos futuros
 
+# --- Legacy / no versionados explícitos ---
+/- COL/
+
 # =====================================================================
 # Reglas internas (aplican dentro de los módulos versionados)
 # =====================================================================
