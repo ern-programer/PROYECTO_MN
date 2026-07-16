@@ -313,6 +313,9 @@ class MainWindow(QMainWindow):
 		self.open_pdf_btn = QPushButton("Abrir PDF")
 		self.open_pdf_btn.clicked.connect(self.open_pdf)
 		self.open_pdf_btn.setToolTip("Abre el informe clínico PDF generado.")
+		self.save_pdf_as_btn = QPushButton("Guardar PDF como...")
+		self.save_pdf_as_btn.clicked.connect(self.save_pdf_as)
+		self.save_pdf_as_btn.setToolTip("Guarda una copia del informe PDF en la ubicación que elijas.")
 		self.open_polar_btn = QPushButton("Polar map")
 		self.open_polar_btn.clicked.connect(self.open_polar_map)
 		self.open_polar_btn.setToolTip("Abre la imagen del mapa polar del estudio procesado.")
@@ -323,7 +326,8 @@ class MainWindow(QMainWindow):
 		button_row.addWidget(self.auto_btn, 0, 1)
 		button_row.addWidget(self.open_folder_btn, 1, 0)
 		button_row.addWidget(self.open_pdf_btn, 1, 1)
-		button_row.addWidget(self.open_polar_btn, 2, 0, 1, 2)
+		button_row.addWidget(self.save_pdf_as_btn, 2, 0, 1, 2)
+		button_row.addWidget(self.open_polar_btn, 3, 0, 1, 2)
 		self._sidebar_layout.addWidget(button_box)
 
 		roi_box = QGroupBox("ROI manual por slice")
@@ -2490,6 +2494,27 @@ class MainWindow(QMainWindow):
 			QMessageBox.information(self, "SINCRO", "Todavía no hay PDF generado en output_demo.")
 			return
 		QDesktopServices.openUrl(QUrl.fromLocalFile(pdf_path))
+
+	def save_pdf_as(self):
+		import shutil
+		pdf_path = os.path.join(self.output_dir, "informe_sincro.pdf")
+		if not os.path.exists(pdf_path):
+			QMessageBox.information(self, "SINCRO", "Todavía no hay PDF generado. Procesá un estudio primero.")
+			return
+		dest, _ = QFileDialog.getSaveFileName(
+			self,
+			"Guardar informe PDF como...",
+			"informe_sincro.pdf",
+			"Archivos PDF (*.pdf);;Todos (*.*)",
+		)
+		if not dest:
+			return
+		try:
+			shutil.copy2(pdf_path, dest)
+			self._log(f"PDF guardado en: {dest}")
+			self.statusBar().showMessage(f"PDF guardado en: {dest}")
+		except Exception as exc:
+			QMessageBox.critical(self, "SINCRO", f"No se pudo guardar el PDF:\n{exc}")
 
 	def open_polar_map(self):
 		pm_path = os.path.join(self.output_dir, "polar_map.png")
