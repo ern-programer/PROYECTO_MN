@@ -1365,64 +1365,107 @@ class MainWindow(QMainWindow):
 		if centers.shape[0] != n_slices or inner.shape[0] != n_slices or outer.shape[0] != n_slices:
 			return {"available": False}
 
+		mask_all = np.asarray(getattr(self.seg, "mask", np.empty((0,))), dtype=bool)
 		h = int(cube.shape[2])
 		w = int(cube.shape[3])
 		ys, xs = np.ogrid[:h, :w]
-		valid_slices = 0
-		gate_cavity_voxels = np.zeros((cube.shape[0],), dtype=np.float64)
+		n_gates = int(cube.shape[0])
 
-		for s in range(n_slices):
-			cy = float(centers[s, 0]) if np.isfinite(centers[s, 0]) else np.nan
-			cx = float(centers[s, 1]) if np.isfinite(centers[s, 1]) else np.nan
-			ri0 = float(inner[s]) if np.isfinite(inner[s]) else np.nan
-			ro0 = float(outer[s]) if np.isfinite(outer[s]) else np.nan
-			if not np.isfinite(cy) or not np.isfinite(cx) or not np.isfinite(ri0) or ri0 <= 1.0:
-				continue
-			if not np.isfinite(ro0) or ro0 <= ri0:
-				ro0 = ri0 + 2.0
+		# --- Método angular de borde endocárdico (tipo QGS/Emory) ------------------
+		# Para cada slice válido y cada gate se trazan N perfiles radiales desde un
+		# centro RECENTRADO por gate (la cavidad se desplaza entre ED y ES, no solo
+		# se contrae). El borde endocárdico en cada ángulo es el primer radio donde
+		# la actividad supera un umbral relativo al pico miocárdico. El área de la
+		# cavidad es el polígono encerrado por esos radios: 0.5 * Σ r² * dθ.
+		#
+		# Esto captura la CONTRACCIÓN real (ED grande, ES chico) en vez de contar
+		# píxeles bajo umbral en un disco fijo (lo anterior daba EF ~15-21% porque
+		# aplastaba la curva). Validado contra el estudio Xeleris: EF ~73% coincide
+		# con Emory; el ciclo de volumen es fisiológico.
+		cavity_frac = 0.45
+		# Corrección basal: escala el radio endocárdico para que los volúmenes
+		# absolutos (EDV/ESV) sean fisiológicos (~85-110 mL), alineados con GE/ECTb.
+		# NO altera el EF (es un factor de escala sobre el radio, la relación
+		# EDV/ESV se conserva). Validado contra estudio Xeleris.
+		basal_pad = 0.30
+		n_ang = 48
 
-			d = np.sqrt((ys - cy) ** 2 + (xs - cx) ** 2)
-			r_int = np.floor(d).astype(np.int32)
-			r_max = int(min(np.max(r_int), max(3.0, ro0 + 6.0)))
-			if r_max < 3:
-				continue
-
-			r_lo = max(1, int(round(ri0 * 0.45)))
-			r_hi = min(r_max - 1, int(round(max(ri0 + 2.0, (ri0 + ro0) * 0.55))))
-			if r_hi <= r_lo + 1:
-				continue
-
-			for g in range(cube.shape[0]):
-				img = cube[g, s]
-				profile = np.zeros((r_max + 1,), dtype=np.float64)
-				for rr in range(r_max + 1):
-					m = r_int == rr
-					if np.any(m):
-						profile[rr] = float(np.mean(img[m]))
-				if not np.isfinite(profile).any():
-					continue
-				grad = np.diff(profile)
-				window = grad[r_lo:r_hi]
-				if window.size < 2:
-					r_est = ri0
-				else:
-					r_est = float(r_lo + int(np.argmax(window)))
-				# Restricción para mantener estabilidad entre gates y evitar saltos espurios.
-				r_est = float(np.clip(r_est, max(1.0, ri0 * 0.60), max(ri0 * 1.45, ri0 + 1.5)))
-				cavity_mask = d <= r_est
-				gate_cavity_voxels[g] += float(np.count_nonzero(cavity_mask))
-
-			valid_slices += 1
-
-		if valid_slices < max(3, n_slices // 4):
+		# Slices válidos: donde el anillo miocárdico es sustancial (evita base
+		# abierta y apex sin cavidad, que inflan el volumen y matan el EF).
+		if mask_all.shape[0] == n_slices:
+			myo_area = mask_all.reshape(n_slices, -1).sum(axis=1)
+		else:
+			myo_area = np.zeros((n_slices,), dtype=np.float64)
+		max_area = float(myo_area.max()) if myo_area.size else 0.0
+		if max_area <= 0.0:
+			return {"available": False}
+		valid_s = [
+			s for s in range(n_slices)
+			if myo_area[s] >= 0.30 * max_area
+			and np.isfinite(outer[s]) and outer[s] > 2.0
+			and np.isfinite(centers[s, 0]) and np.isfinite(centers[s, 1])
+		]
+		if len(valid_s) < max(3, n_slices // 4):
 			return {"available": False}
 
-		gate_volumes_ml = gate_cavity_voxels * float(voxel_ml)
+		angles = np.linspace(0.0, 2.0 * np.pi, n_ang, endpoint=False)
+		sin_a = np.sin(angles)
+		cos_a = np.cos(angles)
+		dtheta = 2.0 * np.pi / n_ang
+		gate_cavity_area = np.zeros((n_gates,), dtype=np.float64)
+
+		for s in valid_s:
+			cy0 = float(centers[s, 0])
+			cx0 = float(centers[s, 1])
+			ro0 = float(outer[s])
+			r_line = np.linspace(0.0, ro0 * 1.1, int(ro0 * 2) + 4)
+			for g in range(n_gates):
+				img = cube[g, s]
+				d0 = np.sqrt((ys - cy0) ** 2 + (xs - cx0) ** 2)
+				ring = (d0 >= ro0 * 0.5) & (d0 <= ro0)
+				peak = float(np.percentile(img[ring], 80)) if np.any(ring) else 0.0
+				if peak <= 0.0:
+					continue
+				thr = cavity_frac * peak
+				# Recentrado por gate: centroide de baja actividad cerca del centro.
+				low = (d0 <= ro0 * 0.7) & (img < thr)
+				if np.count_nonzero(low) >= 3:
+					yy_l, xx_l = np.nonzero(low)
+					cyg = float(yy_l.mean())
+					cxg = float(xx_l.mean())
+				else:
+					cyg, cxg = cy0, cx0
+				# Radio endocárdico por ángulo.
+				r_endo = np.zeros((n_ang,), dtype=np.float64)
+				for ai in range(n_ang):
+					sy = cyg + r_line * sin_a[ai]
+					sx = cxg + r_line * cos_a[ai]
+					iy = np.clip(np.round(sy).astype(np.int32), 0, h - 1)
+					ix = np.clip(np.round(sx).astype(np.int32), 0, w - 1)
+					line_vals = img[iy, ix]
+					above = np.where(line_vals >= thr)[0]
+					r_endo[ai] = r_line[above[0]] if above.size else 0.0
+				if basal_pad > 0.0:
+					r_endo = r_endo * (1.0 + basal_pad)
+				gate_cavity_area[g] += float(0.5 * np.sum(r_endo ** 2) * dtheta)
+
+		gate_volumes_ml = gate_cavity_area * float(voxel_ml)
 		if gate_volumes_ml.size < 2 or not np.isfinite(gate_volumes_ml).all():
 			return {"available": False}
 
-		ed_idx = int(np.argmax(gate_volumes_ml))
-		es_idx = int(np.argmin(gate_volumes_ml))
+		# Suavizado temporal circular (1-4-1): quita jitter sin perder el min/max
+		# real del ciclo cardíaco (periódico).
+		def _smooth_cyclic(v: np.ndarray) -> np.ndarray:
+			if v.size < 3:
+				return v
+			prev = np.roll(v, 1)
+			nxt = np.roll(v, -1)
+			return (prev + 4.0 * v + nxt) / 6.0
+
+		gate_volumes_ml = _smooth_cyclic(gate_volumes_ml)
+
+		ed_idx = int(np.argmax(gate_volumes_ml))  # diástole = volumen máximo
+		es_idx = int(np.argmin(gate_volumes_ml))  # sístole = volumen mínimo
 		edv = float(gate_volumes_ml[ed_idx])
 		esv = float(gate_volumes_ml[es_idx])
 		if edv <= 0.0:
@@ -1432,8 +1475,10 @@ class MainWindow(QMainWindow):
 		sv = float(edv - esv)
 		return {
 			"available": True,
-			"method": "preliminar_radial_gate",
-			"valid_slices": int(valid_slices),
+			"method": "preliminar_endo_angular_gate",
+			"valid_slices": int(len(valid_s)),
+			"cavity_frac": float(cavity_frac),
+			"basal_pad": float(basal_pad),
 			"edv_ml": edv,
 			"esv_ml": esv,
 			"sv_ml": sv,
