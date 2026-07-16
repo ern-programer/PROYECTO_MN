@@ -145,6 +145,12 @@ class MainWindow(QMainWindow):
 		self.visual_style_combo.addItems(["GammaSync", "Xeleris-like", "QGS-like"])
 		self.visual_style_combo.setCurrentText("Xeleris-like")
 
+		self.polar_rotation_spin = QSpinBox()
+		self.polar_rotation_spin.setRange(-180, 180)
+		self.polar_rotation_spin.setSingleStep(5)
+		self.polar_rotation_spin.setValue(0)
+		self.polar_rotation_spin.setSuffix("°")
+
 		self.manual_rois = QPlainTextEdit()
 		self.manual_rois.setPlaceholderText(
 			"Modo manual: slice,cy,cx,r_inner,r_outer\n"
@@ -160,6 +166,7 @@ class MainWindow(QMainWindow):
 		controls_form.addRow("Amplitude filter", self.phase_threshold_spin)
 		controls_form.addRow("Colormap fase", self.cmap_combo)
 		controls_form.addRow("Estilo visual", self.visual_style_combo)
+		controls_form.addRow("Rotación polar", self.polar_rotation_spin)
 		controls_form.addRow(self.normalize_check)
 		controls_form.addRow(self.auto_run_check)
 
@@ -170,6 +177,7 @@ class MainWindow(QMainWindow):
 		self.phase_threshold_spin.setToolTip("Filtro de amplitud: descarta voxels débiles o ruidosos.")
 		self.cmap_combo.setToolTip("Colormap cíclico para visualizar fase.")
 		self.visual_style_combo.setToolTip("Tema visual de los paneles clínicos (curva FEVI, panel funcional gated y bull's eye).")
+		self.polar_rotation_spin.setToolTip("Rota el mapa polar de perfusión continua. Ajustalo para alinear ANT/SEP/LAT/INF a tu convención.")
 		self.normalize_check.setToolTip("Resta una referencia global de fase para comparar estudios.")
 
 		self._sidebar_layout.addWidget(controls_box)
@@ -595,6 +603,7 @@ class MainWindow(QMainWindow):
 			"normalize_reference": bool(self.normalize_check.isChecked()),
 			"phase_cmap": str(self.cmap_combo.currentText()),
 			"visual_style": str(self.visual_style_combo.currentText()),
+			"polar_rotation_deg": int(self.polar_rotation_spin.value()),
 			"auto_run": bool(self.auto_run_check.isChecked()),
 			"auto_center_gain": int(self.auto_center_gain_slider.value()),
 			"auto_inner_delta": int(self.auto_inner_delta_slider.value()),
@@ -623,6 +632,8 @@ class MainWindow(QMainWindow):
 			self.cmap_combo.setCurrentText(str(params["phase_cmap"]))
 		if "visual_style" in params:
 			self.visual_style_combo.setCurrentText(str(params["visual_style"]))
+		if "polar_rotation_deg" in params:
+			self.polar_rotation_spin.setValue(int(params["polar_rotation_deg"]))
 		if "auto_run" in params:
 			self.auto_run_check.setChecked(bool(params["auto_run"]))
 		if "auto_center_gain" in params:
@@ -1928,6 +1939,8 @@ class MainWindow(QMainWindow):
 		if len(profiles) >= 2:
 			profiles_arr = np.asarray(profiles, dtype=np.float64)
 			nr, nt = 220, 360
+			rotation_deg = int(self.polar_rotation_spin.value())
+			rotation_bins = int(np.round(rotation_deg)) % 360
 			polar_map = np.zeros((nr, nt), dtype=np.float64)
 			for ir in range(nr):
 				t = (ir / max(1, nr - 1)) * (profiles_arr.shape[0] - 1)
@@ -1935,6 +1948,8 @@ class MainWindow(QMainWindow):
 				i1 = min(i0 + 1, profiles_arr.shape[0] - 1)
 				a = float(t - i0)
 				polar_map[ir] = (1.0 - a) * profiles_arr[i0] + a * profiles_arr[i1]
+			if rotation_bins:
+				polar_map = np.roll(polar_map, shift=rotation_bins, axis=1)
 
 			mx_pm = float(np.nanmax(polar_map)) if np.isfinite(polar_map).any() else 0.0
 			polar_map = polar_map / (mx_pm + 1e-8)
@@ -1996,7 +2011,7 @@ class MainWindow(QMainWindow):
 				ax.set_title(ttl, color=style["fg"], fontsize=10, fontweight="bold")
 
 			fig_pp.suptitle(
-				f"Mapa polar de perfusión (apex en centro, base en borde) — {self.visual_style_combo.currentText()}",
+				f"Mapa polar de perfusión (apex en centro, base en borde) — {self.visual_style_combo.currentText()} | rotación {rotation_deg:+d}°",
 				color=style["fg"],
 				fontsize=12,
 				fontweight="bold",
@@ -2027,6 +2042,7 @@ class MainWindow(QMainWindow):
 			"harmonics": int(self.harmonics_spin.value()),
 			"amp_filter": float(self.phase_threshold_spin.value()),
 			"visual_style": str(self.visual_style_combo.currentText()),
+			"polar_rotation_deg": int(self.polar_rotation_spin.value()),
 		}
 		vol = self._compute_volumes_ml()
 		ef = self._estimate_lv_ef_preliminary()

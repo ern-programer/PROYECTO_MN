@@ -209,7 +209,8 @@ def generate_report(
 		f"Sigma={_safe_float(processing_params.get('smooth_sigma'), 1)} | "
 		f"Harmonics={processing_params.get('harmonics', 'N/D')} | "
 		f"Amp filter={_safe_float(processing_params.get('amp_filter'), 2)} | "
-		f"Estilo visual={processing_params.get('visual_style', 'N/D')}"
+		f"Estilo visual={processing_params.get('visual_style', 'N/D')} | "
+		f"Rotación polar={processing_params.get('polar_rotation_deg', 'N/D')}°"
 	)
 	story.append(Paragraph(f"<b>Parámetros usados:</b> {proc_txt}", body_style))
 
