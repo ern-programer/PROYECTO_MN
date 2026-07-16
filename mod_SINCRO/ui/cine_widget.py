@@ -821,7 +821,11 @@ class CineWidget(QWidget):
 		empty_only = self.auto_roi_empty_only_check.isChecked()
 		n_slices = int(self._cube.shape[1])
 		for sl in range(n_slices):
-			if empty_only and self._rois.get(sl) is not None:
+			existing_roi = self._rois.get(sl)
+			source = self._roi_source.get(sl)
+			# "solo vacíos" protege ROIs manuales, pero permite regenerar los automáticos
+			# para que un segundo click sobre "Auto ROI todos" siga funcionando.
+			if empty_only and existing_roi is not None and source != "auto":
 				continue
 			roi = self.estimate_auto_roi_for_slice(sl)
 			if roi is None:

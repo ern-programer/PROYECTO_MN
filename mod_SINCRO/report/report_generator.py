@@ -218,11 +218,12 @@ def generate_report(
 	img_files = [
 		("slices_fase.png", "Slice medio con máscara y fase superpuesta."),
 		("polar_map.png", "Mapa polar AHA (17 segmentos)."),
+		("polar_perfusion_directa.png", "Mapa polar de perfusión continua (apex-centro, base-borde)."),
 		("bullseye_directo.png", "Bull's eye de perfusión directa (colores de intensidad)."),
 		("histograma.png", "Histograma de fase."),
 		("ejes_ortogonales.png", "Ejes SA/HLA/VLA."),
 		("panel_clinico_convencion.png", "Panel clínico A/B (ED/ES)."),
-		("ventriculograma.png", "Panel funcional tipo ventriculograma (ED/ES + curvas)."),
+		("ventriculograma.png", "Panel funcional gated SPECT (ED/ES + curvas de volumen y fase)."),
 		("comparacion_ejes.png", "Comparación original vs reconstruido."),
 		("curva_tac.png", "Curva de actividad por gate."),
 		("curva_fevi.png", "Curva FEVI preliminar con volumen y derivada."),

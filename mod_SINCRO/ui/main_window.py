@@ -169,7 +169,7 @@ class MainWindow(QMainWindow):
 		self.harmonics_spin.setToolTip("Cantidad de armónicos usados para estabilizar la fase.")
 		self.phase_threshold_spin.setToolTip("Filtro de amplitud: descarta voxels débiles o ruidosos.")
 		self.cmap_combo.setToolTip("Colormap cíclico para visualizar fase.")
-		self.visual_style_combo.setToolTip("Tema visual de los paneles clínicos (curva FEVI, ventriculograma y bull's eye).")
+		self.visual_style_combo.setToolTip("Tema visual de los paneles clínicos (curva FEVI, panel funcional gated y bull's eye).")
 		self.normalize_check.setToolTip("Resta una referencia global de fase para comparar estudios.")
 
 		self._sidebar_layout.addWidget(controls_box)
@@ -452,9 +452,22 @@ class MainWindow(QMainWindow):
 
 		self.tabs = QTabWidget()
 		self.preview_labels: dict[str, QLabel] = {}
+		preview_titles = {
+			"slices_fase": "slices_fase",
+			"polar_map": "polar_map",
+			"polar_perfusion_directa": "polar_perfusion_directa",
+			"histograma": "histograma",
+			"ejes_ortogonales": "ejes_ortogonales",
+			"comparacion_ejes": "comparacion_ejes",
+			"curva_fevi": "curva_fevi",
+			"curva_tac": "curva_tac",
+			"ventriculograma": "panel_funcional_gated",
+			"bullseye_directo": "bullseye_directo",
+		}
 		for name in [
 			"slices_fase",
 			"polar_map",
+			"polar_perfusion_directa",
 			"histograma",
 			"ejes_ortogonales",
 			"comparacion_ejes",
@@ -500,7 +513,7 @@ class MainWindow(QMainWindow):
 			scroller.setWidgetResizable(False)
 			scroller.setWidget(label)
 			tab_layout.addWidget(scroller)
-			self.tabs.addTab(tab, name)
+			self.tabs.addTab(tab, preview_titles.get(name, name))
 		self.cine = CineWidget()
 		self.cine.roiEdited.connect(self._on_cine_roi_changed)
 		self.cine.playStateChanged.connect(self._on_play_state_changed)
@@ -1686,7 +1699,7 @@ class MainWindow(QMainWindow):
 		fig_ef.savefig(os.path.join(self.output_dir, "curva_fevi.png"), dpi=160, bbox_inches="tight", facecolor=fig_ef.get_facecolor())
 		plt.close(fig_ef)
 
-		# Panel tipo ventriculograma funcional (estilo clínico): ED/ES + mapas + curvas.
+		# Panel funcional gated SPECT: ED/ES + mapas + curvas de volumen/fase.
 		fig_v = plt.figure(figsize=(14.0, 8.4), facecolor=style["fig_bg"])
 		gs = fig_v.add_gridspec(3, 4, width_ratios=[1.1, 1.1, 1.45, 1.15], hspace=0.28, wspace=0.22)
 		ax_ed_sa = fig_v.add_subplot(gs[0, 0])
@@ -1752,7 +1765,26 @@ class MainWindow(QMainWindow):
 		ax_curve.tick_params(axis="y", colors=style["vol"])
 		ax_curve.grid(True, color=style["grid"], alpha=0.45)
 
-		ax_metrics.axis("off")
+		phase_seg_ids = np.array(sorted(int(k) for k in self.phase_by_seg.keys()), dtype=np.int32)
+		phase_seg_vals = np.array([float(self.phase_by_seg[int(k)]) for k in phase_seg_ids], dtype=np.float64) if phase_seg_ids.size else np.array([], dtype=np.float64)
+		if phase_seg_ids.size:
+			ax_metrics.plot(phase_seg_ids, phase_seg_vals, color=style["deriv"], linewidth=1.8, marker="o", markersize=4)
+			ax_metrics.axhline(float(self.metrics.get("mean_phase", np.nan)), color=style["ed"], linestyle="--", linewidth=1.1)
+			ax_metrics.set_xlim(1, 17)
+			ax_metrics.set_xticks(np.arange(1, 18, 2))
+			ax_metrics.set_ylim(0, 360)
+			ax_metrics.set_yticks(np.arange(0, 361, 90))
+			ax_metrics.set_title("Curva de fase por segmento AHA", color=style["fg"], fontsize=10, fontweight="bold")
+			ax_metrics.set_xlabel("Segmento AHA", color=style["subtle"])
+			ax_metrics.set_ylabel("Fase (°)", color=style["deriv"])
+			ax_metrics.tick_params(axis="x", colors=style["subtle"])
+			ax_metrics.tick_params(axis="y", colors=style["deriv"])
+			ax_metrics.grid(True, color=style["grid"], alpha=0.35)
+		else:
+			ax_metrics.set_xticks([])
+			ax_metrics.set_yticks([])
+			ax_metrics.text(0.5, 0.5, "Sin datos de fase por segmento", transform=ax_metrics.transAxes, ha="center", va="center", color=style["fg"])
+
 		metrics_lines = [
 			f"Clasificación: {self.metrics.get('classification')}",
 			f"Phase SD: {float(self.metrics.get('phase_sd', np.nan)):.1f}°",
@@ -1768,19 +1800,19 @@ class MainWindow(QMainWindow):
 		else:
 			metrics_lines.append("FEVI: no disponible")
 		ax_metrics.text(
-			0.02,
-			0.92,
+			0.98,
+			0.96,
 			"\n".join(metrics_lines),
 			transform=ax_metrics.transAxes,
 			va="top",
-			ha="left",
+			ha="right",
 			color=style["fg"],
-			fontsize=10,
+			fontsize=8.6,
 			bbox=dict(boxstyle="round,pad=0.45", facecolor=style["ax_bg"], edgecolor=style["grid"], alpha=0.95),
 		)
 
 		fig_v.suptitle(
-			f"Ventriculograma funcional (estilo clínico: {self.visual_style_combo.currentText()})",
+			f"Panel funcional gated SPECT (estilo clínico: {self.visual_style_combo.currentText()})",
 			color=style["fg"],
 			fontsize=13,
 			fontweight="bold",
@@ -1840,6 +1872,115 @@ class MainWindow(QMainWindow):
 		ax_b.text(0.0, -1.02, "Colores de intensidad normalizada (gate medio)", ha="center", va="top", color=style["subtle"], fontsize=9)
 		fig_b.savefig(os.path.join(self.output_dir, "bullseye_directo.png"), dpi=170, bbox_inches="tight", facecolor=fig_b.get_facecolor())
 		plt.close(fig_b)
+
+		# Mapa polar continuo de perfusión ("aplastado" apex->base), complementario al bull's eye por segmentos.
+		from scipy.ndimage import gaussian_filter
+
+		def _fill_profile_nans_circular(profile: np.ndarray) -> np.ndarray:
+			p = np.asarray(profile, dtype=np.float64).copy()
+			if p.size == 0:
+				return p
+			valid = np.isfinite(p)
+			if valid.all():
+				return p
+			if not valid.any():
+				return np.zeros_like(p, dtype=np.float64)
+			x = np.arange(p.size)
+			xv = x[valid]
+			yv = p[valid]
+			x_ext = np.concatenate([xv - p.size, xv, xv + p.size])
+			y_ext = np.concatenate([yv, yv, yv])
+			p[~valid] = np.interp(x[~valid], x_ext, y_ext)
+			return p
+
+		def _slice_angular_profile(s_idx: int) -> np.ndarray | None:
+			img = np.asarray(mid_gate_cube[int(s_idx)], dtype=np.float64)
+			mask_s = np.asarray(self.seg.mask[int(s_idx)], dtype=bool)
+			if not np.any(mask_s):
+				return None
+			cy, cx = self.seg.center_per_slice[int(s_idx)]
+			if not (np.isfinite(cy) and np.isfinite(cx)):
+				ys0, xs0 = np.nonzero(mask_s)
+				if ys0.size == 0:
+					return None
+				cy = float(np.mean(ys0))
+				cx = float(np.mean(xs0))
+			ys, xs = np.nonzero(mask_s)
+			vals = img[ys, xs]
+			ang = (np.degrees(np.arctan2(ys - cy, xs - cx)) + 360.0) % 360.0
+			bins = np.floor(ang).astype(np.int32) % 360
+			prof = np.full((360,), np.nan, dtype=np.float64)
+			for b in range(360):
+				vb = vals[bins == b]
+				if vb.size:
+					prof[b] = float(np.percentile(vb, 70))
+			return _fill_profile_nans_circular(prof)
+
+		apex_to_base = list(getattr(self.aha, "apex_to_base_order", []) or [])
+		if not apex_to_base:
+			apex_to_base = [int(s) for s in np.where(self.seg.mask.reshape(self.seg.mask.shape[0], -1).any(axis=1))[0].tolist()]
+		profiles = []
+		for s in apex_to_base:
+			p = _slice_angular_profile(int(s))
+			if p is not None:
+				profiles.append(p)
+
+		if len(profiles) >= 2:
+			profiles_arr = np.asarray(profiles, dtype=np.float64)
+			nr, nt = 220, 360
+			polar_map = np.zeros((nr, nt), dtype=np.float64)
+			for ir in range(nr):
+				t = (ir / max(1, nr - 1)) * (profiles_arr.shape[0] - 1)
+				i0 = int(np.floor(t))
+				i1 = min(i0 + 1, profiles_arr.shape[0] - 1)
+				a = float(t - i0)
+				polar_map[ir] = (1.0 - a) * profiles_arr[i0] + a * profiles_arr[i1]
+
+			mx_pm = float(np.nanmax(polar_map)) if np.isfinite(polar_map).any() else 0.0
+			polar_map = polar_map / (mx_pm + 1e-8)
+			polar_map_smooth = gaussian_filter(polar_map, sigma=(2.0, 1.2))
+
+			def _polar_to_cartesian(pm: np.ndarray, size: int = 480) -> np.ndarray:
+				canvas = np.full((size, size), np.nan, dtype=np.float64)
+				yy, xx = np.indices((size, size), dtype=np.float64)
+				cxp = (size - 1) / 2.0
+				cyp = (size - 1) / 2.0
+				xn = (xx - cxp) / max(1.0, cxp)
+				yn = (yy - cyp) / max(1.0, cyp)
+				rr = np.sqrt(xn**2 + yn**2)
+				inside = rr <= 1.0
+				ang = (np.degrees(np.arctan2(yn, xn)) + 360.0) % 360.0
+				ri = np.clip((rr * (pm.shape[0] - 1)).astype(np.int32), 0, pm.shape[0] - 1)
+				ti = np.clip(np.floor(ang).astype(np.int32), 0, pm.shape[1] - 1)
+				canvas[inside] = pm[ri[inside], ti[inside]]
+				return canvas
+
+			cart_raw = _polar_to_cartesian(polar_map)
+			cart_smooth = _polar_to_cartesian(polar_map_smooth)
+
+			fig_pp, axes_pp = plt.subplots(1, 2, figsize=(12, 6.2), facecolor=style["fig_bg"])
+			for ax, img_pp, ttl in [
+				(axes_pp[0], cart_raw, "Perfusión polar directa (crudo)"),
+				(axes_pp[1], cart_smooth, "Perfusión polar directa (suavizado)"),
+			]:
+				ax.set_facecolor(style["ax_bg"])
+				ax.set_aspect("equal")
+				ax.set_xticks([])
+				ax.set_yticks([])
+				ax.imshow(img_pp, cmap=style["bull_cmap"], vmin=0.0, vmax=1.0)
+				for frac in (0.33, 0.66, 1.0):
+					ax.add_patch(plt.Circle((img_pp.shape[1] * 0.5, img_pp.shape[0] * 0.5), radius=img_pp.shape[0] * 0.5 * frac, fill=False, color=style["grid"], linewidth=0.8, alpha=0.7))
+				ax.set_title(ttl, color=style["fg"], fontsize=10, fontweight="bold")
+
+			fig_pp.suptitle(
+				f"Mapa polar de perfusión (apex en centro, base en borde) — {self.visual_style_combo.currentText()}",
+				color=style["fg"],
+				fontsize=12,
+				fontweight="bold",
+			)
+			fig_pp.text(0.5, 0.04, "Reconstrucción polar continua desde short-axis: \"aplastado\" apex->base", ha="center", color=style["subtle"], fontsize=9)
+			fig_pp.savefig(os.path.join(self.output_dir, "polar_perfusion_directa.png"), dpi=170, bbox_inches="tight", facecolor=fig_pp.get_facecolor())
+			plt.close(fig_pp)
 
 	def _load_previews(self):
 		for name in self.preview_labels:
