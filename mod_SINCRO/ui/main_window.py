@@ -73,6 +73,11 @@ class MainWindow(QMainWindow):
 		self.aha = None
 		self.phase_by_seg = None
 		self.territory = None
+		# Estudio de comparación (típicamente REST vs el actual STRESS) para el
+		# análisis stress/rest de disincronía (stunning isquémico, Camilletti 2015).
+		self.compare_metrics = None
+		self.compare_label = None
+		self.compare_ef = None
 		self.preview_zoom: dict[str, float] = {}
 		self.preview_pixmaps: dict[str, QPixmap] = {}
 		self.preview_movies: dict[str, QMovie] = {}
@@ -319,6 +324,12 @@ class MainWindow(QMainWindow):
 		self.open_polar_btn = QPushButton("Polar map")
 		self.open_polar_btn.clicked.connect(self.open_polar_map)
 		self.open_polar_btn.setToolTip("Abre la imagen del mapa polar del estudio procesado.")
+		self.compare_stress_rest_btn = QPushButton("Comparar con Rest/Stress...")
+		self.compare_stress_rest_btn.clicked.connect(self.load_compare_study)
+		self.compare_stress_rest_btn.setToolTip(
+			"Carga un segundo estudio (ej: REST) y compara la disincronía (PSD, BW, Kurtosis, Entropy) "
+			"contra el estudio actual. Útil para detectar stunning isquémico post-stress (Camilletti 2015)."
+		)
 		self.apply_roi_all_btn = QPushButton("Replicar ROI a todos")
 		self.apply_roi_all_btn.clicked.connect(self.apply_current_roi_to_all_slices)
 		self.apply_roi_all_btn.setToolTip("Copia el ROI del slice actual a todos los slices del volumen.")
@@ -328,6 +339,7 @@ class MainWindow(QMainWindow):
 		button_row.addWidget(self.open_pdf_btn, 1, 1)
 		button_row.addWidget(self.save_pdf_as_btn, 2, 0, 1, 2)
 		button_row.addWidget(self.open_polar_btn, 3, 0, 1, 2)
+		button_row.addWidget(self.compare_stress_rest_btn, 4, 0, 1, 2)
 		self._sidebar_layout.addWidget(button_box)
 
 		roi_box = QGroupBox("ROI manual por slice")
@@ -533,6 +545,7 @@ class MainWindow(QMainWindow):
 			"histograma": "histograma",
 			"ejes_ortogonales": "ejes_ortogonales",
 			"comparacion_ejes": "comparacion_ejes",
+			"comparacion_stress_rest": "stress_vs_rest",
 			"curva_fevi": "curva_fevi",
 			"curva_tac": "curva_tac",
 			"ventriculograma": "panel_funcional_gated",
@@ -546,6 +559,7 @@ class MainWindow(QMainWindow):
 			"histograma",
 			"ejes_ortogonales",
 			"comparacion_ejes",
+			"comparacion_stress_rest",
 			"curva_fevi",
 			"curva_tac",
 			"ventriculograma",
@@ -1513,6 +1527,19 @@ class MainWindow(QMainWindow):
 			clinical.append(f"  Índice cavidad/miocardio: {vol['cavity_to_myo_ratio']:.3f}")
 		if vol["myocardial_ml"] is None:
 			clinical.append("  No disponibles (faltan metadatos geométricos DICOM).")
+
+		if self.compare_metrics is not None:
+			clinical.append("")
+			clinical.append(f"Comparación disincronía vs {self.compare_label or 'otro estudio'}")
+			d_psd = float(self.metrics.get("phase_sd", 0.0)) - float(self.compare_metrics.get("phase_sd", 0.0))
+			d_bw = float(self.metrics.get("bandwidth", 0.0)) - float(self.compare_metrics.get("bandwidth", 0.0))
+			clinical.append(f"  Δ Phase SD: {d_psd:+.2f}°   Δ Bandwidth: {d_bw:+.2f}°")
+			if d_psd > 3.0 and d_bw > 8.0:
+				clinical.append("  → Δ marcado: posible stunning isquémico post-stress.")
+			elif abs(d_psd) <= 3.0 and abs(d_bw) <= 8.0:
+				clinical.append("  → Sincronía estable entre estudios.")
+			else:
+				clinical.append("  → Diferencia intermedia: correlacionar con clínica.")
 
 		clinical.append("")
 		clinical.append("FEVI preliminar")
@@ -2517,6 +2544,160 @@ class MainWindow(QMainWindow):
 				QDesktopServices.openUrl(QUrl.fromLocalFile(doc_path))
 			else:
 				QMessageBox.information(self, "SINCRO", "No se encontró la guía técnica en docs.")
+
+	def load_compare_study(self):
+		"""Carga un segundo estudio gated (típicamente REST) y calcula sus métricas
+		de fase para comparar disincronía contra el estudio actual (típicamente
+		STRESS). Base clínica: Camilletti/Erriest 2015 (Hospital Italiano La Plata):
+		la isquemia post-stress produce disincronía transitoria por stunning, que se
+		manifiesta como aumento de BW/PSD en stress respecto de rest.
+		"""
+		if self.study is None or self.metrics is None:
+			QMessageBox.warning(self, "SINCRO", "Primero procesá el estudio actual (STRESS).")
+			return
+		path, _ = QFileDialog.getOpenFileName(
+			self,
+			"Seleccionar estudio de comparación (ej: REST)",
+			os.path.dirname(self.file_edit.text().strip() or self.output_dir),
+			"DICOM (*.dcm *.DCM *.ima *.IMA);;Todos (*.*)",
+		)
+		if not path:
+			return
+		try:
+			self._set_progress(10, "Cargando estudio de comparación...")
+			comp_study = dicom_loader.load(path, verbose=False)
+			self._set_progress(40, "Segmentando comparación...")
+			comp_seg = segment_myocardium(
+				comp_study.cube,
+				method="auto",
+				threshold_frac=float(self.threshold_spin.value()),
+				smooth_sigma=float(self.sigma_spin.value()),
+			)
+			self._set_progress(65, "Fase del estudio de comparación...")
+			comp_phase = phase_analysis(
+				comp_study.cube,
+				comp_seg.mask,
+				harmonics=int(self.harmonics_spin.value()),
+				amplitude_threshold_frac=float(self.phase_threshold_spin.value()),
+				normalize_reference=self.normalize_check.isChecked(),
+			)
+			comp_metrics = calculate_phase_metrics(comp_phase.phases_deg)
+			# EF preliminar del estudio de comparación (reusa el método actual con stub).
+			comp_ef = self._estimate_ef_for(comp_study, comp_seg)
+
+			self.compare_metrics = comp_metrics
+			self.compare_ef = comp_ef
+			self.compare_label = os.path.splitext(os.path.basename(path))[0]
+
+			self._set_progress(85, "Generando comparación stress/rest...")
+			self._write_compare_stress_rest()
+			self._load_previews()
+			self._refresh_summary()
+			self._select_tab_by_title("stress_vs_rest")
+			self._set_progress(100, "Comparación lista")
+			self._log(f"Comparación cargada: {self.compare_label}")
+			self.statusBar().showMessage(f"Comparación cargada: {self.compare_label}")
+		except Exception as exc:
+			self._set_progress(0, "Error")
+			QMessageBox.critical(self, "Error de comparación", str(exc))
+			self._log(f"[ERROR compare] {exc}")
+
+	def _estimate_ef_for(self, study, seg) -> dict:
+		"""Corre el estimador de EF sobre un (study, seg) arbitrario sin perder el
+		estado actual. Reusa _estimate_lv_ef_preliminary temporalmente."""
+		saved_study, saved_seg = self.study, self.seg
+		try:
+			self.study, self.seg = study, seg
+			return self._estimate_lv_ef_preliminary()
+		finally:
+			self.study, self.seg = saved_study, saved_seg
+
+	def _select_tab_by_title(self, title: str):
+		for i in range(self.tabs.count()):
+			if self.tabs.tabText(i) == title:
+				self.tabs.setCurrentIndex(i)
+				return
+
+	def _write_compare_stress_rest(self):
+		"""Genera comparacion_stress_rest.png: panel comparativo de métricas de
+		disincronía (actual vs comparación) con Δ e interpretación de stunning."""
+		if self.metrics is None or self.compare_metrics is None:
+			return
+		import matplotlib.pyplot as plt
+
+		cur_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
+		cmp_label = self.compare_label or "Comparación"
+
+		keys = [
+			("phase_sd", "Phase SD (°)", "menor = más sincrónico"),
+			("bandwidth", "Bandwidth (°)", "menor = más sincrónico"),
+			("kurtosis", "Kurtosis", "mayor = más sincrónico"),
+			("entropy", "Entropy", "menor = más sincrónico"),
+		]
+		cur_vals = [float(self.metrics.get(k, 0.0)) for k, _, _ in keys]
+		cmp_vals = [float(self.compare_metrics.get(k, 0.0)) for k, _, _ in keys]
+		deltas = [c - r for c, r in zip(cur_vals, cmp_vals)]
+
+		fig, (ax_bar, ax_txt) = plt.subplots(1, 2, figsize=(13, 6.0), gridspec_kw={"width_ratios": [1.4, 1.0]})
+		x = np.arange(len(keys))
+		width = 0.38
+		ax_bar.bar(x - width / 2, cur_vals, width, label=cur_label, color="#d9534f")
+		ax_bar.bar(x + width / 2, cmp_vals, width, label=cmp_label, color="#0275d8")
+		ax_bar.set_xticks(x)
+		ax_bar.set_xticklabels([lbl for _, lbl, _ in keys], fontsize=9)
+		ax_bar.set_title("Disincronía: comparación entre estudios", fontsize=12, fontweight="bold")
+		ax_bar.legend()
+		ax_bar.grid(True, axis="y", alpha=0.3)
+		for xi, (cv, rv) in enumerate(zip(cur_vals, cmp_vals)):
+			ax_bar.text(xi - width / 2, cv, f"{cv:.1f}", ha="center", va="bottom", fontsize=8)
+			ax_bar.text(xi + width / 2, rv, f"{rv:.1f}", ha="center", va="bottom", fontsize=8)
+
+		# Panel de texto: tabla de Δ + interpretación clínica.
+		ax_txt.axis("off")
+		lines = [f"{cur_label}  vs  {cmp_label}", ""]
+		for (k, lbl, _), cv, rv, dv in zip(keys, cur_vals, cmp_vals, deltas):
+			lines.append(f"{lbl:<16} {cv:7.2f}  {rv:7.2f}   Δ {dv:+.2f}")
+		lines.append("")
+		# Interpretación de stunning: si el estudio actual (stress) tiene PSD y BW
+		# claramente mayores que el de comparación (rest), sugiere disincronía
+		# transitoria post-stress (stunning isquémico) — Camilletti 2015.
+		d_psd = deltas[0]
+		d_bw = deltas[1]
+		psd_cur = cur_vals[0]
+		if d_psd > 3.0 and d_bw > 8.0:
+			interp = (
+				"Δ positivo marcado en PSD y BW:\n"
+				"sugiere DISINCRONÍA POST-STRESS\n"
+				"(posible stunning isquémico).\n"
+				"Revisar perfusión regional."
+			)
+			color = "#d9534f"
+		elif abs(d_psd) <= 3.0 and abs(d_bw) <= 8.0:
+			interp = (
+				"Diferencias pequeñas entre estudios:\n"
+				"sincronía estable, sin stunning\n"
+				"significativo aparente."
+			)
+			color = "#5cb85c"
+		else:
+			interp = (
+				"Diferencias intermedias:\n"
+				"correlacionar con clínica y\n"
+				"perfusión regional."
+			)
+			color = "#f0ad4e"
+		ax_txt.text(0.0, 0.95, "\n".join(lines), family="monospace", fontsize=10, va="top")
+		ax_txt.text(0.0, 0.42, interp, fontsize=10.5, va="top", color=color, fontweight="bold")
+		ax_txt.text(
+			0.0, 0.10,
+			"Base: Camilletti/Erriest 2015 (ASNC).\nCutoffs Δ orientativos, no diagnósticos.",
+			fontsize=8, va="top", color="#666",
+		)
+
+		fig.suptitle("Comparación de disincronía entre estudios (stress vs rest)", fontsize=13, fontweight="bold")
+		fig.tight_layout(rect=(0, 0, 1, 0.96))
+		fig.savefig(os.path.join(self.output_dir, "comparacion_stress_rest.png"), dpi=160, bbox_inches="tight")
+		plt.close(fig)
 
 	def open_output_folder(self):
 		QDesktopServices.openUrl(QUrl.fromLocalFile(self.output_dir))

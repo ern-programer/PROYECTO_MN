@@ -229,6 +229,7 @@ def generate_report(
 		("panel_clinico_convencion.png", "Panel clínico A/B (ED/ES)."),
 		("ventriculograma.png", "Panel funcional gated SPECT (ED/ES + curvas de volumen y fase)."),
 		("comparacion_ejes.png", "Comparación original vs reconstruido."),
+		("comparacion_stress_rest.png", "Comparación de disincronía entre estudios (stress vs rest): PSD, BW, Kurtosis, Entropy con Δ e interpretación de stunning."),
 		("curva_tac.png", "Curva de actividad por gate."),
 		("curva_fevi.png", "Curva FEVI preliminar con volumen y derivada."),
 	]
