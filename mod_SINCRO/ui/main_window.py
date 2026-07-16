@@ -142,8 +142,8 @@ class MainWindow(QMainWindow):
 		self.cmap_combo.setCurrentText("french")
 
 		self.visual_style_combo = QComboBox()
-		self.visual_style_combo.addItems(["GammaSync", "Xeleris-like", "QGS-like"])
-		self.visual_style_combo.setCurrentText("Xeleris-like")
+		self.visual_style_combo.addItems(["GammaSync", "QGS-like"])
+		self.visual_style_combo.setCurrentText("QGS-like")
 
 		self.polar_rotation_spin = QSpinBox()
 		self.polar_rotation_spin.setRange(-180, 180)
@@ -181,6 +181,51 @@ class MainWindow(QMainWindow):
 		self.normalize_check.setToolTip("Resta una referencia global de fase para comparar estudios.")
 
 		self._sidebar_layout.addWidget(controls_box)
+
+		report_cmap_box = QGroupBox("Escalas informe (por imagen)")
+		report_cmap_layout = QGridLayout(report_cmap_box)
+		report_cmap_layout.setContentsMargins(6, 6, 6, 6)
+		report_cmap_layout.setHorizontalSpacing(4)
+		report_cmap_layout.setVerticalSpacing(4)
+
+		def _mk_combo(options: list[str], current: str) -> QComboBox:
+			cb = QComboBox()
+			cb.addItems(options)
+			cb.setCurrentText(current)
+			return cb
+
+		intensity_opts = ["hot", "inferno", "magma", "turbo", "viridis", "plasma", "gray", "bone", "cividis"]
+		perfusion_opts = ["turbo", "inferno", "magma", "plasma", "viridis", "cividis", "hot"]
+		amp_opts = ["turbo", "viridis", "plasma", "magma", "inferno", "cividis"]
+		phase_opts = ["hsv", "twilight", "twilight_shifted", "cool", "prism", "french"]
+
+		self.report_cmap_slices = _mk_combo(intensity_opts, "hot")
+		self.report_cmap_axes = _mk_combo(intensity_opts, "hot")
+		self.report_cmap_compare = _mk_combo(intensity_opts, "hot")
+		self.report_cmap_panel_axes = _mk_combo(intensity_opts, "hot")
+		self.report_cmap_phase = _mk_combo(phase_opts, "french")
+		self.report_cmap_amp = _mk_combo(amp_opts, "turbo")
+		self.report_cmap_bullseye = _mk_combo(perfusion_opts, "turbo")
+		self.report_cmap_polar_perf = _mk_combo(perfusion_opts, "turbo")
+
+		report_cmap_layout.addWidget(QLabel("slices_fase"), 0, 0)
+		report_cmap_layout.addWidget(self.report_cmap_slices, 0, 1)
+		report_cmap_layout.addWidget(QLabel("ejes_ortogonales"), 1, 0)
+		report_cmap_layout.addWidget(self.report_cmap_axes, 1, 1)
+		report_cmap_layout.addWidget(QLabel("comparacion_ejes"), 2, 0)
+		report_cmap_layout.addWidget(self.report_cmap_compare, 2, 1)
+		report_cmap_layout.addWidget(QLabel("panel_funcional (ED/ES)"), 3, 0)
+		report_cmap_layout.addWidget(self.report_cmap_panel_axes, 3, 1)
+		report_cmap_layout.addWidget(QLabel("fase (overlay/polar)"), 4, 0)
+		report_cmap_layout.addWidget(self.report_cmap_phase, 4, 1)
+		report_cmap_layout.addWidget(QLabel("amplitud"), 5, 0)
+		report_cmap_layout.addWidget(self.report_cmap_amp, 5, 1)
+		report_cmap_layout.addWidget(QLabel("bullseye_directo"), 6, 0)
+		report_cmap_layout.addWidget(self.report_cmap_bullseye, 6, 1)
+		report_cmap_layout.addWidget(QLabel("polar_perfusion_directa"), 7, 0)
+		report_cmap_layout.addWidget(self.report_cmap_polar_perf, 7, 1)
+
+		self._sidebar_layout.addWidget(report_cmap_box)
 
 		preset_box = QGroupBox("Presets por paciente")
 		preset_layout = QVBoxLayout(preset_box)
@@ -604,6 +649,14 @@ class MainWindow(QMainWindow):
 			"phase_cmap": str(self.cmap_combo.currentText()),
 			"visual_style": str(self.visual_style_combo.currentText()),
 			"polar_rotation_deg": int(self.polar_rotation_spin.value()),
+			"report_cmap_slices": str(self.report_cmap_slices.currentText()),
+			"report_cmap_axes": str(self.report_cmap_axes.currentText()),
+			"report_cmap_compare": str(self.report_cmap_compare.currentText()),
+			"report_cmap_panel_axes": str(self.report_cmap_panel_axes.currentText()),
+			"report_cmap_phase": str(self.report_cmap_phase.currentText()),
+			"report_cmap_amp": str(self.report_cmap_amp.currentText()),
+			"report_cmap_bullseye": str(self.report_cmap_bullseye.currentText()),
+			"report_cmap_polar_perf": str(self.report_cmap_polar_perf.currentText()),
 			"auto_run": bool(self.auto_run_check.isChecked()),
 			"auto_center_gain": int(self.auto_center_gain_slider.value()),
 			"auto_inner_delta": int(self.auto_inner_delta_slider.value()),
@@ -631,9 +684,28 @@ class MainWindow(QMainWindow):
 		if "phase_cmap" in params:
 			self.cmap_combo.setCurrentText(str(params["phase_cmap"]))
 		if "visual_style" in params:
-			self.visual_style_combo.setCurrentText(str(params["visual_style"]))
+			style_value = str(params["visual_style"])
+			if style_value == "Xeleris-like":
+				style_value = "QGS-like"
+			self.visual_style_combo.setCurrentText(style_value)
 		if "polar_rotation_deg" in params:
 			self.polar_rotation_spin.setValue(int(params["polar_rotation_deg"]))
+		if "report_cmap_slices" in params:
+			self.report_cmap_slices.setCurrentText(str(params["report_cmap_slices"]))
+		if "report_cmap_axes" in params:
+			self.report_cmap_axes.setCurrentText(str(params["report_cmap_axes"]))
+		if "report_cmap_compare" in params:
+			self.report_cmap_compare.setCurrentText(str(params["report_cmap_compare"]))
+		if "report_cmap_panel_axes" in params:
+			self.report_cmap_panel_axes.setCurrentText(str(params["report_cmap_panel_axes"]))
+		if "report_cmap_phase" in params:
+			self.report_cmap_phase.setCurrentText(str(params["report_cmap_phase"]))
+		if "report_cmap_amp" in params:
+			self.report_cmap_amp.setCurrentText(str(params["report_cmap_amp"]))
+		if "report_cmap_bullseye" in params:
+			self.report_cmap_bullseye.setCurrentText(str(params["report_cmap_bullseye"]))
+		if "report_cmap_polar_perf" in params:
+			self.report_cmap_polar_perf.setCurrentText(str(params["report_cmap_polar_perf"]))
 		if "auto_run" in params:
 			self.auto_run_check.setChecked(bool(params["auto_run"]))
 		if "auto_center_gain" in params:
@@ -1381,15 +1453,24 @@ class MainWindow(QMainWindow):
 		matplotlib.use("Agg")
 		import matplotlib.pyplot as plt
 
+		cmap_slices = str(self.report_cmap_slices.currentText())
+		cmap_axes = str(self.report_cmap_axes.currentText())
+		cmap_compare = str(self.report_cmap_compare.currentText())
+		cmap_panel_axes = str(self.report_cmap_panel_axes.currentText())
+		cmap_phase_report = str(self.report_cmap_phase.currentText())
+		cmap_amp_report = str(self.report_cmap_amp.currentText())
+		cmap_bullseye = str(self.report_cmap_bullseye.currentText())
+		cmap_polar_perf = str(self.report_cmap_polar_perf.currentText())
+
 		fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 		for ax in axes:
 			ax.set_xticks([])
 			ax.set_yticks([])
 
-		axes[0].imshow(frame_norm, cmap="gray")
+		axes[0].imshow(frame_norm, cmap=cmap_slices)
 		axes[0].set_title(f"Slice {mid_slice}, Gate {mid_gate}")
 
-		axes[1].imshow(frame_norm, cmap="gray")
+		axes[1].imshow(frame_norm, cmap=cmap_slices)
 		mask_slice = self.seg.mask[mid_slice].astype(float)
 		overlay = np.zeros((*mask_slice.shape, 4))
 		overlay[..., 0] = 1.0
@@ -1397,12 +1478,12 @@ class MainWindow(QMainWindow):
 		axes[1].imshow(overlay)
 		axes[1].set_title("Máscara miocardio")
 
-		axes[2].imshow(frame_norm, cmap="gray")
+		axes[2].imshow(frame_norm, cmap=cmap_slices)
 		phase_slice = self.phase_result.phase_map[mid_slice].copy()
 		valid = np.isfinite(phase_slice)
 		if valid.any():
 			from viz.colormaps import phase_to_rgb
-			rgb = phase_to_rgb(phase_slice[valid], cmap_name=str(self.cmap_combo.currentText()))
+			rgb = phase_to_rgb(phase_slice[valid], cmap_name=cmap_phase_report)
 			pm_overlay = np.zeros((*phase_slice.shape, 4))
 			pm_overlay[valid, :3] = rgb
 			pm_overlay[valid, 3] = 0.75
@@ -1414,7 +1495,7 @@ class MainWindow(QMainWindow):
 		fig.savefig(os.path.join(self.output_dir, "slices_fase.png"), dpi=150, bbox_inches="tight")
 		plt.close(fig)
 
-		pm = build_polar_map(self.phase_by_seg, cmap_name=str(self.cmap_combo.currentText()), title="Phase Polar Map")
+		pm = build_polar_map(self.phase_by_seg, cmap_name=cmap_phase_report, title="Phase Polar Map")
 		save_polar_map(pm, os.path.join(self.output_dir, "polar_map.png"), dpi=150)
 		plt.close(pm.fig)
 
@@ -1475,7 +1556,7 @@ class MainWindow(QMainWindow):
 			ax.set_xticks([])
 			ax.set_yticks([])
 
-		axes2[0].imshow(sa, cmap="hot")
+		axes2[0].imshow(sa, cmap=cmap_axes)
 		axes2[0].set_title(f"SA (slice {mid_slice + 1})")
 		_annotate_axis(axes2[0], "ANT", "INF", "SEP", "LAT")
 		cmp_frac_sa = self._comparison_fraction()
@@ -1486,10 +1567,10 @@ class MainWindow(QMainWindow):
 		axes2[0].axhline(y_cmp, color="#7cf29a", linestyle="--", linewidth=1.2)
 		axes2[0].axvline(x_cmp, color="#7cf29a", linestyle="--", linewidth=1.2)
 		axes2[0].text(0.03, 0.05, f"Corte cmp {int(round(cmp_frac_sa * 100.0))}%", transform=axes2[0].transAxes, fontsize=8, color="#7cf29a", fontweight="bold")
-		axes2[1].imshow(hla_view, cmap="hot", aspect="auto")
+		axes2[1].imshow(hla_view, cmap=cmap_axes, aspect="auto")
 		axes2[1].set_title("HLA (horizontal long axis)")
 		_annotate_axis(axes2[1], "BASE", "APEX", "ANT", "INF")
-		axes2[2].imshow(vla_view, cmap="hot", aspect="auto")
+		axes2[2].imshow(vla_view, cmap=cmap_axes, aspect="auto")
 		axes2[2].set_title("VLA (vertical long axis)")
 		_annotate_axis(axes2[2], "BASE", "APEX", "SEP", "LAT")
 		if hla_original_mid:
@@ -1533,16 +1614,16 @@ class MainWindow(QMainWindow):
 			for ax in axes_cmp.ravel():
 				ax.set_xticks([])
 				ax.set_yticks([])
-			axes_cmp[0, 0].imshow(hla_original_view, cmap="hot", aspect="auto")
+			axes_cmp[0, 0].imshow(hla_original_view, cmap=cmap_compare, aspect="auto")
 			axes_cmp[0, 0].set_title(f"HLA original (gate {cmp_gate + 1}, corte {hla_original_idx + 1})")
 			_annotate_axis(axes_cmp[0, 0], "BASE", "APEX", "ANT", "INF")
-			axes_cmp[0, 1].imshow(hla_recon, cmap="hot", aspect="auto")
+			axes_cmp[0, 1].imshow(hla_recon, cmap=cmap_compare, aspect="auto")
 			axes_cmp[0, 1].set_title(f"HLA reconstruido desde SA (plano {hla_recon_idx + 1})")
 			_annotate_axis(axes_cmp[0, 1], "BASE", "APEX", "ANT", "INF")
-			axes_cmp[1, 0].imshow(vla_original_view, cmap="hot", aspect="auto")
+			axes_cmp[1, 0].imshow(vla_original_view, cmap=cmap_compare, aspect="auto")
 			axes_cmp[1, 0].set_title(f"VLA original (gate {cmp_gate + 1}, corte {vla_original_idx + 1})")
 			_annotate_axis(axes_cmp[1, 0], "BASE", "APEX", "SEP", "LAT")
-			axes_cmp[1, 1].imshow(vla_recon, cmap="hot", aspect="auto")
+			axes_cmp[1, 1].imshow(vla_recon, cmap=cmap_compare, aspect="auto")
 			axes_cmp[1, 1].set_title(f"VLA reconstruido desde SA (plano {vla_recon_idx + 1})")
 			_annotate_axis(axes_cmp[1, 1], "BASE", "APEX", "SEP", "LAT")
 			fig_cmp.suptitle(
@@ -1565,19 +1646,6 @@ class MainWindow(QMainWindow):
 
 		style_name = str(self.visual_style_combo.currentText()).strip().lower()
 		style_catalog = {
-			"xeleris-like": {
-				"fig_bg": "#04070e",
-				"ax_bg": "#060b16",
-				"grid": "#334155",
-				"fg": "#e2e8f0",
-				"subtle": "#94a3b8",
-				"vol": "#f6c453",
-				"deriv": "#4fd1c5",
-				"ed": "#7dd3fc",
-				"es": "#fda4af",
-				"amp_cmap": "turbo",
-				"bull_cmap": "turbo",
-			},
 			"qgs-like": {
 				"fig_bg": "#050811",
 				"ax_bg": "#0a1424",
@@ -1605,7 +1673,7 @@ class MainWindow(QMainWindow):
 				"bull_cmap": "turbo",
 			},
 		}
-		style = style_catalog.get(style_name, style_catalog["xeleris-like"])
+		style = style_catalog.get(style_name, style_catalog["qgs-like"])
 
 		sa_ed, hla_ed, vla_ed, _ed_hla_original, _ed_vla_original = _oriented_axes_views(ed_gate)
 		sa_es, hla_es, vla_es, _es_hla_original, _es_vla_original = _oriented_axes_views(es_gate)
@@ -1615,23 +1683,23 @@ class MainWindow(QMainWindow):
 			ax.set_xticks([])
 			ax.set_yticks([])
 
-		axes4[0, 0].imshow(sa_ed, cmap="hot")
+		axes4[0, 0].imshow(sa_ed, cmap=cmap_panel_axes)
 		axes4[0, 0].set_title(f"A) ED - SHORT AXIS (Gate {ed_gate + 1})", fontsize=10)
 		_annotate_axis(axes4[0, 0], "ANT", "INF", "SEP", "LAT")
-		axes4[0, 1].imshow(hla_ed, cmap="hot", aspect="auto")
+		axes4[0, 1].imshow(hla_ed, cmap=cmap_panel_axes, aspect="auto")
 		axes4[0, 1].set_title("A) ED - HORIZONTAL AXIS (HLA)", fontsize=10)
 		_annotate_axis(axes4[0, 1], "BASE", "APEX", "ANT", "INF")
-		axes4[0, 2].imshow(vla_ed, cmap="hot", aspect="auto")
+		axes4[0, 2].imshow(vla_ed, cmap=cmap_panel_axes, aspect="auto")
 		axes4[0, 2].set_title("A) ED - VERTICAL AXIS (VLA)", fontsize=10)
 		_annotate_axis(axes4[0, 2], "BASE", "APEX", "SEP", "LAT")
 
-		axes4[1, 0].imshow(sa_es, cmap="hot")
+		axes4[1, 0].imshow(sa_es, cmap=cmap_panel_axes)
 		axes4[1, 0].set_title(f"B) ES - SHORT AXIS (Gate {es_gate + 1})", fontsize=10)
 		_annotate_axis(axes4[1, 0], "ANT", "INF", "SEP", "LAT")
-		axes4[1, 1].imshow(hla_es, cmap="hot", aspect="auto")
+		axes4[1, 1].imshow(hla_es, cmap=cmap_panel_axes, aspect="auto")
 		axes4[1, 1].set_title("B) ES - HORIZONTAL AXIS (HLA)", fontsize=10)
 		_annotate_axis(axes4[1, 1], "BASE", "APEX", "ANT", "INF")
-		axes4[1, 2].imshow(vla_es, cmap="hot", aspect="auto")
+		axes4[1, 2].imshow(vla_es, cmap=cmap_panel_axes, aspect="auto")
 		axes4[1, 2].set_title("B) ES - VERTICAL AXIS (VLA)", fontsize=10)
 		_annotate_axis(axes4[1, 2], "BASE", "APEX", "SEP", "LAT")
 
@@ -1731,13 +1799,13 @@ class MainWindow(QMainWindow):
 			ax.set_xticks([])
 			ax.set_yticks([])
 
-		ax_ed_sa.imshow(sa_ed, cmap="hot")
+		ax_ed_sa.imshow(sa_ed, cmap=cmap_panel_axes)
 		ax_ed_sa.set_title(f"ED SA (gate {ed_gate + 1})", color=style["fg"], fontsize=9)
-		ax_es_sa.imshow(sa_es, cmap="hot")
+		ax_es_sa.imshow(sa_es, cmap=cmap_panel_axes)
 		ax_es_sa.set_title(f"ES SA (gate {es_gate + 1})", color=style["fg"], fontsize=9)
-		ax_ed_hla.imshow(hla_ed, cmap="hot", aspect="auto")
+		ax_ed_hla.imshow(hla_ed, cmap=cmap_panel_axes, aspect="auto")
 		ax_ed_hla.set_title("ED HLA", color=style["fg"], fontsize=9)
-		ax_es_hla.imshow(hla_es, cmap="hot", aspect="auto")
+		ax_es_hla.imshow(hla_es, cmap=cmap_panel_axes, aspect="auto")
 		ax_es_hla.set_title("ES HLA", color=style["fg"], fontsize=9)
 
 		from viz.colormaps import phase_to_rgb
@@ -1746,10 +1814,10 @@ class MainWindow(QMainWindow):
 		amp_mid = np.asarray(self.phase_result.amplitude_map[mid_slice], dtype=np.float64)
 		phase_show = np.where(np.isfinite(phase_mid), phase_mid, 0.0)
 		amp_show = amp_mid / (float(np.nanmax(amp_mid)) + 1e-8)
-		phase_rgb = phase_to_rgb(phase_mid, cmap_name=str(self.cmap_combo.currentText()), nan_color=(0.05, 0.07, 0.10))
+		phase_rgb = phase_to_rgb(phase_mid, cmap_name=cmap_phase_report, nan_color=(0.05, 0.07, 0.10))
 		ax_phase.imshow(phase_rgb)
 		ax_phase.set_title("Mapa de fase", color=style["fg"], fontsize=9)
-		ax_amp.imshow(amp_show, cmap=style["amp_cmap"], vmin=0.0, vmax=1.0)
+		ax_amp.imshow(amp_show, cmap=cmap_amp_report, vmin=0.0, vmax=1.0)
 		ax_amp.set_title("Mapa de amplitud", color=style["fg"], fontsize=9)
 
 		t_gate = np.arange(1, n_gates + 1)
@@ -1852,7 +1920,7 @@ class MainWindow(QMainWindow):
 		ax_b.set_ylim(-1.08, 1.08)
 		ax_b.set_aspect("equal")
 		ax_b.axis("off")
-		cmap_b = matplotlib.colormaps.get(style["bull_cmap"])
+		cmap_b = matplotlib.colormaps.get(cmap_bullseye)
 
 		def _segment_color(seg_id: int):
 			v = seg_uptake.get(int(seg_id), np.nan)
@@ -2006,7 +2074,7 @@ class MainWindow(QMainWindow):
 				ax.set_aspect("equal")
 				ax.set_xticks([])
 				ax.set_yticks([])
-				ax.imshow(img_pp, cmap=style["bull_cmap"], vmin=0.0, vmax=1.0)
+				ax.imshow(img_pp, cmap=cmap_polar_perf, vmin=0.0, vmax=1.0)
 				_annotate_polar_guides(ax, int(img_pp.shape[0]))
 				ax.set_title(ttl, color=style["fg"], fontsize=10, fontweight="bold")
 
@@ -2043,6 +2111,14 @@ class MainWindow(QMainWindow):
 			"amp_filter": float(self.phase_threshold_spin.value()),
 			"visual_style": str(self.visual_style_combo.currentText()),
 			"polar_rotation_deg": int(self.polar_rotation_spin.value()),
+			"report_cmap_slices": str(self.report_cmap_slices.currentText()),
+			"report_cmap_axes": str(self.report_cmap_axes.currentText()),
+			"report_cmap_compare": str(self.report_cmap_compare.currentText()),
+			"report_cmap_panel_axes": str(self.report_cmap_panel_axes.currentText()),
+			"report_cmap_phase": str(self.report_cmap_phase.currentText()),
+			"report_cmap_amp": str(self.report_cmap_amp.currentText()),
+			"report_cmap_bullseye": str(self.report_cmap_bullseye.currentText()),
+			"report_cmap_polar_perf": str(self.report_cmap_polar_perf.currentText()),
 		}
 		vol = self._compute_volumes_ml()
 		ef = self._estimate_lv_ef_preliminary()
