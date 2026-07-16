@@ -210,7 +210,9 @@ def generate_report(
 		f"Harmonics={processing_params.get('harmonics', 'N/D')} | "
 		f"Amp filter={_safe_float(processing_params.get('amp_filter'), 2)} | "
 		f"Estilo visual={processing_params.get('visual_style', 'N/D')} | "
-		f"Rotación polar={processing_params.get('polar_rotation_deg', 'N/D')}°"
+		f"Rotación polar={processing_params.get('polar_rotation_deg', 'N/D')}° | "
+		f"Polar cine={processing_params.get('polar_cine_speed_ms', 'N/D')} ms/frame | "
+		f"MP4 polar cine={'sí' if processing_params.get('export_polar_mp4', False) else 'no'}"
 	)
 	story.append(Paragraph(f"<b>Parámetros usados:</b> {proc_txt}", body_style))
 
@@ -221,7 +223,7 @@ def generate_report(
 		("polar_map.png", "Mapa polar AHA (17 segmentos)."),
 		("polar_perfusion_directa.png", "Mapa polar de perfusión continua (apex-centro, base-borde)."),
 		("polar_perfusion_directa_apexfill.png", "Mapa polar de perfusión con refuerzo apical (centro no vaciado espurio)."),
-		("polar_cine_montaje.png", "Polar cine gatillado (muestra de gates). Archivo animado: polar_cine.gif."),
+		("polar_cine_montaje.png", "Polar cine gatillado (muestra de gates). Archivos animados: polar_cine.gif / polar_cine.mp4."),
 		("bullseye_directo.png", "Bull's eye de perfusión directa (colores de intensidad)."),
 		("histograma.png", "Histograma de fase."),
 		("ejes_ortogonales.png", "Ejes SA/HLA/VLA."),

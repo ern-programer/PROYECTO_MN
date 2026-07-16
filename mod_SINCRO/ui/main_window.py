@@ -151,6 +151,15 @@ class MainWindow(QMainWindow):
 		self.polar_rotation_spin.setValue(0)
 		self.polar_rotation_spin.setSuffix("°")
 
+		self.polar_cine_speed_spin = QSpinBox()
+		self.polar_cine_speed_spin.setRange(40, 1000)
+		self.polar_cine_speed_spin.setSingleStep(10)
+		self.polar_cine_speed_spin.setValue(180)
+		self.polar_cine_speed_spin.setSuffix(" ms")
+
+		self.export_polar_mp4_check = QCheckBox("Exportar polar cine MP4")
+		self.export_polar_mp4_check.setChecked(True)
+
 		self.manual_rois = QPlainTextEdit()
 		self.manual_rois.setPlaceholderText(
 			"Modo manual: slice,cy,cx,r_inner,r_outer\n"
@@ -167,6 +176,8 @@ class MainWindow(QMainWindow):
 		controls_form.addRow("Colormap fase", self.cmap_combo)
 		controls_form.addRow("Estilo visual", self.visual_style_combo)
 		controls_form.addRow("Rotación polar", self.polar_rotation_spin)
+		controls_form.addRow("Velocidad polar cine", self.polar_cine_speed_spin)
+		controls_form.addRow(self.export_polar_mp4_check)
 		controls_form.addRow(self.normalize_check)
 		controls_form.addRow(self.auto_run_check)
 
@@ -178,6 +189,8 @@ class MainWindow(QMainWindow):
 		self.cmap_combo.setToolTip("Colormap cíclico para visualizar fase.")
 		self.visual_style_combo.setToolTip("Tema visual de los paneles clínicos (curva FEVI, panel funcional gated y bull's eye).")
 		self.polar_rotation_spin.setToolTip("Rota el mapa polar de perfusión continua. Ajustalo para alinear ANT/SEP/LAT/INF a tu convención.")
+		self.polar_cine_speed_spin.setToolTip("Duración por frame del GIF del cine polar (en milisegundos).")
+		self.export_polar_mp4_check.setToolTip("Además del GIF, intenta exportar un MP4 del cine polar gatillado.")
 		self.normalize_check.setToolTip("Resta una referencia global de fase para comparar estudios.")
 
 		self._sidebar_layout.addWidget(controls_box)
@@ -653,6 +666,8 @@ class MainWindow(QMainWindow):
 			"phase_cmap": str(self.cmap_combo.currentText()),
 			"visual_style": str(self.visual_style_combo.currentText()),
 			"polar_rotation_deg": int(self.polar_rotation_spin.value()),
+			"polar_cine_speed_ms": int(self.polar_cine_speed_spin.value()),
+			"export_polar_mp4": bool(self.export_polar_mp4_check.isChecked()),
 			"report_cmap_slices": str(self.report_cmap_slices.currentText()),
 			"report_cmap_axes": str(self.report_cmap_axes.currentText()),
 			"report_cmap_compare": str(self.report_cmap_compare.currentText()),
@@ -694,6 +709,10 @@ class MainWindow(QMainWindow):
 			self.visual_style_combo.setCurrentText(style_value)
 		if "polar_rotation_deg" in params:
 			self.polar_rotation_spin.setValue(int(params["polar_rotation_deg"]))
+		if "polar_cine_speed_ms" in params:
+			self.polar_cine_speed_spin.setValue(int(params["polar_cine_speed_ms"]))
+		if "export_polar_mp4" in params:
+			self.export_polar_mp4_check.setChecked(bool(params["export_polar_mp4"]))
 		if "report_cmap_slices" in params:
 			self.report_cmap_slices.setCurrentText(str(params["report_cmap_slices"]))
 		if "report_cmap_axes" in params:
@@ -2196,15 +2215,42 @@ class MainWindow(QMainWindow):
 				plt.close(fig_g)
 
 			if gate_frames:
+				polar_cine_ms = int(self.polar_cine_speed_spin.value())
+				export_mp4 = bool(self.export_polar_mp4_check.isChecked())
 				if Image is not None:
 					pil_frames = [Image.fromarray(frm) for frm in gate_frames]
 					pil_frames[0].save(
 						os.path.join(self.output_dir, "polar_cine.gif"),
 						save_all=True,
 						append_images=pil_frames[1:],
-						duration=180,
+						duration=polar_cine_ms,
 						loop=0,
 					)
+
+				if export_mp4:
+					fps = max(1.0, 1000.0 / max(1, polar_cine_ms))
+					mp4_path = os.path.join(self.output_dir, "polar_cine.mp4")
+					mp4_done = False
+					try:
+						import cv2
+						h, w = gate_frames[0].shape[:2]
+						writer = cv2.VideoWriter(mp4_path, cv2.VideoWriter_fourcc(*"mp4v"), float(fps), (int(w), int(h)))
+						for frm in gate_frames:
+							writer.write(cv2.cvtColor(frm, cv2.COLOR_RGB2BGR))
+						writer.release()
+						mp4_done = True
+					except Exception:
+						mp4_done = False
+
+					if not mp4_done:
+						try:
+							import imageio.v2 as imageio
+							imageio.mimsave(mp4_path, gate_frames, fps=float(fps))
+							mp4_done = True
+						except Exception:
+							mp4_done = False
+					if not mp4_done:
+						self._log("[WARN] No se pudo exportar polar_cine.mp4 (faltan códecs/librerías).")
 
 				# Montaje estático para preview/PDF
 				n_show = min(8, len(gate_frames))
@@ -2247,6 +2293,8 @@ class MainWindow(QMainWindow):
 			"amp_filter": float(self.phase_threshold_spin.value()),
 			"visual_style": str(self.visual_style_combo.currentText()),
 			"polar_rotation_deg": int(self.polar_rotation_spin.value()),
+			"polar_cine_speed_ms": int(self.polar_cine_speed_spin.value()),
+			"export_polar_mp4": bool(self.export_polar_mp4_check.isChecked()),
 			"report_cmap_slices": str(self.report_cmap_slices.currentText()),
 			"report_cmap_axes": str(self.report_cmap_axes.currentText()),
 			"report_cmap_compare": str(self.report_cmap_compare.currentText()),
