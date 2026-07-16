@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 	QMessageBox,
 	QPushButton,
 	QPlainTextEdit,
+	QProgressBar,
 	QScrollArea,
 	QSpinBox,
 	QSlider,
@@ -614,6 +615,17 @@ class MainWindow(QMainWindow):
 		layout = QVBoxLayout(central)
 		layout.addWidget(splitter)
 
+		self._progress_bar = QProgressBar()
+		self._progress_bar.setRange(0, 100)
+		self._progress_bar.setValue(0)
+		self._progress_bar.setFixedWidth(220)
+		self._progress_bar.setTextVisible(True)
+		self._progress_bar.setFormat("Listo")
+		self._progress_bar.setStyleSheet(
+			"QProgressBar { border: 1px solid #555; border-radius: 4px; text-align: center; background: #222; height: 16px; }"
+			" QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0066cc, stop:1 #00cc88); border-radius: 3px; }"
+		)
+		self.statusBar().addPermanentWidget(self._progress_bar)
 		self.statusBar().showMessage("Listo")
 		self.cmap_combo.currentTextChanged.connect(self._on_phase_cmap_changed)
 		self.preset_patient_edit.textChanged.connect(lambda _=None: self._refresh_presets_for_current_patient())
@@ -1175,9 +1187,10 @@ class MainWindow(QMainWindow):
 			return
 
 		try:
-			self.statusBar().showMessage("Cargando estudio...")
+			self._set_progress(5, "Cargando DICOM...")
 			self._log(f"Cargando: {path}")
 			self.study = dicom_loader.load(path, verbose=False)
+			self._set_progress(15, "Series originales...")
 			self.axis_companions = self._load_axis_companions(path)
 			self.compare_gate_spin.setRange(1, max(1, int(self.study.cube.shape[0])))
 			self.compare_gate_spin.setValue(max(1, int(self.study.cube.shape[0] // 2) + 1))
@@ -1205,6 +1218,7 @@ class MainWindow(QMainWindow):
 				QMessageBox.warning(self, "SINCRO", "Modo manual activo pero no hay ROIs definidos. Dibujá ROI o cambiá a auto/threshold.")
 				return
 			manual_rois = parsed_rois if seg_method == "manual" else None
+			self._set_progress(30, "Segmentando miocardio...")
 			self.seg = segment_myocardium(
 				self.study.cube,
 				method=seg_method,
@@ -1213,6 +1227,7 @@ class MainWindow(QMainWindow):
 				manual_rois=manual_rois,
 			)
 
+			self._set_progress(50, "Análisis de fase...")
 			self.phase_result = phase_analysis(
 				self.study.cube,
 				self.seg.mask,
@@ -1221,23 +1236,37 @@ class MainWindow(QMainWindow):
 				normalize_reference=self.normalize_check.isChecked(),
 			)
 
+			self._set_progress(65, "Métricas y segmentos AHA...")
 			self.metrics = calculate_phase_metrics(self.phase_result.phases_deg)
 			self.aha = map_to_17_segments(self.seg)
 			self.phase_by_seg = phase_by_segment(self.phase_result.phase_map, self.aha)
 			self.territory = territory_analysis(self.phase_by_seg)
 
+			self._set_progress(75, "Preparando cine...")
 			self.cine.set_manual_rois(manual_rois or {})
 			self.cine.set_smooth_sigma(float(self.sigma_spin.value()))
 			self.cine.set_cube(self.study.cube)
+			self._set_progress(80, "Generando imágenes...")
 			self._write_outputs()
+			self._set_progress(90, "Generando PDF...")
 			self._generate_pdf_report()
 			self._refresh_summary()
+			self._set_progress(95, "Cargando previews...")
 			self._load_previews()
+			self._set_progress(100, "Procesamiento completo")
 			self.statusBar().showMessage("Procesamiento completo")
 		except Exception as exc:
+			self._set_progress(0, "Error")
 			self.statusBar().showMessage("Error")
 			QMessageBox.critical(self, "Error de procesamiento", str(exc))
 			self._log(f"[ERROR] {exc}")
+
+	def _set_progress(self, value: int, label: str = ""):
+		self._progress_bar.setValue(value)
+		if label:
+			self._progress_bar.setFormat(label)
+			self.statusBar().showMessage(label)
+		QApplication.processEvents()
 
 	def _effective_voxel_volume_ml(self) -> float | None:
 		if self.study is None:
