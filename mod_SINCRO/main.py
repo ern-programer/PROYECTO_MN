@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 
 from core.console_utf8 import enable_utf8
+from version import __version__
 
 
 def main(argv: list[str]) -> int:
@@ -24,7 +25,8 @@ def main(argv: list[str]) -> int:
 
     app = QApplication(argv)
     app.setApplicationName("GammaSync")
-    app.setApplicationDisplayName("GammaSync")
+    app.setApplicationDisplayName(f"GammaSync v{__version__}")
+    app.setApplicationVersion(__version__)
     app.setOrganizationName("Gammasys")
 
     from ui.main_window import MainWindow

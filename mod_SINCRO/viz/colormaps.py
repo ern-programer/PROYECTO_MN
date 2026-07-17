@@ -1,4 +1,7 @@
-"""SINCRO - viz.colormaps — colormaps cíclicos para fase (0-360°)."""
+"""SINCRO - viz.colormaps — colormaps cíclicos para fase (0-360°).
+
+Ahora incluye soporte para colormaps de Odyssey (.col) cargados vía core.col_registry.
+"""
 from __future__ import annotations
 
 import matplotlib
@@ -8,6 +11,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
+
+from core.col_registry import register_all_colormaps, get_cmap as registry_get_cmap
+
+# Registrar todos los colormaps (Odyssey + french + estándar) al importar.
+register_all_colormaps()
 
 
 _FRENCH_CMAP = LinearSegmentedColormap.from_list(
@@ -22,18 +30,15 @@ _FRENCH_CMAP = LinearSegmentedColormap.from_list(
 
 def get_phase_cmap(name: str = "hsv"):
 	"""
-	Devuelve un colormap matplotlib CÍCLICO para mapear fase 0-360°.
-	Opciones válidas: 'hsv', 'twilight', 'twilight_shifted', 'cool', 'prism', 'french'.
-
-	Nota: en fase cardíaca se suele interpretar inicio (temprano) en rojo y colores
-	posteriores como contracción más tardía según la referencia de fase utilizada.
+	Devuelve un colormap matplotlib para mapear fase 0-360°.
+	Acepta cualquier nombre registrado: estándar, french, u odyssey_*.
 	"""
-	valid = {"hsv", "twilight", "twilight_shifted", "cool", "prism", "french"}
-	if name not in valid:
-		raise ValueError(f"cmap inválido '{name}'. Válidos: {sorted(valid)}")
 	if name == "french":
 		return _FRENCH_CMAP
-	return plt.get_cmap(name)
+	try:
+		return registry_get_cmap(name)
+	except Exception:
+		return plt.get_cmap("hsv")
 
 
 def phase_to_rgb(phase_deg, cmap_name: str = "hsv", nan_color=(0.1, 0.1, 0.1)):

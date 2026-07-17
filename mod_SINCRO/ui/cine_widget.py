@@ -9,11 +9,23 @@ from typing import Optional
 
 import matplotlib
 import numpy as np
-from scipy.ndimage import center_of_mass, gaussian_filter, label
+from scipy.ndimage import (
+	binary_closing,
+	binary_dilation,
+	binary_erosion,
+	binary_fill_holes,
+	binary_opening,
+	center_of_mass,
+	gaussian_filter,
+	label,
+)
 from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.path import Path as MplPath
 from PyQt6.QtCore import QTimer, QPointF, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import QCheckBox, QComboBox, QGridLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget, QHBoxLayout
+from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
+from PyQt6.QtWidgets import QCheckBox, QComboBox, QDialog, QGridLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget, QHBoxLayout, QMessageBox
+
+from core.col_registry import register_all_colormaps, available_colormaps
 
 
 _FRENCH_CMAP = LinearSegmentedColormap.from_list(
@@ -104,6 +116,8 @@ def _array_to_pixmap(
 class RoiImageLabel(QLabel):
 	roiChanged = pyqtSignal(int, object)
 	zoomChanged = pyqtSignal(float)
+	middleClicked = pyqtSignal()
+	exclusionPolygonEdited = pyqtSignal(int, object)
 
 	def __init__(self, parent=None):
 		super().__init__(parent)
@@ -116,6 +130,9 @@ class RoiImageLabel(QLabel):
 		self._frame_shape: tuple[int, int] | None = None
 		self._slice_index = 0
 		self._roi: tuple[float, float, float, float] | None = None
+		self._exclusion_polygon: list[tuple[float, float]] = []
+		self._draft_exclusion_polygon: list[tuple[float, float]] = []
+		self._draw_exclusion_mode = False
 		self._message = "Cargá un estudio para ver el cine"
 		self._zoom = 1.0
 
@@ -153,6 +170,17 @@ class RoiImageLabel(QLabel):
 
 	def set_roi(self, roi: tuple[float, float, float, float] | None):
 		self._roi = roi
+		self.update()
+
+	def set_exclusion_polygon(self, polygon: list[tuple[float, float]] | None):
+		self._exclusion_polygon = [tuple(map(float, p)) for p in (polygon or [])]
+		self._draft_exclusion_polygon = []
+		self.update()
+
+	def set_exclusion_draw_mode(self, enabled: bool):
+		self._draw_exclusion_mode = bool(enabled)
+		if not self._draw_exclusion_mode:
+			self._draft_exclusion_polygon = []
 		self.update()
 
 	def roi(self):
@@ -210,6 +238,18 @@ class RoiImageLabel(QLabel):
 		cy = rel_y * h
 		return float(cy), float(cx)
 
+	def _polygon_to_widget(self, polygon: list[tuple[float, float]]) -> list[QPointF]:
+		rect = self._image_rect()
+		if rect is None or self._frame_shape is None:
+			return []
+		h, w = self._frame_shape
+		sx = rect.width() / max(1.0, float(w))
+		sy = rect.height() / max(1.0, float(h))
+		pts: list[QPointF] = []
+		for cy, cx in polygon:
+			pts.append(QPointF(rect.x() + float(cx) * sx, rect.y() + float(cy) * sy))
+		return pts
+
 	def paintEvent(self, event):
 		painter = QPainter(self)
 		painter.fillRect(self.rect(), QColor("#111111"))
@@ -223,6 +263,22 @@ class RoiImageLabel(QLabel):
 		if rect is None:
 			return
 		painter.drawPixmap(rect.toRect(), self._base_pixmap)
+
+		# ROI intestinal irregular (overlay de referencia para atenuación local).
+		poly_draw = self._exclusion_polygon
+		if self._draw_exclusion_mode and self._draft_exclusion_polygon:
+			poly_draw = self._draft_exclusion_polygon
+		wpts = self._polygon_to_widget(poly_draw)
+		if len(wpts) >= 2:
+			painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+			painter.setPen(QPen(QColor("#ff4dd2"), 2, Qt.PenStyle.DashLine))
+			for i in range(1, len(wpts)):
+				painter.drawLine(wpts[i - 1], wpts[i])
+			if len(wpts) >= 3 and (not self._draw_exclusion_mode or len(poly_draw) == len(self._exclusion_polygon)):
+				painter.drawLine(wpts[-1], wpts[0])
+				painter.setPen(QPen(QColor("#ff4dd2"), 1))
+				painter.setBrush(QColor(255, 77, 210, 35))
+				painter.drawPolygon(QPolygonF(wpts))
 
 		roi_data = self._roi_to_widget()
 		if roi_data is not None:
@@ -239,6 +295,8 @@ class RoiImageLabel(QLabel):
 
 			painter.setPen(QColor("#ffffff"))
 			label = f"Slice {self._slice_index + 1} | clic = centro | Shift = radio externo | Ctrl = radio interno | botón derecho = borrar"
+			if self._draw_exclusion_mode:
+				label += " | ROI intestino: clic agrega punto, doble clic cierra, clic derecho borra"
 			painter.drawText(12, 22, label)
 		else:
 			painter.setPen(QColor("#ffffff"))
@@ -247,6 +305,23 @@ class RoiImageLabel(QLabel):
 	def mousePressEvent(self, event):
 		if self._base_pixmap is None or self._frame_shape is None:
 			return
+		if event.button() == Qt.MouseButton.MiddleButton:
+			self.middleClicked.emit()
+			return
+		if self._draw_exclusion_mode:
+			mapped = self._widget_to_image(event.position())
+			if mapped is None:
+				return
+			if event.button() == Qt.MouseButton.RightButton:
+				self._exclusion_polygon = []
+				self._draft_exclusion_polygon = []
+				self.exclusionPolygonEdited.emit(self._slice_index, None)
+				self.update()
+				return
+			if event.button() == Qt.MouseButton.LeftButton:
+				self._draft_exclusion_polygon.append((float(mapped[0]), float(mapped[1])))
+				self.update()
+				return
 		mapped = self._widget_to_image(event.position())
 		if mapped is None:
 			return
@@ -278,6 +353,21 @@ class RoiImageLabel(QLabel):
 			self._roi = (self._roi[0], self._roi[1], r_inner, r_outer)
 
 		self.roiChanged.emit(self._slice_index, self._roi)
+		self.update()
+
+	def mouseDoubleClickEvent(self, event):
+		if not self._draw_exclusion_mode:
+			super().mouseDoubleClickEvent(event)
+			return
+		if event.button() != Qt.MouseButton.LeftButton:
+			return
+		mapped = self._widget_to_image(event.position())
+		if mapped is not None:
+			self._draft_exclusion_polygon.append((float(mapped[0]), float(mapped[1])))
+		if len(self._draft_exclusion_polygon) >= 3:
+			self._exclusion_polygon = list(self._draft_exclusion_polygon)
+			self.exclusionPolygonEdited.emit(self._slice_index, list(self._exclusion_polygon))
+		self._draft_exclusion_polygon = []
 		self.update()
 
 	def wheelEvent(self, event):
@@ -368,6 +458,7 @@ class CineWidget(QWidget):
 	roiEdited = pyqtSignal(int, object)
 	playStateChanged = pyqtSignal(bool)
 	playbackSpeedChanged = pyqtSignal(int)
+	activated = pyqtSignal()
 
 	def __init__(self, parent=None):
 		super().__init__(parent)
@@ -379,6 +470,16 @@ class CineWidget(QWidget):
 		self._smooth_sigma = 0.0
 		self._window_low = 0.0
 		self._window_high = 1.0
+		self._auto_roi_method = "robusto"
+		self._intestinal_roi_polygons: dict[int, list[tuple[float, float]]] = {}
+		self._intestinal_roi_polygons_by_gate: dict[tuple[int, int], list[tuple[float, float]]] = {}
+		self._intestinal_attenuation_pct = 60
+		self._intestinal_feather_px = 2
+		self._intestinal_scope_mode = "slice"
+		self._tooltips_cache: dict[QWidget, str] = {}
+		self._helpers_visible = True
+		self._compact_controls = False
+		self._controls_visible = True
 		self._timer = QTimer(self)
 		self._timer.setInterval(250)
 		self._timer.timeout.connect(self._advance_gate)
@@ -410,7 +511,9 @@ class CineWidget(QWidget):
 		self.slice_next_btn.clicked.connect(lambda: self._step_slider(self.slice_slider, 1))
 
 		self.cmap_combo = QComboBox()
-		self.cmap_combo.addItems(["gray", "hot", "cool", "prism", "french"])
+		register_all_colormaps()
+		self.cmap_combo.addItems(available_colormaps())
+		self.cmap_combo.setCurrentText("hot")
 		self.cmap_combo.currentIndexChanged.connect(self._update_view)
 		self.invert_cmap_check = QCheckBox("Invertir")
 		self.invert_cmap_check.toggled.connect(self._update_view)
@@ -456,6 +559,42 @@ class CineWidget(QWidget):
 		self.auto_roi_all_btn = QPushButton("Auto ROI todos")
 		self.auto_roi_all_btn.clicked.connect(self._auto_roi_all_slices)
 		self.auto_roi_all_btn.setToolTip("Detecta ROIs automáticamente en todos los slices del volumen.")
+		self.auto_roi_config_btn = QPushButton("Config ROI")
+		self.auto_roi_config_btn.clicked.connect(self._open_auto_roi_config)
+		self.auto_roi_help_btn = QPushButton("Help ROI")
+		self.auto_roi_help_btn.clicked.connect(self._show_auto_roi_help)
+		self.intestinal_roi_toggle_btn = QPushButton("ROI intestino")
+		self.intestinal_roi_toggle_btn.setCheckable(True)
+		self.intestinal_roi_toggle_btn.toggled.connect(self._on_intestinal_draw_toggled)
+		self.intestinal_roi_clear_btn = QPushButton("Borrar intestino")
+		self.intestinal_roi_clear_btn.clicked.connect(self._clear_intestinal_roi_current_slice)
+		self.intestinal_scope_combo = QComboBox()
+		self.intestinal_scope_combo.addItem("Slice actual", "slice")
+		self.intestinal_scope_combo.addItem("Todos los slices", "all_slices")
+		self.intestinal_scope_combo.addItem("Gate actual + todos slices", "gate_slices")
+		self.intestinal_scope_combo.currentIndexChanged.connect(self._on_intestinal_scope_changed)
+		self.intestinal_atten_slider = QSlider(Qt.Orientation.Horizontal)
+		self.intestinal_atten_slider.setRange(0, 100)
+		self.intestinal_atten_slider.setValue(int(self._intestinal_attenuation_pct))
+		self.intestinal_atten_slider.valueChanged.connect(self._on_intestinal_attenuation_changed)
+		self.intestinal_atten_label = QLabel(f"{int(self._intestinal_attenuation_pct)}%")
+		self.intestinal_feather_slider = QSlider(Qt.Orientation.Horizontal)
+		self.intestinal_feather_slider.setRange(0, 12)
+		self.intestinal_feather_slider.setValue(int(self._intestinal_feather_px))
+		self.intestinal_feather_slider.valueChanged.connect(self._on_intestinal_feather_changed)
+		self.intestinal_feather_label = QLabel(f"{int(self._intestinal_feather_px)} px")
+		self.auto_roi_method_label = QLabel("Robusto")
+		self.auto_roi_method_label.setStyleSheet("color:#4b5563;")
+		self.auto_roi_config_btn.setToolTip("Abre la comparación visual de métodos Auto ROI y deja seleccionado el método aplicado.")
+		self.auto_roi_help_btn.setToolTip("Ayuda rápida de controles y métodos Auto ROI.")
+		self.auto_roi_method_label.setToolTip("Método Auto ROI activo en este visor. También se guarda en presets.")
+		self.intestinal_roi_toggle_btn.setToolTip("Activa dibujo irregular del ROI intestinal: clic agrega puntos, doble clic cierra, clic derecho borra.")
+		self.intestinal_roi_clear_btn.setToolTip("Borra el ROI intestinal del slice actual.")
+		self.intestinal_atten_slider.setToolTip("Porcentaje de reducción de cuentas dentro del ROI intestinal (solo para Auto ROI).")
+		self.intestinal_feather_slider.setToolTip("Suavizado/borde blando alrededor del ROI intestinal para evitar cortes bruscos.")
+		self.intestinal_scope_combo.setToolTip(
+			"Elegí alcance del ROI intestinal: solo slice actual, todos los slices, o gate actual + todos los slices."
+		)
 		self.auto_roi_empty_only_check = QCheckBox("solo vacíos")
 		self.auto_roi_empty_only_check.setChecked(True)
 		self.auto_roi_empty_only_check.setToolTip("Si está activo, Auto ROI todos no sobrescribe slices que ya tienen ROI.")
@@ -524,8 +663,21 @@ class CineWidget(QWidget):
 		controls.addWidget(self.auto_window_btn, 0, 5)
 		controls.addWidget(self.auto_roi_btn, 0, 6)
 		controls.addWidget(self.auto_roi_all_btn, 0, 7)
-		controls.addWidget(self.auto_roi_empty_only_check, 0, 8)
-		controls.addWidget(self.show_auto_roi_check, 0, 9)
+		controls.addWidget(self.auto_roi_config_btn, 0, 8)
+		controls.addWidget(self.auto_roi_help_btn, 0, 9)
+		controls.addWidget(self.auto_roi_method_label, 0, 10)
+		controls.addWidget(self.auto_roi_empty_only_check, 0, 11)
+		controls.addWidget(self.show_auto_roi_check, 0, 12)
+		controls.addWidget(self.intestinal_roi_toggle_btn, 1, 9)
+		controls.addWidget(self.intestinal_roi_clear_btn, 1, 10)
+		controls.addWidget(QLabel("Atenuar intest."), 1, 11)
+		controls.addWidget(self.intestinal_atten_slider, 1, 12)
+		controls.addWidget(self.intestinal_atten_label, 1, 13)
+		controls.addWidget(QLabel("Feather"), 2, 8)
+		controls.addWidget(self.intestinal_feather_slider, 2, 9)
+		controls.addWidget(self.intestinal_feather_label, 2, 10)
+		controls.addWidget(QLabel("Alcance intest."), 2, 11)
+		controls.addWidget(self.intestinal_scope_combo, 2, 12, 1, 2)
 
 		controls.addWidget(self.gate_label, 1, 0)
 		controls.addWidget(self.gate_prev_btn, 1, 1)
@@ -567,28 +719,138 @@ class CineWidget(QWidget):
 		window_panel.addWidget(QLabel("Base"), 0, Qt.AlignmentFlag.AlignHCenter)
 		window_panel.addWidget(self.window_low_slider, 0, Qt.AlignmentFlag.AlignHCenter)
 		window_panel.addWidget(self.window_low_label, 0, Qt.AlignmentFlag.AlignHCenter)
+		self.window_panel_widget = QWidget()
+		self.window_panel_widget.setLayout(window_panel)
 
 		preview_row = QHBoxLayout()
 		preview_row.addWidget(self.preview, 1)
-		preview_row.addLayout(window_panel)
+		preview_row.addWidget(self.window_panel_widget)
+
+		self.controls_panel = QWidget()
+		self.controls_panel.setLayout(controls)
 
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(4, 4, 4, 4)
 		layout.setSpacing(2)
 		layout.addLayout(preview_row)
 		layout.addWidget(self.help_label)
-		layout.addLayout(controls)
+		layout.addWidget(self.controls_panel)
 
 		self.preview.roiChanged.connect(self._on_roi_changed)
 		self.preview.zoomChanged.connect(self._on_preview_zoom_changed)
+		self.preview.middleClicked.connect(self.activated.emit)
+		self.preview.exclusionPolygonEdited.connect(self._on_exclusion_polygon_edited)
 		self.setMinimumHeight(260)
 		self.setSizePolicy(self.sizePolicy().horizontalPolicy(), self.sizePolicy().verticalPolicy())
+		self.set_active_highlight(False)
+		self._capture_tooltips()
+
+	def set_controls_visible(self, visible: bool):
+		self._controls_visible = bool(visible)
+		self._refresh_ui_visibility()
+
+	def _refresh_ui_visibility(self):
+		show = bool(self._controls_visible)
+		self.help_label.setVisible(show and bool(self._helpers_visible))
+		self.controls_panel.setVisible(show)
+		self.window_panel_widget.setVisible(show)
+
+	def _capture_tooltips(self):
+		for w in self.findChildren(QWidget):
+			tip = w.toolTip()
+			if tip:
+				self._tooltips_cache[w] = tip
+
+	def _apply_tooltips_enabled(self, enabled: bool):
+		for w, tip in list(self._tooltips_cache.items()):
+			if w is None:
+				continue
+			w.setToolTip(tip if enabled else "")
+
+	def _apply_compact_controls(self):
+		compact = bool(self._compact_controls)
+		hide_when_compact = [
+			self.auto_window_btn,
+			self.auto_roi_help_btn,
+			self.gate_prev_btn,
+			self.gate_next_btn,
+			self.slice_prev_btn,
+			self.slice_next_btn,
+			self.zoom_prev_btn,
+			self.zoom_next_btn,
+			self.smooth_prev_btn,
+			self.smooth_next_btn,
+			self.auto_roi_empty_only_check,
+			self.show_auto_roi_check,
+		]
+		for w in hide_when_compact:
+			w.setVisible(not compact)
+
+	def set_ui_preferences(self, *, show_helpers: bool, enable_tooltips: bool, compact_controls: bool):
+		self._helpers_visible = bool(show_helpers)
+		self._compact_controls = bool(compact_controls)
+		self._apply_tooltips_enabled(bool(enable_tooltips))
+		self._apply_compact_controls()
+		self._refresh_ui_visibility()
+
+	def set_active_highlight(self, active: bool):
+		if active:
+			self.preview.setStyleSheet("background:#111; color:#ddd; border:2px solid #d61f1f;")
+		else:
+			self.preview.setStyleSheet("background:#111; color:#ddd; border:1px solid #444;")
 
 	def set_manual_rois(self, rois: dict[int, tuple[float, float, float, float]] | None):
 		old_sources = dict(self._roi_source)
 		self._rois = dict(rois or {})
 		self._roi_source = {int(sl): old_sources.get(int(sl), "manual") for sl in self._rois.keys()}
 		self._update_view()
+
+	def set_intestinal_params(self, attenuation_pct: int | float, feather_px: int | float):
+		self._intestinal_attenuation_pct = max(0, min(100, int(round(float(attenuation_pct)))))
+		self._intestinal_feather_px = max(0, min(16, int(round(float(feather_px)))))
+		self.intestinal_atten_slider.blockSignals(True)
+		self.intestinal_feather_slider.blockSignals(True)
+		self.intestinal_atten_slider.setValue(int(self._intestinal_attenuation_pct))
+		self.intestinal_feather_slider.setValue(int(self._intestinal_feather_px))
+		self.intestinal_atten_slider.blockSignals(False)
+		self.intestinal_feather_slider.blockSignals(False)
+		self.intestinal_atten_label.setText(f"{int(self._intestinal_attenuation_pct)}%")
+		self.intestinal_feather_label.setText(f"{int(self._intestinal_feather_px)} px")
+
+	def intestinal_params(self) -> tuple[int, int]:
+		return int(self._intestinal_attenuation_pct), int(self._intestinal_feather_px)
+
+	def set_intestinal_scope(self, scope: str):
+		mode = str(scope or "").strip().lower()
+		if mode not in ("slice", "all_slices", "gate_slices"):
+			mode = "slice"
+		self._intestinal_scope_mode = mode
+		idx = self.intestinal_scope_combo.findData(mode)
+		if idx >= 0 and self.intestinal_scope_combo.currentIndex() != idx:
+			self.intestinal_scope_combo.blockSignals(True)
+			self.intestinal_scope_combo.setCurrentIndex(idx)
+			self.intestinal_scope_combo.blockSignals(False)
+
+	def intestinal_scope(self) -> str:
+		return str(self._intestinal_scope_mode)
+
+	def _intestinal_polygon_for_slice(self, slice_index: int, gate_index: int | None = None) -> list[tuple[float, float]]:
+		sl = int(slice_index)
+		if self._intestinal_scope_mode == "gate_slices":
+			g = int(self.current_gate_index() if gate_index is None else gate_index)
+			poly_g = self._intestinal_roi_polygons_by_gate.get((g, sl))
+			if poly_g:
+				return poly_g
+			for (gg, ss), poly_any in self._intestinal_roi_polygons_by_gate.items():
+				if int(gg) == g and poly_any:
+					return poly_any
+			return []
+		poly = self._intestinal_roi_polygons.get(sl)
+		if poly:
+			return poly
+		if self._intestinal_scope_mode == "all_slices" and self._intestinal_roi_polygons:
+			return next(iter(self._intestinal_roi_polygons.values()))
+		return []
 
 	def roi_for_slice(self, slice_index: int):
 		return self._rois.get(int(slice_index))
@@ -600,7 +862,45 @@ class CineWidget(QWidget):
 		if sl < 0 or sl >= int(self._cube.shape[1]):
 			return None
 		img = np.asarray(self._cube[:, sl].mean(axis=0), dtype=np.float64)
+		img = self._attenuate_image_with_intestinal_roi(img, sl)
 		return self._auto_roi_from_image(img)
+
+	def _polygon_to_mask(self, shape: tuple[int, int], polygon: list[tuple[float, float]] | None) -> np.ndarray:
+		if not polygon or len(polygon) < 3:
+			return np.zeros(shape, dtype=bool)
+		h, w = int(shape[0]), int(shape[1])
+		verts = np.asarray([(float(cx), float(cy)) for cy, cx in polygon], dtype=np.float64)
+		path = MplPath(verts)
+		xs, ys = np.meshgrid(np.arange(w, dtype=np.float64), np.arange(h, dtype=np.float64))
+		pts = np.column_stack((xs.ravel(), ys.ravel()))
+		inside = path.contains_points(pts)
+		return inside.reshape(h, w)
+
+	def _soft_mask_from_polygon(self, shape: tuple[int, int], polygon: list[tuple[float, float]] | None) -> np.ndarray:
+		base = self._polygon_to_mask(shape, polygon)
+		if not np.any(base):
+			return np.zeros(shape, dtype=np.float64)
+		feather = max(0, int(self._intestinal_feather_px))
+		if feather > 0:
+			dil = binary_dilation(base, iterations=max(1, feather // 2 + 1))
+			soft = gaussian_filter(dil.astype(np.float64), sigma=max(0.8, float(feather) * 0.6))
+			soft = soft / max(1e-8, float(np.max(soft)))
+			return np.clip(soft, 0.0, 1.0)
+		return base.astype(np.float64)
+
+	def _attenuate_image_with_intestinal_roi(self, img: np.ndarray, slice_index: int) -> np.ndarray:
+		img = np.asarray(img, dtype=np.float64)
+		poly = self._intestinal_polygon_for_slice(int(slice_index), gate_index=self.current_gate_index())
+		if not poly:
+			return img
+		atten = max(0.0, min(1.0, float(self._intestinal_attenuation_pct) / 100.0))
+		if atten <= 1e-6:
+			return img
+		mask = self._soft_mask_from_polygon(img.shape, poly)
+		if not np.isfinite(mask).any() or float(np.max(mask)) <= 0.0:
+			return img
+		factor = 1.0 - atten * np.clip(mask, 0.0, 1.0)
+		return np.asarray(img * factor, dtype=np.float64)
 
 	def build_adjusted_auto_rois(
 		self,
@@ -661,6 +961,9 @@ class CineWidget(QWidget):
 	def set_cube(self, cube: np.ndarray | None):
 		self._cube = cube
 		if cube is None:
+			self._intestinal_roi_polygons = {}
+			self._intestinal_roi_polygons_by_gate = {}
+			self.preview.set_exclusion_polygon([])
 			self.preview.set_message("Cargá un estudio para ver el cine")
 			self.gate_slider.setRange(0, 0)
 			self.slice_slider.setRange(0, 0)
@@ -734,6 +1037,7 @@ class CineWidget(QWidget):
 		if roi is not None and not self.show_auto_roi_check.isChecked() and self._roi_source.get(sl) == "auto":
 			roi = None
 		self.preview.set_roi(roi)
+		self.preview.set_exclusion_polygon(self._intestinal_polygon_for_slice(sl, gate_index=gate))
 		self.gate_label.setText(f"Gate: {gate + 1}/{self._cube.shape[0]}")
 		self.slice_label.setText(f"Slice: {sl + 1}/{self._cube.shape[1]}")
 		self.matrix_label.setText(f"Matriz: {self._cube.shape[2]}x{self._cube.shape[3]}")
@@ -835,11 +1139,221 @@ class CineWidget(QWidget):
 			self.roiEdited.emit(sl, roi)
 		self._update_view()
 
-	def _auto_roi_from_image(self, img: np.ndarray):
-		img = gaussian_filter(np.asarray(img, dtype=np.float64), sigma=1.0)
-		if not np.isfinite(img).any() or float(np.max(img)) <= 0.0:
-			return None
+	def _open_auto_roi_config(self):
+		# Config ROI ahora abre la comparativa visual para elegir método+ROI en un paso.
+		self._compare_auto_roi_methods_current_slice()
 
+	def _show_auto_roi_help(self):
+		msg = (
+			"Auto ROI - guía rápida\n\n"
+			"Controles:\n"
+			"• Auto ROI: aplica en slice actual.\n"
+			"• Auto ROI todos: recorre todo el volumen.\n"
+			"• solo vacíos: no pisa ROIs manuales existentes.\n"
+			"• Config ROI: abre la comparativa visual y aplica método/ROI en un clic.\n\n"
+			"Métodos:\n"
+			"1) Robusto central: prior espacial del VI + umbral robusto (recomendado).\n"
+			"2) Clásico: umbral + componente mayor.\n"
+			"3) Gradiente: bordes por gradiente + morfología.\n"
+			"4) Hot bowel: variante robusta con penalización inferior para focos intestinales intensos.\n"
+			"5) Percentil central: umbral adaptativo por percentiles + prior central (útil en matrices bajas).\n"
+			"6) Consenso: combina varios métodos y sugiere el más estable.\n\n"
+			"7) Inferior superpuesto: suprime focos calientes periféricos inferiores (hígado/intestino) y luego detecta VI.\n\n"
+			"ROI intestino irregular:\n"
+			"• Activá 'ROI intestino' y dibujá polígono (doble clic para cerrar).\n"
+			"• Ajustá Atenuar % y Feather para bajar cuentas con borde suave.\n\n"
+			"Tip clínico: en 22x22, usar primero Robusto u Hot bowel y validar con Comparar ROI."
+		)
+		QMessageBox.information(self, "SINCRO - Help Auto ROI", msg)
+
+	def set_auto_roi_method(self, method: str):
+		key = str(method or "").strip().lower()
+		if key not in ("robusto", "clasico", "gradiente", "hotbowel", "percentil_central", "consenso", "inferior_overlap"):
+			key = "robusto"
+		self._auto_roi_method = key
+		if key == "clasico":
+			self.auto_roi_method_label.setText("Clásico")
+		elif key == "gradiente":
+			self.auto_roi_method_label.setText("Gradiente")
+		elif key == "hotbowel":
+			self.auto_roi_method_label.setText("Hot bowel")
+		elif key == "percentil_central":
+			self.auto_roi_method_label.setText("Percentil central")
+		elif key == "consenso":
+			self.auto_roi_method_label.setText("Consenso")
+		elif key == "inferior_overlap":
+			self.auto_roi_method_label.setText("Inferior superpuesto")
+		else:
+			self.auto_roi_method_label.setText("Robusto")
+
+	def auto_roi_method(self) -> str:
+		return str(self._auto_roi_method)
+
+	def _method_label(self, method: str) -> str:
+		m = str(method).lower()
+		if m == "clasico":
+			return "Clásico"
+		if m == "gradiente":
+			return "Gradiente"
+		if m == "hotbowel":
+			return "Hot bowel"
+		if m == "percentil_central":
+			return "Percentil central"
+		if m == "consenso":
+			return "Consenso"
+		if m == "inferior_overlap":
+			return "Inferior superpuesto"
+		return "Robusto"
+
+	def _build_inferior_hot_suppression_map(self, img: np.ndarray, low_res: bool) -> np.ndarray:
+		img = np.asarray(img, dtype=np.float64)
+		h, w = img.shape
+		finite = img[np.isfinite(img)]
+		if finite.size < 12:
+			return np.ones_like(img, dtype=np.float64)
+		p_hot = float(np.percentile(finite, 88.0 if low_res else 91.5))
+		ys, xs = np.ogrid[:h, :w]
+		cy0 = 0.5 * (h - 1)
+		cx0 = 0.5 * (w - 1)
+		rr = np.sqrt((ys - cy0) ** 2 + (xs - cx0) ** 2)
+		rmin = float(min(h, w))
+		inferior = ys > (cy0 + 0.08 * h)
+		peripheral = (rr >= 0.45 * rmin) & (rr <= 0.98 * rmin)
+		hot = img >= p_hot
+		seeds = hot & inferior & peripheral
+		if int(np.count_nonzero(seeds)) < 4:
+			return np.ones_like(img, dtype=np.float64)
+		spread = gaussian_filter(seeds.astype(np.float64), sigma=1.2 if low_res else 1.8)
+		mx = float(np.max(spread))
+		if mx <= 1e-8:
+			return np.ones_like(img, dtype=np.float64)
+		spread /= mx
+		strength = 0.55 if low_res else 0.48
+		penalty = 1.0 - strength * np.clip(spread, 0.0, 1.0)
+		# No penalizar el anillo central donde normalmente vive el VI.
+		penalty = np.where(rr <= 0.34 * rmin, 1.0, penalty)
+		return np.asarray(np.clip(penalty, 0.25, 1.0), dtype=np.float64)
+
+	def _auto_roi_from_image_inferior_overlap(self, img: np.ndarray, low_res: bool):
+		img = np.asarray(img, dtype=np.float64)
+		supp = self._build_inferior_hot_suppression_map(img, low_res)
+		img_w = img * supp
+		finite = img_w[np.isfinite(img_w)]
+		if finite.size < 8:
+			return self._auto_roi_from_image_hotbowel(img, low_res)
+		p99 = float(np.percentile(finite, 99.0))
+		thr_floor = float(np.percentile(finite, 70.0 if low_res else 67.0))
+		thr = max(0.54 * p99, thr_floor)
+		bin_mask = img_w > thr
+		mask = self._component_with_center_prior(bin_mask, penalize_inferior=True)
+		if mask is None:
+			return self._auto_roi_from_image_hotbowel(img, low_res)
+		roi = self._roi_from_binary_mask(mask, low_res)
+		if roi is not None:
+			return roi
+		return self._auto_roi_from_image_hotbowel(img, low_res)
+
+	def _auto_roi_from_image_percentil_central(self, img: np.ndarray, low_res: bool):
+		finite = img[np.isfinite(img)]
+		if finite.size < 8:
+			return None
+		p88 = float(np.percentile(finite, 88.0 if low_res else 84.0))
+		p70 = float(np.percentile(finite, 70.0 if low_res else 66.0))
+		thr = max(p70, 0.72 * p88)
+		bin_mask = img > thr
+		mask = self._component_with_center_prior(bin_mask, penalize_inferior=True)
+		if mask is None:
+			return self._auto_roi_from_image_robusto(img, low_res)
+		return self._roi_from_binary_mask(mask, low_res)
+
+	def _auto_roi_from_image_consenso(self, img: np.ndarray, low_res: bool):
+		candidates: list[tuple[str, tuple[float, float, float, float]]] = []
+		for method in ("robusto", "hotbowel", "percentil_central", "gradiente"):
+			roi = self._auto_roi_from_image_with_method(img, low_res=low_res, method=method)
+			if roi is not None:
+				candidates.append((method, roi))
+		if not candidates:
+			return None
+		if len(candidates) == 1:
+			return candidates[0][1]
+		ys = np.asarray([float(r[0]) for _, r in candidates], dtype=np.float64)
+		xs = np.asarray([float(r[1]) for _, r in candidates], dtype=np.float64)
+		ym = float(np.median(ys))
+		xm = float(np.median(xs))
+		filtered: list[tuple[float, float, float, float]] = []
+		for _m, roi in candidates:
+			cy, cx, ri, ro = (float(v) for v in roi)
+			if math.hypot(cy - ym, cx - xm) <= (3.2 if low_res else 4.5):
+				filtered.append((cy, cx, ri, ro))
+		if not filtered:
+			filtered = [tuple(float(v) for v in r) for _, r in candidates]
+		arr = np.asarray(filtered, dtype=np.float64)
+		cy = float(np.median(arr[:, 0]))
+		cx = float(np.median(arr[:, 1]))
+		ri = float(np.median(arr[:, 2]))
+		ro = float(np.median(arr[:, 3]))
+		if ro <= ri:
+			ro = ri + 1.0
+		return (cy, cx, max(0.0, ri), ro)
+
+	def _component_with_center_prior(self, bin_mask: np.ndarray, *, penalize_inferior: bool = False):
+		bin_mask = np.asarray(bin_mask, dtype=bool)
+		lbl, n = label(bin_mask)
+		if n <= 0:
+			return None
+		h, w = bin_mask.shape
+		cy0 = (h - 1) * 0.5
+		cx0 = (w - 1) * 0.5
+		ys_grid, xs_grid = np.ogrid[:h, :w]
+		rr = np.sqrt((ys_grid - cy0) ** 2 + (xs_grid - cx0) ** 2)
+		prior = (rr >= 0.10 * min(h, w)) & (rr <= 0.50 * min(h, w))
+
+		best_score = -1e9
+		best = None
+		for comp_id in range(1, n + 1):
+			comp = lbl == comp_id
+			area = int(np.count_nonzero(comp))
+			if area < 5:
+				continue
+			cy_c, cx_c = center_of_mass(comp)
+			if not (np.isfinite(cy_c) and np.isfinite(cx_c)):
+				continue
+			dist = float(np.sqrt((cy_c - cy0) ** 2 + (cx_c - cx0) ** 2))
+			dist_norm = dist / max(1e-6, 0.5 * min(h, w))
+			overlap = float(np.count_nonzero(comp & prior)) / float(area)
+			filled = binary_fill_holes(comp)
+			cavity = filled & (~comp)
+			hole_frac = float(np.count_nonzero(cavity)) / max(1.0, float(np.count_nonzero(filled)))
+			score = 2.6 * overlap + 1.8 * max(0.0, 1.0 - dist_norm) + 0.6 * min(1.0, hole_frac / 0.18)
+			if dist_norm > 0.95:
+				score -= 2.5
+			if penalize_inferior and float(cy_c) > 0.62 * float(h):
+				score -= 1.25
+			if score > best_score:
+				best_score = score
+				best = comp
+		return best
+
+	def _roi_from_binary_mask(self, mask: np.ndarray, low_res: bool):
+		mask = np.asarray(mask, dtype=bool)
+		if int(mask.sum()) < 8:
+			return None
+		cy, cx = center_of_mass(mask)
+		ys, xs = np.nonzero(mask)
+		d = np.sqrt((ys - cy) ** 2 + (xs - cx) ** 2)
+		if d.size < 4:
+			return None
+		h, w = mask.shape
+		r_inner = float(np.percentile(d, 24 if low_res else 22))
+		r_outer = float(np.percentile(d, 76 if low_res else 82))
+		max_outer = (0.42 if low_res else 0.48) * float(min(h, w))
+		r_outer = min(float(r_outer), float(max_outer))
+		if r_outer <= r_inner:
+			r_outer = r_inner + 1.0
+		r_inner = min(float(r_inner), 0.84 * float(r_outer))
+		return (float(cy), float(cx), r_inner, r_outer)
+
+	def _auto_roi_from_image_clasico(self, img: np.ndarray, low_res: bool):
 		thr = float(np.percentile(img[np.isfinite(img)], 70.0))
 		bin_mask = img > thr
 		lbl, n = label(bin_mask)
@@ -849,19 +1363,286 @@ class CineWidget(QWidget):
 		counts[0] = 0
 		largest = int(np.argmax(counts))
 		mask = lbl == largest
-		if int(mask.sum()) < 8:
-			return None
+		return self._roi_from_binary_mask(mask, low_res)
 
-		cy, cx = center_of_mass(mask)
-		ys, xs = np.nonzero(mask)
-		d = np.sqrt((ys - cy) ** 2 + (xs - cx) ** 2)
-		if d.size < 4:
+	def _auto_roi_from_image_gradiente(self, img: np.ndarray, low_res: bool):
+		gy, gx = np.gradient(img)
+		grad = np.hypot(gx, gy)
+		finite = grad[np.isfinite(grad)]
+		if finite.size < 8:
 			return None
-		r_inner = float(np.percentile(d, 22))
-		r_outer = float(np.percentile(d, 82))
-		if r_outer <= r_inner:
-			r_outer = r_inner + 1.0
-		return (float(cy), float(cx), r_inner, r_outer)
+		thr = float(np.percentile(finite, 74.0 if low_res else 80.0))
+		edges = grad > thr
+		k = 2 if low_res else 3
+		st = np.ones((k, k), dtype=bool)
+		edges = binary_opening(edges, structure=st)
+		edges = binary_closing(edges, structure=st)
+		filled = binary_fill_holes(edges)
+		mask = self._component_with_center_prior(filled)
+		if mask is None:
+			return None
+		boundary = mask & (~binary_erosion(mask, structure=st))
+		if int(np.count_nonzero(boundary)) >= 8:
+			cy, cx = center_of_mass(mask)
+			ys, xs = np.nonzero(boundary)
+			d = np.sqrt((ys - cy) ** 2 + (xs - cx) ** 2)
+			r_outer = float(np.percentile(d, 68 if low_res else 74))
+			max_outer = (0.42 if low_res else 0.48) * float(min(mask.shape))
+			r_outer = min(float(r_outer), float(max_outer))
+			r_inner = max(0.0, 0.46 * float(r_outer))
+			return (float(cy), float(cx), float(r_inner), float(r_outer))
+		return self._roi_from_binary_mask(mask, low_res)
+
+	def _auto_roi_from_image_robusto(self, img: np.ndarray, low_res: bool):
+		finite = img[np.isfinite(img)]
+		p99 = float(np.percentile(finite, 99.0)) if finite.size else 0.0
+		thr_floor = float(np.percentile(finite, 72.0 if low_res else 70.0))
+		thr = max(0.52 * p99, thr_floor)
+		bin_mask = img > thr
+		mask = self._component_with_center_prior(bin_mask)
+		if mask is None:
+			lbl, n = label(bin_mask)
+			if n <= 0:
+				return None
+			counts = np.bincount(lbl.ravel())
+			counts[0] = 0
+			largest = int(np.argmax(counts))
+			mask = lbl == largest
+		return self._roi_from_binary_mask(mask, low_res)
+
+	def _auto_roi_from_image_hotbowel(self, img: np.ndarray, low_res: bool):
+		finite = img[np.isfinite(img)]
+		p99 = float(np.percentile(finite, 99.0)) if finite.size else 0.0
+		thr_floor = float(np.percentile(finite, 73.0 if low_res else 71.0))
+		thr = max(0.55 * p99, thr_floor)
+		bin_mask = img > thr
+		mask = self._component_with_center_prior(bin_mask, penalize_inferior=True)
+		if mask is None:
+			lbl, n = label(bin_mask)
+			if n <= 0:
+				return None
+			counts = np.bincount(lbl.ravel())
+			counts[0] = 0
+			largest = int(np.argmax(counts))
+			mask = lbl == largest
+		return self._roi_from_binary_mask(mask, low_res)
+
+	def _auto_roi_from_image(self, img: np.ndarray):
+		img = np.asarray(img, dtype=np.float64)
+		if img.ndim != 2:
+			return None
+		h, w = img.shape
+		low_res = min(h, w) <= 28
+		img = gaussian_filter(img, sigma=1.2 if low_res else 1.0)
+		if not np.isfinite(img).any() or float(np.max(img)) <= 0.0:
+			return None
+		return self._auto_roi_from_image_with_method(img, low_res=low_res, method=self._auto_roi_method)
+
+	def _auto_roi_from_image_with_method(self, img: np.ndarray, *, low_res: bool, method: str):
+		method_key = str(method or "").strip().lower()
+		if method_key == "clasico":
+			return self._auto_roi_from_image_clasico(img, low_res)
+		if method_key == "gradiente":
+			return self._auto_roi_from_image_gradiente(img, low_res)
+		if method_key == "hotbowel":
+			return self._auto_roi_from_image_hotbowel(img, low_res)
+		if method_key == "percentil_central":
+			return self._auto_roi_from_image_percentil_central(img, low_res)
+		if method_key == "consenso":
+			return self._auto_roi_from_image_consenso(img, low_res)
+		if method_key == "inferior_overlap":
+			return self._auto_roi_from_image_inferior_overlap(img, low_res)
+		return self._auto_roi_from_image_robusto(img, low_res)
+
+	def _score_auto_roi_candidate(self, img: np.ndarray, roi: tuple[float, float, float, float], slice_index: int) -> float:
+		cy, cx, ri, ro = (float(v) for v in roi)
+		h, w = img.shape
+		ys, xs = np.ogrid[:h, :w]
+		d = np.sqrt((ys - cy) ** 2 + (xs - cx) ** 2)
+		ring = (d >= max(0.0, ri - 0.75)) & (d <= max(ri + 1.0, ro))
+		inside = d <= ro
+		outside = (d > ro) & (d <= ro + max(2.0, 0.35 * ro))
+		if int(np.count_nonzero(ring)) < 8 or int(np.count_nonzero(outside)) < 8:
+			return -1e6
+		ring_mean = float(np.mean(img[ring]))
+		outside_mean = float(np.mean(img[outside]))
+		contrast = ring_mean - outside_mean
+		inferior_out = (d > ro) & (d <= ro + max(2.0, 0.42 * ro)) & (ys > cy + 0.12 * ro)
+		if int(np.count_nonzero(inferior_out)) >= 8:
+			inferior_hot_pen = max(0.0, float(np.mean(img[inferior_out])) - ring_mean)
+		else:
+			inferior_hot_pen = 0.0
+		center_dist = float(math.hypot(cy - 0.5 * (h - 1), cx - 0.5 * (w - 1)))
+		center_pen = center_dist / max(1e-6, 0.55 * min(h, w))
+		area_pen = abs(float(np.count_nonzero(inside)) / max(1.0, float(h * w)) - 0.24)
+		score = 2.2 * contrast - 0.95 * center_pen - 0.55 * area_pen - 1.25 * inferior_hot_pen
+		poly = self._intestinal_roi_polygons.get(int(slice_index))
+		if poly:
+			mask_int = self._polygon_to_mask(img.shape, poly)
+			if np.any(mask_int):
+				overlap = float(np.count_nonzero(inside & mask_int)) / max(1.0, float(np.count_nonzero(inside)))
+				score -= 0.8 * overlap
+		return float(score)
+
+	def _compare_auto_roi_methods_current_slice(self):
+		if self._cube is None:
+			return
+		sl = int(self.slice_slider.value())
+		img = np.asarray(self._cube[:, sl].mean(axis=0), dtype=np.float64)
+		img = self._attenuate_image_with_intestinal_roi(img, sl)
+		if img.ndim != 2:
+			return
+		low_res = min(img.shape) <= 28
+		img_s = gaussian_filter(img, sigma=1.2 if low_res else 1.0)
+		if not np.isfinite(img_s).any() or float(np.max(img_s)) <= 0.0:
+			return
+
+		method_order = ["robusto", "clasico", "gradiente", "hotbowel", "percentil_central", "consenso", "inferior_overlap"]
+		options = []
+		by_label = {}
+		best_label = ""
+		best_score = -1e9
+		for method in method_order:
+			roi = self._auto_roi_from_image_with_method(img_s, low_res=low_res, method=method)
+			if roi is None:
+				continue
+			cy, cx, ri, ro = (float(v) for v in roi)
+			score = self._score_auto_roi_candidate(img_s, roi, sl)
+			label = f"{self._method_label(method)} | cy={cy:.1f} cx={cx:.1f} ri={ri:.1f} ro={ro:.1f} | score={score:.2f}"
+			if score > best_score:
+				best_score = score
+				best_label = label
+			options.append(label)
+			by_label[label] = (method, roi, score)
+
+		if not options:
+			return
+
+		dialog = QDialog(self)
+		dialog.setWindowTitle(f"Comparar Auto ROI - Slice {sl + 1}")
+		dialog.setModal(True)
+		root = QVBoxLayout(dialog)
+		root.addWidget(QLabel("Vista previa de métodos Auto ROI. Elegí uno para aplicar en este slice."))
+
+		row = QHBoxLayout()
+		selected: dict[str, tuple[str, tuple[float, float, float, float]] | None] = {"value": None}
+
+		for option in options:
+			entry = by_label.get(option)
+			if entry is None:
+				continue
+			method, roi, score = entry
+			card = QWidget()
+			card_layout = QVBoxLayout(card)
+			card_layout.setContentsMargins(6, 6, 6, 6)
+			card_layout.setSpacing(4)
+			card.setStyleSheet("background:#0f172a; border:1px solid #334155; border-radius:6px;")
+
+			title_text = self._method_label(method)
+			if option == best_label:
+				title_text += "  |  SUGERIDO"
+			title = QLabel(title_text)
+			title.setStyleSheet("color:#e2e8f0; font-weight:600;")
+			title.setToolTip(
+				"Robusto: prior central/anular.\n"
+				"Clásico: umbral + componente mayor.\n"
+				"Gradiente: bordes por gradiente.\n"
+				"Hot bowel: robusto + penalización inferior.\n"
+				"Percentil central: prior central + percentiles adaptativos.\n"
+				"Consenso: mediana entre métodos robustos.\n"
+				"Inferior superpuesto: reduce impacto de focos inferiores extracardíacos."
+			)
+			card_layout.addWidget(title)
+
+			img_label = QLabel()
+			img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+			img_label.setPixmap(self._build_roi_preview_pixmap(img_s, roi, size=220))
+			card_layout.addWidget(img_label)
+
+			cy, cx, ri, ro = (float(v) for v in roi)
+			metrics = QLabel(f"cy={cy:.1f}  cx={cx:.1f}\nri={ri:.1f}  ro={ro:.1f}\nscore={score:.2f}")
+			metrics.setStyleSheet("color:#cbd5e1;")
+			metrics.setToolTip("Centro (cy/cx) y radios interno/externo calculados para este método.")
+			card_layout.addWidget(metrics)
+
+			apply_btn = QPushButton("Aplicar")
+			apply_btn.setToolTip(f"Aplicar método {self._method_label(method)} en este slice y dejarlo activo.")
+			def _on_apply(_checked=False, m=method, r=roi):
+				selected["value"] = (m, r)
+				dialog.accept()
+			apply_btn.clicked.connect(_on_apply)
+			card_layout.addWidget(apply_btn)
+
+			row.addWidget(card)
+
+		root.addLayout(row)
+		if best_label:
+			best_entry = by_label.get(best_label)
+			if best_entry is not None:
+				best_method, best_roi, _best_score = best_entry
+				apply_best_btn = QPushButton(f"Aplicar sugerido ({self._method_label(best_method)})")
+				apply_best_btn.setToolTip("Aplica directamente el método sugerido por score en este slice.")
+				def _on_apply_best(_checked=False, m=best_method, r=best_roi):
+					selected["value"] = (m, r)
+					dialog.accept()
+				apply_best_btn.clicked.connect(_on_apply_best)
+				root.addWidget(apply_best_btn)
+		cancel_btn = QPushButton("Cancelar")
+		cancel_btn.clicked.connect(dialog.reject)
+		root.addWidget(cancel_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+		if dialog.exec() != int(QDialog.DialogCode.Accepted):
+			return
+
+		picked = selected.get("value")
+		if picked is None:
+			return
+		method, roi = picked
+		self.set_auto_roi_method(method)
+		self._rois[sl] = roi
+		self._roi_source[sl] = "auto"
+		self.roiEdited.emit(sl, roi)
+		self._update_view()
+
+	def _build_roi_preview_pixmap(self, img: np.ndarray, roi: tuple[float, float, float, float], size: int = 220) -> QPixmap:
+		base = _array_to_pixmap(
+			img,
+			cmap_name=str(self.cmap_combo.currentText()),
+			smooth_sigma=0.0,
+			invert_cmap=self.invert_cmap_check.isChecked(),
+			window_low=self._window_low,
+			window_high=self._window_high,
+		)
+		scaled = base.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+		canvas = QPixmap(size, size)
+		canvas.fill(QColor("#020617"))
+		painter = QPainter(canvas)
+		x0 = int((size - scaled.width()) / 2)
+		y0 = int((size - scaled.height()) / 2)
+		painter.drawPixmap(x0, y0, scaled)
+
+		try:
+			cy, cx, r_inner, r_outer = (float(v) for v in roi)
+			h, w = int(img.shape[0]), int(img.shape[1])
+			sx = float(scaled.width()) / max(1.0, float(w))
+			sy = float(scaled.height()) / max(1.0, float(h))
+			s = min(sx, sy)
+			ccx = x0 + cx * sx
+			ccy = y0 + cy * sy
+			painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+			painter.setPen(QPen(QColor("#22d3ee"), 2))
+			painter.drawEllipse(QPointF(ccx, ccy), 2.5, 2.5)
+			if r_outer > 0:
+				painter.setPen(QPen(QColor("#facc15"), 2, Qt.PenStyle.DashLine))
+				painter.drawEllipse(QPointF(ccx, ccy), r_outer * s, r_outer * s)
+			if r_inner > 0:
+				painter.setPen(QPen(QColor("#f87171"), 2, Qt.PenStyle.DotLine))
+				painter.drawEllipse(QPointF(ccx, ccy), r_inner * s, r_inner * s)
+		except Exception:
+			pass
+
+		painter.end()
+		return canvas
 
 	def _on_roi_changed(self, slice_index: int, roi):
 		if roi is None:
@@ -885,6 +1666,79 @@ class CineWidget(QWidget):
 
 	def _on_zoom_reset(self):
 		self.preview.reset_zoom()
+
+	def _on_intestinal_draw_toggled(self, checked: bool):
+		enabled = bool(checked)
+		self.preview.set_exclusion_draw_mode(enabled)
+		if enabled:
+			self.help_label.setText(
+				"Modo ROI intestino activo: clic izquierdo agrega vértices, doble clic cierra polígono, clic derecho borra."
+			)
+		else:
+			self.help_label.setText(
+				"Mouse: clic izq = centro | Shift+clic = radio externo | Ctrl+clic = radio interno | clic der = borrar ROI | "
+				"apex/base sin cavidad: usar 'Borrar internos'"
+			)
+
+	def _on_exclusion_polygon_edited(self, slice_index: int, polygon):
+		sl = int(slice_index)
+		gate = int(self.current_gate_index())
+		if polygon is None:
+			if self._intestinal_scope_mode == "all_slices":
+				self._intestinal_roi_polygons = {}
+			elif self._intestinal_scope_mode == "gate_slices":
+				self._intestinal_roi_polygons_by_gate = {
+					(k, s): p for (k, s), p in self._intestinal_roi_polygons_by_gate.items() if int(k) != gate
+				}
+			else:
+				self._intestinal_roi_polygons.pop(sl, None)
+		else:
+			pts = [tuple(map(float, p)) for p in (polygon or [])]
+			if len(pts) >= 3:
+				if self._intestinal_scope_mode == "all_slices" and self._cube is not None:
+					n_slices = int(self._cube.shape[1])
+					self._intestinal_roi_polygons = {int(i): list(pts) for i in range(n_slices)}
+				elif self._intestinal_scope_mode == "gate_slices":
+					if self._cube is not None:
+						n_slices = int(self._cube.shape[1])
+						for i in range(n_slices):
+							self._intestinal_roi_polygons_by_gate[(gate, int(i))] = list(pts)
+					else:
+						self._intestinal_roi_polygons_by_gate[(gate, sl)] = list(pts)
+				else:
+					self._intestinal_roi_polygons[sl] = pts
+			else:
+				if self._intestinal_scope_mode == "gate_slices":
+					self._intestinal_roi_polygons_by_gate.pop((gate, sl), None)
+				else:
+					self._intestinal_roi_polygons.pop(sl, None)
+		self._update_view()
+
+	def _clear_intestinal_roi_current_slice(self):
+		sl = int(self.slice_slider.value())
+		if self._intestinal_scope_mode == "all_slices":
+			self._intestinal_roi_polygons = {}
+		elif self._intestinal_scope_mode == "gate_slices":
+			gate = int(self.current_gate_index())
+			self._intestinal_roi_polygons_by_gate = {
+				(k, s): p for (k, s), p in self._intestinal_roi_polygons_by_gate.items() if int(k) != gate
+			}
+		else:
+			self._intestinal_roi_polygons.pop(sl, None)
+		self.preview.set_exclusion_polygon([])
+		self._update_view()
+
+	def _on_intestinal_scope_changed(self, _index: int):
+		scope = self.intestinal_scope_combo.currentData()
+		self._intestinal_scope_mode = str(scope or "slice")
+
+	def _on_intestinal_attenuation_changed(self, value: int):
+		self._intestinal_attenuation_pct = max(0, min(100, int(value)))
+		self.intestinal_atten_label.setText(f"{int(self._intestinal_attenuation_pct)}%")
+
+	def _on_intestinal_feather_changed(self, value: int):
+		self._intestinal_feather_px = max(0, min(16, int(value)))
+		self.intestinal_feather_label.setText(f"{int(self._intestinal_feather_px)} px")
 
 	def resizeEvent(self, event):
 		super().resizeEvent(event)

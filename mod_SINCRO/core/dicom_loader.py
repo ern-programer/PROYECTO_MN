@@ -64,6 +64,14 @@ class GatedStudy:
     image_type: list[str] = field(default_factory=list)
     series_description: str = ""
     study_description: str = ""
+    patient_name: str = ""
+    patient_id: str = ""
+    patient_sex: str = ""
+    patient_birth_date: str = ""
+    study_date: str = ""
+    study_time: str = ""
+    accession_number: str = ""
+    study_instance_uid: str = ""
     was_montage: bool = False
     had_summed_frame: bool = False
     reconstructed: bool = True            # False si venía crudo (proyecciones)
@@ -72,7 +80,12 @@ class GatedStudy:
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
+        patient_txt = self.patient_name.strip() or "N/D"
+        patient_id_txt = self.patient_id.strip() or "N/D"
+        study_date_txt = self.study_date.strip() or "N/D"
         lines = [
+            f"Paciente       : {patient_txt}  (ID: {patient_id_txt})",
+            f"Fecha estudio  : {study_date_txt}",
             f"Estudio        : {self.study_description} | {self.series_description}",
             f"Cubo 4D        : {self.cube.shape}  (gates × slices × H × W)",
             f"Gates          : {self.n_gates}",
@@ -141,6 +154,16 @@ def _to_float_or_none(value) -> float | None:
         return None
 
 
+def _to_clean_str(value) -> str:
+    if value is None:
+        return ""
+    try:
+        text = str(value)
+    except Exception:
+        return ""
+    return text.strip()
+
+
 def _unpack_montage(frames: np.ndarray, n_slices: int) -> np.ndarray:
     """(F, rows, cols) con cols = n_slices*rows  →  (F, n_slices, rows, cell)."""
     F, rows, cols = frames.shape
@@ -180,6 +203,14 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
     itype = [str(x) for x in _get(ds, (0x0008, 0x0008), [])]
     series_desc = str(_get(ds, (0x0008, 0x103E), "") or "")
     study_desc = str(_get(ds, (0x0008, 0x1030), "") or "")
+    patient_name = _to_clean_str(_get(ds, (0x0010, 0x0010), ""))
+    patient_id = _to_clean_str(_get(ds, (0x0010, 0x0020), ""))
+    patient_sex = _to_clean_str(_get(ds, (0x0010, 0x0040), ""))
+    patient_birth_date = _to_clean_str(_get(ds, (0x0010, 0x0030), ""))
+    study_date = _to_clean_str(_get(ds, (0x0008, 0x0020), ""))
+    study_time = _to_clean_str(_get(ds, (0x0008, 0x0030), ""))
+    accession_number = _to_clean_str(_get(ds, (0x0008, 0x0050), ""))
+    study_instance_uid = _to_clean_str(_get(ds, (0x0020, 0x000D), ""))
     rows = int(_get(ds, (0x0028, 0x0010), 0) or 0)
     cols = int(_get(ds, (0x0028, 0x0011), 0) or 0)
     px = _get(ds, (0x0028, 0x0030), None)
@@ -278,6 +309,14 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
         image_type=itype,
         series_description=series_desc,
         study_description=study_desc,
+        patient_name=patient_name,
+        patient_id=patient_id,
+        patient_sex=patient_sex,
+        patient_birth_date=patient_birth_date,
+        study_date=study_date,
+        study_time=study_time,
+        accession_number=accession_number,
+        study_instance_uid=study_instance_uid,
         was_montage=was_montage,
         had_summed_frame=locals().get("had_summed", False),
         reconstructed=True,

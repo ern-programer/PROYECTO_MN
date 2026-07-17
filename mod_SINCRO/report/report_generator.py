@@ -42,6 +42,22 @@ def _scaled_image(path: str, max_width: float, max_height: float) -> RLImage:
 	return RLImage(path, width=float(iw) * scale, height=float(ih) * scale)
 
 
+def _phase_label_from_source(path_text: str) -> str:
+	u = os.path.basename(str(path_text or "")).upper()
+	if "STRESS" in u:
+		return "Esfuerzo"
+	if "REST" in u:
+		return "Reposo"
+	return "Estudio"
+
+
+def _format_dicom_date(raw: str) -> str:
+	val = str(raw or "").strip()
+	if len(val) == 8 and val.isdigit():
+		return f"{val[6:8]}/{val[4:6]}/{val[0:4]}"
+	return val or "N/D"
+
+
 def _audit_snapshot(seg, mask: np.ndarray) -> dict[str, object]:
 	n_slices = int(mask.shape[0])
 	valid_slices = np.where(mask.reshape(n_slices, -1).any(axis=1))[0].astype(int).tolist()
@@ -108,10 +124,18 @@ def generate_report(
 
 	cube = np.asarray(study.cube)
 	audit = _audit_snapshot(seg, seg.mask.astype(bool))
+	phase_label = _phase_label_from_source(str(getattr(study, "source_path", "") or ""))
+	patient_name = str(getattr(study, "patient_name", "") or "").strip() or "N/D"
+	patient_id = str(getattr(study, "patient_id", "") or "").strip() or "N/D"
+	patient_sex = str(getattr(study, "patient_sex", "") or "").strip() or "N/D"
+	study_date = _format_dicom_date(str(getattr(study, "study_date", "") or ""))
+	study_time = str(getattr(study, "study_time", "") or "").strip() or "N/D"
+	accession_number = str(getattr(study, "accession_number", "") or "").strip() or "N/D"
+	series_uid = str(getattr(study, "study_instance_uid", "") or "").strip() or "N/D"
 	story: list = []
 
 	story.append(Paragraph("SINCRO", title_style))
-	story.append(Paragraph("Análisis de sincronía cardíaca — Informe automático", subtitle_style))
+	story.append(Paragraph(f"Análisis de sincronía cardíaca — Informe automático ({phase_label})", subtitle_style))
 	story.append(Spacer(1, 1.5 * mm))
 	story.append(HRFlowable(width="100%", thickness=1.4, color=DARK_BLUE))
 	story.append(Spacer(1, 4 * mm))
@@ -119,6 +143,13 @@ def generate_report(
 	story.append(Paragraph("1. Datos del estudio", section_style))
 	info_data = [
 		["Fecha informe", datetime.now().strftime("%d/%m/%Y %H:%M")],
+		["Fase procesada", phase_label],
+		["Paciente", patient_name],
+		["Patient ID", patient_id],
+		["Sexo", patient_sex],
+		["Fecha/Hora estudio", f"{study_date} {study_time}".strip()],
+		["Accession", accession_number],
+		["Study UID", series_uid],
 		["Descripción", str(getattr(study, "study_description", "N/D") or "N/D")],
 		["Serie", str(getattr(study, "series_description", "N/D") or "N/D")],
 		["Dimensiones", f"{cube.shape[0]} gates x {cube.shape[1]} slices x {cube.shape[2]}x{cube.shape[3]}"],
@@ -220,10 +251,13 @@ def generate_report(
 	story.append(Paragraph("4. Visualizaciones", section_style))
 	img_files = [
 		("slices_fase.png", "Slice medio con máscara y fase superpuesta."),
-		("polar_map.png", "Mapa polar AHA (17 segmentos)."),
-		("polar_perfusion_directa.png", "Mapa polar de perfusión continua (apex-centro, base-borde)."),
-		("polar_cine_montaje.png", "Polar cine gatillado (muestra de gates). Archivos animados: polar_cine.gif / polar_cine.mp4."),
-		("bullseye_directo.png", "Bull's eye de perfusión directa (colores de intensidad)."),
+		("polar_map.png", "Mapa polar de fase AHA (17): muestra distribución regional de activación mecánica. Uso: patrón/extensión de disincronía."),
+		("polar_clinico.png", "Panel polar clínico (histograma + bullseye) con PSD/PHB para lectura rápida estilo estación clínica."),
+		("polar_map_delta_signed.png", "Delta con signo (esfuerzo - reposo), circular: conserva dirección del cambio (adelanto/atraso relativo)."),
+		("polar_map_absdiff.png", "Delta absoluto |esfuerzo - reposo|: magnitud del cambio regional sin dirección (hotspots dinámicos)."),
+		("polar_perfusion_directa.png", "Mapa polar continuo de perfusión (apex-centro, base-borde). Uso: heterogeneidad perfusional regional continua."),
+		("polar_cine_montaje.png", "Polar cine gatillado (muestra de gates). Uso: dinámica temporal del patrón polar. Animados: polar_cine.gif / polar_cine.mp4."),
+		("bullseye_directo.png", "Bull's-eye segmentario AHA (17) de perfusión directa. Uso: resumen rápido de intensidad regional."),
 		("histograma.png", "Histograma de fase."),
 		("ejes_ortogonales.png", "Ejes SA/HLA/VLA."),
 		("panel_clinico_convencion.png", "Panel clínico A/B (ED/ES)."),
@@ -242,11 +276,155 @@ def generate_report(
 		story.append(img)
 		story.append(Paragraph(caption, ParagraphStyle("Cap", parent=small_style, alignment=1, spaceAfter=4 * mm)))
 
+	story.append(PageBreak())
+	story.append(Paragraph("5. Llamadas clínicas de interpretación", section_style))
+	story.append(Paragraph(
+		"<b>polar_map:</b> describe la distribución de fase por segmentos AHA."
+		" Es el mapa basal para inferir patrón de disincronía intraventricular (regional y global).",
+		body_style,
+	))
+	story.append(Spacer(1, 1.5 * mm))
+	story.append(Paragraph(
+		"<b>polar_clinico:</b> integra histograma de fase + bullseye en una sola vista rápida."
+		" Útil para lectura inicial y comunicación clínica, sin reemplazar la revisión completa de mapas y cine.",
+		body_style,
+	))
+	story.append(Spacer(1, 1.5 * mm))
+	story.append(Paragraph(
+		"<b>polar_map_Δsigned:</b> diferencia circular con signo entre esfuerzo y reposo."
+		" Un valor positivo indica adelanto relativo en esfuerzo; negativo indica atraso relativo.",
+		body_style,
+	))
+	story.append(Spacer(1, 1.5 * mm))
+	story.append(Paragraph(
+		"<b>polar_map_Δabs:</b> valor absoluto del cambio stress-rest."
+		" Sirve para cuantificar magnitud regional del cambio sin depender de la dirección.",
+		body_style,
+	))
+	story.append(Spacer(1, 1.5 * mm))
+	story.append(Paragraph(
+		"<b>polar_perfusion_directa:</b> mapa continuo de intensidad perfusional (apex en centro, base en borde)."
+		" Complementa fase para diferenciar alteración temporal vs alteración de captación.",
+		body_style,
+	))
+	story.append(Spacer(1, 1.5 * mm))
+	story.append(Paragraph(
+		"<b>bullseye_directo:</b> resumen segmentario AHA de perfusión."
+		" Lectura compacta para identificar regiones de hipocaptación y comunicar hallazgos en reporte.",
+		body_style,
+	))
+	story.append(Spacer(1, 1.5 * mm))
+	story.append(Paragraph(
+		"<b>polar_cine_montaje:</b> añade dimensión temporal gate-a-gate."
+		" Útil cuando la foto estática no refleja la dinámica mecánica completa del ciclo.",
+		body_style,
+	))
+	story.append(Spacer(1, 2.2 * mm))
+	story.append(Paragraph(
+		"<b>Pie de uso recomendado:</b> interpretar siempre en conjunto fase + perfusión + cine + métricas (PSD/BW/Entropy),"
+		" y correlacionar con contexto clínico. FEVI en este informe es preliminar.",
+		small_style,
+	))
+
 	story.append(Spacer(1, 4 * mm))
 	story.append(HRFlowable(width="100%", thickness=0.5, color=HexColor("#9aa7b5")))
 	story.append(Paragraph(
 		"Informe generado automáticamente por SINCRO. Resultados orientativos para apoyo clínico y auditoría técnica.",
 		ParagraphStyle("Disc", parent=small_style, alignment=1),
+	))
+
+	doc.build(story)
+	return output_pdf
+
+
+def generate_polar_reference_pdf(*, output_pdf: str) -> str:
+	"""Genera un PDF técnico separado con explicación clínica y fórmulas de mapas polares y sincronía."""
+
+	os.makedirs(os.path.dirname(output_pdf), exist_ok=True)
+
+	styles = getSampleStyleSheet()
+	DARK_BLUE = HexColor("#1a3a5c")
+
+	title_style = ParagraphStyle("RefTitle", parent=styles["Title"], fontSize=20, textColor=DARK_BLUE)
+	section_style = ParagraphStyle("RefSection", parent=styles["Heading2"], fontSize=12.5, textColor=DARK_BLUE)
+	body_style = ParagraphStyle("RefBody", parent=styles["Normal"], fontSize=9.6, leading=13.5)
+	small_style = ParagraphStyle("RefSmall", parent=styles["Normal"], fontSize=8.2, textColor=HexColor("#555555"))
+
+	doc = SimpleDocTemplate(
+		output_pdf,
+		pagesize=A4,
+		leftMargin=18 * mm,
+		rightMargin=18 * mm,
+		topMargin=16 * mm,
+		bottomMargin=16 * mm,
+		title="SINCRO - Mapas polares y fórmulas",
+		author="SINCRO",
+	)
+
+	story: list = []
+	story.append(Paragraph("SINCRO — Guía técnica de mapas polares y sincronía", title_style))
+	story.append(Paragraph("Resumen de uso clínico, fórmulas y rangos de referencia", small_style))
+	story.append(Spacer(1, 2 * mm))
+	story.append(HRFlowable(width="100%", thickness=1.2, color=DARK_BLUE))
+	story.append(Spacer(1, 4 * mm))
+
+	story.append(Paragraph("1. Qué representa cada mapa polar", section_style))
+	story.append(Paragraph("<b>polar_map:</b> mapa polar de fase en 17 segmentos AHA. Muestra la distribución regional del tiempo de activación mecánica.", body_style))
+	story.append(Paragraph("<b>polar_map_Δsigned:</b> diferencia circular con signo entre esfuerzo y reposo. Conserva dirección (adelanto/atraso relativo).", body_style))
+	story.append(Paragraph("<b>polar_map_Δabs:</b> valor absoluto del cambio stress-rest. Mide magnitud regional del cambio sin dirección.", body_style))
+	story.append(Paragraph("<b>polar_perfusion_directa:</b> mapa polar continuo de intensidad perfusional (apex-centro, base-borde).", body_style))
+	story.append(Paragraph("<b>bullseye_directo:</b> resumen segmentario AHA de perfusión para comunicación rápida de hallazgos.", body_style))
+	story.append(Paragraph("<b>polar_cine_montaje:</b> evolución temporal gate-a-gate del patrón polar, útil cuando la foto estática no alcanza.", body_style))
+	story.append(Spacer(1, 3 * mm))
+
+	story.append(Paragraph("2. Fórmulas clave", section_style))
+	story.append(Paragraph("Las fases son angulares (0°–360°), por lo que las diferencias deben calcularse en espacio circular.", body_style))
+	story.append(Paragraph("<b>Delta circular con signo:</b> Δsigned = ((φ_esfuerzo − φ_reposo + 180) mod 360) − 180", body_style))
+	story.append(Paragraph("<b>Delta absoluto:</b> Δabs = |Δsigned|", body_style))
+	story.append(Paragraph("<b>Phase SD (°):</b> desviación estándar de fase segmentaria/global. Mayor valor implica mayor dispersión temporal.", body_style))
+	story.append(Paragraph("<b>Bandwidth (°):</b> ancho del histograma de fase (habitualmente percentil 95%). Mayor valor implica peor sincronía.", body_style))
+	story.append(Paragraph("<b>Entropy:</b> mide desorganización del histograma de fase. Mayor valor sugiere contracción más heterogénea.", body_style))
+	story.append(Spacer(1, 3 * mm))
+
+	story.append(Paragraph("3. Interpretación clínica práctica", section_style))
+	story.append(Paragraph("Regla base: cuanto más dispersa está la fase (mayor PSD/BW/Entropy), mayor probabilidad de asincronía patológica.", body_style))
+	story.append(Paragraph("En comparación stress-rest, un incremento relevante de PSD/BW en esfuerzo frente a reposo puede sugerir disincronía transitoria post-stress (stunning isquémico).", body_style))
+	story.append(Paragraph("Siempre correlacionar con perfusión regional, contexto clínico y evolución del paciente.", body_style))
+	story.append(Spacer(1, 3 * mm))
+
+	story.append(Paragraph("4. Rangos de referencia orientativos", section_style))
+	ref_rows = [
+		["Métrica", "Rango orientativo", "Lectura clínica"],
+		["Phase SD", "11–14°", "Mayor valor: mayor dispersión de sincronía"],
+		["Bandwidth", "42–49°", "Mayor valor: mayor asincronía"],
+		["Entropy", "~3.2", "Mayor valor: mayor desorganización temporal"],
+	]
+	ref_table = Table(ref_rows, colWidths=[42 * mm, 40 * mm, 84 * mm])
+	ref_table.setStyle(TableStyle([
+		("BACKGROUND", (0, 0), (-1, 0), DARK_BLUE),
+		("TEXTCOLOR", (0, 0), (-1, 0), white),
+		("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+		("GRID", (0, 0), (-1, -1), 0.4, HexColor("#c8d0d8")),
+		("FONTSIZE", (0, 0), (-1, -1), 9),
+		("VALIGN", (0, 0), (-1, -1), "TOP"),
+		("LEFTPADDING", (0, 0), (-1, -1), 2.5 * mm),
+	]))
+	story.append(ref_table)
+	story.append(Spacer(1, 2.5 * mm))
+	story.append(Paragraph("Nota: rangos publicados como referencia poblacional; no reemplazan validación local ni juicio clínico individual.", small_style))
+	story.append(Spacer(1, 3 * mm))
+
+	story.append(Paragraph("5. Datos adicionales útiles para diagnóstico", section_style))
+	story.append(Paragraph("• Topografía del cambio: identificar si el delta se concentra en territorios coronarios específicos.", body_style))
+	story.append(Paragraph("• Coherencia fase-perfusión: discordancia relevante (alta asincronía con perfusión casi normal, o viceversa) puede requerir revisión adicional.", body_style))
+	story.append(Paragraph("• Dinámica en cine: observar si la alteración es persistente en todos los gates o puntual en fases del ciclo.", body_style))
+	story.append(Paragraph("• Integración con FEVI/volúmenes: interpretar asincronía junto a función global para priorizar impacto clínico.", body_style))
+	story.append(Spacer(1, 2 * mm))
+
+	story.append(HRFlowable(width="100%", thickness=0.5, color=HexColor("#9aa7b5")))
+	story.append(Paragraph(
+		"Referencias orientativas: literatura Emory/ASNC en análisis de fase gated SPECT y trabajos sobre comparación stress-rest (incluyendo series clínicas argentinas).",
+		small_style,
 	))
 
 	doc.build(story)
