@@ -1065,10 +1065,12 @@ class MainWindow(QMainWindow):
 		active_auto_roi_method = self.cine.auto_roi_method()
 		atten_pct, feather_px = self.cine.intestinal_params()
 		intestinal_scope = self.cine.intestinal_scope()
+		intestinal_apply_enabled = self.cine.intestinal_apply_enabled()
 		if self.active_cine_source == "compare":
 			active_auto_roi_method = self.cine_compare.auto_roi_method()
 			atten_pct, feather_px = self.cine_compare.intestinal_params()
 			intestinal_scope = self.cine_compare.intestinal_scope()
+			intestinal_apply_enabled = self.cine_compare.intestinal_apply_enabled()
 		return {
 			"seg_method": str(self.seg_method.currentText()),
 			"threshold": float(self.threshold_spin.value()),
@@ -1117,6 +1119,7 @@ class MainWindow(QMainWindow):
 			"intestinal_attenuation_pct": int(atten_pct),
 			"intestinal_feather_px": int(feather_px),
 			"intestinal_scope": str(intestinal_scope),
+			"intestinal_apply_enabled": bool(intestinal_apply_enabled),
 			"ui_show_helpers": bool(self._ui_show_helpers),
 			"ui_enable_tooltips": bool(self._ui_enable_tooltips),
 			"ui_compact_controls": bool(self._ui_compact_controls),
@@ -1227,6 +1230,10 @@ class MainWindow(QMainWindow):
 			scope = str(params.get("intestinal_scope", "slice"))
 			self.cine.set_intestinal_scope(scope)
 			self.cine_compare.set_intestinal_scope(scope)
+		if "intestinal_apply_enabled" in params:
+			apply_on = bool(params.get("intestinal_apply_enabled", False))
+			self.cine.set_intestinal_apply_enabled(apply_on)
+			self.cine_compare.set_intestinal_apply_enabled(apply_on)
 		if "ui_show_helpers" in params:
 			self._ui_show_helpers = bool(params["ui_show_helpers"])
 		if "ui_enable_tooltips" in params:
@@ -1570,16 +1577,20 @@ class MainWindow(QMainWindow):
 		active_method = self.cine.auto_roi_method()
 		active_atten, active_feather = self.cine.intestinal_params()
 		active_intestinal_scope = self.cine.intestinal_scope()
+		active_intestinal_apply = self.cine.intestinal_apply_enabled()
 		if self.active_cine_source == "compare":
 			active_method = self.cine_compare.auto_roi_method()
 			active_atten, active_feather = self.cine_compare.intestinal_params()
 			active_intestinal_scope = self.cine_compare.intestinal_scope()
+			active_intestinal_apply = self.cine_compare.intestinal_apply_enabled()
 		self.cine.set_auto_roi_method(active_method)
 		self.cine_compare.set_auto_roi_method(active_method)
 		self.cine.set_intestinal_params(active_atten, active_feather)
 		self.cine_compare.set_intestinal_params(active_atten, active_feather)
 		self.cine.set_intestinal_scope(active_intestinal_scope)
 		self.cine_compare.set_intestinal_scope(active_intestinal_scope)
+		self.cine.set_intestinal_apply_enabled(active_intestinal_apply)
+		self.cine_compare.set_intestinal_apply_enabled(active_intestinal_apply)
 
 		self._save_active_manual_rois_text()
 		self.active_cine_source = "compare" if source == "compare" and self.compare_bundle is not None else "primary"
@@ -4338,13 +4349,35 @@ class MainWindow(QMainWindow):
 					"bullseye_directo.png",
 				)
 			)
+			# Si hay comparación cargada, al entrar a avanzado hay que garantizar
+			# también las salidas avanzadas del bundle secundario (reposo) para evitar
+			# pestañas vacías o mostrando solo esfuerzo.
+			must_render_compare = False
+			if self.advanced_mode_enabled and self.compare_bundle is not None:
+				must_render_compare = not all(
+					os.path.exists(os.path.join(self.compare_output_dir, name))
+					for name in (
+						"polar_perfusion_directa.png",
+						"polar_cine_montaje.png",
+						"comparacion_ejes.png",
+						"ventriculograma.png",
+						"bullseye_directo.png",
+					)
+				)
 			if must_render:
 				self._set_progress(78, "Actualizando modo de visualización...")
 				self._write_outputs()
-				if self.compare_bundle is not None:
-					left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
-					right_label = self.compare_label or "Comparación"
-					self._compose_dual_tab_images(left_label, right_label)
+			if self.advanced_mode_enabled and self.compare_bundle is not None and (must_render or must_render_compare):
+				self._set_progress(84, "Actualizando comparación en pestañas avanzadas...")
+				self.statusBar().showMessage("Regenerando avanzado (esfuerzo + reposo)...")
+				self._log("Modo avanzado: regenerando paneles de esfuerzo + reposo.")
+				self._write_outputs_for_bundle(self.compare_bundle, self.compare_output_dir)
+				# Re-generar principal con compare activo para mantener mapas delta y
+				# luego recomponer vistas lado a lado.
+				self._write_outputs()
+				left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
+				right_label = self.compare_label or "Comparación"
+				self._compose_dual_tab_images(left_label, right_label)
 			self._load_previews()
 			self._set_progress(100, "Modo actualizado")
 

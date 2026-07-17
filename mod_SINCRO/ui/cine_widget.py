@@ -379,6 +379,15 @@ class RoiImageLabel(QLabel):
 		event.accept()
 
 
+class ClickableLabel(QLabel):
+	clicked = pyqtSignal()
+
+	def mousePressEvent(self, event):
+		if event.button() == Qt.MouseButton.LeftButton:
+			self.clicked.emit()
+		super().mousePressEvent(event)
+
+
 class GateCurveWidget(QWidget):
 	"""Curvas simples en tiempo real (intensidad por gate)."""
 
@@ -476,6 +485,7 @@ class CineWidget(QWidget):
 		self._intestinal_attenuation_pct = 60
 		self._intestinal_feather_px = 2
 		self._intestinal_scope_mode = "slice"
+		self._intestinal_apply_enabled = False
 		self._tooltips_cache: dict[QWidget, str] = {}
 		self._helpers_visible = True
 		self._compact_controls = False
@@ -566,6 +576,10 @@ class CineWidget(QWidget):
 		self.intestinal_roi_toggle_btn = QPushButton("ROI intestino")
 		self.intestinal_roi_toggle_btn.setCheckable(True)
 		self.intestinal_roi_toggle_btn.toggled.connect(self._on_intestinal_draw_toggled)
+		self.intestinal_apply_btn = QPushButton("Aplicar ROI intestino")
+		self.intestinal_apply_btn.setCheckable(True)
+		self.intestinal_apply_btn.toggled.connect(self._on_intestinal_apply_toggled)
+		self.intestinal_apply_btn.setStyleSheet("font-weight:600;")
 		self.intestinal_roi_clear_btn = QPushButton("Borrar intestino")
 		self.intestinal_roi_clear_btn.clicked.connect(self._clear_intestinal_roi_current_slice)
 		self.intestinal_scope_combo = QComboBox()
@@ -589,7 +603,8 @@ class CineWidget(QWidget):
 		self.auto_roi_help_btn.setToolTip("Ayuda rápida de controles y métodos Auto ROI.")
 		self.auto_roi_method_label.setToolTip("Método Auto ROI activo en este visor. También se guarda en presets.")
 		self.intestinal_roi_toggle_btn.setToolTip("Activa dibujo irregular del ROI intestinal: clic agrega puntos, doble clic cierra, clic derecho borra.")
-		self.intestinal_roi_clear_btn.setToolTip("Borra el ROI intestinal del slice actual.")
+		self.intestinal_apply_btn.setToolTip("Activa o desactiva la atenuación intestinal. Si está activo, se ve en tiempo real y afecta Auto ROI.")
+		self.intestinal_roi_clear_btn.setToolTip("Borra el ROI intestinal según el alcance seleccionado.")
 		self.intestinal_atten_slider.setToolTip("Porcentaje de reducción de cuentas dentro del ROI intestinal (solo para Auto ROI).")
 		self.intestinal_feather_slider.setToolTip("Suavizado/borde blando alrededor del ROI intestinal para evitar cortes bruscos.")
 		self.intestinal_scope_combo.setToolTip(
@@ -669,15 +684,16 @@ class CineWidget(QWidget):
 		controls.addWidget(self.auto_roi_empty_only_check, 0, 11)
 		controls.addWidget(self.show_auto_roi_check, 0, 12)
 		controls.addWidget(self.intestinal_roi_toggle_btn, 1, 9)
-		controls.addWidget(self.intestinal_roi_clear_btn, 1, 10)
-		controls.addWidget(QLabel("Atenuar intest."), 1, 11)
-		controls.addWidget(self.intestinal_atten_slider, 1, 12)
-		controls.addWidget(self.intestinal_atten_label, 1, 13)
+		controls.addWidget(self.intestinal_apply_btn, 1, 10)
+		controls.addWidget(self.intestinal_roi_clear_btn, 1, 11)
+		controls.addWidget(QLabel("Atenuar int."), 1, 12)
+		controls.addWidget(self.intestinal_atten_slider, 1, 13)
 		controls.addWidget(QLabel("Feather"), 2, 8)
 		controls.addWidget(self.intestinal_feather_slider, 2, 9)
 		controls.addWidget(self.intestinal_feather_label, 2, 10)
-		controls.addWidget(QLabel("Alcance intest."), 2, 11)
-		controls.addWidget(self.intestinal_scope_combo, 2, 12, 1, 2)
+		controls.addWidget(self.intestinal_atten_label, 2, 11)
+		controls.addWidget(QLabel("Alcance int."), 2, 12)
+		controls.addWidget(self.intestinal_scope_combo, 2, 13)
 
 		controls.addWidget(self.gate_label, 1, 0)
 		controls.addWidget(self.gate_prev_btn, 1, 1)
@@ -743,6 +759,7 @@ class CineWidget(QWidget):
 		self.setMinimumHeight(260)
 		self.setSizePolicy(self.sizePolicy().horizontalPolicy(), self.sizePolicy().verticalPolicy())
 		self.set_active_highlight(False)
+		self._refresh_intestinal_apply_button_text()
 		self._capture_tooltips()
 
 	def set_controls_visible(self, visible: bool):
@@ -820,6 +837,17 @@ class CineWidget(QWidget):
 	def intestinal_params(self) -> tuple[int, int]:
 		return int(self._intestinal_attenuation_pct), int(self._intestinal_feather_px)
 
+	def set_intestinal_apply_enabled(self, enabled: bool):
+		self._intestinal_apply_enabled = bool(enabled)
+		self.intestinal_apply_btn.blockSignals(True)
+		self.intestinal_apply_btn.setChecked(self._intestinal_apply_enabled)
+		self.intestinal_apply_btn.blockSignals(False)
+		self._refresh_intestinal_apply_button_text()
+		self._update_view()
+
+	def intestinal_apply_enabled(self) -> bool:
+		return bool(self._intestinal_apply_enabled)
+
 	def set_intestinal_scope(self, scope: str):
 		mode = str(scope or "").strip().lower()
 		if mode not in ("slice", "all_slices", "gate_slices"):
@@ -890,6 +918,8 @@ class CineWidget(QWidget):
 
 	def _attenuate_image_with_intestinal_roi(self, img: np.ndarray, slice_index: int) -> np.ndarray:
 		img = np.asarray(img, dtype=np.float64)
+		if not self._intestinal_apply_enabled:
+			return img
 		poly = self._intestinal_polygon_for_slice(int(slice_index), gate_index=self.current_gate_index())
 		if not poly:
 			return img
@@ -1023,7 +1053,9 @@ class CineWidget(QWidget):
 		gate = int(self.gate_slider.value())
 		sl = int(self.slice_slider.value())
 		self._current_slice = sl
-		frame = self._cube[gate, sl]
+		frame = np.asarray(self._cube[gate, sl], dtype=np.float64)
+		if self._intestinal_apply_enabled:
+			frame = self._attenuate_image_with_intestinal_roi(frame, sl)
 		self.preview.set_slice_index(sl)
 		self.preview.set_frame(
 			frame,
@@ -1150,7 +1182,8 @@ class CineWidget(QWidget):
 			"• Auto ROI: aplica en slice actual.\n"
 			"• Auto ROI todos: recorre todo el volumen.\n"
 			"• solo vacíos: no pisa ROIs manuales existentes.\n"
-			"• Config ROI: abre la comparativa visual y aplica método/ROI en un clic.\n\n"
+			"• Config ROI: abre la comparativa visual y aplica método/ROI en un clic.\n"
+			"  Tip: podés hacer clic directamente sobre la imagen del método para seleccionarlo.\n\n"
 			"Métodos:\n"
 			"1) Robusto central: prior espacial del VI + umbral robusto (recomendado).\n"
 			"2) Clásico: umbral + componente mayor.\n"
@@ -1521,13 +1554,16 @@ class CineWidget(QWidget):
 		dialog = QDialog(self)
 		dialog.setWindowTitle(f"Comparar Auto ROI - Slice {sl + 1}")
 		dialog.setModal(True)
+		dialog.resize(1220, 760)
 		root = QVBoxLayout(dialog)
 		root.addWidget(QLabel("Vista previa de métodos Auto ROI. Elegí uno para aplicar en este slice."))
 
-		row = QHBoxLayout()
+		grid = QGridLayout()
+		grid.setHorizontalSpacing(8)
+		grid.setVerticalSpacing(8)
 		selected: dict[str, tuple[str, tuple[float, float, float, float]] | None] = {"value": None}
 
-		for option in options:
+		for idx, option in enumerate(options):
 			entry = by_label.get(option)
 			if entry is None:
 				continue
@@ -1554,9 +1590,15 @@ class CineWidget(QWidget):
 			)
 			card_layout.addWidget(title)
 
-			img_label = QLabel()
+			img_label = ClickableLabel()
 			img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+			img_label.setCursor(Qt.CursorShape.PointingHandCursor)
 			img_label.setPixmap(self._build_roi_preview_pixmap(img_s, roi, size=220))
+			img_label.setToolTip(f"Clic para aplicar método {self._method_label(method)}")
+			def _on_pick(m=method, r=roi):
+				selected["value"] = (m, r)
+				dialog.accept()
+			img_label.clicked.connect(_on_pick)
 			card_layout.addWidget(img_label)
 
 			cy, cx, ri, ro = (float(v) for v in roi)
@@ -1573,9 +1615,11 @@ class CineWidget(QWidget):
 			apply_btn.clicked.connect(_on_apply)
 			card_layout.addWidget(apply_btn)
 
-			row.addWidget(card)
+			row = idx // 4
+			col = idx % 4
+			grid.addWidget(card, row, col)
 
-		root.addLayout(row)
+		root.addLayout(grid)
 		if best_label:
 			best_entry = by_label.get(best_label)
 			if best_entry is not None:
@@ -1731,6 +1775,17 @@ class CineWidget(QWidget):
 	def _on_intestinal_scope_changed(self, _index: int):
 		scope = self.intestinal_scope_combo.currentData()
 		self._intestinal_scope_mode = str(scope or "slice")
+
+	def _on_intestinal_apply_toggled(self, checked: bool):
+		self._intestinal_apply_enabled = bool(checked)
+		self._refresh_intestinal_apply_button_text()
+		self._update_view()
+
+	def _refresh_intestinal_apply_button_text(self):
+		if self._intestinal_apply_enabled:
+			self.intestinal_apply_btn.setText("ROI intestinal ON")
+		else:
+			self.intestinal_apply_btn.setText("Aplicar ROI intestino")
 
 	def _on_intestinal_attenuation_changed(self, value: int):
 		self._intestinal_attenuation_pct = max(0, min(100, int(value)))
