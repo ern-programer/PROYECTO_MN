@@ -916,11 +916,12 @@ class CineWidget(QWidget):
 			return np.clip(soft, 0.0, 1.0)
 		return base.astype(np.float64)
 
-	def _attenuate_image_with_intestinal_roi(self, img: np.ndarray, slice_index: int) -> np.ndarray:
+	def _attenuate_image_with_intestinal_roi(self, img: np.ndarray, slice_index: int, gate_index: int | None = None) -> np.ndarray:
 		img = np.asarray(img, dtype=np.float64)
 		if not self._intestinal_apply_enabled:
 			return img
-		poly = self._intestinal_polygon_for_slice(int(slice_index), gate_index=self.current_gate_index())
+		g = self.current_gate_index() if gate_index is None else int(gate_index)
+		poly = self._intestinal_polygon_for_slice(int(slice_index), gate_index=g)
 		if not poly:
 			return img
 		atten = max(0.0, min(1.0, float(self._intestinal_attenuation_pct) / 100.0))
@@ -931,6 +932,22 @@ class CineWidget(QWidget):
 			return img
 		factor = 1.0 - atten * np.clip(mask, 0.0, 1.0)
 		return np.asarray(img * factor, dtype=np.float64)
+
+	def apply_intestinal_mask_to_gate_volume(self, gate_volume: np.ndarray, gate_index: int | None = None) -> np.ndarray:
+		"""Aplica atenuación intestinal slice a slice sobre un volumen de gate.
+
+		Se usa para mejorar vistas comparativas (SA/HLA/VLA) sin alterar el cubo base.
+		"""
+		vol = np.asarray(gate_volume, dtype=np.float64)
+		if vol.ndim != 3:
+			return vol
+		if not self._intestinal_apply_enabled:
+			return vol
+		g = self.current_gate_index() if gate_index is None else int(gate_index)
+		out = np.array(vol, dtype=np.float64, copy=True)
+		for s in range(int(out.shape[0])):
+			out[s] = self._attenuate_image_with_intestinal_roi(out[s], s, gate_index=g)
+		return out
 
 	def build_adjusted_auto_rois(
 		self,

@@ -206,6 +206,9 @@ class MainWindow(QMainWindow):
 
 		self.normalize_check = QCheckBox("Normalizar referencia de fase")
 		self.normalize_check.setChecked(False)
+		self.global_intestinal_render_check = QCheckBox("Atenuación intestinal global en salidas")
+		self.global_intestinal_render_check.setChecked(True)
+		self.global_intestinal_render_check.toggled.connect(self._on_global_intestinal_render_toggled)
 
 		# Base de datos normal (comparación de PSD/BW contra valores publicados).
 		self.normal_sex_combo = QComboBox()
@@ -287,6 +290,7 @@ class MainWindow(QMainWindow):
 		controls_form.addRow(self.export_polar_mp4_check)
 		controls_form.addRow(self.profile_timing_check)
 		controls_form.addRow(self.normalize_check)
+		controls_form.addRow(self.global_intestinal_render_check)
 		controls_form.addRow("Sexo (DB normal)", self.normal_sex_combo)
 		controls_form.addRow("Protocolo (DB normal)", self.normal_protocol_combo)
 		controls_form.addRow("DB normal", self.normal_db_combo)
@@ -307,6 +311,7 @@ class MainWindow(QMainWindow):
 		self.export_polar_mp4_check.setToolTip("Además del GIF, intenta exportar un MP4 del cine polar gatillado.")
 		self.profile_timing_check.setToolTip("Registra en el log solo etapas que superan 0.5 s.")
 		self.normalize_check.setToolTip("Resta una referencia global de fase para comparar estudios.")
+		self.global_intestinal_render_check.setToolTip("Si está activo, aplica ROI intestinal en todas las salidas visuales (paneles, polar, bullseye y cine), no solo en cortes/ejes.")
 		self.normal_sex_combo.setToolTip("Sexo del paciente: los valores normales de PSD/BW difieren por sexo (Mukherjee 2016).")
 		self.normal_protocol_combo.setToolTip("Protocolo del estudio: stress da PSD/BW mayores que rest.")
 		self.normal_db_combo.setToolTip("Base de datos normal usada para z-score y flag de disincronía (media + 2 SD).")
@@ -688,10 +693,34 @@ class MainWindow(QMainWindow):
 		compare_window_row.addWidget(self.compare_window_low_slider, 1, 1)
 		compare_window_row.addWidget(self.compare_window_low_label, 1, 2)
 		compare_layout.addLayout(compare_window_row)
+		compare_zoom_row = QGridLayout()
+		self.compare_axes_zoom_slider = QSlider(Qt.Orientation.Horizontal)
+		self.compare_axes_zoom_slider.setRange(100, 300)
+		self.compare_axes_zoom_slider.setValue(100)
+		self.compare_axes_zoom_slider.setToolTip("Zoom global en comparacion_ejes: agranda todos los cortes SA/HLA/VLA al mismo tiempo.")
+		self.compare_axes_zoom_slider.sliderPressed.connect(self._on_compare_controls_drag_started)
+		self.compare_axes_zoom_slider.sliderReleased.connect(self._on_compare_controls_drag_ended)
+		self.compare_axes_zoom_slider.valueChanged.connect(self._on_compare_axes_zoom_changed)
+		self.compare_axes_zoom_label = QLabel("100%")
+		compare_zoom_row.addWidget(QLabel("Zoom cortes"), 0, 0)
+		compare_zoom_row.addWidget(self.compare_axes_zoom_slider, 0, 1)
+		compare_zoom_row.addWidget(self.compare_axes_zoom_label, 0, 2)
+		compare_layout.addLayout(compare_zoom_row)
 		self.compare_mask_check = QCheckBox("Mostrar máscara en comparativa")
 		self.compare_mask_check.setChecked(True)
 		self.compare_mask_check.toggled.connect(self._on_compare_mask_toggled)
 		compare_layout.addWidget(self.compare_mask_check)
+		self.compare_axes_intestinal_mask_check = QCheckBox("ROI intestino en ejes (SA/HLA/VLA)")
+		self.compare_axes_intestinal_mask_check.setChecked(True)
+		self.compare_axes_intestinal_mask_check.setToolTip("Si está activo, aplica la atenuación intestinal en las imágenes de comparacion_ejes.")
+		self.compare_axes_intestinal_mask_check.toggled.connect(self._schedule_compare_axes_refresh)
+		compare_layout.addWidget(self.compare_axes_intestinal_mask_check)
+		compare_quick_row = QHBoxLayout()
+		self.compare_axes_preset_clinical_btn = QPushButton("Preset clínico ejes")
+		self.compare_axes_preset_clinical_btn.setToolTip("Aplica valores recomendados para lectura clínica rápida de comparacion_ejes.")
+		self.compare_axes_preset_clinical_btn.clicked.connect(self._apply_compare_axes_clinical_quick_preset)
+		compare_quick_row.addWidget(self.compare_axes_preset_clinical_btn)
+		compare_layout.addLayout(compare_quick_row)
 		self.compare_fast_drag_check = QCheckBox("Modo rápido al arrastrar (alta calidad al soltar)")
 		self.compare_fast_drag_check.setChecked(True)
 		compare_layout.addWidget(self.compare_fast_drag_check)
@@ -727,6 +756,7 @@ class MainWindow(QMainWindow):
 		compare_layout.addWidget(self.refresh_compare_btn)
 		self._update_compare_slice_label()
 		self._update_compare_window_labels()
+		self._update_compare_axes_zoom_label()
 		self._refresh_cine_source_selector()
 		self._sidebar_layout.addWidget(compare_box)
 
@@ -1112,6 +1142,9 @@ class MainWindow(QMainWindow):
 			"compare_window_top": int(self.compare_window_high_slider.value()),
 			"compare_window_base": int(self.compare_window_low_slider.value()),
 			"compare_show_mask": bool(self.compare_mask_check.isChecked()),
+			"compare_axes_zoom_pct": int(self.compare_axes_zoom_slider.value()),
+			"compare_axes_use_intestinal_mask": bool(self.compare_axes_intestinal_mask_check.isChecked()),
+			"global_intestinal_render": bool(self.global_intestinal_render_check.isChecked()),
 			"normal_sex": str(self.normal_sex_combo.currentText()),
 			"normal_protocol": str(self.normal_protocol_combo.currentText()),
 			"normal_db": str(self.normal_db_combo.currentText()),
@@ -1211,6 +1244,12 @@ class MainWindow(QMainWindow):
 			self.compare_window_low_slider.setValue(int(params["compare_window_base"]))
 		if "compare_show_mask" in params:
 			self.compare_mask_check.setChecked(bool(params["compare_show_mask"]))
+		if "compare_axes_zoom_pct" in params:
+			self.compare_axes_zoom_slider.setValue(int(params["compare_axes_zoom_pct"]))
+		if "compare_axes_use_intestinal_mask" in params:
+			self.compare_axes_intestinal_mask_check.setChecked(bool(params["compare_axes_use_intestinal_mask"]))
+		if "global_intestinal_render" in params:
+			self.global_intestinal_render_check.setChecked(bool(params["global_intestinal_render"]))
 		if "normal_sex" in params:
 			self.normal_sex_combo.setCurrentText(str(params["normal_sex"]))
 		if "normal_protocol" in params:
@@ -1630,6 +1669,9 @@ class MainWindow(QMainWindow):
 		self.compare_window_high_label.setText(f"{int(self.compare_window_high_slider.value())}%")
 		self.compare_window_low_label.setText(f"{int(self.compare_window_low_slider.value())}%")
 
+	def _update_compare_axes_zoom_label(self):
+		self.compare_axes_zoom_label.setText(f"{int(self.compare_axes_zoom_slider.value())}%")
+
 	def _schedule_compare_axes_refresh(self):
 		self.compare_axes_refresh_timer.start(180)
 
@@ -1648,6 +1690,35 @@ class MainWindow(QMainWindow):
 			self.compare_window_high_slider.blockSignals(False)
 		self._update_compare_window_labels()
 		self._schedule_compare_axes_refresh()
+
+	def _on_compare_axes_zoom_changed(self, value: int):
+		self._update_compare_axes_zoom_label()
+		self._schedule_compare_axes_refresh()
+
+	def _on_global_intestinal_render_toggled(self, checked: bool):
+		self._invalidate_output_cache()
+		if self.study is not None and self.phase_result is not None:
+			self._set_progress(82, "Actualizando salidas con atenuación intestinal...")
+			self._write_outputs()
+			if self.compare_bundle is not None and self.advanced_mode_enabled:
+				self._write_outputs_for_bundle(self.compare_bundle, self.compare_output_dir)
+				left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
+				right_label = self.compare_label or "Comparación"
+				self._compose_dual_tab_images(left_label, right_label)
+			self._load_previews()
+			self._set_progress(100, "Procesamiento completo")
+		state = "ON" if bool(checked) else "OFF"
+		self.statusBar().showMessage(f"Atenuación intestinal global: {state}")
+
+	def _apply_compare_axes_clinical_quick_preset(self):
+		self.compare_axes_zoom_slider.setValue(140)
+		self.compare_axes_intestinal_mask_check.setChecked(True)
+		self.compare_window_high_slider.setValue(98)
+		self.compare_window_low_slider.setValue(5)
+		self.compare_mask_check.setChecked(True)
+		self.compare_axes_cmap_combo.setCurrentText("hot")
+		self._schedule_compare_axes_refresh()
+		self.statusBar().showMessage("Preset clínico aplicado en comparacion_ejes (zoom 140%, ROI intestino ON, ventana 98/5).")
 
 	def _comparison_gate_index(self) -> int:
 		if self.study is None:
@@ -2068,6 +2139,40 @@ class MainWindow(QMainWindow):
 			serial.append([int(sidx), float(cy), float(cx), float(rin), float(rout)])
 		return serial
 
+	def _intestinal_signature_for_widget(self, cine_widget: CineWidget | None) -> dict:
+		if cine_widget is None:
+			return {
+				"global_render": bool(self.global_intestinal_render_check.isChecked()),
+				"enabled": False,
+				"atten": 0,
+				"feather": 0,
+				"scope": "slice",
+				"poly_s": "none",
+				"poly_g": "none",
+			}
+		atten, feather = cine_widget.intestinal_params()
+		scope = cine_widget.intestinal_scope()
+		enabled = cine_widget.intestinal_apply_enabled()
+		poly_slice = getattr(cine_widget, "_intestinal_roi_polygons", {}) or {}
+		poly_gate = getattr(cine_widget, "_intestinal_roi_polygons_by_gate", {}) or {}
+		try:
+			poly_s_items = sorted((int(k), [(float(a), float(b)) for a, b in (v or [])]) for k, v in poly_slice.items())
+		except Exception:
+			poly_s_items = []
+		try:
+			poly_g_items = sorted(((int(g), int(s)), [(float(a), float(b)) for a, b in (v or [])]) for (g, s), v in poly_gate.items())
+		except Exception:
+			poly_g_items = []
+		return {
+			"global_render": bool(self.global_intestinal_render_check.isChecked()),
+			"enabled": bool(enabled),
+			"atten": int(atten),
+			"feather": int(feather),
+			"scope": str(scope),
+			"poly_s": self._hash_payload({"items": poly_s_items}) if poly_s_items else "none",
+			"poly_g": self._hash_payload({"items": poly_g_items}) if poly_g_items else "none",
+		}
+
 	def _collect_visual_signature_payload(self) -> dict:
 		return {
 			"visual_style": str(self.visual_style_combo.currentText()),
@@ -2087,7 +2192,58 @@ class MainWindow(QMainWindow):
 			"report_cmap_bullseye": str(self.report_cmap_bullseye.currentText()),
 			"report_cmap_polar_perf": str(self.report_cmap_polar_perf.currentText()),
 			"compare_active": bool(self.compare_bundle is not None),
+			"compare_axes_zoom_pct": int(self.compare_axes_zoom_slider.value()),
+			"compare_axes_use_intestinal_mask": bool(self.compare_axes_intestinal_mask_check.isChecked()),
+			"global_intestinal_render": bool(self.global_intestinal_render_check.isChecked()),
+			"intestinal_primary": self._intestinal_signature_for_widget(self.cine),
+			"intestinal_compare": self._intestinal_signature_for_widget(self.cine_compare),
 		}
+
+	def _apply_intestinal_mask_to_cube(self, cube: np.ndarray, cine_widget: CineWidget | None) -> np.ndarray:
+		arr = np.asarray(cube, dtype=np.float64)
+		if arr.ndim != 4 or cine_widget is None:
+			return arr
+		if not bool(self.global_intestinal_render_check.isChecked()):
+			return arr
+		if not cine_widget.intestinal_apply_enabled():
+			return arr
+		out = np.array(arr, dtype=np.float64, copy=True)
+		for g in range(int(out.shape[0])):
+			out[g] = cine_widget.apply_intestinal_mask_to_gate_volume(out[g], gate_index=g)
+		return out
+
+	def _intestinal_export_stamp_text(self, cine_widget: CineWidget | None = None) -> str:
+		widget = cine_widget
+		if widget is None:
+			widget = getattr(self, "_output_cine_widget_override", None)
+		if widget is None:
+			widget = self.cine
+		global_on = bool(self.global_intestinal_render_check.isChecked())
+		local_on = bool(widget is not None and widget.intestinal_apply_enabled())
+		applied = bool(global_on and local_on)
+		atten_pct = 0
+		feather_px = 0
+		if widget is not None:
+			atten_pct, feather_px = widget.intestinal_params()
+		return (
+			f"ROI intestino | global {'ON' if global_on else 'OFF'} | visor {'ON' if local_on else 'OFF'} | "
+			f"aplicado {'ON' if applied else 'OFF'} | atten {int(atten_pct)}% | feather {int(feather_px)}px"
+		)
+
+	def _stamp_export_figure(self, fig, cine_widget: CineWidget | None = None):
+		try:
+			fig.text(
+				0.995,
+				0.004,
+				self._intestinal_export_stamp_text(cine_widget),
+				ha="right",
+				va="bottom",
+				fontsize=7.2,
+				color="#f8fafc",
+				bbox=dict(boxstyle="round,pad=0.22", facecolor="black", edgecolor="#334155", alpha=0.60),
+			)
+		except Exception:
+			pass
 
 	def process_current(self):
 		path = self.file_edit.text().strip()
@@ -2154,11 +2310,14 @@ class MainWindow(QMainWindow):
 				QMessageBox.warning(self, "SINCRO", "Modo manual activo pero no hay ROIs definidos. Dibujá ROI o cambiá a auto/threshold.")
 				return
 			manual_rois = parsed_rois if seg_method == "manual" else None
+			cube_for_processing = self._apply_intestinal_mask_to_cube(self.study.cube, self.cine)
+			intestinal_sig_primary = self._intestinal_signature_for_widget(self.cine)
 			seg_payload = {
 				"study": study_sig,
 				"method": seg_method,
 				"threshold": round(float(self.threshold_spin.value()), 5),
 				"sigma": round(float(self.sigma_spin.value()), 5),
+				"intestinal": intestinal_sig_primary,
 				"manual_rois": self._serialize_manual_rois(manual_rois or {}),
 			}
 			seg_sig = self._hash_payload(seg_payload)
@@ -2166,7 +2325,7 @@ class MainWindow(QMainWindow):
 				t_stage = perf_counter()
 				self._set_progress(30, "Segmentando miocardio...")
 				self.seg = segment_myocardium(
-					self.study.cube,
+					cube_for_processing,
 					method=seg_method,
 					threshold_frac=float(self.threshold_spin.value()),
 					smooth_sigma=float(self.sigma_spin.value()),
@@ -2191,7 +2350,7 @@ class MainWindow(QMainWindow):
 				t_stage = perf_counter()
 				self._set_progress(50, "Análisis de fase...")
 				self.phase_result = phase_analysis(
-					self.study.cube,
+					cube_for_processing,
 					self.seg.mask,
 					harmonics=int(self.harmonics_spin.value()),
 					amplitude_threshold_frac=float(self.phase_threshold_spin.value()),
@@ -2672,10 +2831,14 @@ class MainWindow(QMainWindow):
 	def _write_outputs(self):
 		if self.study is None or self.phase_result is None:
 			return
+		active_cine_widget = getattr(self, "_output_cine_widget_override", None)
+		if active_cine_widget is None:
+			active_cine_widget = self.cine
+		study_cube_render = self._apply_intestinal_mask_to_cube(self.study.cube, active_cine_widget)
 
-		mid_slice = self.study.cube.shape[1] // 2
-		mid_gate = self.study.cube.shape[0] // 2
-		frame = self.study.cube[mid_gate, mid_slice]
+		mid_slice = study_cube_render.shape[1] // 2
+		mid_gate = study_cube_render.shape[0] // 2
+		frame = study_cube_render[mid_gate, mid_slice]
 		frame_norm = frame / (frame.max() + 1e-8)
 
 		import matplotlib
@@ -2833,6 +2996,7 @@ class MainWindow(QMainWindow):
 		axes[2].set_title("Fase superpuesta")
 
 		fig.suptitle(f"SINCRO — Vista principal — {study_context_label}", fontsize=12.5, fontweight="bold")
+		self._stamp_export_figure(fig, active_cine_widget)
 		fig.tight_layout()
 		fig.savefig(os.path.join(self.output_dir, "slices_fase.png"), dpi=150, bbox_inches="tight")
 		plt.close(fig)
@@ -2847,6 +3011,7 @@ class MainWindow(QMainWindow):
 			ha="left",
 			va="bottom",
 		)
+		self._stamp_export_figure(pm.fig, active_cine_widget)
 		save_polar_map(pm, os.path.join(self.output_dir, "polar_map.png"), dpi=150)
 		plt.close(pm.fig)
 
@@ -2923,6 +3088,7 @@ class MainWindow(QMainWindow):
 					cbar.set_ticklabels(tick_labels)
 				if legend_text:
 					fig.text(0.02, 0.02, legend_text, fontsize=9, color="#334155", ha="left", va="bottom")
+				self._stamp_export_figure(fig, active_cine_widget)
 				fig.tight_layout()
 				fig.savefig(os.path.join(self.output_dir, output_name), dpi=150, bbox_inches="tight")
 				plt.close(fig)
@@ -3028,6 +3194,7 @@ class MainWindow(QMainWindow):
 			canvas.save(os.path.join(self.output_dir, "delta_combo.png"))
 
 		hfig = build_phase_histogram(self.phase_result.phases_deg, metrics=self.metrics, bins=72, title=f"Phase Histogram — {study_context_label}")
+		self._stamp_export_figure(hfig, active_cine_widget)
 		save_histogram(hfig, os.path.join(self.output_dir, "histograma.png"), dpi=150)
 		plt.close(hfig)
 		_compose_polar_combo()
@@ -3040,6 +3207,7 @@ class MainWindow(QMainWindow):
 			cmap_name=cmap_polar_clinico,
 			title=f"Panel polar clínico (histograma + fase) — {study_context_label}",
 		)
+		self._stamp_export_figure(cfig, active_cine_widget)
 		save_clinical_phase_panel(cfig, os.path.join(self.output_dir, "polar_clinico.png"), dpi=150)
 		plt.close(cfig)
 
@@ -3048,7 +3216,7 @@ class MainWindow(QMainWindow):
 			return
 
 		def _oriented_axes_views(gate_index: int):
-			vol_gate = self.study.cube[int(gate_index)].astype(np.float64)
+			vol_gate = np.asarray(study_cube_render[int(gate_index)], dtype=np.float64)
 			sa_local = vol_gate[mid_slice]
 
 			def _axis_plane(axis_code: str, prefer_original: bool):
@@ -3122,6 +3290,7 @@ class MainWindow(QMainWindow):
 		if vla_original_mid:
 			axes2[2].text(0.03, 0.05, "ORIGINAL", transform=axes2[2].transAxes, fontsize=8, color="#ffe082", fontweight="bold")
 		fig2.suptitle(f"Ejes cardíacos ortogonales — Gate {mid_gate + 1} — {study_context_label}", fontsize=12, fontweight="bold")
+		self._stamp_export_figure(fig2, active_cine_widget)
 		fig2.tight_layout()
 		fig2.savefig(os.path.join(self.output_dir, "ejes_ortogonales.png"), dpi=150, bbox_inches="tight")
 		plt.close(fig2)
@@ -3132,7 +3301,7 @@ class MainWindow(QMainWindow):
 			self._log("Cache tab: comparacion_ejes sin cambios, se omite regeneración.")
 
 		ef = self._estimate_lv_ef_preliminary()
-		n_gates = int(self.study.cube.shape[0])
+		n_gates = int(study_cube_render.shape[0])
 		if ef.get("available"):
 			ed_gate = max(0, min(n_gates - 1, int(ef["ed_gate"]) - 1))
 			es_gate = max(0, min(n_gates - 1, int(ef["es_gate"]) - 1))
@@ -3206,18 +3375,20 @@ class MainWindow(QMainWindow):
 			fontsize=13,
 			fontweight="bold",
 		)
+		self._stamp_export_figure(fig4, active_cine_widget)
 		fig4.tight_layout()
 		fig4.savefig(os.path.join(self.output_dir, "panel_clinico_convencion.png"), dpi=150, bbox_inches="tight")
 		plt.close(fig4)
 
 		fig3, ax3 = plt.subplots(figsize=(10, 4))
-		mean_per_gate = np.array([float(self.study.cube[gi][self.seg.mask].mean()) for gi in range(self.study.cube.shape[0])])
+		mean_per_gate = np.array([float(study_cube_render[gi][self.seg.mask].mean()) for gi in range(study_cube_render.shape[0])])
 		mean_per_gate = mean_per_gate / (mean_per_gate.max() + 1e-8)
-		ax3.plot(np.arange(self.study.cube.shape[0]), mean_per_gate, "o-", color="#2c7fb8")
+		ax3.plot(np.arange(study_cube_render.shape[0]), mean_per_gate, "o-", color="#2c7fb8")
 		ax3.set_title("Curva de actividad miocárdica por gate")
 		ax3.set_xlabel("Gate")
 		ax3.set_ylabel("Intensidad normalizada")
 		ax3.grid(True, alpha=0.3)
+		self._stamp_export_figure(fig3, active_cine_widget)
 		fig3.tight_layout()
 		fig3.savefig(os.path.join(self.output_dir, "curva_tac.png"), dpi=150, bbox_inches="tight")
 		plt.close(fig3)
@@ -3225,8 +3396,8 @@ class MainWindow(QMainWindow):
 		if need_tab_render.get("curva_fevi", True):
 			fig_ef, ax_ef = plt.subplots(figsize=(10, 4.4), facecolor=style["fig_bg"])
 			ax_ef.set_facecolor(style["ax_bg"])
-			gate_axis = np.arange(self.study.cube.shape[0]) + 1
-			t_pct = np.linspace(0.0, 100.0, self.study.cube.shape[0], endpoint=False)
+			gate_axis = np.arange(study_cube_render.shape[0]) + 1
+			t_pct = np.linspace(0.0, 100.0, study_cube_render.shape[0], endpoint=False)
 			if ef.get("available"):
 				gate_volumes = np.asarray(ef.get("gate_volumes_ml", []), dtype=np.float64)
 				if gate_volumes.size != gate_axis.size:
@@ -3273,6 +3444,7 @@ class MainWindow(QMainWindow):
 				ax_ef.tick_params(axis="x", colors=style["subtle"])
 				ax_ef.tick_params(axis="y", colors=style["fg"])
 				ax_ef.grid(True, color=style["grid"], alpha=0.45)
+			self._stamp_export_figure(fig_ef, active_cine_widget)
 			fig_ef.tight_layout()
 			fig_ef.savefig(os.path.join(self.output_dir, "curva_fevi.png"), dpi=160, bbox_inches="tight", facecolor=fig_ef.get_facecolor())
 			plt.close(fig_ef)
@@ -3397,13 +3569,14 @@ class MainWindow(QMainWindow):
 			fontsize=13,
 			fontweight="bold",
 		)
+		self._stamp_export_figure(fig_v, active_cine_widget)
 		fig_v.savefig(os.path.join(self.output_dir, "ventriculograma.png"), dpi=155, bbox_inches="tight", facecolor=fig_v.get_facecolor())
 		plt.close(fig_v)
 
 		# Bull's eye directo de perfusión (colores de intensidad), inspirado en consolas clínicas.
 		from matplotlib.patches import Circle, Wedge
 		seg_map = np.asarray(self.aha.segment_map, dtype=np.int32)
-		mid_gate_cube = np.asarray(self.study.cube[mid_gate], dtype=np.float64)
+		mid_gate_cube = np.asarray(study_cube_render[mid_gate], dtype=np.float64)
 		mx = float(np.nanmax(mid_gate_cube)) if mid_gate_cube.size else 0.0
 		uptake_norm = mid_gate_cube / (mx + 1e-8)
 		seg_uptake: dict[int, float] = {}
@@ -3451,6 +3624,7 @@ class MainWindow(QMainWindow):
 		ax_b.text(0.0, 1.04, f"Bull's eye perfusión directa ({self.visual_style_combo.currentText()})", ha="center", va="bottom", color=style["fg"], fontsize=12, fontweight="bold")
 		ax_b.text(0.0, -1.02, "Colores de intensidad normalizada (gate medio)", ha="center", va="top", color=style["subtle"], fontsize=9)
 		ax_b.text(0.0, -1.09, "Uso clínico: resumen segmentario AHA rápido para detectar regiones de hipocaptación.", ha="center", va="top", color=style["subtle"], fontsize=8.4)
+		self._stamp_export_figure(fig_b, active_cine_widget)
 		fig_b.savefig(os.path.join(self.output_dir, "bullseye_directo.png"), dpi=170, bbox_inches="tight", facecolor=fig_b.get_facecolor())
 		plt.close(fig_b)
 
@@ -3612,6 +3786,7 @@ class MainWindow(QMainWindow):
 				cbar.ax.set_facecolor(perf_bg)
 			fig_pp.suptitle(f"Mapa polar de perfusión (apex en centro, base en borde) — {study_context_label} — rotación {rotation_deg:+d}°", color=perf_fg, fontsize=11.5, fontweight="bold")
 			fig_pp.text(0.5, 0.02, "Reconstrucción polar continua desde short-axis: 'aplastado' apex->base", ha="center", color=perf_subtle, fontsize=8.6)
+			self._stamp_export_figure(fig_pp, active_cine_widget)
 			fig_pp.savefig(os.path.join(self.output_dir, "polar_perfusion_directa.png"), dpi=185, bbox_inches="tight", facecolor=fig_pp.get_facecolor())
 			plt.close(fig_pp)
 
@@ -3621,8 +3796,8 @@ class MainWindow(QMainWindow):
 			except Exception:
 				Image = None
 
-			def _render_gate_frame(study_obj, seg_obj, apex_order, gate_index: int, label_text: str):
-				gate_cube = np.asarray(study_obj.cube[int(gate_index)], dtype=np.float64)
+			def _render_gate_frame(study_cube_all: np.ndarray, seg_obj, apex_order, gate_index: int, label_text: str):
+				gate_cube = np.asarray(study_cube_all[int(gate_index)], dtype=np.float64)
 				profiles_g = []
 				for s in apex_order:
 					pg = _slice_angular_profile_from_gate(gate_cube, seg_obj, int(s))
@@ -3651,7 +3826,7 @@ class MainWindow(QMainWindow):
 				ax_g.set_yticks([])
 				ax_g.imshow(cart_g, cmap=cmap_polar_perf, vmin=0.0, vmax=1.0)
 				_annotate_polar_guides(ax_g, int(cart_g.shape[0]))
-				ax_g.set_title(f"{label_text} gate {gate_index + 1}/{int(study_obj.cube.shape[0])}", color=perf_fg, fontsize=10, fontweight="bold")
+				ax_g.set_title(f"{label_text} gate {gate_index + 1}/{int(study_cube_all.shape[0])}", color=perf_fg, fontsize=10, fontweight="bold")
 				fig_g.tight_layout()
 				fig_g.canvas.draw()
 				w, h = fig_g.canvas.get_width_height()
@@ -3708,9 +3883,11 @@ class MainWindow(QMainWindow):
 
 			primary_frames: list[np.ndarray] = []
 			compare_frames: list[np.ndarray] = []
-			frame_count = int(self.study.cube.shape[0])
+			frame_count = int(study_cube_render.shape[0])
+			compare_cube_render = None
 			if self.compare_bundle is not None and self.compare_bundle.get("study") is not None:
-				frame_count = min(frame_count, int(self.compare_bundle["study"].cube.shape[0]))
+				compare_cube_render = self._apply_intestinal_mask_to_cube(self.compare_bundle["study"].cube, self.cine_compare)
+				frame_count = min(frame_count, int(compare_cube_render.shape[0]))
 				compare_apex_to_base = list(getattr(self.compare_bundle.get("aha"), "apex_to_base_order", []) or [])
 				if not compare_apex_to_base:
 					compare_apex_to_base = [int(s) for s in np.where(np.asarray(self.compare_bundle["seg"].mask).reshape(self.compare_bundle["seg"].mask.shape[0], -1).any(axis=1))[0].tolist()]
@@ -3718,12 +3895,12 @@ class MainWindow(QMainWindow):
 				compare_apex_to_base = []
 
 			for g in range(frame_count):
-				p_frame, p_pm = _render_gate_frame(self.study, self.seg, apex_to_base, g, primary_phase_label)
+				p_frame, p_pm = _render_gate_frame(study_cube_render, self.seg, apex_to_base, g, primary_phase_label)
 				if p_frame is None:
 					continue
 				primary_frames.append(p_frame)
 				if self.compare_bundle is not None and self.compare_bundle.get("study") is not None:
-					r_frame, r_pm = _render_gate_frame(self.compare_bundle["study"], self.compare_bundle["seg"], compare_apex_to_base, g, compare_phase_label)
+					r_frame, r_pm = _render_gate_frame(compare_cube_render, self.compare_bundle["seg"], compare_apex_to_base, g, compare_phase_label)
 					if r_frame is None:
 						compare_frames.append(p_frame)
 					else:
@@ -3815,6 +3992,7 @@ class MainWindow(QMainWindow):
 						fontweight="bold",
 					)
 				fig_m.text(0.5, 0.02, "Uso clínico: evaluar dinámica temporal del patrón polar; en stress/rest comparar evolución de sincronía por gate.", ha="center", color=perf_subtle, fontsize=8.2)
+				self._stamp_export_figure(fig_m, active_cine_widget)
 				fig_m.savefig(os.path.join(self.output_dir, "polar_cine_montaje.png"), dpi=160, bbox_inches="tight", facecolor=fig_m.get_facecolor())
 				plt.close(fig_m)
 
@@ -3822,9 +4000,15 @@ class MainWindow(QMainWindow):
 		if self.study is None or self.seg is None:
 			return
 		import matplotlib.pyplot as plt
+		try:
+			from scipy.ndimage import zoom as ndi_zoom
+		except Exception:
+			ndi_zoom = None
 		fast_mode = bool(self.compare_fast_drag_check.isChecked() and self.compare_interactive_fast_mode)
 		render_dpi = 130 if fast_mode else 240
 		interp_mode = "nearest" if fast_mode else "lanczos"
+		zoom_factor = max(1.0, float(self.compare_axes_zoom_slider.value()) / 100.0)
+		apply_intestinal = bool(self.compare_axes_intestinal_mask_check.isChecked())
 
 		def _norm(img):
 			arr = np.asarray(img, dtype=np.float64)
@@ -3838,6 +4022,32 @@ class MainWindow(QMainWindow):
 			arr = _norm(img)
 			return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
 
+		def _zoom_center(img2d: np.ndarray) -> np.ndarray:
+			arr = np.asarray(img2d, dtype=np.float64)
+			if arr.ndim != 2 or zoom_factor <= 1.001:
+				return arr
+			h, w = arr.shape
+			crop_h = max(8, int(round(h / zoom_factor)))
+			crop_w = max(8, int(round(w / zoom_factor)))
+			y0 = max(0, (h - crop_h) // 2)
+			x0 = max(0, (w - crop_w) // 2)
+			crop = arr[y0:y0 + crop_h, x0:x0 + crop_w]
+			if crop.size == 0:
+				return arr
+			if (not fast_mode) and (ndi_zoom is not None):
+				scale_y = float(h) / float(max(1, crop_h))
+				scale_x = float(w) / float(max(1, crop_w))
+				up = ndi_zoom(crop, (scale_y, scale_x), order=3, mode="nearest", prefilter=True)
+			else:
+				zy = max(1, int(np.ceil(h / max(1, crop_h))))
+				zx = max(1, int(np.ceil(w / max(1, crop_w))))
+				up = np.repeat(np.repeat(crop, zy, axis=0), zx, axis=1)
+			if up.shape[0] < h or up.shape[1] < w:
+				pad_y = max(0, h - up.shape[0])
+				pad_x = max(0, w - up.shape[1])
+				up = np.pad(up, ((0, pad_y), (0, pad_x)), mode="edge")
+			return up[:h, :w]
+
 		def _sample_even(indices: list[int], n_cols: int) -> list[int]:
 			if not indices:
 				return []
@@ -3850,6 +4060,7 @@ class MainWindow(QMainWindow):
 			return int(max(0, min(max(0, limit - 1), int(value) + int(shift))))
 
 		def _axis_orient(img2d: np.ndarray, axis_name: str) -> np.ndarray:
+			img2d = _zoom_center(img2d)
 			if axis_name == "HLA":
 				return _windowed(img2d)
 			if axis_name == "VLA":
@@ -3896,9 +4107,14 @@ class MainWindow(QMainWindow):
 				return "REPOSO"
 			return fallback
 
-		def _extract_rows(study, seg, path_text: str, gate_override: int | None = None):
+		def _extract_rows(study, seg, path_text: str, cine_widget: CineWidget | None, gate_override: int | None = None):
 			gate = max(0, min(int(study.cube.shape[0]) - 1, int(self.compare_gate_spin.value()) - 1 if gate_override is None else int(gate_override)))
 			vol_gate = np.asarray(study.cube[int(gate)], dtype=np.float64)
+			if apply_intestinal and cine_widget is not None:
+				try:
+					vol_gate = cine_widget.apply_intestinal_mask_to_gate_volume(vol_gate, gate_index=int(gate))
+				except Exception:
+					pass
 			mask3d = np.asarray(seg.mask, dtype=bool)
 			n_slices, h, w = vol_gate.shape
 			rows = []
@@ -3944,12 +4160,19 @@ class MainWindow(QMainWindow):
 
 		def _build_compare_figure(primary_gate_override: int | None = None, secondary_gate_override: int | None = None):
 			show_mask = bool(self.compare_mask_check.isChecked())
-			primary_gate, primary_rows, primary_phase = _extract_rows(self.study, self.seg, self.file_edit.text().strip(), gate_override=primary_gate_override)
+			primary_gate, primary_rows, primary_phase = _extract_rows(
+				self.study,
+				self.seg,
+				self.file_edit.text().strip(),
+				self.cine,
+				gate_override=primary_gate_override,
+			)
 			if self.compare_bundle is not None:
 				secondary_gate, secondary_rows, secondary_phase = _extract_rows(
 					self.compare_bundle["study"],
 					self.compare_bundle["seg"],
 					str(self.compare_bundle.get("path", self.compare_label or "comparacion")),
+					self.cine_compare,
 					gate_override=secondary_gate_override,
 				)
 			else:
@@ -3997,8 +4220,9 @@ class MainWindow(QMainWindow):
 			if secondary_gate is not None:
 				gate_text += f" | Gate reposo {int(secondary_gate) + 1}"
 			mask_txt = "ON" if show_mask else "OFF"
+			int_txt = "ON" if apply_intestinal else "OFF"
 			fig.suptitle(
-				f"Comparativa de ejes clínica — 16 cortes por eje — {gate_text} — Máscara {mask_txt} — Top {int(self.compare_window_high_slider.value())}% / Base {int(self.compare_window_low_slider.value())}%",
+				f"Comparativa de ejes clínica — 16 cortes por eje — {gate_text} — Máscara {mask_txt} — ROI intestino {int_txt} — Zoom {int(self.compare_axes_zoom_slider.value())}% — Top {int(self.compare_window_high_slider.value())}% / Base {int(self.compare_window_low_slider.value())}%",
 				fontsize=12,
 				fontweight="bold",
 				color="#f8fafc",
@@ -4007,6 +4231,7 @@ class MainWindow(QMainWindow):
 			return fig
 
 		fig = _build_compare_figure()
+		self._stamp_export_figure(fig, self.cine)
 		fig.savefig(os.path.join(self.output_dir, "comparacion_ejes.png"), dpi=render_dpi, bbox_inches="tight")
 		if os.path.exists(os.path.join(self.output_dir, "comparacion_ejes.gif")):
 			try:
@@ -4339,45 +4564,17 @@ class MainWindow(QMainWindow):
 			self._log("Modo básico activado: foco en asincronía con render rápido.")
 		self._rebuild_tabs_for_mode()
 		if self.study is not None and self.phase_result is not None:
-			must_render = self.advanced_mode_enabled and not all(
-				os.path.exists(os.path.join(self.output_dir, name))
-				for name in (
-					"polar_perfusion_directa.png",
-					"polar_cine_montaje.png",
-					"comparacion_ejes.png",
-					"ventriculograma.png",
-					"bullseye_directo.png",
-				)
-			)
-			# Si hay comparación cargada, al entrar a avanzado hay que garantizar
-			# también las salidas avanzadas del bundle secundario (reposo) para evitar
-			# pestañas vacías o mostrando solo esfuerzo.
-			must_render_compare = False
-			if self.advanced_mode_enabled and self.compare_bundle is not None:
-				must_render_compare = not all(
-					os.path.exists(os.path.join(self.compare_output_dir, name))
-					for name in (
-						"polar_perfusion_directa.png",
-						"polar_cine_montaje.png",
-						"comparacion_ejes.png",
-						"ventriculograma.png",
-						"bullseye_directo.png",
-					)
-				)
-			if must_render:
-				self._set_progress(78, "Actualizando modo de visualización...")
+			if self.advanced_mode_enabled:
+				self._set_progress(78, "Regenerando paneles avanzados...")
+				self.statusBar().showMessage("Regenerando avanzado con parámetros actuales...")
+				self._log("Modo avanzado: regeneración completa de pestañas/figuras para evitar vistas vacías o desactualizadas.")
 				self._write_outputs()
-			if self.advanced_mode_enabled and self.compare_bundle is not None and (must_render or must_render_compare):
-				self._set_progress(84, "Actualizando comparación en pestañas avanzadas...")
-				self.statusBar().showMessage("Regenerando avanzado (esfuerzo + reposo)...")
-				self._log("Modo avanzado: regenerando paneles de esfuerzo + reposo.")
-				self._write_outputs_for_bundle(self.compare_bundle, self.compare_output_dir)
-				# Re-generar principal con compare activo para mantener mapas delta y
-				# luego recomponer vistas lado a lado.
-				self._write_outputs()
-				left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
-				right_label = self.compare_label or "Comparación"
-				self._compose_dual_tab_images(left_label, right_label)
+				if self.compare_bundle is not None:
+					self._set_progress(84, "Regenerando comparación (reposo)...")
+					self._write_outputs_for_bundle(self.compare_bundle, self.compare_output_dir)
+					left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
+					right_label = self.compare_label or "Comparación"
+					self._compose_dual_tab_images(left_label, right_label)
 			self._load_previews()
 			self._set_progress(100, "Modo actualizado")
 
@@ -4558,6 +4755,7 @@ class MainWindow(QMainWindow):
 	def _process_secondary_bundle(self, path: str) -> dict:
 		comp_study = dicom_loader.load(path, verbose=False)
 		comp_axis = self._load_axis_companions(path)
+		comp_cube_for_processing = self._apply_intestinal_mask_to_cube(comp_study.cube, self.cine_compare)
 		seg_method = "auto"
 		manual_rois = None
 		parsed_compare_rois = self._parse_manual_rois_text(self.compare_manual_rois_text)
@@ -4570,14 +4768,14 @@ class MainWindow(QMainWindow):
 			seg_method = "manual"
 			manual_rois = valid_compare_rois
 		comp_seg = segment_myocardium(
-			comp_study.cube,
+			comp_cube_for_processing,
 			method=seg_method,
 			threshold_frac=float(self.threshold_spin.value()),
 			smooth_sigma=float(self.sigma_spin.value()),
 			manual_rois=manual_rois,
 		)
 		comp_phase = phase_analysis(
-			comp_study.cube,
+			comp_cube_for_processing,
 			comp_seg.mask,
 			harmonics=int(self.harmonics_spin.value()),
 			amplitude_threshold_frac=float(self.phase_threshold_spin.value()),
@@ -4616,6 +4814,7 @@ class MainWindow(QMainWindow):
 		saved_territory = self.territory
 		saved_compare_bundle = self.compare_bundle
 		saved_output_path_override = getattr(self, "_output_study_path_override", None)
+		saved_output_cine_override = getattr(self, "_output_cine_widget_override", None)
 		try:
 			self.output_dir = target_dir
 			self.study = bundle["study"]
@@ -4629,6 +4828,7 @@ class MainWindow(QMainWindow):
 			# Al renderizar el bundle secundario, evitar compararlo consigo mismo.
 			self.compare_bundle = None
 			self._output_study_path_override = str(bundle.get("path", ""))
+			self._output_cine_widget_override = self.cine_compare
 			self._write_outputs()
 		finally:
 			self.output_dir = saved_output_dir
@@ -4642,6 +4842,7 @@ class MainWindow(QMainWindow):
 			self.territory = saved_territory
 			self.compare_bundle = saved_compare_bundle
 			self._output_study_path_override = saved_output_path_override
+			self._output_cine_widget_override = saved_output_cine_override
 
 	def _compose_dual_tab_images(self, left_label: str, right_label: str):
 		import matplotlib.pyplot as plt
@@ -4863,6 +5064,7 @@ class MainWindow(QMainWindow):
 		)
 
 		fig.suptitle("Comparación de disincronía entre estudios (stress vs rest)", fontsize=13, fontweight="bold")
+		self._stamp_export_figure(fig, self.cine)
 		fig.tight_layout(rect=(0, 0, 1, 0.96))
 		fig.savefig(os.path.join(self.output_dir, "comparacion_stress_rest.png"), dpi=160, bbox_inches="tight")
 		plt.close(fig)
