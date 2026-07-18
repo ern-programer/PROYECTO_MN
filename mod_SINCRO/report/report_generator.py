@@ -259,7 +259,6 @@ def generate_report(
 		("polar_perfusion_directa.png", "Mapa polar continuo de perfusión (apex-centro, base-borde). Uso: heterogeneidad perfusional regional continua."),
 		("polar_cine_montaje.png", "Polar cine gatillado (muestra de gates). Uso: dinámica temporal del patrón polar. Animados: polar_cine.gif / polar_cine.mp4."),
 		("bullseye_directo.png", "Bull's-eye segmentario AHA (17) de perfusión directa. Uso: resumen rápido de intensidad regional."),
-		("histograma.png", "Histograma de fase."),
 		("ejes_ortogonales.png", "Ejes SA/HLA/VLA."),
 		("panel_clinico_convencion.png", "Panel clínico A/B (ED/ES)."),
 		("panel_funcional_gated.png", "Panel funcional gated (ED/ES + curvas de volumen y fase)."),

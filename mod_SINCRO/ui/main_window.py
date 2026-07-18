@@ -72,6 +72,12 @@ from ui.cine_widget import CineWidget
 from version import __version__
 
 
+RAW_PHASE_QC_AMP_FILTER = 0.10
+CLINICAL_PHASE_AMP_FILTER_DEFAULT = 0.40
+LOW_CONFIDENCE_TAIL_DEG = 120.0
+LOW_CONFIDENCE_TAIL_WARN_PCT = 5.0
+
+
 class MainWindow(QMainWindow):
 	def __init__(self, initial_path: str | None = None):
 		super().__init__()
@@ -87,8 +93,11 @@ class MainWindow(QMainWindow):
 		self.study = None
 		self.axis_companions: dict[str, object] = {}
 		self.seg = None
+		self.phase_result_raw = None
 		self.phase_result = None
+		self.metrics_raw = None
 		self.metrics = None
+		self.phase_qc = None
 		self.aha = None
 		self.phase_by_seg = None
 		self.territory = None
@@ -210,9 +219,9 @@ class MainWindow(QMainWindow):
 		self.harmonics_spin.setValue(1)
 
 		self.phase_threshold_spin = QDoubleSpinBox()
-		self.phase_threshold_spin.setRange(0.01, 0.50)
+		self.phase_threshold_spin.setRange(0.01, 0.80)
 		self.phase_threshold_spin.setSingleStep(0.01)
-		self.phase_threshold_spin.setValue(0.10)
+		self.phase_threshold_spin.setValue(CLINICAL_PHASE_AMP_FILTER_DEFAULT)
 
 		self.normalize_check = QCheckBox("Normalizar referencia de fase")
 		self.normalize_check.setChecked(False)
@@ -306,7 +315,7 @@ class MainWindow(QMainWindow):
 		controls_form.addRow("Threshold", self.threshold_spin)
 		controls_form.addRow("Smooth sigma", self.sigma_spin)
 		controls_form.addRow("Harmonics", self.harmonics_spin)
-		controls_form.addRow("Amplitude filter", self.phase_threshold_spin)
+		controls_form.addRow("Amplitude filter clínico", self.phase_threshold_spin)
 		controls_form.addRow("Colormap fase", self.cmap_combo)
 		controls_form.addRow("Estilo visual", self.visual_style_combo)
 		controls_form.addRow("Rotación polar", self.polar_rotation_spin)
@@ -328,7 +337,7 @@ class MainWindow(QMainWindow):
 		self.threshold_spin.setToolTip("Porcentaje del máximo usado para separar miocardio del fondo.")
 		self.sigma_spin.setToolTip("Suavizado espacial aplicado antes del threshold en segmentación.")
 		self.harmonics_spin.setToolTip("Cantidad de armónicos usados para estabilizar la fase.")
-		self.phase_threshold_spin.setToolTip("Filtro de amplitud: descarta voxels débiles o ruidosos.")
+		self.phase_threshold_spin.setToolTip("Filtro clínico robusto de amplitud. El QC crudo se calcula aparte con amp 0.10 y no entra al informe.")
 		self.cmap_combo.setToolTip("Colormap cíclico para visualizar fase.")
 		self.visual_style_combo.setToolTip("Tema visual de los paneles clínicos (curva FEVI, panel funcional gated y bull's eye).")
 		self.polar_rotation_spin.setToolTip("Rota el mapa polar de perfusión continua. Ajustalo para alinear ANT/SEP/LAT/INF a tu convención.")
@@ -2198,8 +2207,11 @@ class MainWindow(QMainWindow):
 		self.study = None
 		self.axis_companions = {}
 		self.seg = None
+		self.phase_result_raw = None
 		self.phase_result = None
+		self.metrics_raw = None
 		self.metrics = None
+		self.phase_qc = None
 		self.aha = None
 		self.phase_by_seg = None
 		self.territory = None
@@ -2373,6 +2385,57 @@ class MainWindow(QMainWindow):
 		except Exception:
 			pass
 
+	def _annotate_phase_metrics(self, metrics: dict, phase_result, amp_filter: float, label: str) -> dict:
+		out = dict(metrics or {})
+		out["amp_filter"] = round(float(amp_filter), 2)
+		out["amp_label"] = str(label)
+		out["n_voxels_kept"] = int(getattr(phase_result, "n_voxels_kept", out.get("n_voxels", 0)))
+		out["n_voxels_total"] = int(getattr(phase_result, "n_voxels_total", out.get("n_voxels", 0)))
+		return out
+
+	def _build_phase_qc(self, raw_result, clinical_result, raw_metrics: dict, clinical_metrics: dict) -> dict:
+		if raw_result is None or clinical_result is None:
+			return {}
+		raw_phases = np.asarray(getattr(raw_result, "phases_deg", []), dtype=np.float64)
+		raw_amps = np.asarray(getattr(raw_result, "amplitudes", []), dtype=np.float64)
+		if raw_phases.size == 0 or raw_amps.size != raw_phases.size:
+			return {}
+		clinical_filter = float(getattr(clinical_result, "amplitude_threshold_frac", CLINICAL_PHASE_AMP_FILTER_DEFAULT))
+		amp_max = float(np.nanmax(raw_amps)) if raw_amps.size else 0.0
+		low_amp = raw_amps < (clinical_filter * amp_max) if amp_max > 0.0 else np.zeros(raw_amps.shape, dtype=bool)
+		clinical_mean = float(clinical_metrics.get("mean_phase", raw_metrics.get("mean_phase", 0.0)))
+		centered = (raw_phases - clinical_mean + 180.0) % 360.0 - 180.0
+		late_tail = np.abs(centered) > LOW_CONFIDENCE_TAIL_DEG
+		low_tail = low_amp & late_tail
+		low_tail_pct = float(np.mean(low_tail) * 100.0) if raw_phases.size else 0.0
+		low_tail_n = int(np.count_nonzero(low_tail))
+		class_changed = str(raw_metrics.get("classification", "")) != str(clinical_metrics.get("classification", ""))
+		warn = bool(low_tail_pct >= LOW_CONFIDENCE_TAIL_WARN_PCT or class_changed)
+		return {
+			"raw_filter": float(RAW_PHASE_QC_AMP_FILTER),
+			"clinical_filter": round(clinical_filter, 2),
+			"raw_classification": str(raw_metrics.get("classification", "N/D")),
+			"clinical_classification": str(clinical_metrics.get("classification", "N/D")),
+			"class_changed": class_changed,
+			"low_confidence_tail_pct": round(low_tail_pct, 1),
+			"low_confidence_tail_n": low_tail_n,
+			"raw_voxels": int(getattr(raw_result, "n_voxels_kept", raw_phases.size)),
+			"clinical_voxels": int(getattr(clinical_result, "n_voxels_kept", 0)),
+			"total_voxels": int(getattr(raw_result, "n_voxels_total", raw_phases.size)),
+			"warn": warn,
+		}
+
+	def _phase_qc_note(self, qc: dict | None = None) -> str:
+		qc = qc or self.phase_qc or {}
+		if not qc:
+			return ""
+		parts = []
+		if qc.get("class_changed"):
+			parts.append(f"cambio {qc.get('raw_classification')}→{qc.get('clinical_classification')}")
+		if float(qc.get("low_confidence_tail_pct", 0.0)) >= LOW_CONFIDENCE_TAIL_WARN_PCT:
+			parts.append(f"cola baja amplitud {qc.get('low_confidence_tail_pct')}%")
+		return "; ".join(parts)
+
 	def process_current(self):
 		path = self.file_edit.text().strip()
 		if not path:
@@ -2469,25 +2532,46 @@ class MainWindow(QMainWindow):
 				self._set_progress(30, "Segmentación sin cambios (cache)...")
 				self._log("Cache: segmentación reutilizada.")
 
+			clinical_amp_filter = float(self.phase_threshold_spin.value())
 			phase_payload = {
 				"seg": self._cache_seg_sig,
 				"harmonics": int(self.harmonics_spin.value()),
-				"amp_filter": round(float(self.phase_threshold_spin.value()), 5),
+				"raw_amp_filter": round(float(RAW_PHASE_QC_AMP_FILTER), 5),
+				"clinical_amp_filter": round(clinical_amp_filter, 5),
 				"normalize_reference": bool(self.normalize_check.isChecked()),
 			}
 			phase_sig = self._hash_payload(phase_payload)
 			if self.phase_result is None or phase_sig != self._cache_phase_sig:
 				t_stage = perf_counter()
-				self._set_progress(50, "Análisis de fase sobre estudio bruto...")
+				self._set_progress(50, "Análisis de fase crudo y clínico robusto...")
+				self.phase_result_raw = phase_analysis(
+					cube_for_analysis,
+					self.seg.mask,
+					harmonics=int(self.harmonics_spin.value()),
+					amplitude_threshold_frac=float(RAW_PHASE_QC_AMP_FILTER),
+					normalize_reference=self.normalize_check.isChecked(),
+				)
 				self.phase_result = phase_analysis(
 					cube_for_analysis,
 					self.seg.mask,
 					harmonics=int(self.harmonics_spin.value()),
-					amplitude_threshold_frac=float(self.phase_threshold_spin.value()),
+					amplitude_threshold_frac=clinical_amp_filter,
 					normalize_reference=self.normalize_check.isChecked(),
 				)
 				self._set_progress(65, "Métricas y segmentos AHA...")
-				self.metrics = calculate_phase_metrics(self.phase_result.phases_deg)
+				self.metrics_raw = self._annotate_phase_metrics(
+					calculate_phase_metrics(self.phase_result_raw.phases_deg),
+					self.phase_result_raw,
+					RAW_PHASE_QC_AMP_FILTER,
+					"crudo ROI",
+				)
+				self.metrics = self._annotate_phase_metrics(
+					calculate_phase_metrics(self.phase_result.phases_deg),
+					self.phase_result,
+					clinical_amp_filter,
+					"clínico robusto",
+				)
+				self.phase_qc = self._build_phase_qc(self.phase_result_raw, self.phase_result, self.metrics_raw, self.metrics)
 				self.aha = map_to_17_segments(self.seg)
 				self.phase_by_seg = phase_by_segment(self.phase_result.phase_map, self.aha)
 				self.territory = territory_analysis(self.phase_by_seg)
@@ -2497,8 +2581,30 @@ class MainWindow(QMainWindow):
 			else:
 				self._set_progress(65, "Fase/métricas sin cambios (cache)...")
 				self._log("Cache: fase, métricas y segmentación AHA reutilizadas.")
+				if self.phase_result_raw is None:
+					self.phase_result_raw = phase_analysis(
+						cube_for_analysis,
+						self.seg.mask,
+						harmonics=int(self.harmonics_spin.value()),
+						amplitude_threshold_frac=float(RAW_PHASE_QC_AMP_FILTER),
+						normalize_reference=self.normalize_check.isChecked(),
+					)
+				if self.metrics_raw is None:
+					self.metrics_raw = self._annotate_phase_metrics(
+						calculate_phase_metrics(self.phase_result_raw.phases_deg),
+						self.phase_result_raw,
+						RAW_PHASE_QC_AMP_FILTER,
+						"crudo ROI",
+					)
 				if self.metrics is None:
-					self.metrics = calculate_phase_metrics(self.phase_result.phases_deg)
+					self.metrics = self._annotate_phase_metrics(
+						calculate_phase_metrics(self.phase_result.phases_deg),
+						self.phase_result,
+						clinical_amp_filter,
+						"clínico robusto",
+					)
+				if self.phase_qc is None:
+					self.phase_qc = self._build_phase_qc(self.phase_result_raw, self.phase_result, self.metrics_raw, self.metrics)
 				if self.aha is None:
 					self.aha = map_to_17_segments(self.seg)
 				if self.phase_by_seg is None:
@@ -2944,11 +3050,26 @@ class MainWindow(QMainWindow):
 		clinical.append(f"Visualizando: {ctx['phase']}")
 		clinical.append(f"Paciente: {ctx['patient_name']}  |  ID: {ctx['patient_id']}  |  Fecha: {ctx['study_date']}")
 		clinical.append("")
-		clinical.append("Resultado clínico")
+		clinical.append(f"Resultado clínico robusto (amp {self.metrics.get('amp_filter', CLINICAL_PHASE_AMP_FILTER_DEFAULT):.2f})")
 		clinical.append(f"  Clasificación de disincronía: {self.metrics.get('classification')}")
 		clinical.append(f"  Phase SD: {self.metrics.get('phase_sd')}°")
 		clinical.append(f"  Bandwidth: {self.metrics.get('bandwidth')}°")
 		clinical.append(f"  Entropy: {self.metrics.get('entropy')}")
+		if self.metrics_raw is not None and self.phase_qc:
+			clinical.append("")
+			clinical.append("Control QC en pantalla")
+			clinical.append(
+				f"  Resultado crudo amp {self.metrics_raw.get('amp_filter', RAW_PHASE_QC_AMP_FILTER):.2f}: "
+				f"{self.metrics_raw.get('classification')} "
+				f"(PSD {self.metrics_raw.get('phase_sd')}°, BW {self.metrics_raw.get('bandwidth')}°)"
+			)
+			if self.phase_qc.get("class_changed"):
+				clinical.append(
+					f"  Cambio de clase: {self.phase_qc.get('raw_classification')} → {self.phase_qc.get('clinical_classification')}"
+				)
+			if self.phase_qc.get("warn"):
+				clinical.append("  Interpretación QC: posible sobreestimación cruda por voxels de baja amplitud.")
+			clinical.append("  Nota: el resultado crudo/QC no se incluye en el informe PDF.")
 		clinical.append("")
 
 		# Comparación contra base de datos normal (por sexo/protocolo).
@@ -3037,7 +3158,8 @@ class MainWindow(QMainWindow):
 		technical.append(f"  Threshold: {self.threshold_spin.value():.2f}")
 		technical.append(f"  Smooth sigma: {self.sigma_spin.value():.1f}")
 		technical.append(f"  Harmonics: {self.harmonics_spin.value()}")
-		technical.append(f"  Amp filter: {self.phase_threshold_spin.value():.2f}")
+		technical.append(f"  Amp filter clínico: {self.phase_threshold_spin.value():.2f}")
+		technical.append(f"  Amp filter crudo QC: {RAW_PHASE_QC_AMP_FILTER:.2f}")
 		technical.append(f"  Normalize reference: {'sí' if self.normalize_check.isChecked() else 'no'}")
 		if vol["voxel_ml"] is not None:
 			technical.append(f"  Volumen voxel: {vol['voxel_ml']:.4f} mL")
@@ -3045,6 +3167,16 @@ class MainWindow(QMainWindow):
 		technical.append("Métricas técnicas")
 		for key in ["mean_phase", "phase_sd", "bandwidth", "entropy", "asynchrony_index", "peak_phase", "peak_width", "latest_activation_phase", "classification"]:
 			technical.append(f"  {key}: {self.metrics.get(key)}")
+		if self.metrics_raw is not None:
+			technical.append("")
+			technical.append("QC crudo (solo pantalla; no informe)")
+			for key in ["phase_sd", "bandwidth", "entropy", "peak_phase", "classification", "n_voxels_kept", "n_voxels_total"]:
+				technical.append(f"  raw_{key}: {self.metrics_raw.get(key)}")
+		if self.phase_qc:
+			technical.append("")
+			technical.append("QC estabilidad por amplitud")
+			for key in ["raw_filter", "clinical_filter", "class_changed", "low_confidence_tail_pct", "low_confidence_tail_n", "raw_voxels", "clinical_voxels", "total_voxels", "warn"]:
+				technical.append(f"  {key}: {self.phase_qc.get(key)}")
 
 		self.summary_clinical.setPlainText("\n".join(clinical))
 		self.summary_technical.setPlainText("\n".join(technical))
@@ -3430,7 +3562,20 @@ class MainWindow(QMainWindow):
 			canvas.save(os.path.join(self.output_dir, "delta_combo.png"))
 
 		if render_histograma:
-			hfig = build_phase_histogram(self.phase_result.phases_deg, metrics=self.metrics, bins=72, title=f"Phase Histogram — {study_context_label}")
+			if self.phase_result_raw is not None and self.metrics_raw is not None:
+				hfig = build_phase_histogram(
+					self.phase_result_raw.phases_deg,
+					metrics=self.metrics_raw,
+					bins=72,
+					title=f"Phase Histogram QC — {study_context_label}",
+					comparison_phases_deg=self.phase_result.phases_deg,
+					comparison_metrics=self.metrics,
+					primary_label=f"Crudo amp {RAW_PHASE_QC_AMP_FILTER:.2f}",
+					comparison_label=f"Clínico amp {float(self.metrics.get('amp_filter', self.phase_threshold_spin.value())):.2f}",
+					qc_note=self._phase_qc_note(),
+				)
+			else:
+				hfig = build_phase_histogram(self.phase_result.phases_deg, metrics=self.metrics, bins=72, title=f"Phase Histogram — {study_context_label}")
 			self._stamp_export_figure(hfig, active_cine_widget)
 			save_histogram(hfig, os.path.join(self.output_dir, "histograma.png"), dpi=150)
 			plt.close(hfig)
@@ -4684,7 +4829,7 @@ class MainWindow(QMainWindow):
 			"threshold": float(self.threshold_spin.value()),
 			"smooth_sigma": float(self.sigma_spin.value()),
 			"harmonics": int(self.harmonics_spin.value()),
-			"amp_filter": float(self.phase_threshold_spin.value()),
+			"amp_filter": float(self.metrics.get("amp_filter", self.phase_threshold_spin.value())),
 			"visual_style": str(self.visual_style_combo.currentText()),
 			"polar_rotation_deg": int(self.polar_rotation_spin.value()),
 			"polar_cine_speed_ms": int(self.polar_cine_speed_spin.value()),
@@ -5098,7 +5243,26 @@ class MainWindow(QMainWindow):
 			amplitude_threshold_frac=float(self.phase_threshold_spin.value()),
 			normalize_reference=self.normalize_check.isChecked(),
 		)
-		comp_metrics = calculate_phase_metrics(comp_phase.phases_deg)
+		comp_phase_raw = phase_analysis(
+			comp_cube_for_analysis,
+			comp_seg.mask,
+			harmonics=int(self.harmonics_spin.value()),
+			amplitude_threshold_frac=float(RAW_PHASE_QC_AMP_FILTER),
+			normalize_reference=self.normalize_check.isChecked(),
+		)
+		comp_metrics_raw = self._annotate_phase_metrics(
+			calculate_phase_metrics(comp_phase_raw.phases_deg),
+			comp_phase_raw,
+			RAW_PHASE_QC_AMP_FILTER,
+			"crudo ROI",
+		)
+		comp_metrics = self._annotate_phase_metrics(
+			calculate_phase_metrics(comp_phase.phases_deg),
+			comp_phase,
+			float(self.phase_threshold_spin.value()),
+			"clínico robusto",
+		)
+		comp_phase_qc = self._build_phase_qc(comp_phase_raw, comp_phase, comp_metrics_raw, comp_metrics)
 		comp_aha = map_to_17_segments(comp_seg)
 		comp_phase_by_seg = phase_by_segment(comp_phase.phase_map, comp_aha)
 		comp_territory = territory_analysis(comp_phase_by_seg)
@@ -5110,7 +5274,10 @@ class MainWindow(QMainWindow):
 			"axis_companions": comp_axis,
 			"seg": comp_seg,
 			"phase_result": comp_phase,
+			"phase_result_raw": comp_phase_raw,
 			"metrics": comp_metrics,
+			"metrics_raw": comp_metrics_raw,
+			"phase_qc": comp_phase_qc,
 			"aha": comp_aha,
 			"phase_by_seg": comp_phase_by_seg,
 			"territory": comp_territory,
@@ -5125,7 +5292,10 @@ class MainWindow(QMainWindow):
 		saved_axis = self.axis_companions
 		saved_seg = self.seg
 		saved_phase = self.phase_result
+		saved_phase_raw = self.phase_result_raw
 		saved_metrics = self.metrics
+		saved_metrics_raw = self.metrics_raw
+		saved_phase_qc = self.phase_qc
 		saved_aha = self.aha
 		saved_phase_by_seg = self.phase_by_seg
 		saved_territory = self.territory
@@ -5138,7 +5308,10 @@ class MainWindow(QMainWindow):
 			self.axis_companions = bundle["axis_companions"]
 			self.seg = bundle["seg"]
 			self.phase_result = bundle["phase_result"]
+			self.phase_result_raw = bundle.get("phase_result_raw")
 			self.metrics = bundle["metrics"]
+			self.metrics_raw = bundle.get("metrics_raw")
+			self.phase_qc = bundle.get("phase_qc")
 			self.aha = bundle["aha"]
 			self.phase_by_seg = bundle["phase_by_seg"]
 			self.territory = bundle["territory"]
@@ -5153,7 +5326,10 @@ class MainWindow(QMainWindow):
 			self.axis_companions = saved_axis
 			self.seg = saved_seg
 			self.phase_result = saved_phase
+			self.phase_result_raw = saved_phase_raw
 			self.metrics = saved_metrics
+			self.metrics_raw = saved_metrics_raw
+			self.phase_qc = saved_phase_qc
 			self.aha = saved_aha
 			self.phase_by_seg = saved_phase_by_seg
 			self.territory = saved_territory
