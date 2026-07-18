@@ -242,6 +242,7 @@ def generate_report(
 		f"Amp filter={_safe_float(processing_params.get('amp_filter'), 2)} | "
 		f"Estilo visual={processing_params.get('visual_style', 'N/D')} | "
 		f"Rotación polar={processing_params.get('polar_rotation_deg', 'N/D')}° | "
+		f"Suavizado polar={processing_params.get('polar_perf_smooth_method', 'N/D')} {_safe_float(processing_params.get('polar_perf_smooth_strength'), 2)} | "
 		f"Polar cine={processing_params.get('polar_cine_speed_ms', 'N/D')} ms/frame | "
 		f"MP4 polar cine={'sí' if processing_params.get('export_polar_mp4', False) else 'no'}"
 	)
@@ -261,7 +262,8 @@ def generate_report(
 		("histograma.png", "Histograma de fase."),
 		("ejes_ortogonales.png", "Ejes SA/HLA/VLA."),
 		("panel_clinico_convencion.png", "Panel clínico A/B (ED/ES)."),
-		("ventriculograma.png", "Panel funcional gated SPECT (ED/ES + curvas de volumen y fase)."),
+		("panel_funcional_gated.png", "Panel funcional gated (ED/ES + curvas de volumen y fase)."),
+		("ventriculograma.png", "Panel funcional gated (ED/ES + curvas de volumen y fase)."),
 		("comparacion_ejes.png", "Comparación original vs reconstruido."),
 		("comparacion_stress_rest.png", "Comparación de disincronía entre estudios (stress vs rest): PSD, BW, Kurtosis, Entropy con Δ e interpretación de stunning."),
 		("curva_tac.png", "Curva de actividad por gate."),

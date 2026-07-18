@@ -126,6 +126,16 @@ class MainWindow(QMainWindow):
 		self.compare_axes_refresh_timer = QTimer(self)
 		self.compare_axes_refresh_timer.setSingleShot(True)
 		self.compare_axes_refresh_timer.timeout.connect(self._refresh_compare_axes_panel_now)
+		self._deferred_hq_job: str = ""
+		self._deferred_compare_bundle: dict | None = None
+		self._deferred_compare_left_label = ""
+		self._deferred_compare_right_label = ""
+		self._deferred_hq_generation = 0
+		self._deferred_hq_running = False
+		self._deferred_hq_timer = QTimer(self)
+		self._deferred_hq_timer.setSingleShot(True)
+		self._deferred_hq_timer.timeout.connect(self._run_deferred_hq_render)
+		self._lazy_render_pending_tabs: set[str] = set()
 		self._cache_study_sig = ""
 		self._cache_seg_sig = ""
 		self._cache_phase_sig = ""
@@ -144,7 +154,7 @@ class MainWindow(QMainWindow):
 			"polar_perfusion_directa",
 			"polar_cine_montaje",
 			"comparacion_ejes",
-			"ventriculograma",
+			"panel_funcional_gated",
 			"bullseye_directo",
 		]
 
@@ -206,7 +216,7 @@ class MainWindow(QMainWindow):
 
 		self.normalize_check = QCheckBox("Normalizar referencia de fase")
 		self.normalize_check.setChecked(False)
-		self.global_intestinal_render_check = QCheckBox("Atenuación intestinal global en salidas")
+		self.global_intestinal_render_check = QCheckBox("Atenuación intestinal visual global")
 		self.global_intestinal_render_check.setChecked(True)
 		self.global_intestinal_render_check.toggled.connect(self._on_global_intestinal_render_toggled)
 
@@ -238,6 +248,20 @@ class MainWindow(QMainWindow):
 		self.polar_rotation_spin.setSingleStep(5)
 		self.polar_rotation_spin.setValue(0)
 		self.polar_rotation_spin.setSuffix("°")
+		self.polar_perf_smooth_method_combo = QComboBox()
+		self.polar_perf_smooth_method_combo.addItems(["Gaussiano", "Butterworth"])
+		self.polar_perf_smooth_method_combo.setCurrentText("Gaussiano")
+		self.polar_perf_smooth_strength_spin = QDoubleSpinBox()
+		self.polar_perf_smooth_strength_spin.setRange(0.0, 8.0)
+		self.polar_perf_smooth_strength_spin.setSingleStep(0.25)
+		self.polar_perf_smooth_strength_spin.setDecimals(2)
+		self.polar_perf_smooth_strength_spin.setValue(2.0)
+		polar_perf_smooth_widget = QWidget()
+		polar_perf_smooth_layout = QHBoxLayout(polar_perf_smooth_widget)
+		polar_perf_smooth_layout.setContentsMargins(0, 0, 0, 0)
+		polar_perf_smooth_layout.setSpacing(4)
+		polar_perf_smooth_layout.addWidget(self.polar_perf_smooth_method_combo, 1)
+		polar_perf_smooth_layout.addWidget(self.polar_perf_smooth_strength_spin)
 
 		self.polar_cine_speed_spin = QSpinBox()
 		self.polar_cine_speed_spin.setRange(40, 1000)
@@ -267,6 +291,8 @@ class MainWindow(QMainWindow):
 		self.export_polar_mp4_check.setChecked(True)
 		self.profile_timing_check = QCheckBox("Log tiempos > 0.5 s")
 		self.profile_timing_check.setChecked(True)
+		self.realtime_deferred_render_check = QCheckBox("Tiempo real (rápido) + HQ diferido")
+		self.realtime_deferred_render_check.setChecked(True)
 
 		self.manual_rois = QPlainTextEdit()
 		self.manual_rois.setPlaceholderText(
@@ -284,11 +310,13 @@ class MainWindow(QMainWindow):
 		controls_form.addRow("Colormap fase", self.cmap_combo)
 		controls_form.addRow("Estilo visual", self.visual_style_combo)
 		controls_form.addRow("Rotación polar", self.polar_rotation_spin)
+		controls_form.addRow("Suavizado polar", polar_perf_smooth_widget)
 		controls_form.addRow("Velocidad polar cine", self.polar_cine_speed_spin)
 		controls_form.addRow("Math polar stress/rest", self.polar_compare_math_combo)
 		controls_form.addRow("Términos math", polar_math_terms)
 		controls_form.addRow(self.export_polar_mp4_check)
 		controls_form.addRow(self.profile_timing_check)
+		controls_form.addRow(self.realtime_deferred_render_check)
 		controls_form.addRow(self.normalize_check)
 		controls_form.addRow(self.global_intestinal_render_check)
 		controls_form.addRow("Sexo (DB normal)", self.normal_sex_combo)
@@ -304,14 +332,17 @@ class MainWindow(QMainWindow):
 		self.cmap_combo.setToolTip("Colormap cíclico para visualizar fase.")
 		self.visual_style_combo.setToolTip("Tema visual de los paneles clínicos (curva FEVI, panel funcional gated y bull's eye).")
 		self.polar_rotation_spin.setToolTip("Rota el mapa polar de perfusión continua. Ajustalo para alinear ANT/SEP/LAT/INF a tu convención.")
+		self.polar_perf_smooth_method_combo.setToolTip("Método de suavizado para el segundo mapa de polar_perfusion_directa y para el cine polar.")
+		self.polar_perf_smooth_strength_spin.setToolTip("Intensidad del suavizado polar. 0 = sin suavizado; valores mayores suavizan más.")
 		self.polar_cine_speed_spin.setToolTip("Duración por frame del GIF del cine polar (en milisegundos).")
 		self.polar_compare_math_combo.setToolTip("Operación matemática opcional entre mapas polares de esfuerzo/reposo en el cine comparativo.")
 		self.polar_compare_term_a_combo.setToolTip("Primer término de la operación A op B.")
 		self.polar_compare_term_b_combo.setToolTip("Segundo término de la operación A op B.")
 		self.export_polar_mp4_check.setToolTip("Además del GIF, intenta exportar un MP4 del cine polar gatillado.")
 		self.profile_timing_check.setToolTip("Registra en el log solo etapas que superan 0.5 s.")
+		self.realtime_deferred_render_check.setToolTip("Muestra resultados rápidos primero y completa en alta calidad unos instantes después.")
 		self.normalize_check.setToolTip("Resta una referencia global de fase para comparar estudios.")
-		self.global_intestinal_render_check.setToolTip("Si está activo, aplica ROI intestinal en todas las salidas visuales (paneles, polar, bullseye y cine), no solo en cortes/ejes.")
+		self.global_intestinal_render_check.setToolTip("Si está activo, muestra la atenuación intestinal en las salidas visuales. Fase, métricas y FEVI se calculan sobre el estudio bruto.")
 		self.normal_sex_combo.setToolTip("Sexo del paciente: los valores normales de PSD/BW difieren por sexo (Mukherjee 2016).")
 		self.normal_protocol_combo.setToolTip("Protocolo del estudio: stress da PSD/BW mayores que rest.")
 		self.normal_db_combo.setToolTip("Base de datos normal usada para z-score y flag de disincronía (media + 2 SD).")
@@ -323,6 +354,12 @@ class MainWindow(QMainWindow):
 		report_cmap_layout.setContentsMargins(6, 6, 6, 6)
 		report_cmap_layout.setHorizontalSpacing(4)
 		report_cmap_layout.setVerticalSpacing(4)
+		report_cmap_layout.setColumnStretch(0, 3)
+		report_cmap_layout.setColumnStretch(1, 2)
+		report_cmap_info = QLabel("Elegí la escala por pestaña: seguí el orden clínico 1-9 para preparar el informe de forma consistente.")
+		report_cmap_info.setWordWrap(True)
+		report_cmap_info.setStyleSheet("color:#35506a;")
+		report_cmap_layout.addWidget(report_cmap_info, 0, 0, 1, 2)
 
 		def _mk_combo(current: str) -> QComboBox:
 			cb = QComboBox()
@@ -341,24 +378,22 @@ class MainWindow(QMainWindow):
 		self.report_cmap_bullseye = _mk_combo("turbo")
 		self.report_cmap_polar_perf = _mk_combo("perf_clinical")
 
-		report_cmap_layout.addWidget(QLabel("slices_fase"), 0, 0)
-		report_cmap_layout.addWidget(self.report_cmap_slices, 0, 1)
-		report_cmap_layout.addWidget(QLabel("ejes_ortogonales"), 1, 0)
-		report_cmap_layout.addWidget(self.report_cmap_axes, 1, 1)
-		report_cmap_layout.addWidget(QLabel("comparacion_ejes"), 2, 0)
-		report_cmap_layout.addWidget(self.report_cmap_compare, 2, 1)
-		report_cmap_layout.addWidget(QLabel("panel_funcional (ED/ES)"), 3, 0)
-		report_cmap_layout.addWidget(self.report_cmap_panel_axes, 3, 1)
-		report_cmap_layout.addWidget(QLabel("fase (overlay/polar)"), 4, 0)
-		report_cmap_layout.addWidget(self.report_cmap_phase, 4, 1)
-		report_cmap_layout.addWidget(QLabel("polar_clinico"), 5, 0)
-		report_cmap_layout.addWidget(self.report_cmap_polar_clinico, 5, 1)
-		report_cmap_layout.addWidget(QLabel("amplitud"), 6, 0)
-		report_cmap_layout.addWidget(self.report_cmap_amp, 6, 1)
-		report_cmap_layout.addWidget(QLabel("bullseye_directo"), 7, 0)
-		report_cmap_layout.addWidget(self.report_cmap_bullseye, 7, 1)
-		report_cmap_layout.addWidget(QLabel("polar_perfusion_directa"), 8, 0)
-		report_cmap_layout.addWidget(self.report_cmap_polar_perf, 8, 1)
+		def _add_cmap_row(row: int, label_text: str, combo: QComboBox, tip_text: str):
+			label = QLabel(label_text)
+			label.setToolTip(tip_text)
+			combo.setToolTip(tip_text)
+			report_cmap_layout.addWidget(label, row, 0)
+			report_cmap_layout.addWidget(combo, row, 1)
+
+		_add_cmap_row(1, "[1] slices_fase", self.report_cmap_slices, "Orden clínico 1/9. Afecta la imagen de la pestaña slices_fase (slice/gate, máscara y superposición).")
+		_add_cmap_row(2, "[2] comparacion_ejes (SA/HLA/VLA)", self.report_cmap_axes, "Orden clínico 2/9. Afecta las imágenes de ejes ortogonales SA/HLA/VLA para informe.")
+		_add_cmap_row(3, "[3] comparacion_ejes (grilla)", self.report_cmap_compare, "Orden clínico 3/9. Afecta la grilla multicorte de comparación entre estudios.")
+		_add_cmap_row(4, "[4] panel_funcional_gated (ED/ES)", self.report_cmap_panel_axes, "Orden clínico 4/9. Afecta las imágenes ED/ES del panel funcional gated.")
+		_add_cmap_row(5, "[5] fase (overlay/polar)", self.report_cmap_phase, "Orden clínico 5/9. Afecta mapas de fase (overlay y polar de fase).")
+		_add_cmap_row(6, "[6] polar_clinico", self.report_cmap_polar_clinico, "Orden clínico 6/9. Afecta el panel polar clínico (histograma + bullseye de fase).")
+		_add_cmap_row(7, "[7] panel_funcional_gated (amplitud)", self.report_cmap_amp, "Orden clínico 7/9. Afecta el mapa de amplitud en el panel funcional gated.")
+		_add_cmap_row(8, "[8] bullseye_directo", self.report_cmap_bullseye, "Orden clínico 8/9. Afecta el bullseye directo de perfusión segmentaria AHA.")
+		_add_cmap_row(9, "[9] polar_perfusion_directa", self.report_cmap_polar_perf, "Orden clínico 9/9. Afecta el mapa polar continuo de perfusión (apex-centro, base-borde).")
 
 		self._sidebar_layout.addWidget(report_cmap_box)
 
@@ -443,25 +478,25 @@ class MainWindow(QMainWindow):
 		self.open_pdf_btn = QPushButton("Abrir PDF")
 		self.open_pdf_btn.clicked.connect(self.open_pdf)
 		self.open_pdf_btn.setToolTip("Abre el informe clínico PDF generado.")
-		self.save_pdf_as_btn = QPushButton("Guardar PDF como...")
+		self.save_pdf_as_btn = QPushButton("Guardar PDF")
 		self.save_pdf_as_btn.clicked.connect(self.save_pdf_as)
 		self.save_pdf_as_btn.setToolTip("Guarda una copia del informe PDF en la ubicación que elijas.")
-		self.compare_stress_rest_btn = QPushButton("Comparar con Rest/Stress...")
+		self.compare_stress_rest_btn = QPushButton("Comparar Rest/Stress")
 		self.compare_stress_rest_btn.clicked.connect(self.load_compare_study)
 		self.compare_stress_rest_btn.setToolTip(
 			"Carga un segundo estudio (ej: REST) y compara la disincronía (PSD, BW, Kurtosis, Entropy) "
 			"contra el estudio actual. Útil para detectar stunning isquémico post-stress (Camilletti 2015)."
 		)
-		self.apply_roi_all_btn = QPushButton("Replicar ROI a todos")
+		self.apply_roi_all_btn = QPushButton("Replicar ROI")
 		self.apply_roi_all_btn.clicked.connect(self.apply_current_roi_to_all_slices)
 		self.apply_roi_all_btn.setToolTip("Copia el ROI del slice actual a todos los slices del volumen.")
-		self.load_one_or_two_btn = QPushButton("Cargar 1 o 2 estudios...")
+		self.load_one_or_two_btn = QPushButton("Cargar 1/2 estudios")
 		self.load_one_or_two_btn.clicked.connect(self.load_one_or_two_studies)
 		self.load_one_or_two_btn.setToolTip("Permite cargar y procesar una fase (stress o rest) o dos fases para comparación integral.")
-		self.advanced_toggle_btn = QPushButton("AVANZADO...")
+		self.advanced_toggle_btn = QPushButton("AVANZADO")
 		self.advanced_toggle_btn.clicked.connect(self.toggle_advanced_mode)
 		self.advanced_toggle_btn.setToolTip("Activa paneles y render pesado. En básico se prioriza velocidad para asincronía.")
-		self.ui_config_btn = QPushButton("Config UI...")
+		self.ui_config_btn = QPushButton("Config UI")
 		self.ui_config_btn.clicked.connect(self.open_ui_preferences_dialog)
 		self.ui_config_btn.setToolTip("Configura helpers, tooltips y modo compacto de botones.")
 		button_row.addWidget(self.restart_btn, 0, 0, 1, 2)
@@ -481,7 +516,7 @@ class MainWindow(QMainWindow):
 		roi_layout = QVBoxLayout(roi_box)
 		roi_layout.setContentsMargins(6, 6, 6, 6)
 		roi_layout.setSpacing(4)
-		roi_note = QLabel("Usá el visor para editar el ROI. También podés pegar líneas slice,cy,cx,r_inner,r_outer.")
+		roi_note = QLabel("Editá ROI en el visor o pegá líneas slice,cy,cx,r_inner,r_outer.")
 		roi_note.setWordWrap(True)
 		roi_note.setStyleSheet("color:#555;")
 		roi_layout.addWidget(roi_note)
@@ -491,9 +526,7 @@ class MainWindow(QMainWindow):
 		roi_actions_top.addStretch(1)
 		roi_layout.addLayout(roi_actions_top)
 
-		roi_adjust_note = QLabel(
-			"Ajuste Auto ROI desde slice actual: corregí un slice y propagá solo centro, radio interno, radio externo o todo el ajuste al volumen."
-		)
+		roi_adjust_note = QLabel("Ajuste Auto ROI desde slice actual: propagá centro/radios al volumen.")
 		roi_adjust_note.setWordWrap(True)
 		roi_adjust_note.setStyleSheet("color:#555;")
 		roi_layout.addWidget(roi_adjust_note)
@@ -527,7 +560,7 @@ class MainWindow(QMainWindow):
 		roi_delta_grid.addWidget(QLabel("Externo"), 2, 0)
 		roi_delta_grid.addWidget(self.auto_outer_delta_slider, 2, 1)
 		roi_delta_grid.addWidget(self.auto_outer_delta_label, 2, 2)
-		self.reset_roi_deltas_btn = QPushButton("Reset deltas")
+		self.reset_roi_deltas_btn = QPushButton("Reset")
 		self.reset_roi_deltas_btn.clicked.connect(self.reset_roi_adjust_deltas)
 		roi_delta_grid.addWidget(self.reset_roi_deltas_btn, 3, 1)
 		roi_layout.addLayout(roi_delta_grid)
@@ -547,13 +580,13 @@ class MainWindow(QMainWindow):
 		roi_adjust_actions = QGridLayout()
 		roi_adjust_actions.setHorizontalSpacing(4)
 		roi_adjust_actions.setVerticalSpacing(4)
-		self.adjust_auto_center_btn = QPushButton("Centro -> todos")
+		self.adjust_auto_center_btn = QPushButton("Centro")
 		self.adjust_auto_center_btn.clicked.connect(self.adjust_auto_center_all_slices)
-		self.adjust_auto_inner_btn = QPushButton("Interno -> todos")
+		self.adjust_auto_inner_btn = QPushButton("Interno")
 		self.adjust_auto_inner_btn.clicked.connect(self.adjust_auto_inner_all_slices)
-		self.adjust_auto_outer_btn = QPushButton("Externo -> todos")
+		self.adjust_auto_outer_btn = QPushButton("Externo")
 		self.adjust_auto_outer_btn.clicked.connect(self.adjust_auto_outer_all_slices)
-		self.adjust_auto_full_btn = QPushButton("Completo -> todos")
+		self.adjust_auto_full_btn = QPushButton("Completo")
 		self.adjust_auto_full_btn.clicked.connect(self.adjust_auto_full_all_slices)
 		roi_adjust_actions.addWidget(self.adjust_auto_center_btn, 0, 0)
 		roi_adjust_actions.addWidget(self.adjust_auto_inner_btn, 0, 1)
@@ -591,11 +624,11 @@ class MainWindow(QMainWindow):
 		roi_layout.addLayout(roi_actions_bottom)
 		self._sidebar_layout.addWidget(roi_box)
 
-		compare_box = QGroupBox("Comparación original vs reconstruido")
+		compare_box = QGroupBox("Comparación ejes")
 		compare_layout = QVBoxLayout(compare_box)
 		compare_layout.setContentsMargins(6, 6, 6, 6)
 		compare_layout.setSpacing(4)
-		compare_note = QLabel("Define el mismo gate y el mismo corte anatómico relativo para comparar HLA/VLA original vs reconstruido.")
+		compare_note = QLabel("Alinea gate/corte para comparar ejes entre estudios.")
 		compare_note.setWordWrap(True)
 		compare_note.setStyleSheet("color:#555;")
 		compare_layout.addWidget(compare_note)
@@ -605,10 +638,10 @@ class MainWindow(QMainWindow):
 		self.cine_source_combo.currentIndexChanged.connect(self._on_cine_source_changed)
 		cine_source_row.addWidget(self.cine_source_combo, 1)
 		self.cine_primary_btn = QToolButton()
-		self.cine_primary_btn.setText("SA Esfuerzo")
+		self.cine_primary_btn.setText("Esf.")
 		self.cine_primary_btn.clicked.connect(lambda: self._apply_cine_source("primary"))
 		self.cine_compare_btn = QToolButton()
-		self.cine_compare_btn.setText("SA Reposo")
+		self.cine_compare_btn.setText("Reposo")
 		self.cine_compare_btn.clicked.connect(lambda: self._apply_cine_source("compare"))
 		cine_source_row.addWidget(self.cine_primary_btn)
 		cine_source_row.addWidget(self.cine_compare_btn)
@@ -621,7 +654,7 @@ class MainWindow(QMainWindow):
 		self.compare_gate_spin.setToolTip("Gate usado en la lámina de comparación de ejes.")
 		self.compare_gate_spin.valueChanged.connect(self._schedule_compare_axes_refresh)
 		compare_gate_row.addWidget(self.compare_gate_spin)
-		self.use_cine_compare_btn = QPushButton("Usar gate/slice")
+		self.use_cine_compare_btn = QPushButton("Usar cine")
 		self.use_cine_compare_btn.clicked.connect(self.use_cine_position_for_comparison)
 		compare_gate_row.addWidget(self.use_cine_compare_btn)
 		compare_layout.addLayout(compare_gate_row)
@@ -635,7 +668,7 @@ class MainWindow(QMainWindow):
 		self.compare_slice_label = QLabel("50%")
 		self.compare_slice_slider.valueChanged.connect(self._update_compare_slice_label)
 		self.compare_slice_slider.valueChanged.connect(self._schedule_compare_axes_refresh)
-		compare_slice_row.addWidget(QLabel("Corte anatómico"), 0, 0)
+		compare_slice_row.addWidget(QLabel("Corte"), 0, 0)
 		compare_slice_row.addWidget(self.compare_slice_slider, 0, 1)
 		compare_slice_row.addWidget(self.compare_slice_label, 0, 2)
 		compare_layout.addLayout(compare_slice_row)
@@ -655,11 +688,11 @@ class MainWindow(QMainWindow):
 		self.compare_slice_offset_vla_spin.setValue(0)
 		self.compare_slice_offset_vla_spin.setToolTip("Desfase manual para VLA cuando no coincide el corte entre stress y rest.")
 		self.compare_slice_offset_vla_spin.valueChanged.connect(self._schedule_compare_axes_refresh)
-		compare_offset_row.addWidget(QLabel("Desfase SA"), 0, 0)
+		compare_offset_row.addWidget(QLabel("SA"), 0, 0)
 		compare_offset_row.addWidget(self.compare_slice_offset_sa_spin, 0, 1)
-		compare_offset_row.addWidget(QLabel("Desfase HLA"), 1, 0)
+		compare_offset_row.addWidget(QLabel("HLA"), 1, 0)
 		compare_offset_row.addWidget(self.compare_slice_offset_hla_spin, 1, 1)
-		compare_offset_row.addWidget(QLabel("Desfase VLA"), 2, 0)
+		compare_offset_row.addWidget(QLabel("VLA"), 2, 0)
 		compare_offset_row.addWidget(self.compare_slice_offset_vla_spin, 2, 1)
 		compare_layout.addLayout(compare_offset_row)
 		self.compare_axes_cmap_combo = QComboBox()
@@ -702,30 +735,30 @@ class MainWindow(QMainWindow):
 		self.compare_axes_zoom_slider.sliderReleased.connect(self._on_compare_controls_drag_ended)
 		self.compare_axes_zoom_slider.valueChanged.connect(self._on_compare_axes_zoom_changed)
 		self.compare_axes_zoom_label = QLabel("100%")
-		compare_zoom_row.addWidget(QLabel("Zoom cortes"), 0, 0)
+		compare_zoom_row.addWidget(QLabel("Zoom"), 0, 0)
 		compare_zoom_row.addWidget(self.compare_axes_zoom_slider, 0, 1)
 		compare_zoom_row.addWidget(self.compare_axes_zoom_label, 0, 2)
 		compare_layout.addLayout(compare_zoom_row)
-		self.compare_mask_check = QCheckBox("Mostrar máscara en comparativa")
+		self.compare_mask_check = QCheckBox("Máscara")
 		self.compare_mask_check.setChecked(True)
 		self.compare_mask_check.toggled.connect(self._on_compare_mask_toggled)
 		compare_layout.addWidget(self.compare_mask_check)
-		self.compare_axes_intestinal_mask_check = QCheckBox("ROI intestino en ejes (SA/HLA/VLA)")
+		self.compare_axes_intestinal_mask_check = QCheckBox("ROI intestino")
 		self.compare_axes_intestinal_mask_check.setChecked(True)
-		self.compare_axes_intestinal_mask_check.setToolTip("Si está activo, aplica la atenuación intestinal en las imágenes de comparacion_ejes.")
+		self.compare_axes_intestinal_mask_check.setToolTip("Si está activo, aplica la atenuación intestinal visual en comparacion_ejes cuando el toggle visual global está ON.")
 		self.compare_axes_intestinal_mask_check.toggled.connect(self._schedule_compare_axes_refresh)
 		compare_layout.addWidget(self.compare_axes_intestinal_mask_check)
 		compare_quick_row = QHBoxLayout()
-		self.compare_axes_preset_clinical_btn = QPushButton("Preset clínico ejes")
+		self.compare_axes_preset_clinical_btn = QPushButton("Preset ejes")
 		self.compare_axes_preset_clinical_btn.setToolTip("Aplica valores recomendados para lectura clínica rápida de comparacion_ejes.")
 		self.compare_axes_preset_clinical_btn.clicked.connect(self._apply_compare_axes_clinical_quick_preset)
 		compare_quick_row.addWidget(self.compare_axes_preset_clinical_btn)
 		compare_layout.addLayout(compare_quick_row)
-		self.compare_fast_drag_check = QCheckBox("Modo rápido al arrastrar (alta calidad al soltar)")
+		self.compare_fast_drag_check = QCheckBox("Rápido al arrastrar")
 		self.compare_fast_drag_check.setChecked(True)
 		compare_layout.addWidget(self.compare_fast_drag_check)
 		compare_cine_row = QGridLayout()
-		self.compare_axes_cine_check = QCheckBox("Cine en comparativa")
+		self.compare_axes_cine_check = QCheckBox("Cine")
 		self.compare_axes_cine_check.setChecked(False)
 		self.compare_axes_cine_check.toggled.connect(self._on_compare_axes_cine_toggled)
 		self.compare_axes_cine_speed_spin = QSpinBox()
@@ -739,7 +772,7 @@ class MainWindow(QMainWindow):
 		self.compare_axes_cine_toggle_btn.setText("Play")
 		self.compare_axes_cine_toggle_btn.clicked.connect(self._toggle_compare_axes_preview)
 		self.compare_axes_cine_restart_btn = QToolButton()
-		self.compare_axes_cine_restart_btn.setText("Restart")
+		self.compare_axes_cine_restart_btn.setText("Reset")
 		self.compare_axes_cine_restart_btn.clicked.connect(self._restart_compare_axes_preview)
 		compare_cine_row.addWidget(self.compare_axes_cine_check, 0, 0, 1, 2)
 		compare_cine_row.addWidget(QLabel("Velocidad"), 1, 0)
@@ -747,11 +780,11 @@ class MainWindow(QMainWindow):
 		compare_cine_row.addWidget(self.compare_axes_cine_toggle_btn, 2, 0)
 		compare_cine_row.addWidget(self.compare_axes_cine_restart_btn, 2, 1)
 		self.compare_axes_export_frames_btn = QToolButton()
-		self.compare_axes_export_frames_btn.setText("Exportar frames")
+		self.compare_axes_export_frames_btn.setText("Export frames")
 		self.compare_axes_export_frames_btn.clicked.connect(self.export_compare_axes_frames_debug)
 		compare_cine_row.addWidget(self.compare_axes_export_frames_btn, 3, 0, 1, 2)
 		compare_layout.addLayout(compare_cine_row)
-		self.refresh_compare_btn = QPushButton("Actualizar comparativa")
+		self.refresh_compare_btn = QPushButton("Actualizar ejes")
 		self.refresh_compare_btn.clicked.connect(self._refresh_compare_axes_panel_now)
 		compare_layout.addWidget(self.refresh_compare_btn)
 		self._update_compare_slice_label()
@@ -820,7 +853,7 @@ class MainWindow(QMainWindow):
 			"polar_cine_montaje": "polar_cine_montaje",
 			"comparacion_ejes": "comparacion_ejes",
 			"comparacion_stress_rest": "stress_vs_rest",
-			"ventriculograma": "panel_funcional_gated",
+			"panel_funcional_gated": "Panel funcional gated",
 			"bullseye_directo": "bullseye_directo",
 		}
 		preview_help_texts = {
@@ -832,7 +865,7 @@ class MainWindow(QMainWindow):
 			"polar_cine_montaje": "Cine polar gatillado: evolución temporal por gate del patrón polar; en dual-mode permite lectura dinámica stress/rest.",
 			"comparacion_ejes": "Comparación multicorte por ejes entre estudios para detectar diferencias regionales en el mismo gate.",
 			"comparacion_stress_rest": "Resumen de métricas de disincronía stress vs rest (PSD/BW/Kurtosis/Entropy) e interpretación clínica.",
-			"ventriculograma": "Panel funcional integrado (ED/ES, fase, amplitud y curvas) para lectura clínica rápida.",
+			"panel_funcional_gated": "Panel funcional integrado (ED/ES, fase, amplitud y curvas) para lectura clínica rápida.",
 			"bullseye_directo": "Bull's-eye de perfusión segmentaria AHA (17): resumen compacto de intensidad regional.",
 		}
 		for name in [
@@ -844,7 +877,7 @@ class MainWindow(QMainWindow):
 			"polar_cine_montaje",
 			"comparacion_ejes",
 			"comparacion_stress_rest",
-			"ventriculograma",
+			"panel_funcional_gated",
 			"bullseye_directo",
 		]:
 			tab = QWidget()
@@ -959,6 +992,90 @@ class MainWindow(QMainWindow):
 				self.process_auto()
 			else:
 				self.process_current()
+
+	def _tab_name_from_title(self, title: str) -> str | None:
+		for name, tab_title in self._tab_titles.items():
+			if tab_title == str(title):
+				return name
+		return None
+
+	def _active_tab_name(self) -> str | None:
+		idx = int(self.tabs.currentIndex()) if self.tabs is not None else -1
+		if idx < 0:
+			return None
+		return self._tab_name_from_title(self.tabs.tabText(idx))
+
+	def _default_preview_tabs(self) -> set[str]:
+		tabs = {"slices_fase", "polar_combo", "delta_combo", "histograma", "comparacion_stress_rest"}
+		active = self._active_tab_name()
+		if active:
+			tabs.add(active)
+		return tabs
+
+	def _tab_required_outputs(self, name: str) -> tuple[str, ...]:
+		mapping = {
+			"slices_fase": ("slices_fase.png",),
+			"polar_combo": ("polar_combo.png",),
+			"delta_combo": ("delta_combo.png",),
+			"histograma": ("histograma.png",),
+			"comparacion_stress_rest": ("comparacion_stress_rest.png",),
+			"comparacion_ejes": ("comparacion_ejes.png",),
+			"curva_fevi": ("curva_fevi.png",),
+			"panel_funcional_gated": ("panel_funcional_gated.png",),
+			"bullseye_directo": ("bullseye_directo.png",),
+			"polar_perfusion_directa": ("polar_perfusion_directa.png",),
+			"polar_cine_montaje": ("polar_cine_montaje.png",),
+		}
+		return mapping.get(str(name), tuple())
+
+	def _is_tab_render_ready(self, name: str) -> bool:
+		files = self._tab_required_outputs(name)
+		if not files:
+			return True
+		return all(os.path.exists(os.path.join(self.output_dir, fname)) for fname in files)
+
+	def _request_lazy_tab_render(self, tab_name: str, reason: str = ""):
+		if self.study is None or self.seg is None or self.phase_result is None:
+			return
+		if not bool(self.advanced_mode_enabled):
+			return
+		heavy_tabs = {
+			"comparacion_ejes",
+			"curva_fevi",
+			"panel_funcional_gated",
+			"bullseye_directo",
+			"polar_perfusion_directa",
+			"polar_cine_montaje",
+		}
+		tab_name = str(tab_name or "")
+		if tab_name not in heavy_tabs:
+			return
+		if self._is_tab_render_ready(tab_name):
+			self._load_preview(tab_name)
+			return
+		self._lazy_render_pending_tabs.add(tab_name)
+		if self._deferred_hq_running:
+			self._log(f"Lazy render encolado ({tab_name}) mientras HQ está en curso.")
+			return
+		pending = set(self._lazy_render_pending_tabs)
+		self._lazy_render_pending_tabs.clear()
+		if not pending:
+			return
+		msg = f"Render bajo demanda: {', '.join(sorted(pending))}"
+		if reason:
+			msg += f" ({reason})"
+		self._set_progress(86, msg)
+		try:
+			if self.compare_bundle is not None:
+				self._write_outputs_for_bundle(self.compare_bundle, self.compare_output_dir, target_tabs=pending)
+			self._write_outputs(target_tabs=pending)
+			if self.compare_bundle is not None:
+				left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
+				right_label = self.compare_label or "Comparación"
+				self._compose_dual_tab_images(left_label, right_label, target_tabs=pending)
+			self._load_previews_selected(pending)
+		except Exception as exc:
+			self._log(f"[WARN] Lazy render falló ({', '.join(sorted(pending))}): {exc}")
 
 	def _log(self, message: str):
 		self.log_box.append(message)
@@ -1111,11 +1228,14 @@ class MainWindow(QMainWindow):
 			"phase_cmap": str(self.cmap_combo.currentText()),
 			"visual_style": str(self.visual_style_combo.currentText()),
 			"polar_rotation_deg": int(self.polar_rotation_spin.value()),
+			"polar_perf_smooth_method": str(self.polar_perf_smooth_method_combo.currentText()),
+			"polar_perf_smooth_strength": float(self.polar_perf_smooth_strength_spin.value()),
 			"polar_cine_speed_ms": int(self.polar_cine_speed_spin.value()),
 			"polar_compare_math_op": str(self.polar_compare_math_combo.currentText()),
 			"polar_compare_math_a": str(self.polar_compare_term_a_combo.currentText()),
 			"polar_compare_math_b": str(self.polar_compare_term_b_combo.currentText()),
 			"export_polar_mp4": bool(self.export_polar_mp4_check.isChecked()),
+			"realtime_deferred_render": bool(self.realtime_deferred_render_check.isChecked()),
 			"report_cmap_slices": str(self.report_cmap_slices.currentText()),
 			"report_cmap_axes": str(self.report_cmap_axes.currentText()),
 			"report_cmap_compare": str(self.report_cmap_compare.currentText()),
@@ -1182,6 +1302,10 @@ class MainWindow(QMainWindow):
 			self.visual_style_combo.setCurrentText(style_value)
 		if "polar_rotation_deg" in params:
 			self.polar_rotation_spin.setValue(int(params["polar_rotation_deg"]))
+		if "polar_perf_smooth_method" in params:
+			self.polar_perf_smooth_method_combo.setCurrentText(str(params["polar_perf_smooth_method"]))
+		if "polar_perf_smooth_strength" in params:
+			self.polar_perf_smooth_strength_spin.setValue(float(params["polar_perf_smooth_strength"]))
 		if "polar_cine_speed_ms" in params:
 			self.polar_cine_speed_spin.setValue(int(params["polar_cine_speed_ms"]))
 		if "polar_compare_math_op" in params:
@@ -1192,6 +1316,8 @@ class MainWindow(QMainWindow):
 			self.polar_compare_term_b_combo.setCurrentText(str(params["polar_compare_math_b"]))
 		if "export_polar_mp4" in params:
 			self.export_polar_mp4_check.setChecked(bool(params["export_polar_mp4"]))
+		if "realtime_deferred_render" in params:
+			self.realtime_deferred_render_check.setChecked(bool(params["realtime_deferred_render"]))
 		if "report_cmap_slices" in params:
 			self.report_cmap_slices.setCurrentText(str(params["report_cmap_slices"]))
 		if "report_cmap_axes" in params:
@@ -1345,8 +1471,8 @@ class MainWindow(QMainWindow):
 	def _build_sidebar(self) -> QWidget:
 		sidebar = QWidget()
 		sidebar.setObjectName("sincroSidebar")
-		sidebar.setMinimumWidth(360)
-		sidebar.setMaximumWidth(560)
+		sidebar.setMinimumWidth(400)
+		sidebar.setMaximumWidth(680)
 		sidebar.setStyleSheet(
 			"#sincroSidebar { background: #f7f8fb; border-right: 1px solid #d7dce5; }"
 			"QGroupBox { font-weight: 600; border: 1px solid #d7dce5; border-radius: 7px; margin-top: 6px; background: white; }"
@@ -1616,20 +1742,16 @@ class MainWindow(QMainWindow):
 		active_method = self.cine.auto_roi_method()
 		active_atten, active_feather = self.cine.intestinal_params()
 		active_intestinal_scope = self.cine.intestinal_scope()
-		active_intestinal_apply = self.cine.intestinal_apply_enabled()
 		if self.active_cine_source == "compare":
 			active_method = self.cine_compare.auto_roi_method()
 			active_atten, active_feather = self.cine_compare.intestinal_params()
 			active_intestinal_scope = self.cine_compare.intestinal_scope()
-			active_intestinal_apply = self.cine_compare.intestinal_apply_enabled()
 		self.cine.set_auto_roi_method(active_method)
 		self.cine_compare.set_auto_roi_method(active_method)
 		self.cine.set_intestinal_params(active_atten, active_feather)
 		self.cine_compare.set_intestinal_params(active_atten, active_feather)
 		self.cine.set_intestinal_scope(active_intestinal_scope)
 		self.cine_compare.set_intestinal_scope(active_intestinal_scope)
-		self.cine.set_intestinal_apply_enabled(active_intestinal_apply)
-		self.cine_compare.set_intestinal_apply_enabled(active_intestinal_apply)
 
 		self._save_active_manual_rois_text()
 		self.active_cine_source = "compare" if source == "compare" and self.compare_bundle is not None else "primary"
@@ -1698,7 +1820,7 @@ class MainWindow(QMainWindow):
 	def _on_global_intestinal_render_toggled(self, checked: bool):
 		self._invalidate_output_cache()
 		if self.study is not None and self.phase_result is not None:
-			self._set_progress(82, "Actualizando salidas con atenuación intestinal...")
+			self._set_progress(82, "Actualizando salidas visuales con ROI intestinal...")
 			self._write_outputs()
 			if self.compare_bundle is not None and self.advanced_mode_enabled:
 				self._write_outputs_for_bundle(self.compare_bundle, self.compare_output_dir)
@@ -1708,7 +1830,7 @@ class MainWindow(QMainWindow):
 			self._load_previews()
 			self._set_progress(100, "Procesamiento completo")
 		state = "ON" if bool(checked) else "OFF"
-		self.statusBar().showMessage(f"Atenuación intestinal global: {state}")
+		self.statusBar().showMessage(f"Atenuación intestinal visual global: {state}")
 
 	def _apply_compare_axes_clinical_quick_preset(self):
 		self.compare_axes_zoom_slider.setValue(140)
@@ -1844,6 +1966,9 @@ class MainWindow(QMainWindow):
 		if index < 0 or self.study is None or self.seg is None:
 			return
 		title = self.tabs.tabText(index)
+		tab_name = self._tab_name_from_title(title)
+		if tab_name:
+			self._request_lazy_tab_render(tab_name, reason="apertura de pestaña")
 		if title == "comparacion_ejes" and self.compare_axes_cine_check.isChecked() and not self.compare_axes_preview_frames:
 			self._set_progress(88, "Generando cine de comparacion_ejes...")
 			try:
@@ -2177,11 +2302,14 @@ class MainWindow(QMainWindow):
 		return {
 			"visual_style": str(self.visual_style_combo.currentText()),
 			"polar_rotation_deg": int(self.polar_rotation_spin.value()),
+			"polar_perf_smooth_method": str(self.polar_perf_smooth_method_combo.currentText()),
+			"polar_perf_smooth_strength": float(self.polar_perf_smooth_strength_spin.value()),
 			"polar_cine_speed_ms": int(self.polar_cine_speed_spin.value()),
 			"polar_compare_math_op": str(self.polar_compare_math_combo.currentText()),
 			"polar_compare_math_a": str(self.polar_compare_term_a_combo.currentText()),
 			"polar_compare_math_b": str(self.polar_compare_term_b_combo.currentText()),
 			"export_polar_mp4": bool(self.export_polar_mp4_check.isChecked()),
+			"realtime_deferred_render": bool(self.realtime_deferred_render_check.isChecked()),
 			"report_cmap_slices": str(self.report_cmap_slices.currentText()),
 			"report_cmap_axes": str(self.report_cmap_axes.currentText()),
 			"report_cmap_compare": str(self.report_cmap_compare.currentText()),
@@ -2199,11 +2327,11 @@ class MainWindow(QMainWindow):
 			"intestinal_compare": self._intestinal_signature_for_widget(self.cine_compare),
 		}
 
-	def _apply_intestinal_mask_to_cube(self, cube: np.ndarray, cine_widget: CineWidget | None) -> np.ndarray:
+	def _apply_intestinal_mask_to_cube(self, cube: np.ndarray, cine_widget: CineWidget | None, *, require_global_visual: bool = True) -> np.ndarray:
 		arr = np.asarray(cube, dtype=np.float64)
 		if arr.ndim != 4 or cine_widget is None:
 			return arr
-		if not bool(self.global_intestinal_render_check.isChecked()):
+		if require_global_visual and not bool(self.global_intestinal_render_check.isChecked()):
 			return arr
 		if not cine_widget.intestinal_apply_enabled():
 			return arr
@@ -2310,8 +2438,10 @@ class MainWindow(QMainWindow):
 				QMessageBox.warning(self, "SINCRO", "Modo manual activo pero no hay ROIs definidos. Dibujá ROI o cambiá a auto/threshold.")
 				return
 			manual_rois = parsed_rois if seg_method == "manual" else None
-			cube_for_processing = self._apply_intestinal_mask_to_cube(self.study.cube, self.cine)
+			cube_for_segmentation = self._apply_intestinal_mask_to_cube(self.study.cube, self.cine, require_global_visual=False)
+			cube_for_analysis = np.asarray(self.study.cube, dtype=np.float64)
 			intestinal_sig_primary = self._intestinal_signature_for_widget(self.cine)
+			intestinal_sig_primary["global_render"] = "ignored_for_segmentation"
 			seg_payload = {
 				"study": study_sig,
 				"method": seg_method,
@@ -2325,7 +2455,7 @@ class MainWindow(QMainWindow):
 				t_stage = perf_counter()
 				self._set_progress(30, "Segmentando miocardio...")
 				self.seg = segment_myocardium(
-					cube_for_processing,
+					cube_for_segmentation,
 					method=seg_method,
 					threshold_frac=float(self.threshold_spin.value()),
 					smooth_sigma=float(self.sigma_spin.value()),
@@ -2348,9 +2478,9 @@ class MainWindow(QMainWindow):
 			phase_sig = self._hash_payload(phase_payload)
 			if self.phase_result is None or phase_sig != self._cache_phase_sig:
 				t_stage = perf_counter()
-				self._set_progress(50, "Análisis de fase...")
+				self._set_progress(50, "Análisis de fase sobre estudio bruto...")
 				self.phase_result = phase_analysis(
-					cube_for_processing,
+					cube_for_analysis,
 					self.seg.mask,
 					harmonics=int(self.harmonics_spin.value()),
 					amplitude_threshold_frac=float(self.phase_threshold_spin.value()),
@@ -2394,9 +2524,21 @@ class MainWindow(QMainWindow):
 			output_sig = self._hash_payload(visual_payload)
 			if output_sig != self._cache_output_sig:
 				t_stage = perf_counter()
-				self._set_progress(80, "Generando imágenes...")
-				self._write_outputs()
-				self._cache_output_sig = output_sig
+				if bool(self.realtime_deferred_render_check.isChecked()) and bool(self.advanced_mode_enabled):
+					self._set_progress(80, "Generando vista rápida...")
+					prev_adv = bool(self.advanced_mode_enabled)
+					self.advanced_mode_enabled = False
+					try:
+						self._write_outputs()
+					finally:
+						self.advanced_mode_enabled = prev_adv
+					self._cache_output_sig = ""
+					self._schedule_deferred_hq_render("primary", delay_ms=280)
+					self._log("Modo tiempo real: salida rápida lista; HQ diferido en progreso.")
+				else:
+					self._set_progress(80, "Generando imágenes...")
+					self._write_outputs()
+					self._cache_output_sig = output_sig
 				self._log_timing_if_slow("Generación de salidas visuales", t_stage)
 			else:
 				self._set_progress(80, "Imágenes sin cambios (cache)...")
@@ -2413,7 +2555,7 @@ class MainWindow(QMainWindow):
 			self._refresh_summary()
 			self._set_progress(90, "Cargando previews...")
 			t_stage = perf_counter()
-			self._load_previews()
+			self._load_previews_selected(self._default_preview_tabs())
 			self._log_timing_if_slow("Carga de previews", t_stage)
 			self._select_tab_by_title("histograma")
 			self._set_progress(100, "Procesamiento completo")
@@ -2431,6 +2573,85 @@ class MainWindow(QMainWindow):
 			self._progress_bar.setFormat(label)
 			self.statusBar().showMessage(label)
 		QApplication.processEvents()
+
+	def _schedule_deferred_hq_render(
+		self,
+		job: str,
+		*,
+		delay_ms: int = 260,
+		compare_bundle: dict | None = None,
+		left_label: str = "",
+		right_label: str = "",
+	):
+		self._deferred_hq_job = str(job or "").strip().lower()
+		self._deferred_compare_bundle = compare_bundle
+		self._deferred_compare_left_label = str(left_label or "")
+		self._deferred_compare_right_label = str(right_label or "")
+		self._deferred_hq_generation = int(self._deferred_hq_generation) + 1
+		self._deferred_hq_timer.start(max(120, int(delay_ms)))
+
+	def _run_deferred_hq_render(self):
+		if self._deferred_hq_running:
+			return
+		self._deferred_hq_running = True
+		run_generation = int(self._deferred_hq_generation)
+		job = str(self._deferred_hq_job or "").strip().lower()
+		self._deferred_hq_job = ""
+		try:
+			if job == "primary":
+				if self.study is None or self.phase_result is None or not bool(self.advanced_mode_enabled):
+					return
+				if run_generation != int(self._deferred_hq_generation):
+					self._log("Render HQ principal omitido por versión más nueva en cola.")
+					return
+				try:
+					self._set_progress(88, "Render HQ diferido (principal)...")
+					self._write_outputs()
+					visual_payload = self._collect_visual_signature_payload()
+					visual_payload["phase"] = self._cache_phase_sig
+					self._cache_output_sig = self._hash_payload(visual_payload)
+					self._load_previews_selected(self._default_preview_tabs())
+					self._set_progress(100, "Procesamiento completo")
+					self.statusBar().showMessage("Render HQ principal completado")
+				except Exception as exc:
+					self._log(f"[WARN] Render HQ diferido (principal) falló: {exc}")
+				return
+			if job == "compare":
+				bundle = self._deferred_compare_bundle
+				if bundle is None or self.study is None:
+					return
+				if run_generation != int(self._deferred_hq_generation):
+					self._log("Render HQ comparación omitido por versión más nueva en cola.")
+					return
+				try:
+					self._set_progress(88, "Render HQ diferido (comparación)...")
+					self._run_compare_hq_pipeline(
+						bundle,
+						left_label=self._deferred_compare_left_label,
+						right_label=self._deferred_compare_right_label,
+						deferred=True,
+					)
+					self._set_progress(100, "Procesamiento completo")
+				except Exception as exc:
+					self._log(f"[WARN] Render HQ diferido (comparación) falló: {exc}")
+		finally:
+			self._deferred_hq_running = False
+			if self._lazy_render_pending_tabs and self.study is not None and self.seg is not None and self.phase_result is not None:
+				pending = set(self._lazy_render_pending_tabs)
+				self._lazy_render_pending_tabs.clear()
+				if pending:
+					self._set_progress(86, f"Render bajo demanda: {', '.join(sorted(pending))} (post HQ)")
+					try:
+						if self.compare_bundle is not None:
+							self._write_outputs_for_bundle(self.compare_bundle, self.compare_output_dir, target_tabs=pending)
+						self._write_outputs(target_tabs=pending)
+						if self.compare_bundle is not None:
+							left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
+							right_label = self.compare_label or "Comparación"
+							self._compose_dual_tab_images(left_label, right_label, target_tabs=pending)
+						self._load_previews_selected(pending)
+					except Exception as exc:
+						self._log(f"[WARN] Lazy render falló ({', '.join(sorted(pending))}): {exc}")
 
 	def _effective_voxel_volume_ml(self) -> float | None:
 		if self.study is None:
@@ -2828,9 +3049,10 @@ class MainWindow(QMainWindow):
 		self.summary_clinical.setPlainText("\n".join(clinical))
 		self.summary_technical.setPlainText("\n".join(technical))
 
-	def _write_outputs(self):
+	def _write_outputs(self, target_tabs: set[str] | None = None):
 		if self.study is None or self.phase_result is None:
 			return
+		target_tabs_set = None if target_tabs is None else {str(x) for x in target_tabs}
 		active_cine_widget = getattr(self, "_output_cine_widget_override", None)
 		if active_cine_widget is None:
 			active_cine_widget = self.cine
@@ -2893,7 +3115,7 @@ class MainWindow(QMainWindow):
 				**base_payload,
 				"visual_style": str(self.visual_style_combo.currentText()),
 			},
-			"ventriculograma": {
+			"panel_funcional_gated": {
 				**base_payload,
 				"visual_style": str(self.visual_style_combo.currentText()),
 				"cmap_panel_axes": cmap_panel_axes,
@@ -2908,11 +3130,15 @@ class MainWindow(QMainWindow):
 			"polar_perfusion_directa": {
 				**base_payload,
 				"rotation": int(self.polar_rotation_spin.value()),
+				"smooth_method": str(self.polar_perf_smooth_method_combo.currentText()),
+				"smooth_strength": float(self.polar_perf_smooth_strength_spin.value()),
 				"cmap_polar_perf": cmap_polar_perf,
 			},
 			"polar_cine_montaje": {
 				**base_payload,
 				"rotation": int(self.polar_rotation_spin.value()),
+				"smooth_method": str(self.polar_perf_smooth_method_combo.currentText()),
+				"smooth_strength": float(self.polar_perf_smooth_strength_spin.value()),
 				"cmap_polar_perf": cmap_polar_perf,
 				"cine_speed": int(self.polar_cine_speed_spin.value()),
 				"export_mp4": bool(self.export_polar_mp4_check.isChecked()),
@@ -2927,13 +3153,22 @@ class MainWindow(QMainWindow):
 			need_tab_render[tab_name] = self._cache_tab_output_sigs.get(tab_name) != sig
 			self._cache_tab_output_sigs[tab_name] = sig
 		need_tab_render["curva_fevi"] = False
+		if target_tabs_set is not None:
+			for tab_name in list(need_tab_render.keys()):
+				need_tab_render[tab_name] = bool(tab_name in target_tabs_set)
+		render_compare_axes = bool(need_tab_render.get("comparacion_ejes", True))
+		render_curva_fevi = bool(need_tab_render.get("curva_fevi", True))
+		render_slices = target_tabs_set is None or "slices_fase" in target_tabs_set
+		render_polar_combo = target_tabs_set is None or "polar_combo" in target_tabs_set
+		render_delta_combo = target_tabs_set is None or "delta_combo" in target_tabs_set
+		render_histograma = target_tabs_set is None or "histograma" in target_tabs_set
 
 		advanced_mode = bool(self.advanced_mode_enabled)
 		if not advanced_mode:
 			for heavy_tab in (
 				"comparacion_ejes",
 				"curva_fevi",
-				"ventriculograma",
+				"panel_funcional_gated",
 				"bullseye_directo",
 				"polar_perfusion_directa",
 				"polar_cine_montaje",
@@ -2945,6 +3180,7 @@ class MainWindow(QMainWindow):
 				"comparacion_ejes.png",
 				"curva_fevi.png",
 				"ventriculograma.png",
+				"panel_funcional_gated.png",
 				"bullseye_directo.png",
 				"polar_perfusion_directa.png",
 				"polar_cine_montaje.png",
@@ -3015,7 +3251,7 @@ class MainWindow(QMainWindow):
 		save_polar_map(pm, os.path.join(self.output_dir, "polar_map.png"), dpi=150)
 		plt.close(pm.fig)
 
-		if self.compare_bundle is not None and self.compare_bundle.get("phase_by_seg") and self.study is not self.compare_bundle.get("study"):
+		if render_delta_combo and self.compare_bundle is not None and self.compare_bundle.get("phase_by_seg") and self.study is not self.compare_bundle.get("study"):
 			from matplotlib.cm import ScalarMappable
 			from matplotlib.colors import Normalize
 			from matplotlib.patches import Circle, Wedge
@@ -3193,13 +3429,11 @@ class MainWindow(QMainWindow):
 				x += im.width + pad
 			canvas.save(os.path.join(self.output_dir, "delta_combo.png"))
 
-		hfig = build_phase_histogram(self.phase_result.phases_deg, metrics=self.metrics, bins=72, title=f"Phase Histogram — {study_context_label}")
-		self._stamp_export_figure(hfig, active_cine_widget)
-		save_histogram(hfig, os.path.join(self.output_dir, "histograma.png"), dpi=150)
-		plt.close(hfig)
-		_compose_polar_combo()
-		_compose_delta_combo()
-
+		if render_histograma:
+			hfig = build_phase_histogram(self.phase_result.phases_deg, metrics=self.metrics, bins=72, title=f"Phase Histogram — {study_context_label}")
+			self._stamp_export_figure(hfig, active_cine_widget)
+			save_histogram(hfig, os.path.join(self.output_dir, "histograma.png"), dpi=150)
+			plt.close(hfig)
 		cfig = build_clinical_phase_panel(
 			self.phase_by_seg,
 			self.phase_result.phases_deg,
@@ -3210,6 +3444,8 @@ class MainWindow(QMainWindow):
 		self._stamp_export_figure(cfig, active_cine_widget)
 		save_clinical_phase_panel(cfig, os.path.join(self.output_dir, "polar_clinico.png"), dpi=150)
 		plt.close(cfig)
+		_compose_polar_combo()
+		_compose_delta_combo()
 
 		if not advanced_mode:
 			self._log("Modo básico: se omite render avanzado (ejes, panel funcional, perfusión directa y cine polar).")
@@ -3261,41 +3497,80 @@ class MainWindow(QMainWindow):
 			mx = float(np.nanmax(arr)) if arr.size else 0.0
 			return arr / (mx + 1e-8)
 
+		try:
+			from scipy.ndimage import zoom as ndi_zoom
+		except Exception:
+			ndi_zoom = None
+
+		def _windowed_panel(img2d: np.ndarray) -> np.ndarray:
+			lo = float(self.compare_window_low_slider.value()) / 100.0
+			hi = float(self.compare_window_high_slider.value()) / 100.0
+			hi = max(hi, lo + 0.01)
+			arr = _norm(img2d)
+			return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+
+		def _zoom_center_panel(img2d: np.ndarray, *, zoom_factor: float) -> np.ndarray:
+			arr = np.asarray(img2d, dtype=np.float64)
+			if arr.ndim != 2 or zoom_factor <= 1.001:
+				return arr
+			h, w = arr.shape
+			crop_h = max(8, int(round(h / zoom_factor)))
+			crop_w = max(8, int(round(w / zoom_factor)))
+			y0 = max(0, (h - crop_h) // 2)
+			x0 = max(0, (w - crop_w) // 2)
+			crop = arr[y0:y0 + crop_h, x0:x0 + crop_w]
+			if crop.size == 0:
+				return arr
+			if ndi_zoom is not None:
+				scale_y = float(h) / float(max(1, crop_h))
+				scale_x = float(w) / float(max(1, crop_w))
+				up = ndi_zoom(crop, (scale_y, scale_x), order=3, mode="nearest", prefilter=True)
+			else:
+				zy = max(1, int(np.ceil(h / max(1, crop_h))))
+				zx = max(1, int(np.ceil(w / max(1, crop_w))))
+				up = np.repeat(np.repeat(crop, zy, axis=0), zx, axis=1)
+			if up.shape[0] < h or up.shape[1] < w:
+				pad_y = max(0, h - up.shape[0])
+				pad_x = max(0, w - up.shape[1])
+				up = np.pad(up, ((0, pad_y), (0, pad_x)), mode="edge")
+			return up[:h, :w]
+
 		sa, hla_view, vla_view, hla_original_mid, vla_original_mid = _oriented_axes_views(mid_gate)
 
-		fig2, axes2 = plt.subplots(1, 3, figsize=(14, 4.8))
-		for ax in axes2:
-			ax.set_xticks([])
-			ax.set_yticks([])
+		if target_tabs_set is None or "comparacion_ejes" in target_tabs_set:
+			fig2, axes2 = plt.subplots(1, 3, figsize=(14, 4.8))
+			for ax in axes2:
+				ax.set_xticks([])
+				ax.set_yticks([])
 
-		axes2[0].imshow(sa, cmap=cmap_axes)
-		axes2[0].set_title(f"SA (slice {mid_slice + 1})")
-		_annotate_axis(axes2[0], "ANT", "INF", "SEP", "LAT")
-		cmp_frac_sa = self._comparison_fraction()
-		sa_h = int(sa.shape[0])
-		sa_w = int(sa.shape[1])
-		y_cmp = min(max(0, int(round(cmp_frac_sa * max(0, sa_h - 1)))), sa_h - 1)
-		x_cmp = min(max(0, int(round(cmp_frac_sa * max(0, sa_w - 1)))), sa_w - 1)
-		axes2[0].axhline(y_cmp, color="#7cf29a", linestyle="--", linewidth=1.2)
-		axes2[0].axvline(x_cmp, color="#7cf29a", linestyle="--", linewidth=1.2)
-		axes2[0].text(0.03, 0.05, f"Corte cmp {int(round(cmp_frac_sa * 100.0))}%", transform=axes2[0].transAxes, fontsize=8, color="#7cf29a", fontweight="bold")
-		axes2[1].imshow(hla_view, cmap=cmap_axes, aspect="auto")
-		axes2[1].set_title("HLA (horizontal long axis)")
-		_annotate_axis(axes2[1], "BASE", "APEX", "ANT", "INF")
-		axes2[2].imshow(vla_view, cmap=cmap_axes, aspect="auto")
-		axes2[2].set_title("VLA (vertical long axis)")
-		_annotate_axis(axes2[2], "BASE", "APEX", "SEP", "LAT")
-		if hla_original_mid:
-			axes2[1].text(0.03, 0.05, "ORIGINAL", transform=axes2[1].transAxes, fontsize=8, color="#ffe082", fontweight="bold")
-		if vla_original_mid:
-			axes2[2].text(0.03, 0.05, "ORIGINAL", transform=axes2[2].transAxes, fontsize=8, color="#ffe082", fontweight="bold")
-		fig2.suptitle(f"Ejes cardíacos ortogonales — Gate {mid_gate + 1} — {study_context_label}", fontsize=12, fontweight="bold")
-		self._stamp_export_figure(fig2, active_cine_widget)
-		fig2.tight_layout()
-		fig2.savefig(os.path.join(self.output_dir, "ejes_ortogonales.png"), dpi=150, bbox_inches="tight")
-		plt.close(fig2)
+			axes2[0].imshow(sa, cmap=cmap_axes)
+			axes2[0].set_title(f"SA (slice {mid_slice + 1})")
+			_annotate_axis(axes2[0], "ANT", "INF", "SEP", "LAT")
+			cmp_frac_sa = self._comparison_fraction()
+			sa_h = int(sa.shape[0])
+			sa_w = int(sa.shape[1])
+			y_cmp = min(max(0, int(round(cmp_frac_sa * max(0, sa_h - 1)))), sa_h - 1)
+			x_cmp = min(max(0, int(round(cmp_frac_sa * max(0, sa_w - 1)))), sa_w - 1)
+			axes2[0].axhline(y_cmp, color="#7cf29a", linestyle="--", linewidth=1.2)
+			axes2[0].axvline(x_cmp, color="#7cf29a", linestyle="--", linewidth=1.2)
+			axes2[0].text(0.03, 0.05, f"Corte cmp {int(round(cmp_frac_sa * 100.0))}%", transform=axes2[0].transAxes, fontsize=8, color="#7cf29a", fontweight="bold")
+			axes2[1].imshow(hla_view, cmap=cmap_axes, aspect="auto")
+			axes2[1].set_title("HLA (horizontal long axis)")
+			_annotate_axis(axes2[1], "BASE", "APEX", "ANT", "INF")
+			axes2[2].imshow(vla_view, cmap=cmap_axes, aspect="auto")
+			axes2[2].set_title("VLA (vertical long axis)")
+			_annotate_axis(axes2[2], "BASE", "APEX", "SEP", "LAT")
+			if hla_original_mid:
+				axes2[1].text(0.03, 0.05, "ORIGINAL", transform=axes2[1].transAxes, fontsize=8, color="#ffe082", fontweight="bold")
+			if vla_original_mid:
+				axes2[2].text(0.03, 0.05, "ORIGINAL", transform=axes2[2].transAxes, fontsize=8, color="#ffe082", fontweight="bold")
+			fig2.suptitle(f"Ejes cardíacos ortogonales — Gate {mid_gate + 1} — {study_context_label}", fontsize=12, fontweight="bold")
+			self._stamp_export_figure(fig2, active_cine_widget)
+			fig2.tight_layout()
+			fig2.savefig(os.path.join(self.output_dir, "ejes_ortogonales.png"), dpi=150, bbox_inches="tight")
+			plt.close(fig2)
 
-		if need_tab_render.get("comparacion_ejes", True):
+		if render_compare_axes:
 			self._write_compare_axes_panel(cmap_compare=cmap_compare, build_cine=False)
 		else:
 			self._log("Cache tab: comparacion_ejes sin cambios, se omite regeneración.")
@@ -3342,8 +3617,15 @@ class MainWindow(QMainWindow):
 			style_name = "clinico"
 		style = style_catalog.get(style_name, style_catalog["clinico"])
 
-		sa_ed, hla_ed, vla_ed, _ed_hla_original, _ed_vla_original = _oriented_axes_views(ed_gate)
-		sa_es, hla_es, vla_es, _es_hla_original, _es_vla_original = _oriented_axes_views(es_gate)
+		panel_zoom = max(1.0, float(self.compare_axes_zoom_slider.value()) / 100.0)
+		sa_ed_raw, hla_ed_raw, vla_ed_raw, _ed_hla_original, _ed_vla_original = _oriented_axes_views(ed_gate)
+		sa_es_raw, hla_es_raw, vla_es_raw, _es_hla_original, _es_vla_original = _oriented_axes_views(es_gate)
+		sa_ed = _zoom_center_panel(_windowed_panel(sa_ed_raw), zoom_factor=panel_zoom)
+		hla_ed = _zoom_center_panel(_windowed_panel(hla_ed_raw), zoom_factor=panel_zoom)
+		vla_ed = _zoom_center_panel(_windowed_panel(vla_ed_raw), zoom_factor=panel_zoom)
+		sa_es = _zoom_center_panel(_windowed_panel(sa_es_raw), zoom_factor=panel_zoom)
+		hla_es = _zoom_center_panel(_windowed_panel(hla_es_raw), zoom_factor=panel_zoom)
+		vla_es = _zoom_center_panel(_windowed_panel(vla_es_raw), zoom_factor=panel_zoom)
 
 		fig4, axes4 = plt.subplots(2, 3, figsize=(14, 8.2))
 		for ax in axes4.ravel():
@@ -3380,20 +3662,21 @@ class MainWindow(QMainWindow):
 		fig4.savefig(os.path.join(self.output_dir, "panel_clinico_convencion.png"), dpi=150, bbox_inches="tight")
 		plt.close(fig4)
 
-		fig3, ax3 = plt.subplots(figsize=(10, 4))
-		mean_per_gate = np.array([float(study_cube_render[gi][self.seg.mask].mean()) for gi in range(study_cube_render.shape[0])])
-		mean_per_gate = mean_per_gate / (mean_per_gate.max() + 1e-8)
-		ax3.plot(np.arange(study_cube_render.shape[0]), mean_per_gate, "o-", color="#2c7fb8")
-		ax3.set_title("Curva de actividad miocárdica por gate")
-		ax3.set_xlabel("Gate")
-		ax3.set_ylabel("Intensidad normalizada")
-		ax3.grid(True, alpha=0.3)
-		self._stamp_export_figure(fig3, active_cine_widget)
-		fig3.tight_layout()
-		fig3.savefig(os.path.join(self.output_dir, "curva_tac.png"), dpi=150, bbox_inches="tight")
-		plt.close(fig3)
+		if target_tabs_set is None or "curva_fevi" in target_tabs_set:
+			fig3, ax3 = plt.subplots(figsize=(10, 4))
+			mean_per_gate = np.array([float(study_cube_render[gi][self.seg.mask].mean()) for gi in range(study_cube_render.shape[0])])
+			mean_per_gate = mean_per_gate / (mean_per_gate.max() + 1e-8)
+			ax3.plot(np.arange(study_cube_render.shape[0]), mean_per_gate, "o-", color="#2c7fb8")
+			ax3.set_title("Curva de actividad miocárdica por gate")
+			ax3.set_xlabel("Gate")
+			ax3.set_ylabel("Intensidad normalizada")
+			ax3.grid(True, alpha=0.3)
+			self._stamp_export_figure(fig3, active_cine_widget)
+			fig3.tight_layout()
+			fig3.savefig(os.path.join(self.output_dir, "curva_tac.png"), dpi=150, bbox_inches="tight")
+			plt.close(fig3)
 
-		if need_tab_render.get("curva_fevi", True):
+		if render_curva_fevi:
 			fig_ef, ax_ef = plt.subplots(figsize=(10, 4.4), facecolor=style["fig_bg"])
 			ax_ef.set_facecolor(style["ax_bg"])
 			gate_axis = np.arange(study_cube_render.shape[0]) + 1
@@ -3472,20 +3755,19 @@ class MainWindow(QMainWindow):
 			ax.set_xticks([])
 			ax.set_yticks([])
 
-		ax_ed_sa.imshow(sa_ed, cmap=cmap_panel_axes)
+		ax_ed_sa.imshow(sa_ed, cmap=cmap_panel_axes, interpolation="lanczos", resample=True)
 		ax_ed_sa.set_title(f"ED SA (gate {ed_gate + 1})", color=style["fg"], fontsize=9)
-		ax_es_sa.imshow(sa_es, cmap=cmap_panel_axes)
+		ax_es_sa.imshow(sa_es, cmap=cmap_panel_axes, interpolation="lanczos", resample=True)
 		ax_es_sa.set_title(f"ES SA (gate {es_gate + 1})", color=style["fg"], fontsize=9)
-		ax_ed_hla.imshow(hla_ed, cmap=cmap_panel_axes, aspect="auto")
+		ax_ed_hla.imshow(hla_ed, cmap=cmap_panel_axes, aspect="auto", interpolation="lanczos", resample=True)
 		ax_ed_hla.set_title("ED HLA", color=style["fg"], fontsize=9)
-		ax_es_hla.imshow(hla_es, cmap=cmap_panel_axes, aspect="auto")
+		ax_es_hla.imshow(hla_es, cmap=cmap_panel_axes, aspect="auto", interpolation="lanczos", resample=True)
 		ax_es_hla.set_title("ES HLA", color=style["fg"], fontsize=9)
 
 		from viz.colormaps import phase_to_rgb
 
 		phase_mid = np.asarray(self.phase_result.phase_map[mid_slice], dtype=np.float64)
 		amp_mid = np.asarray(self.phase_result.amplitude_map[mid_slice], dtype=np.float64)
-		phase_show = np.where(np.isfinite(phase_mid), phase_mid, 0.0)
 		amp_show = amp_mid / (float(np.nanmax(amp_mid)) + 1e-8)
 		phase_rgb = phase_to_rgb(phase_mid, cmap_name=cmap_phase_report, nan_color=(0.05, 0.07, 0.10))
 		ax_phase.imshow(phase_rgb)
@@ -3564,13 +3846,21 @@ class MainWindow(QMainWindow):
 		)
 
 		fig_v.suptitle(
-			f"Panel funcional gated SPECT — {study_context_label} (estilo clínico: {self.visual_style_combo.currentText()})",
+			f"Panel funcional gated — {study_context_label} (estilo clínico: {self.visual_style_combo.currentText()})",
 			color=style["fg"],
 			fontsize=13,
 			fontweight="bold",
 		)
 		self._stamp_export_figure(fig_v, active_cine_widget)
-		fig_v.savefig(os.path.join(self.output_dir, "ventriculograma.png"), dpi=155, bbox_inches="tight", facecolor=fig_v.get_facecolor())
+		panel_path = os.path.join(self.output_dir, "panel_funcional_gated.png")
+		fig_v.savefig(panel_path, dpi=155, bbox_inches="tight", facecolor=fig_v.get_facecolor())
+		legacy_path = os.path.join(self.output_dir, "ventriculograma.png")
+		try:
+			if not os.path.exists(legacy_path):
+				import shutil
+				shutil.copyfile(panel_path, legacy_path)
+		except OSError:
+			pass
 		plt.close(fig_v)
 
 		# Bull's eye directo de perfusión (colores de intensidad), inspirado en consolas clínicas.
@@ -3724,7 +4014,28 @@ class MainWindow(QMainWindow):
 
 			mx_pm = float(np.nanmax(polar_map)) if np.isfinite(polar_map).any() else 0.0
 			polar_map = polar_map / (mx_pm + 1e-8)
-			polar_map_smooth = gaussian_filter(polar_map, sigma=(2.0, 1.2))
+			smooth_method = str(self.polar_perf_smooth_method_combo.currentText()).strip().lower()
+			smooth_strength = float(self.polar_perf_smooth_strength_spin.value())
+
+			def _smooth_polar_perfusion_map(pm: np.ndarray) -> np.ndarray:
+				arr = np.asarray(pm, dtype=np.float64)
+				if arr.size == 0 or smooth_strength <= 0.001:
+					return arr
+				if smooth_method.startswith("butter"):
+					h, w = arr.shape
+					fy = np.fft.fftfreq(h).reshape(-1, 1)
+					fx = np.fft.fftfreq(w).reshape(1, -1)
+					rr = np.sqrt(fy * fy + fx * fx)
+					cutoff = float(np.clip(0.42 / (1.0 + 0.38 * smooth_strength), 0.035, 0.45))
+					order = 2.0
+					transfer = 1.0 / (1.0 + np.power(rr / max(cutoff, 1e-6), 2.0 * order))
+					smoothed = np.real(np.fft.ifft2(np.fft.fft2(arr) * transfer))
+					return np.clip(smoothed, 0.0, 1.0)
+				sigma_radial = max(0.05, smooth_strength)
+				sigma_angular = max(0.05, smooth_strength * 0.60)
+				return np.clip(gaussian_filter(arr, sigma=(sigma_radial, sigma_angular)), 0.0, 1.0)
+
+			polar_map_smooth = _smooth_polar_perfusion_map(polar_map)
 
 			def _polar_to_cartesian(pm: np.ndarray, size: int = 480) -> np.ndarray:
 				canvas = np.full((size, size), np.nan, dtype=np.float64)
@@ -3771,7 +4082,7 @@ class MainWindow(QMainWindow):
 			fig_pp, axes_pp = plt.subplots(1, 2, figsize=(12.0, 6.0), facecolor=perf_bg)
 			for ax_pp, img_pp, ttl in [
 				(axes_pp[0], cart_raw, "Perfusión polar directa (crudo)"),
-				(axes_pp[1], cart_smooth, "Perfusión polar directa (suavizado)"),
+				(axes_pp[1], cart_smooth, f"Perfusión polar directa ({self.polar_perf_smooth_method_combo.currentText()} {smooth_strength:.2f})"),
 			]:
 				ax_pp.set_facecolor(perf_bg)
 				ax_pp.set_aspect("equal")
@@ -3817,7 +4128,7 @@ class MainWindow(QMainWindow):
 					pm_g = np.roll(pm_g, shift=rotation_bins, axis=1)
 				mx_g = float(np.nanmax(pm_g)) if np.isfinite(pm_g).any() else 0.0
 				pm_g = pm_g / (mx_g + 1e-8)
-				pm_g = gaussian_filter(pm_g, sigma=(1.7, 1.1))
+				pm_g = _smooth_polar_perfusion_map(pm_g)
 				cart_g = _polar_to_cartesian(pm_g)
 				fig_g, ax_g = plt.subplots(1, 1, figsize=(5.2, 5.2), facecolor=perf_bg)
 				ax_g.set_facecolor(perf_bg)
@@ -4008,7 +4319,7 @@ class MainWindow(QMainWindow):
 		render_dpi = 130 if fast_mode else 240
 		interp_mode = "nearest" if fast_mode else "lanczos"
 		zoom_factor = max(1.0, float(self.compare_axes_zoom_slider.value()) / 100.0)
-		apply_intestinal = bool(self.compare_axes_intestinal_mask_check.isChecked())
+		apply_intestinal = bool(self.global_intestinal_render_check.isChecked() and self.compare_axes_intestinal_mask_check.isChecked())
 
 		def _norm(img):
 			arr = np.asarray(img, dtype=np.float64)
@@ -4289,6 +4600,11 @@ class MainWindow(QMainWindow):
 	def _load_previews(self):
 		for name in self.preview_labels:
 			self._load_preview(name)
+
+	def _load_previews_selected(self, names):
+		for name in names:
+			if name in self.preview_labels:
+				self._load_preview(name)
 
 	def _load_polar_cine_preview(self):
 		name = "polar_cine_montaje"
@@ -4755,7 +5071,8 @@ class MainWindow(QMainWindow):
 	def _process_secondary_bundle(self, path: str) -> dict:
 		comp_study = dicom_loader.load(path, verbose=False)
 		comp_axis = self._load_axis_companions(path)
-		comp_cube_for_processing = self._apply_intestinal_mask_to_cube(comp_study.cube, self.cine_compare)
+		comp_cube_for_segmentation = self._apply_intestinal_mask_to_cube(comp_study.cube, self.cine_compare, require_global_visual=False)
+		comp_cube_for_analysis = np.asarray(comp_study.cube, dtype=np.float64)
 		seg_method = "auto"
 		manual_rois = None
 		parsed_compare_rois = self._parse_manual_rois_text(self.compare_manual_rois_text)
@@ -4768,14 +5085,14 @@ class MainWindow(QMainWindow):
 			seg_method = "manual"
 			manual_rois = valid_compare_rois
 		comp_seg = segment_myocardium(
-			comp_cube_for_processing,
+			comp_cube_for_segmentation,
 			method=seg_method,
 			threshold_frac=float(self.threshold_spin.value()),
 			smooth_sigma=float(self.sigma_spin.value()),
 			manual_rois=manual_rois,
 		)
 		comp_phase = phase_analysis(
-			comp_cube_for_processing,
+			comp_cube_for_analysis,
 			comp_seg.mask,
 			harmonics=int(self.harmonics_spin.value()),
 			amplitude_threshold_frac=float(self.phase_threshold_spin.value()),
@@ -4801,7 +5118,7 @@ class MainWindow(QMainWindow):
 			"manual_rois_text": self.compare_manual_rois_text,
 		}
 
-	def _write_outputs_for_bundle(self, bundle: dict, target_dir: str):
+	def _write_outputs_for_bundle(self, bundle: dict, target_dir: str, target_tabs: set[str] | None = None):
 		os.makedirs(target_dir, exist_ok=True)
 		saved_output_dir = self.output_dir
 		saved_study = self.study
@@ -4829,7 +5146,7 @@ class MainWindow(QMainWindow):
 			self.compare_bundle = None
 			self._output_study_path_override = str(bundle.get("path", ""))
 			self._output_cine_widget_override = self.cine_compare
-			self._write_outputs()
+			self._write_outputs(target_tabs=target_tabs)
 		finally:
 			self.output_dir = saved_output_dir
 			self.study = saved_study
@@ -4844,10 +5161,13 @@ class MainWindow(QMainWindow):
 			self._output_study_path_override = saved_output_path_override
 			self._output_cine_widget_override = saved_output_cine_override
 
-	def _compose_dual_tab_images(self, left_label: str, right_label: str):
+	def _compose_dual_tab_images(self, left_label: str, right_label: str, target_tabs: set[str] | None = None):
 		import matplotlib.pyplot as plt
 
-		for name in self.preview_labels:
+		names = list(self.preview_labels.keys())
+		if target_tabs is not None:
+			names = [n for n in names if n in set(target_tabs)]
+		for name in names:
 			if name in ("comparacion_stress_rest", "comparacion_ejes", "polar_cine_montaje"):
 				continue
 			left_path = os.path.join(self.output_dir, f"{name}.png")
@@ -4937,35 +5257,75 @@ class MainWindow(QMainWindow):
 				pass
 		self._invalidate_output_cache()
 
+	def _run_compare_hq_pipeline(self, bundle: dict, *, left_label: str, right_label: str, deferred: bool = False, target_tabs: set[str] | None = None):
+		self._write_outputs_for_bundle(bundle, self.compare_output_dir, target_tabs=target_tabs)
+		# Re-generar salidas del estudio principal con compare_bundle activo para
+		# crear mapas delta (polar_map_Δsigned / polar_map_Δabs).
+		self._write_outputs(target_tabs=target_tabs)
+		self._compose_dual_tab_images(left_label, right_label, target_tabs=target_tabs)
+		# polar_cine ya se genera compuesto dentro de _write_outputs cuando hay compare_bundle.
+		# Evitamos recomponer de nuevo para no duplicar paneles (p.ej. Reposo repetido).
+		self._write_compare_axes_panel(cmap_compare=str(self.compare_axes_cmap_combo.currentText()), build_cine=False)
+		self._write_compare_stress_rest()
+		self.dual_mode_active = True
+		self._load_previews_selected(self._default_preview_tabs())
+		self._refresh_summary()
+		self._select_tab_by_title("histograma")
+		if deferred:
+			self.statusBar().showMessage(f"Render HQ de comparación completado: {self.compare_label}")
+		else:
+			self.statusBar().showMessage(f"Comparación cargada: {self.compare_label}")
+
 	def _load_compare_study_from_path(self, path: str):
 		try:
+			t_total = perf_counter()
 			self._set_progress(10, "Cargando y procesando estudio de comparación...")
+			t_stage = perf_counter()
 			bundle = self._process_secondary_bundle(path)
+			self._log_timing_if_slow("Comparación: carga DICOM + segmentación + fase", t_stage)
 			self.compare_bundle = bundle
 			self.compare_metrics = bundle["metrics"]
 			self.compare_ef = bundle["ef"]
 			self.compare_label = bundle["label"]
 			self._refresh_cine_source_selector()
-
-			self._set_progress(75, "Generando salidas comparativas en todas las pestañas...")
-			self._write_outputs_for_bundle(bundle, self.compare_output_dir)
-			# Re-generar salidas del estudio principal con compare_bundle activo para
-			# crear mapas delta (polar_map_Δsigned / polar_map_Δabs).
-			self._write_outputs()
 			left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
 			right_label = self.compare_label or "Comparación"
-			self._compose_dual_tab_images(left_label, right_label)
-			# polar_cine ya se genera compuesto dentro de _write_outputs cuando hay compare_bundle.
-			# Evitamos recomponer de nuevo para no duplicar paneles (p.ej. Reposo repetido).
-			self._write_compare_axes_panel(cmap_compare=str(self.compare_axes_cmap_combo.currentText()), build_cine=False)
-			self._write_compare_stress_rest()
-			self.dual_mode_active = True
-			self._load_previews()
-			self._refresh_summary()
-			self._select_tab_by_title("histograma")
+
+			if bool(self.realtime_deferred_render_check.isChecked()):
+				self._set_progress(75, "Vista rápida de comparación...")
+				prev_fast = bool(self.compare_interactive_fast_mode)
+				self.compare_interactive_fast_mode = True
+				try:
+					self._write_compare_stress_rest()
+					self._write_compare_axes_panel(cmap_compare=str(self.compare_axes_cmap_combo.currentText()), build_cine=False)
+				finally:
+					self.compare_interactive_fast_mode = prev_fast
+				self.dual_mode_active = True
+				self._load_previews_selected(self._default_preview_tabs())
+				self._refresh_summary()
+				self._select_tab_by_title("histograma")
+				self._set_progress(92, "Vista rápida lista (HQ diferido)...")
+				self._schedule_deferred_hq_render(
+					"compare",
+					delay_ms=320,
+					compare_bundle=bundle,
+					left_label=left_label,
+					right_label=right_label,
+				)
+				self._log("Modo tiempo real: comparación rápida lista; HQ diferido en progreso.")
+				self._log_timing_if_slow("Comparación: total", t_total)
+				self.statusBar().showMessage(f"Comparación rápida cargada: {self.compare_label}")
+				return
+
+			self._set_progress(75, "Generando salidas comparativas en todas las pestañas...")
+			t_stage = perf_counter()
+			self._run_compare_hq_pipeline(bundle, left_label=left_label, right_label=right_label, deferred=False)
+			self._log_timing_if_slow("Comparación: render estudio secundario", t_stage)
+			self._log_timing_if_slow("Comparación: re-render estudio principal con deltas", t_stage)
 			self._set_progress(100, "Comparación lista")
+			self._log_timing_if_slow("Comparación: total", t_total)
 			self._log(f"Comparación cargada: {self.compare_label}")
-			self.statusBar().showMessage(f"Comparación cargada: {self.compare_label}")
+			self.statusBar().showMessage(f"Comparación HQ cargada: {self.compare_label}")
 		except Exception as exc:
 			self._set_progress(0, "Error")
 			QMessageBox.critical(self, "Error de comparación", str(exc))
