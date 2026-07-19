@@ -1222,11 +1222,13 @@ class MainWindow(QMainWindow):
 		atten_pct, feather_px = self.cine.intestinal_params()
 		intestinal_scope = self.cine.intestinal_scope()
 		intestinal_apply_enabled = self.cine.intestinal_apply_enabled()
+		intestinal_roi_state = self.cine.intestinal_roi_state()
 		if self.active_cine_source == "compare":
 			active_auto_roi_method = self.cine_compare.auto_roi_method()
 			atten_pct, feather_px = self.cine_compare.intestinal_params()
 			intestinal_scope = self.cine_compare.intestinal_scope()
 			intestinal_apply_enabled = self.cine_compare.intestinal_apply_enabled()
+			intestinal_roi_state = self.cine_compare.intestinal_roi_state()
 		return {
 			"seg_method": str(self.seg_method.currentText()),
 			"threshold": float(self.threshold_spin.value()),
@@ -1282,6 +1284,7 @@ class MainWindow(QMainWindow):
 			"intestinal_feather_px": int(feather_px),
 			"intestinal_scope": str(intestinal_scope),
 			"intestinal_apply_enabled": bool(intestinal_apply_enabled),
+			"intestinal_roi_state": intestinal_roi_state,
 			"ui_show_helpers": bool(self._ui_show_helpers),
 			"ui_enable_tooltips": bool(self._ui_enable_tooltips),
 			"ui_compact_controls": bool(self._ui_compact_controls),
@@ -1408,6 +1411,10 @@ class MainWindow(QMainWindow):
 			apply_on = bool(params.get("intestinal_apply_enabled", False))
 			self.cine.set_intestinal_apply_enabled(apply_on)
 			self.cine_compare.set_intestinal_apply_enabled(apply_on)
+		if "intestinal_roi_state" in params:
+			state = params.get("intestinal_roi_state")
+			self.cine.set_intestinal_roi_state(state if isinstance(state, dict) else None)
+			self.cine_compare.set_intestinal_roi_state(state if isinstance(state, dict) else None)
 		if "ui_show_helpers" in params:
 			self._ui_show_helpers = bool(params["ui_show_helpers"])
 		if "ui_enable_tooltips" in params:
@@ -3888,10 +3895,11 @@ class MainWindow(QMainWindow):
 		ax_es_hla = fig_v.add_subplot(gs[1, 1])
 		ax_phase = fig_v.add_subplot(gs[2, 0])
 		ax_amp = fig_v.add_subplot(gs[2, 1])
-		ax_curve = fig_v.add_subplot(gs[0:2, 2:4])
+		ax_results = fig_v.add_subplot(gs[0, 2:4])
+		ax_curve = fig_v.add_subplot(gs[1, 2:4])
 		ax_metrics = fig_v.add_subplot(gs[2, 2:4])
 
-		for ax in [ax_ed_sa, ax_es_sa, ax_ed_hla, ax_es_hla, ax_phase, ax_amp, ax_curve, ax_metrics]:
+		for ax in [ax_ed_sa, ax_es_sa, ax_ed_hla, ax_es_hla, ax_phase, ax_amp, ax_results, ax_curve, ax_metrics]:
 			ax.set_facecolor(style["ax_bg"])
 			for spine in ax.spines.values():
 				spine.set_color(style["grid"])
@@ -3978,17 +3986,32 @@ class MainWindow(QMainWindow):
 			])
 		else:
 			metrics_lines.append("FEVI: no disponible")
-		ax_metrics.text(
-			0.98,
-			0.96,
-			"\n".join(metrics_lines),
-			transform=ax_metrics.transAxes,
-			va="top",
-			ha="right",
-			color=style["fg"],
-			fontsize=8.6,
-			bbox=dict(boxstyle="round,pad=0.45", facecolor=style["ax_bg"], edgecolor=style["grid"], alpha=0.95),
-		)
+		ax_results.set_xticks([])
+		ax_results.set_yticks([])
+		ax_results.set_xlim(0.0, 1.0)
+		ax_results.set_ylim(0.0, 1.0)
+		ax_results.text(0.02, 0.92, "Resultados", transform=ax_results.transAxes, va="top", ha="left", color=style["fg"], fontsize=11.5, fontweight="bold")
+		result_items = [
+			("Clasificación", str(self.metrics.get("classification"))),
+			("Phase SD", f"{float(self.metrics.get('phase_sd', np.nan)):.1f}°"),
+			("Bandwidth", f"{float(self.metrics.get('bandwidth', np.nan)):.1f}°"),
+			("Entropy", f"{float(self.metrics.get('entropy', np.nan)):.3f}"),
+		]
+		if ef.get("available"):
+			result_items.extend([
+				("EDV", f"{float(ef.get('edv_ml', np.nan)):.1f} mL"),
+				("ESV", f"{float(ef.get('esv_ml', np.nan)):.1f} mL"),
+				("FEVI", f"{float(ef.get('ef_pct', np.nan)):.1f}%"),
+			])
+		else:
+			result_items.append(("FEVI", "no disponible"))
+		for idx, (label, value) in enumerate(result_items):
+			col = idx % 4
+			row = idx // 4
+			x = 0.04 + col * 0.24
+			y = 0.62 - row * 0.34
+			ax_results.text(x, y + 0.13, label, transform=ax_results.transAxes, va="bottom", ha="left", color=style["subtle"], fontsize=8.4, fontweight="bold")
+			ax_results.text(x, y, value, transform=ax_results.transAxes, va="bottom", ha="left", color=style["fg"], fontsize=13.5, fontweight="bold")
 
 		fig_v.suptitle(
 			f"Panel funcional gated — {study_context_label} (estilo clínico: {self.visual_style_combo.currentText()})",

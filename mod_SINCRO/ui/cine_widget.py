@@ -862,6 +862,50 @@ class CineWidget(QWidget):
 	def intestinal_scope(self) -> str:
 		return str(self._intestinal_scope_mode)
 
+	def intestinal_roi_state(self) -> dict[str, object]:
+		"""Estado serializable del ROI intestinal dibujado."""
+		slice_polygons = []
+		for slice_index, polygon in sorted((self._intestinal_roi_polygons or {}).items()):
+			pts = [[float(cy), float(cx)] for cy, cx in (polygon or [])]
+			if len(pts) >= 3:
+				slice_polygons.append({"slice": int(slice_index), "points": pts})
+
+		gate_polygons = []
+		for (gate_index, slice_index), polygon in sorted((self._intestinal_roi_polygons_by_gate or {}).items()):
+			pts = [[float(cy), float(cx)] for cy, cx in (polygon or [])]
+			if len(pts) >= 3:
+				gate_polygons.append({"gate": int(gate_index), "slice": int(slice_index), "points": pts})
+
+		return {
+			"slice_polygons": slice_polygons,
+			"gate_polygons": gate_polygons,
+		}
+
+	def set_intestinal_roi_state(self, state: dict | None):
+		"""Restaura polígonos de ROI intestinal desde un preset."""
+		self._intestinal_roi_polygons = {}
+		self._intestinal_roi_polygons_by_gate = {}
+		if isinstance(state, dict):
+			for item in state.get("slice_polygons", []) or []:
+				try:
+					slice_index = int(item.get("slice"))
+					points = [tuple(float(v) for v in pt[:2]) for pt in (item.get("points") or [])]
+				except Exception:
+					continue
+				if len(points) >= 3:
+					self._intestinal_roi_polygons[slice_index] = points
+			for item in state.get("gate_polygons", []) or []:
+				try:
+					gate_index = int(item.get("gate"))
+					slice_index = int(item.get("slice"))
+					points = [tuple(float(v) for v in pt[:2]) for pt in (item.get("points") or [])]
+				except Exception:
+					continue
+				if len(points) >= 3:
+					self._intestinal_roi_polygons_by_gate[(gate_index, slice_index)] = points
+		self.preview.set_exclusion_polygon(self._intestinal_polygon_for_slice(self.current_slice_index(), gate_index=self.current_gate_index()))
+		self._update_view()
+
 	def _intestinal_polygon_for_slice(self, slice_index: int, gate_index: int | None = None) -> list[tuple[float, float]]:
 		sl = int(slice_index)
 		if self._intestinal_scope_mode == "gate_slices":
