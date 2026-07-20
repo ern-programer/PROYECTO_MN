@@ -1691,6 +1691,32 @@ class MainWindow(QMainWindow):
 			fuente="manual",
 		)
 
+	def _preload_acquisition_ecg(self):
+		"""Precarga datos del ECG de adquisición (3 derivaciones) embebidos en el DICOM SPECT."""
+		gating = getattr(self.study, "gating_info", None) or {}
+		if not gating:
+			return
+		aplicado = []
+		fc = gating.get("heart_rate") or gating.get("heart_rate_est")
+		if fc:
+			self.ecg_fc_spin.setValue(int(fc))
+			aplicado.append(f"FC={fc} lpm")
+		if gating.get("rr_mean_ms"):
+			rr_txt = f"RR medio {gating['rr_mean_ms']:.0f} ms"
+			if gating.get("rr_cv_pct") is not None:
+				rr_txt += f" (CV {gating['rr_cv_pct']:.1f}%)"
+			aplicado.append(rr_txt)
+			if gating.get("rr_variability_flag") == "alta":
+				self.ecg_obs_edit.setText(
+					"Variabilidad RR alta en adquisición (posible FA/extrasístoles); interpretar fase con cautela."
+				)
+		if gating.get("trigger_window_pct") is not None:
+			aplicado.append(f"ventana trigger {gating['trigger_window_pct']:.0f}%")
+		if not self.ecg_obs_edit.text().strip() and aplicado:
+			self.ecg_obs_edit.setText("ECG adquisición (3 deriv.): " + "; ".join(aplicado))
+		self.ecg_preview_label.setText("Precargado desde adquisición (3 derivaciones): " + "; ".join(aplicado))
+		self._log(f"ECG adquisición precargado desde DICOM: {'; '.join(aplicado)}")
+
 	def _apply_extracted_ecg(self, data):
 		if data.ritmo and data.ritmo != "No especificado":
 			self.ecg_ritmo_combo.setCurrentText(data.ritmo)
@@ -1731,6 +1757,21 @@ class MainWindow(QMainWindow):
 		self.ecg_file_path = path
 		manual = self._manual_ecg_data()
 		comparison = compare_ecg_data(manual, extracted)
+
+		# Contraste adicional contra ECG de adquisición (3 derivaciones) si existe
+		gating = getattr(self.study, "gating_info", None) or {} if self.study is not None else {}
+		fc_adq = gating.get("heart_rate") or gating.get("heart_rate_est")
+		if fc_adq and extracted.fc > 0:
+			diff_fc_adq = abs(int(fc_adq) - int(extracted.fc))
+			if diff_fc_adq > 10:
+				comparison["differences"].append({
+					"field": "fc (3 deriv. adquisición)",
+					"manual": fc_adq,
+					"extracted": extracted.fc,
+					"diff": diff_fc_adq,
+					"significant": diff_fc_adq > 20,
+				})
+				comparison["has_differences"] = True
 
 		resumen = (
 			f"Extraído ({extracted.fuente}, confianza {extracted.confianza}): "
@@ -2774,6 +2815,7 @@ class MainWindow(QMainWindow):
 				self._cache_seg_sig = ""
 				self._cache_phase_sig = ""
 				self._invalidate_output_cache()
+				self._preload_acquisition_ecg()
 			self.compare_gate_spin.setRange(1, max(1, int(self.study.cube.shape[0])))
 			self.compare_gate_spin.setValue(max(1, int(self.study.cube.shape[0] // 2) + 1))
 			if self.axis_companions:

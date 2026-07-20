@@ -77,6 +77,7 @@ class GatedStudy:
     reconstructed: bool = True            # False si venía crudo (proyecciones)
     qc_first_harmonic: float = 0.0
     qc_passed: bool = False
+    gating_info: dict = field(default_factory=dict)  # Datos ECG adquisición (3 derivaciones / gating)
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -113,6 +114,85 @@ class LoaderError(Exception):
 
 def _get(ds, tag, default=None):
     return ds[tag].value if tag in ds else default
+
+
+def _extract_gating_info(ds) -> dict:
+    """
+    Extrae datos de gating / ECG de adquisición (monitor de 3 derivaciones)
+    embebidos en el DICOM SPECT. Devuelve dict con lo que encuentre.
+    """
+    import numpy as _np
+    info: dict = {}
+
+    # HeartRate (0018,1088) — FC en lpm
+    hr = _get(ds, (0x0018, 0x1088), None)
+    if hr is not None:
+        try:
+            info["heart_rate"] = int(hr)
+        except Exception:
+            pass
+
+    # RRIntervalVector (0054,0060) — intervalos RR en ms por gate
+    rr_vec = _get(ds, TAG_RR_INTERVAL_VECTOR, None)
+    if rr_vec is not None:
+        try:
+            rr = [float(v) for v in rr_vec]
+            rr = [v for v in rr if v > 0]
+            if rr:
+                info["rr_intervals_ms"] = rr
+                info["rr_mean_ms"] = float(_np.mean(rr))
+                info["rr_cv_pct"] = float(100.0 * _np.std(rr) / _np.mean(rr)) if _np.mean(rr) > 0 else 0.0
+                # FC estimada desde RR medio si no vino HeartRate
+                if "heart_rate" not in info and info["rr_mean_ms"] > 0:
+                    info["heart_rate_est"] = int(round(60000.0 / info["rr_mean_ms"]))
+        except Exception:
+            pass
+
+    # Trigger source/type
+    trig = _get(ds, (0x0018, 0x1061), None)
+    if trig:
+        info["trigger_source"] = str(trig)
+
+    # Trigger window (%) (0018,1094)
+    tw = _get(ds, (0x0018, 0x1094), None)
+    if tw is not None:
+        try:
+            info["trigger_window_pct"] = float(tw)
+        except Exception:
+            pass
+
+    # Heart rate limits (ventana de aceptación)
+    hr_lo = _get(ds, (0x0018, 0x1081), None)
+    hr_hi = _get(ds, (0x0018, 0x1082), None)
+    if hr_lo is not None:
+        info["hr_low_limit"] = hr_lo
+    if hr_hi is not None:
+        info["hr_high_limit"] = hr_hi
+
+    # Beat rejection / PVC rejection
+    beat_rej = _get(ds, (0x0018, 0x1080), None)
+    if beat_rej is not None:
+        info["beat_rejection"] = str(beat_rej)
+    pvc = _get(ds, (0x0018, 0x1085), None)
+    if pvc is not None:
+        info["pvc_rejection"] = str(pvc)
+    skip = _get(ds, (0x0018, 0x1086), None)
+    if skip is not None:
+        info["skip_beats"] = skip
+
+    # Flags privados GE comunes (número de latidos, ventanas RR)
+    n_beats = _get(ds, (0x0011, 0x100C), None)
+    if n_beats is not None:
+        try:
+            info["n_beats"] = int(n_beats)
+        except Exception:
+            pass
+
+    # QC simple: variabilidad RR alta sugiere FA/extrasístoles
+    if info.get("rr_cv_pct") is not None:
+        info["rr_variability_flag"] = "alta" if info["rr_cv_pct"] > 15.0 else "normal"
+
+    return info
 
 
 def _is_raw_projections(ds) -> bool:
@@ -295,6 +375,8 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
             "Posible gating error, reshape incorrecto o estudio no cardíaco."
         )
 
+    gating_info = _extract_gating_info(ds)
+
     study = GatedStudy(
         cube=cube,
         n_gates=n_gates,
@@ -322,6 +404,7 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
         reconstructed=True,
         qc_first_harmonic=frac,
         qc_passed=qc_passed,
+        gating_info=gating_info,
         notes=notes,
     )
 

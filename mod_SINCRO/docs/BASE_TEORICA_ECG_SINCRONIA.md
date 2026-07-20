@@ -100,17 +100,37 @@ GammaSync soporta carga opcional de ECG de 12 derivaciones:
 | Formato | Extracción | Estado |
 |---|---|---|
 | PDF con texto | Ritmo, FC, QRS, QT, QTc (Bazett), BRI, BRD, marcapasos | Implementado |
+| PDF escaneado | Mismo set vía OCR (pytesseract + pdf2image/PyMuPDF) | Implementado (fallback) |
 | SCP-ECG | Estructura básica | Stub (requiere `scp-ecg`) |
 | DICOM Waveform | Metadatos | Stub (requiere estudio de campo) |
 
 **Flujo:**
 1. Usuario carga ECG (opcional).
-2. `core/ecg_extractor.py` extrae datos con regex/parsers.
+2. `core/ecg_extractor.py` extrae datos con regex/parsers; si el PDF no tiene texto, aplica OCR.
 3. Se comparan contra valores manuales: si hay diferencias, se listan una por una marcando las **significativas** (FC >20, QRS >20 ms, cambio de ritmo/BRI/BRD/marcapasos).
 4. El profesional elige: aplicar valores del ECG o conservar manuales.
 5. El modo manual siempre está disponible (no todos los pacientes traen ECG).
 
 **QTc:** si no viene en el ECG, se calcula con Bazett: $QTc = QT / \sqrt{RR(s)}$.
+
+### 6.1 ECG de adquisición (monitor de 3 derivaciones) embebido en el DICOM SPECT
+
+El DICOM SPECT gated puede traer datos del ECG de adquisición (monitor de 3 derivaciones usado para el gating). GammaSync los extrae automáticamente al cargar el estudio (`core/dicom_loader._extract_gating_info`):
+
+| Tag DICOM | Dato | Uso en GammaSync |
+|---|---|---|
+| HeartRate (0018,1088) | FC en lpm | Precarga campo FC |
+| RRIntervalVector (0054,0060) | Intervalos RR en ms | RR medio, CV% (variabilidad), FC estimada (60000/RR) |
+| TriggerWindow (0018,1094) | Ventana de aceptación % | Info de adquisición |
+| HeartRate low/high (0018,1081/1082) | Límites FC aceptados | Info de adquisición |
+| BeatRejection/PVC (0018,1080/1085) | Rechazo de latidos | QC de gating |
+| TriggerSource (0018,1061) | Origen del trigger (EKG) | Info |
+
+**Reglas:**
+- Los datos de adquisición se **precargan por defecto** al cargar el estudio (FC, variabilidad RR), siempre editables manualmente.
+- Si la variabilidad RR (CV%) > 15%, se marca advertencia de posible FA/extrasístoles.
+- Al cargar el ECG de 12 derivaciones, se **contrastan** los datos: FC del monitor de 3 derivaciones vs FC del ECG de 12; diferencias >10 lpm se listan (>20 significativas).
+- **Limitación conocida:** los DICOM exportados por Xeleris/MyoVation traen poco (solo `TriggerSource=EKG`); los crudos de la consola suelen traer más tags. La infraestructura está lista para ambos casos.
 
 ---
 

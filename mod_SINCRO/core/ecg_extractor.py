@@ -235,10 +235,42 @@ def extract_from_dicom_waveform(filepath: str) -> ECGData:
     return data
 
 
+def _ocr_pdf(filepath: str) -> str:
+    """Extrae texto de un PDF escaneado con OCR (pytesseract + pdf2image/PyMuPDF)."""
+    try:
+        import pytesseract
+    except ImportError:
+        raise ImportError("pytesseract no instalado. Instalar con: pip install pytesseract (y Tesseract OCR en el sistema)")
+
+    images = []
+    # Intentar pdf2image primero
+    try:
+        from pdf2image import convert_from_path
+        images = convert_from_path(filepath, dpi=300)
+    except ImportError:
+        # Fallback a PyMuPDF (fitz)
+        try:
+            import fitz
+            doc = fitz.open(filepath)
+            for page in doc:
+                pix = page.get_pixmap(dpi=300)
+                from PIL import Image
+                import io
+                images.append(Image.open(io.BytesIO(pix.tobytes("png"))))
+            doc.close()
+        except ImportError:
+            raise ImportError("pdf2image o PyMuPDF requerido para OCR. Instalar con: pip install pdf2image o pip install PyMuPDF")
+
+    text = ""
+    for img in images:
+        text += pytesseract.image_to_string(img, lang="spa+eng") + "\n"
+    return text
+
+
 def extract_from_pdf_file(filepath: str) -> ECGData:
     """
     Extrae texto de PDF y luego datos ECG.
-    Requiere PyPDF2 o pdfplumber.
+    Requiere PyPDF2 o pdfplumber. Si el PDF es escaneado, usa OCR (pytesseract).
     """
     text = ""
 
@@ -262,9 +294,19 @@ def extract_from_pdf_file(filepath: str) -> ECGData:
             raise ImportError("pdfplumber o PyPDF2 requerido. Instalar con: pip install pdfplumber")
 
     if not text.strip():
-        raise ValueError("No se pudo extraer texto del PDF. ¿Es un PDF escaneado?")
+        # PDF escaneado → OCR
+        try:
+            text = _ocr_pdf(filepath)
+        except ImportError as exc:
+            raise ValueError(f"PDF escaneado sin texto y OCR no disponible: {exc}")
 
-    return extract_from_pdf_text(text)
+    if not text.strip():
+        raise ValueError("No se pudo extraer texto del PDF ni con OCR.")
+
+    data = extract_from_pdf_text(text)
+    if "ocr" in text.lower() or not any(c.isalpha() for c in text[:50]):
+        data.confianza = "media"
+    return data
 
 
 def extract_ecg(filepath: str) -> ECGData:
