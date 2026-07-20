@@ -76,6 +76,14 @@ from viz.polar_map import (
 )
 
 from ui.cine_widget import CineWidget
+from ui.managers import (
+	CineManager,
+	CompareManager,
+	PresetManager,
+	ProcessingManager,
+	ReportManager,
+	ROIManager,
+)
 from version import __version__
 
 
@@ -368,6 +376,60 @@ class MainWindow(QMainWindow):
 		self.normal_db_combo.setToolTip("Base normal publicada usada para lectura vs referencia; los límites son software-dependientes.")
 
 		self._sidebar_layout.addWidget(controls_box)
+
+		# Grupo ECG - Contexto electrocardiográfico
+		ecg_box = QGroupBox("ECG (contexto clínico)")
+		ecg_form = QFormLayout(ecg_box)
+
+		self.ecg_ritmo_combo = QComboBox()
+		self.ecg_ritmo_combo.addItems(["Sinusal", "FA", "Marcapasos", "CRT", "Otro"])
+		self.ecg_ritmo_combo.setCurrentText("Sinusal")
+
+		self.ecg_fc_spin = QSpinBox()
+		self.ecg_fc_spin.setRange(30, 220)
+		self.ecg_fc_spin.setValue(70)
+		self.ecg_fc_spin.setSuffix(" lpm")
+
+		self.ecg_qrs_spin = QSpinBox()
+		self.ecg_qrs_spin.setRange(60, 250)
+		self.ecg_qrs_spin.setValue(90)
+		self.ecg_qrs_spin.setSuffix(" ms")
+
+		self.ecg_qt_spin = QSpinBox()
+		self.ecg_qt_spin.setRange(250, 600)
+		self.ecg_qt_spin.setValue(400)
+		self.ecg_qt_spin.setSuffix(" ms")
+
+		self.ecg_bri_check = QCheckBox("BRI (bloqueo rama izquierda)")
+		self.ecg_bri_check.setChecked(False)
+
+		self.ecg_brd_check = QCheckBox("BRD (bloqueo rama derecha)")
+		self.ecg_brd_check.setChecked(False)
+
+		self.ecg_marcapasos_check = QCheckBox("Marcapasos/CRT")
+		self.ecg_marcapasos_check.setChecked(False)
+
+		self.ecg_obs_edit = QLineEdit()
+		self.ecg_obs_edit.setPlaceholderText("Observaciones ECG...")
+
+		ecg_form.addRow("Ritmo", self.ecg_ritmo_combo)
+		ecg_form.addRow("FC", self.ecg_fc_spin)
+		ecg_form.addRow("QRS", self.ecg_qrs_spin)
+		ecg_form.addRow("QT", self.ecg_qt_spin)
+		ecg_form.addRow(self.ecg_bri_check)
+		ecg_form.addRow(self.ecg_brd_check)
+		ecg_form.addRow(self.ecg_marcapasos_check)
+		ecg_form.addRow("Observaciones", self.ecg_obs_edit)
+
+		self.ecg_ritmo_combo.setToolTip("Ritmo cardíaco dominante en el ECG de 12 derivaciones.")
+		self.ecg_fc_spin.setToolTip("Frecuencia cardíaca en latidos por minuto.")
+		self.ecg_qrs_spin.setToolTip("Duración del QRS en milisegundos. QRS ≥120ms sugiere disincronía eléctrica.")
+		self.ecg_qt_spin.setToolTip("Intervalo QT en milisegundos.")
+		self.ecg_bri_check.setToolTip("Bloqueo de rama izquierda del haz de His.")
+		self.ecg_brd_check.setToolTip("Bloqueo de rama derecha del haz de His.")
+		self.ecg_marcapasos_check.setToolTip("Paciente con marcapasos o resincronizador cardíaco (CRT).")
+
+		self._sidebar_layout.addWidget(ecg_box)
 
 		report_cmap_box = QGroupBox("Escalas informe (por imagen)")
 		report_cmap_layout = QGridLayout(report_cmap_box)
@@ -1300,6 +1362,14 @@ class MainWindow(QMainWindow):
 			"ui_enable_tooltips": bool(self._ui_enable_tooltips),
 			"ui_compact_controls": bool(self._ui_compact_controls),
 			"manual_rois_text": self.manual_rois.toPlainText(),
+			"ecg_ritmo": str(self.ecg_ritmo_combo.currentText()),
+			"ecg_fc": int(self.ecg_fc_spin.value()),
+			"ecg_qrs": int(self.ecg_qrs_spin.value()),
+			"ecg_qt": int(self.ecg_qt_spin.value()),
+			"ecg_bri": bool(self.ecg_bri_check.isChecked()),
+			"ecg_brd": bool(self.ecg_brd_check.isChecked()),
+			"ecg_marcapasos": bool(self.ecg_marcapasos_check.isChecked()),
+			"ecg_observaciones": str(self.ecg_obs_edit.text()),
 			"updated_at": datetime.now().isoformat(timespec="seconds"),
 		}
 
@@ -1437,6 +1507,22 @@ class MainWindow(QMainWindow):
 		if "manual_rois_text" in params:
 			self.manual_rois.setPlainText(str(params["manual_rois_text"]))
 			self.cine.set_manual_rois(self._parse_manual_rois())
+		if "ecg_ritmo" in params:
+			self.ecg_ritmo_combo.setCurrentText(str(params["ecg_ritmo"]))
+		if "ecg_fc" in params:
+			self.ecg_fc_spin.setValue(int(params["ecg_fc"]))
+		if "ecg_qrs" in params:
+			self.ecg_qrs_spin.setValue(int(params["ecg_qrs"]))
+		if "ecg_qt" in params:
+			self.ecg_qt_spin.setValue(int(params["ecg_qt"]))
+		if "ecg_bri" in params:
+			self.ecg_bri_check.setChecked(bool(params["ecg_bri"]))
+		if "ecg_brd" in params:
+			self.ecg_brd_check.setChecked(bool(params["ecg_brd"]))
+		if "ecg_marcapasos" in params:
+			self.ecg_marcapasos_check.setChecked(bool(params["ecg_marcapasos"]))
+		if "ecg_observaciones" in params:
+			self.ecg_obs_edit.setText(str(params["ecg_observaciones"]))
 
 	def save_current_preset(self):
 		patient = self._current_patient_key()
@@ -4256,12 +4342,12 @@ class MainWindow(QMainWindow):
 		else:
 			result_items.append(("FEVI", "no disponible"))
 		for idx, (label, value) in enumerate(result_items):
-			col = idx % 4
-			row = idx // 4
-			x = 0.04 + col * 0.24
-			y = 0.62 - row * 0.34
-			ax_results.text(x, y + 0.13, label, transform=ax_results.transAxes, va="bottom", ha="left", color=style["subtle"], fontsize=8.4, fontweight="bold")
-			ax_results.text(x, y, value, transform=ax_results.transAxes, va="bottom", ha="left", color=style["fg"], fontsize=13.5, fontweight="bold")
+			col = idx % 2
+			row = idx // 2
+			x = 0.04 + col * 0.48
+			y = 0.62 - row * 0.24
+			ax_results.text(x, y + 0.11, label, transform=ax_results.transAxes, va="bottom", ha="left", color=style["subtle"], fontsize=7.8, fontweight="bold")
+			ax_results.text(x, y, value, transform=ax_results.transAxes, va="bottom", ha="left", color=style["fg"], fontsize=11.5, fontweight="bold")
 
 		fig_v.suptitle(
 			f"Panel funcional gated — {study_context_label} (estilo clínico: {self.visual_style_combo.currentText()})",

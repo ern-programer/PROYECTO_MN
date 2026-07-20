@@ -316,6 +316,56 @@ def generate_report(
 		f"MP4 polar cine={'sí' if processing_params.get('export_polar_mp4', False) else 'no'}"
 	)
 	story.append(Paragraph(f"<b>Parámetros usados:</b> {proc_txt}", body_style))
+
+	# Sección ECG si hay datos
+	ecg_data = []
+	if processing_params.get("ecg_ritmo"):
+		ecg_data.append(["Ritmo", str(processing_params.get("ecg_ritmo", "N/D"))])
+	if processing_params.get("ecg_fc"):
+		ecg_data.append(["FC", f"{processing_params.get('ecg_fc', 'N/D')} lpm"])
+	if processing_params.get("ecg_qrs"):
+		ecg_data.append(["QRS", f"{processing_params.get('ecg_qrs', 'N/D')} ms"])
+	if processing_params.get("ecg_qt"):
+		ecg_data.append(["QT", f"{processing_params.get('ecg_qt', 'N/D')} ms"])
+	ecg_flags = []
+	if processing_params.get("ecg_bri"):
+		ecg_flags.append("BRI")
+	if processing_params.get("ecg_brd"):
+		ecg_flags.append("BRD")
+	if processing_params.get("ecg_marcapasos"):
+		ecg_flags.append("Marcapasos/CRT")
+	if ecg_flags:
+		ecg_data.append(["Conducción", ", ".join(ecg_flags)])
+	if processing_params.get("ecg_observaciones"):
+		ecg_data.append(["Observaciones", str(processing_params.get("ecg_observaciones", ""))])
+
+	if ecg_data:
+		story.append(Spacer(1, 3 * mm))
+		story.append(Paragraph("Contexto electrocardiográfico", section_style))
+		ecg_table = Table(ecg_data, colWidths=[48 * mm, 118 * mm])
+		ecg_table.setStyle(TableStyle([
+			("BACKGROUND", (0, 0), (0, -1), LIGHT_BLUE),
+			("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+			("FONTSIZE", (0, 0), (-1, -1), 9),
+			("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cccccc")),
+			("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+			("LEFTPADDING", (0, 0), (-1, -1), 3 * mm),
+		]))
+		story.append(ecg_table)
+		story.append(Spacer(1, 2 * mm))
+		# Score electro-mecánico simple
+		qrs_ms = processing_params.get("ecg_qrs", 0)
+		has_bri = processing_params.get("ecg_bri", False)
+		psd_val = metrics.get("phase_sd", 0)
+		if qrs_ms >= 120 or has_bri:
+			em_txt = "Concordante: QRS ancho/BRI con posible disincronía mecánica."
+		elif qrs_ms < 100 and psd_val > 40:
+			em_txt = "Discordante: QRS estrecho pero PSD elevado; revisar artefacto/ROI."
+		else:
+			em_txt = "Sin discordancia clara electro-mecánica."
+		story.append(Paragraph(f"<b>Evaluación electro-mecánica:</b> {em_txt}", body_style))
+		story.append(Spacer(1, 2 * mm))
+
 	if nd:
 		db_txt = (
 			f"<b>DB normal:</b> {metrics.get('normal_db_dataset', 'N/D')} | "
