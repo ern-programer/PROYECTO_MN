@@ -2,7 +2,7 @@
 
 Módulo de análisis de **sincronía / asincronía / disincronía cardíaca** a partir de estudios Gated SPECT (Short Axis del ventrículo izquierdo).
 
-Genera métricas cuantitativas de fase (Phase SD, Bandwidth, Entropy, Skewness, Kurtosis), polar map (bullseye 17 segmentos AHA), análisis por territorio coronario (LAD/LCx/RCA) e informe PDF.
+Genera métricas cuantitativas de fase (Phase SD, Bandwidth, Entropy, Skewness, Kurtosis), polar map (bullseye 17 segmentos AHA), análisis por territorio coronario (LAD/LCx/RCA), robustez estadística (bootstrap, sensibilidad ROI) e informe PDF.
 
 Proyecto de **Gammasys** (medicina nuclear, Argentina).
 
@@ -10,7 +10,7 @@ Proyecto de **Gammasys** (medicina nuclear, Argentina).
 
 ## Estado
 
-**EN DESARROLLO** — Fase 1 (motor de fase). Inicio: 2026-07-14.
+**v1.8.0** — Roadmap mejoras implementado. Inicio: 2026-07-14. Última actualización: 2026-07-20.
 
 ## Arquitectura
 
@@ -21,7 +21,11 @@ SINCRO/
 │   ├── phase_analysis.py # FFT primer armónico → fase/amplitud por voxel
 │   ├── metrics.py        # Phase SD, BW, Entropy, Skewness, Kurtosis, AI, latest site
 │   ├── segmentation.py   # Segmentación miocárdica (ROI manual + auto)
-│   └── aha_segments.py   # Mapeo voxel → 17 segmentos AHA + territorios
+│   ├── aha_segments.py   # Mapeo voxel → 17 segmentos AHA + territorios
+│   ├── robustness.py     # Robustez: segmentario AHA, bootstrap, sensibilidad ROI
+│   ├── normal_db.py      # DB normal por software (QGS/ECTb/cREPO/HFV)
+│   ├── export_manager.py # Exportación JSON/CSV/Excel
+│   └── logging_config.py # Logging estructurado a archivo
 ├── viz/                  # Visualización
 │   ├── polar_map.py      # Bullseye 17 segmentos (colormap cíclico)
 │   ├── histogram.py      # Histograma de fase
@@ -31,9 +35,11 @@ SINCRO/
 ├── ui/                   # Interfaz PyQt6
 │   ├── main_window.py
 │   └── cine_widget.py
-├── tests/                # Tests (empezar con test sintético)
-│   └── test_phase_synthetic.py
+├── tests/                # Tests
+│   ├── test_phase_synthetic.py  # Tests sintéticos
+│   └── test_integration.py      # Tests E2E
 ├── data_test/            # DICOM de prueba (NO versionado, ver .gitignore)
+├── logs/                 # Logs estructurados (NO versionado)
 └── main.py               # Entry point
 ```
 

@@ -56,6 +56,8 @@ from core.aha_segments import (
 	phase_by_segment,
 	territory_analysis,
 )
+from core.export_manager import export_all
+from core.logging_config import get_logger
 from core.metrics import calculate_phase_metrics
 from core.phase_analysis import phase_analysis
 from core.robustness import (
@@ -2764,11 +2766,33 @@ class MainWindow(QMainWindow):
 			self._set_progress(100, "Procesamiento completo")
 			self._log_timing_if_slow("Proceso total", t_total)
 			self.statusBar().showMessage("Procesamiento completo")
+
+			# Logging estructurado
+			try:
+				logger = get_logger()
+				logger.log_processing_end(
+					path,
+					perf_counter() - t_total,
+					self.metrics or {},
+				)
+			except Exception:
+				pass
+
+			# Exportación automática JSON/CSV
+			try:
+				self._export_structured_results()
+			except Exception as exc:
+				self._log(f"[WARN] Exportación estructurada falló: {exc}")
 		except Exception as exc:
 			self._set_progress(0, "Error")
 			self.statusBar().showMessage("Error")
 			QMessageBox.critical(self, "Error de procesamiento", str(exc))
 			self._log(f"[ERROR] {exc}")
+			try:
+				logger = get_logger()
+				logger.log_error(exc, context={"study_path": path})
+			except Exception:
+				pass
 
 	def _set_progress(self, value: int, label: str = ""):
 		self._progress_bar.setValue(value)
@@ -3161,6 +3185,88 @@ class MainWindow(QMainWindow):
 			ref_txt = "normal según límite superior"
 		cut_txt = f"cutoff {float(cutoff):.1f}{unit}" if cutoff is not None else "cutoff n/d"
 		return f"  {label}: {value:.1f}{unit} | {ref_txt} | {cut_txt} | z={zt} → {flag}"
+
+	def _export_structured_results(self):
+		"""Exporta resultados a JSON/CSV/Excel en el directorio de salida."""
+		if self.study is None or self.metrics is None:
+			return
+
+		# Metadatos del estudio
+		ctx = self._study_context(
+			path_override=str(getattr(self, "_output_study_path_override", "") or self.file_edit.text().strip()),
+			study_obj=self.study,
+		)
+		study_meta = {
+			"patient_name": ctx["patient_name"],
+			"patient_id": ctx["patient_id"],
+			"patient_sex": str(getattr(self.study, "patient_sex", "") or ""),
+			"study_date": ctx["study_date"],
+			"study_description": str(getattr(self.study, "study_description", "") or ""),
+			"series_description": str(getattr(self.study, "series_description", "") or ""),
+			"dimensions": f"{self.study.cube.shape[0]}x{self.study.cube.shape[1]}x{self.study.cube.shape[2]}x{self.study.cube.shape[3]}",
+		}
+
+		# Info de segmentación
+		seg_info = {
+			"method": str(getattr(self.seg, "method", "N/D")),
+			"n_voxels": int(getattr(self.seg, "n_voxels", 0)),
+			"n_slices": int(self.study.cube.shape[1]),
+		}
+
+		# Parámetros de procesamiento
+		proc_params = {
+			"seg_method": str(self.seg_method.currentText()),
+			"threshold": float(self.threshold_spin.value()),
+			"smooth_sigma": float(self.sigma_spin.value()),
+			"harmonics": int(self.harmonics_spin.value()),
+			"amp_filter": float(self.phase_threshold_spin.value()),
+		}
+
+		# Robustez
+		robustness = {
+			"segmental_aha": self.metrics.get("segmental_aha"),
+			"bootstrap": self.metrics.get("bootstrap"),
+			"roi_sensitivity": self.metrics.get("roi_sensitivity"),
+		}
+
+		# Evaluación DB normal
+		try:
+			dataset, sex, protocol, nd = self._normal_db_context()
+			normal_db_eval = nd
+		except Exception:
+			normal_db_eval = None
+
+		# QC
+		qc_info = self.phase_qc if self.phase_qc else None
+
+		# Nombre base
+		patient_id = study_meta.get("patient_id", "unknown")
+		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+		base_name = f"gammasync_{patient_id}_{timestamp}"
+
+		# Exportar
+		results = export_all(
+			self.output_dir,
+			study_meta,
+			self.metrics,
+			seg_info,
+			proc_params,
+			robustness,
+			normal_db_eval,
+			qc_info,
+			base_name,
+		)
+
+		# Log
+		try:
+			logger = get_logger()
+			for fmt, path in results.items():
+				if path:
+					logger.log_export(fmt, path)
+		except Exception:
+			pass
+
+		self._log(f"Exportación estructurada: {', '.join(k for k, v in results.items() if v)}")
 
 	def _refresh_summary(self):
 		if self.study is None or self.metrics is None:
