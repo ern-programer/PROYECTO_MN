@@ -17,6 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.phase_analysis import phase_analysis  # noqa: E402
 from core.metrics import calculate_phase_metrics, circular_mean_deg  # noqa: E402
+from core import normal_db  # noqa: E402
+from core.robustness import bootstrap_phase_metrics, calculate_segmental_metrics, roi_sensitivity_analysis  # noqa: E402
 from core.console_utf8 import enable_utf8  # noqa: E402
 
 enable_utf8()
@@ -83,6 +85,8 @@ def test_dyssynchrony_increases_sd():
     assert m_wide["phase_sd"] > m_narrow["phase_sd"], "SD debería crecer con la dispersión"
     assert m_wide["bandwidth"] > m_narrow["bandwidth"]
     assert m_wide["entropy"] > m_narrow["entropy"]
+    assert m_wide["entropy_normalized_pct"] > m_narrow["entropy_normalized_pct"]
+    assert m_wide["technical_classification"] == m_wide["classification"]
     print(f"[OK] disincronía: SD {m_narrow['phase_sd']}° ({m_narrow['classification']}) "
           f"→ {m_wide['phase_sd']}° ({m_wide['classification']})")
 
@@ -99,9 +103,67 @@ def test_amplitude_filter_drops_noise():
     print(f"[OK] filtro amplitud: {res.n_voxels_kept}/{res.n_voxels_total} voxels conservados")
 
 
+def test_normal_db_upper_limits_and_entropy_pct():
+    """DB por software: usa límites superiores publicados, incluyendo entropy %."""
+    nd = normal_db.evaluate(
+        phase_sd=13.0,
+        bandwidth=44.0,
+        entropy_normalized_pct=44.0,
+        dataset="QGS_JSNM2023",
+        sex="male",
+        protocol="stress",
+    )
+    assert nd["dyssynchrony"] is True
+    assert nd["metrics"]["phase_sd"]["abnormal"] is True
+    assert nd["metrics"]["phase_sd"]["method"] == "upper_limit"
+    assert nd["metrics"]["entropy_normalized_pct"]["abnormal"] is True
+    print("[OK] normal_db: QGS_JSNM2023 aplica upper limits PSD/BW/entropy%")
+
+
+class _SyntheticSeg:
+    def __init__(self, mask, centers, inner, outer):
+        self.mask = mask
+        self.center_per_slice = centers
+        self.inner_radius = inner
+        self.outer_radius = outer
+
+
+def test_robustness_metrics_are_available():
+    """Robustez: modo segmentario, bootstrap y sensibilidad ROI devuelven estructura usable."""
+    phase_by_seg = {idx: float(80 + idx) for idx in range(1, 18)}
+    segmental = calculate_segmental_metrics(phase_by_seg)
+    assert segmental["available"] is True
+    assert segmental["n_segments"] == 17
+
+    phases = np.linspace(60.0, 120.0, 80)
+    boot = bootstrap_phase_metrics(phases, n_iter=25, sample_frac=0.75, seed=1)
+    assert boot["available"] is True
+    assert boot["phase_sd"]["ci95_low"] <= boot["phase_sd"]["ci95_high"]
+
+    phase_map = np.full((2, 12, 12), 90.0)
+    mask = np.zeros((2, 12, 12), dtype=bool)
+    yy, xx = np.ogrid[:12, :12]
+    for s in range(2):
+        dist = np.sqrt((yy - 6.0) ** 2 + (xx - 6.0) ** 2)
+        mask[s] = (dist >= 2.0) & (dist <= 4.5)
+    seg = _SyntheticSeg(
+        mask,
+        np.array([[6.0, 6.0], [6.0, 6.0]], dtype=np.float64),
+        np.array([2.0, 2.0], dtype=np.float64),
+        np.array([4.5, 4.5], dtype=np.float64),
+    )
+    cube = _make_gated(phase_map, n_gates=16)
+    sens = roi_sensitivity_analysis(cube, seg, amplitude_threshold_frac=0.05, delta_px=1.0)
+    assert sens["available"] is True
+    assert len(sens["variants"]) >= 3
+    print("[OK] robustez: segmentario/bootstrap/sensibilidad ROI disponibles")
+
+
 def _run_all():
     for fn in [test_uniform_phase_is_synchronous, test_recovers_known_phase_gradient,
-               test_dyssynchrony_increases_sd, test_amplitude_filter_drops_noise]:
+               test_dyssynchrony_increases_sd, test_amplitude_filter_drops_noise,
+               test_normal_db_upper_limits_and_entropy_pct,
+               test_robustness_metrics_are_available]:
         fn()
     print("\n[TODOS LOS TESTS SINTÉTICOS PASARON]")
 

@@ -73,7 +73,7 @@ metrics = calculate_phase_metrics(phases)
 aha = map_to_17_segments(seg)
 pbs = phase_by_segment(res.phase_map, aha)
 terr = territory_analysis(pbs)
-print(f"  {phases.size} voxels, Phase SD={metrics['phase_sd']:.1f}°, Class={metrics['classification']}")
+print(f"  {phases.size} voxels, Phase SD={metrics['phase_sd']:.1f}°, Técnica PSD={metrics['technical_classification']}")
 
 
 def _slice_list_text(indices: list[int], one_based: bool = True, max_show: int = 12) -> str:
@@ -106,7 +106,7 @@ def _build_audit_snapshot(seg_obj, mask_arr: np.ndarray, metrics_dict: dict) -> 
 
     return {
         "method": str(getattr(seg_obj, "method", "N/D")),
-        "classification": str(metrics_dict.get("classification", "N/D")),
+        "technical_classification": str(metrics_dict.get("technical_classification", metrics_dict.get("classification", "N/D"))),
         "n_total_slices": n_slices,
         "n_valid_slices": len(valid_slices),
         "n_no_inner": len(no_inner_slices),
@@ -352,8 +352,8 @@ story.append(Spacer(1, 6*mm))
 # --- Métricas principales ---
 story.append(Paragraph("2. Métricas de Disincronía", section_style))
 
-# Clasificación con color
-cls = metrics["classification"]
+# Clasificación técnica con color
+cls = metrics.get("technical_classification", metrics.get("classification", "N/D"))
 cls_colors = {
     "NORMAL": "#27ae60", "MILD": "#f39c12",
     "MODERATE": "#e67e22", "SEVERE": "#c0392b",
@@ -362,10 +362,11 @@ cls_color = cls_colors.get(cls, "#333333")
 
 metrics_data = [
     ["Métrica", "Valor", "Referencia", "Estado"],
-    ["Phase SD", f"{metrics['phase_sd']:.1f}°", "<20° Normal / >60° Severo",
+    ["Phase SD", f"{metrics['phase_sd']:.1f}°", "Clasificación técnica PSD; confirmar vs DB software-específica",
      f'<font color="{cls_color}"><b>{cls}</b></font>'],
-    ["Bandwidth", f"{metrics['bandwidth']:.1f}°", "<60° Normal / >120° Severo", ""],
-    ["Entropy", f"{metrics['entropy']:.3f}", "<4.0 Normal / >6.0 Severo", ""],
+    ["Bandwidth", f"{metrics['bandwidth']:.1f}°", "Comparar vs DB software-específica", ""],
+    ["Entropy Shannon", f"{metrics.get('entropy_shannon_bits', metrics['entropy']):.3f} bits", "No comparar con entropy %", ""],
+    ["Entropy normalizada", f"{metrics.get('entropy_normalized_pct', float('nan')):.1f}%", "Usar para literatura con entropy 0-100%", ""],
     ["Peak Phase", f"{metrics['peak_phase']:.1f}°", "—", ""],
     ["Peak Width", f"{metrics['peak_width']:.1f}°", "—", ""],
     ["Asynchrony Index", f"{metrics['asynchrony_index']:.1f}%", "—", ""],
@@ -402,16 +403,16 @@ m_table.setStyle(TableStyle([
 story.append(m_table)
 story.append(Spacer(1, 4*mm))
 
-# Interpretación automática
+# Interpretación automática técnica
 interp_text = ""
 if cls == "NORMAL":
-    interp_text = "La distribución de fase es homogénea. No se evidencia disincronía significativa."
+    interp_text = "La distribución de fase es homogénea por clasificación técnica PSD; confirmar con DB normal seleccionada."
 elif cls == "MILD":
-    interp_text = "Se observa leve heterogeneidad en la activación miocárdica. Disincronía leve."
+    interp_text = "Se observa leve heterogeneidad por clasificación técnica PSD; confirmar con DB normal seleccionada."
 elif cls == "MODERATE":
-    interp_text = "Heterogeneidad moderada en la activación. Disincronía moderada que podría beneficiar terapia de resincronización (CRT)."
+    interp_text = "Heterogeneidad moderada por clasificación técnica PSD. No usar como indicación aislada de CRT/TRC."
 else:
-    interp_text = "Disincronía severa. Alta heterogeneidad de activación. Candidato a evaluación para CRT."
+    interp_text = "Alta heterogeneidad por clasificación técnica PSD. Requiere correlación con QRS/BRI, FEVI, perfusión, viabilidad y clínica."
 
 story.append(Paragraph(f"<b>Interpretación:</b> {interp_text}", body_style))
 story.append(Spacer(1, 4*mm))
@@ -422,7 +423,7 @@ story.append(Paragraph("2.1 Criterios Usados en Este Estudio (Auditoría)", sect
 audit_data = [
     ["Campo", "Valor"],
     ["Método de segmentación", AUDIT["method"]],
-    ["Clasificación global", AUDIT["classification"]],
+    ["Clasificación técnica PSD", AUDIT["technical_classification"]],
     ["Slices totales / válidos", f"{AUDIT['n_total_slices']} / {AUDIT['n_valid_slices']}"],
     ["Slices con ROI sin interno", f"{AUDIT['n_no_inner']} ({_slice_list_text(AUDIT['no_inner_slices'])})"],
     [

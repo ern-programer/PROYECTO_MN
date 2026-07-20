@@ -169,15 +169,56 @@ def generate_report(
 	story.append(Spacer(1, 4 * mm))
 
 	story.append(Paragraph("2. Métricas principales", section_style))
+	nd = metrics.get("normal_db_eval") or {}
+	nd_metrics = nd.get("metrics") or {}
+	nd_label = "N/D"
+	if nd:
+		nd_label = "fuera de referencia" if nd.get("dyssynchrony") else "dentro de referencia"
+	technical_class = str(metrics.get("technical_classification", metrics.get("classification", "N/D")))
 	metrics_rows = [
 		["Phase SD", f"{_safe_float(metrics.get('phase_sd'), 1)}°"],
 		["Bandwidth", f"{_safe_float(metrics.get('bandwidth'), 1)}°"],
-		["Entropy", _safe_float(metrics.get("entropy"), 3)],
+		["Entropy Shannon", f"{_safe_float(metrics.get('entropy_shannon_bits', metrics.get('entropy')), 3)} bits"],
+		["Entropy normalizada", f"{_safe_float(metrics.get('entropy_normalized_pct'), 1)}%"],
 		["Asynchrony Index", f"{_safe_float(metrics.get('asynchrony_index'), 1)}%"],
-		["Clasificación", str(metrics.get("classification", "N/D"))],
+		["Clase PSD técnica", f"{technical_class} (orientativa, no diagnóstica)"],
+		["Interpretación vs DB", nd_label],
+		["Skewness / Kurtosis", f"{_safe_float(metrics.get('skewness'), 3)} / {_safe_float(metrics.get('kurtosis'), 3)}"],
+		["Peak phase / width", f"{_safe_float(metrics.get('peak_phase'), 1)}° / {_safe_float(metrics.get('peak_width'), 1)}°"],
+		["Latest activation", f"{_safe_float(metrics.get('latest_activation_phase'), 1)}°"],
 		["Volumen miocardio", f"{_safe_float(volumes.get('myocardial_ml'), 2)} mL"],
 		["Volumen cavidad", f"{_safe_float(volumes.get('cavity_ml'), 2)} mL"],
 	]
+	segmental = metrics.get("segmental_aha") or {}
+	if segmental.get("available"):
+		metrics_rows.extend([
+			["Modo segmentario AHA", f"PSD {_safe_float(segmental.get('phase_sd'), 1)}° | BW {_safe_float(segmental.get('bandwidth'), 1)}° | n={segmental.get('n_segments')}"],
+			["Clase segmentaria AHA", f"{segmental.get('technical_classification', 'N/D')} (robusta, menor resolución)"],
+		])
+	bootstrap = metrics.get("bootstrap") or {}
+	if bootstrap.get("available"):
+		psd_boot = bootstrap.get("phase_sd", {})
+		bw_boot = bootstrap.get("bandwidth", {})
+		metrics_rows.extend([
+			["Bootstrap PSD IC95", f"{_safe_float(psd_boot.get('ci95_low'), 1)}–{_safe_float(psd_boot.get('ci95_high'), 1)}° | media {_safe_float(psd_boot.get('mean'), 1)}°"],
+			["Bootstrap BW IC95", f"{_safe_float(bw_boot.get('ci95_low'), 1)}–{_safe_float(bw_boot.get('ci95_high'), 1)}° | media {_safe_float(bw_boot.get('mean'), 1)}°"],
+		])
+	roi_sens = metrics.get("roi_sensitivity") or {}
+	if roi_sens.get("available"):
+		qc = "sensible a ROI" if roi_sens.get("warn") else "estable ante ROI ±1 px"
+		metrics_rows.append([
+			"Sensibilidad ROI",
+			f"PSD {_safe_float(roi_sens.get('phase_sd_min'), 1)}–{_safe_float(roi_sens.get('phase_sd_max'), 1)}° | BW {_safe_float(roi_sens.get('bandwidth_min'), 1)}–{_safe_float(roi_sens.get('bandwidth_max'), 1)}° | {qc}",
+		])
+	if nd:
+		for key, label, unit in (("phase_sd", "DB PSD", "°"), ("bandwidth", "DB BW", "°"), ("entropy_normalized_pct", "DB Entropy norm.", "%")):
+			m = nd_metrics.get(key) or {}
+			if not m.get("available"):
+				continue
+			flag = "fuera ref." if m.get("abnormal") else "dentro ref."
+			cutoff = m.get("cutoff")
+			z_value = f"{m['z']:+.1f}" if m.get("z") is not None else "n/d"
+			metrics_rows.append([label, f"{_safe_float(m.get('value'), 1)}{unit} | cutoff {_safe_float(cutoff, 1)}{unit} | z={z_value} | {flag}"])
 	if ef.get("available"):
 		metrics_rows.extend([
 			["EDV preliminar", f"{_safe_float(ef.get('edv_ml'), 2)} mL"],
@@ -199,8 +240,16 @@ def generate_report(
 	story.append(Spacer(1, 4 * mm))
 
 	story.append(Paragraph("3. Criterios usados (auditoría y validación)", section_style))
+	roi_lines = [line.strip() for line in str(processing_params.get("manual_rois_text", "") or "").splitlines() if line.strip() and not line.strip().startswith("#")]
+	roi_preview = "; ".join(roi_lines[:4]) if roi_lines else "N/D"
+	if len(roi_lines) > 4:
+		roi_preview += f"; ... (+{len(roi_lines) - 4})"
 	audit_data = [
 		["Campo", "Valor"],
+		["Segmentación solicitada", str(processing_params.get("seg_method", "N/D"))],
+		["Segmentación efectiva", str(audit["method"])],
+		["ROI reproducible", f"{len(roi_lines)} slices en formato slice,cy,cx,r_inner,r_outer" if roi_lines else "No disponible"],
+		["ROI ejemplo", roi_preview],
 		["Slices totales / válidos", f"{audit['n_total_slices']} / {audit['n_valid_slices']}"],
 		["Slices con ROI sin interno", f"{audit['n_no_inner']} ({_slice_list_text(audit['no_inner_slices'])})"],
 		[
@@ -219,7 +268,27 @@ def generate_report(
 			"Advertencia FEVI",
 			"FEVI es preliminar; interpretar con cautela y validar con paquete clínico validado.",
 		],
+		[
+			"Alcance LVMD",
+			"GammaSync informa asincronía mecánica intraventricular del VI; no reemplaza ECG, eco/CMR ni evaluación clínica integral.",
+		],
+		[
+			"Contexto CRT",
+			"Los cutoffs para terapia de resincronización cardíaca son heterogéneos y software-dependientes; usar solo como contexto, no como indicación aislada.",
+		],
+		[
+			"Robustez estadística",
+			"Se reporta modo voxel, modo segmentario AHA, bootstrap e impacto de mover/contraer/expandir ROI ±1 px cuando están disponibles.",
+		],
 	]
+	if roi_sens.get("available"):
+		for row in roi_sens.get("variants", [])[:7]:
+			if "error" in row:
+				continue
+			audit_data.append([
+				f"ROI {row.get('label')}",
+				f"PSD {_safe_float(row.get('phase_sd'), 1)}° | BW {_safe_float(row.get('bandwidth'), 1)}° | voxels fase {row.get('phase_voxels', 'N/D')}",
+			])
 	audit_table = Table(audit_data, colWidths=[60 * mm, 106 * mm])
 	audit_table.setStyle(TableStyle([
 		("BACKGROUND", (0, 0), (-1, 0), DARK_BLUE),
@@ -247,6 +316,14 @@ def generate_report(
 		f"MP4 polar cine={'sí' if processing_params.get('export_polar_mp4', False) else 'no'}"
 	)
 	story.append(Paragraph(f"<b>Parámetros usados:</b> {proc_txt}", body_style))
+	if nd:
+		db_txt = (
+			f"<b>DB normal:</b> {metrics.get('normal_db_dataset', 'N/D')} | "
+			f"sexo={metrics.get('normal_db_sex', 'N/D')} | protocolo={metrics.get('normal_db_protocol', 'N/D')}. "
+			"Las métricas no son intercambiables entre QGS, ECTb, 4DM, cREPO, HFV o GammaSync sin validación cruzada/local."
+		)
+		story.append(Spacer(1, 2 * mm))
+		story.append(Paragraph(db_txt, body_style))
 
 	story.append(PageBreak())
 	story.append(Paragraph("4. Visualizaciones", section_style))
@@ -323,7 +400,7 @@ def generate_report(
 	story.append(Spacer(1, 2.2 * mm))
 	story.append(Paragraph(
 		"<b>Pie de uso recomendado:</b> interpretar siempre en conjunto fase + perfusión + cine + métricas (PSD/BW/Entropy),"
-		" y correlacionar con contexto clínico. FEVI en este informe es preliminar.",
+		" comparadas contra referencias del mismo software o contra validación local. FEVI en este informe es preliminar.",
 		small_style,
 	))
 
@@ -384,21 +461,22 @@ def generate_polar_reference_pdf(*, output_pdf: str) -> str:
 	story.append(Paragraph("<b>Delta absoluto:</b> Δabs = |Δsigned|", body_style))
 	story.append(Paragraph("<b>Phase SD (°):</b> desviación estándar de fase segmentaria/global. Mayor valor implica mayor dispersión temporal.", body_style))
 	story.append(Paragraph("<b>Bandwidth (°):</b> ancho del histograma de fase (habitualmente percentil 95%). Mayor valor implica peor sincronía.", body_style))
-	story.append(Paragraph("<b>Entropy:</b> mide desorganización del histograma de fase. Mayor valor sugiere contracción más heterogénea.", body_style))
+	story.append(Paragraph("<b>Entropy:</b> mide desorganización del histograma de fase. GammaSync reporta Shannon en bits y entropy normalizada en % para comparación con literatura.", body_style))
 	story.append(Spacer(1, 3 * mm))
 
 	story.append(Paragraph("3. Interpretación clínica práctica", section_style))
-	story.append(Paragraph("Regla base: cuanto más dispersa está la fase (mayor PSD/BW/Entropy), mayor probabilidad de asincronía patológica.", body_style))
+	story.append(Paragraph("Regla base: cuanto más dispersa está la fase (mayor PSD/BW/Entropy), mayor probabilidad de asincronía patológica, siempre contrastada con una referencia software-específica.", body_style))
 	story.append(Paragraph("En comparación stress-rest, un incremento relevante de PSD/BW en esfuerzo frente a reposo puede sugerir disincronía transitoria post-stress (stunning isquémico).", body_style))
-	story.append(Paragraph("Siempre correlacionar con perfusión regional, contexto clínico y evolución del paciente.", body_style))
+	story.append(Paragraph("Siempre correlacionar con perfusión regional, QRS/BRI, FEVI, contexto clínico y evolución del paciente. No usar las métricas aisladas como indicación de CRT/TRC.", body_style))
 	story.append(Spacer(1, 3 * mm))
 
-	story.append(Paragraph("4. Rangos de referencia orientativos", section_style))
+	story.append(Paragraph("4. Rangos de referencia publicados", section_style))
 	ref_rows = [
-		["Métrica", "Rango orientativo", "Lectura clínica"],
-		["Phase SD", "11–14°", "Mayor valor: mayor dispersión de sincronía"],
-		["Bandwidth", "42–49°", "Mayor valor: mayor asincronía"],
-		["Entropy", "~3.2", "Mayor valor: mayor desorganización temporal"],
+		["Software", "Métrica", "Límite superior normal publicado"],
+		["QGS JSNM 2023", "PSD / BW / Entropy", "H: 12° / 43° / 43% · M: 10° / 32° / 33%"],
+		["ECTb JSNM 2023", "PSD / BW", "H: 25° / 50° · M: 19° / 45°"],
+		["cREPO JSNM 2023", "PSD / BW / Entropy", "H: 19° / 69° / 57% · M: 13° / 54° / 52%"],
+		["HFV JSNM 2023", "PSD / BW", "H: 12° / 42° · M: 8° / 31°"],
 	]
 	ref_table = Table(ref_rows, colWidths=[42 * mm, 40 * mm, 84 * mm])
 	ref_table.setStyle(TableStyle([
@@ -412,7 +490,7 @@ def generate_polar_reference_pdf(*, output_pdf: str) -> str:
 	]))
 	story.append(ref_table)
 	story.append(Spacer(1, 2.5 * mm))
-	story.append(Paragraph("Nota: rangos publicados como referencia poblacional; no reemplazan validación local ni juicio clínico individual.", small_style))
+	story.append(Paragraph("Nota: los rangos son software-dependientes y poblacionales; no reemplazan validación local ni juicio clínico individual.", small_style))
 	story.append(Spacer(1, 3 * mm))
 
 	story.append(Paragraph("5. Datos adicionales útiles para diagnóstico", section_style))

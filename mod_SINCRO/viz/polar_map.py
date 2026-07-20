@@ -41,7 +41,17 @@ def _segment_color(seg_id: int, phase_by_seg: dict[int, float], cmap_name: str):
 	return tuple(float(v) for v in rgb)
 
 
-def _draw_bullseye(ax, phase_by_seg: dict[int, float], cmap_name: str, show_values: bool, angle_offset_deg: float = 0.0):
+def build_polar_map(
+	phase_by_seg: dict[int, float],
+	cmap_name: str = "hsv",
+	angle_offset_deg: float = 0.0,
+	show_values: bool = True,
+	title: str | None = None,
+) -> PolarMapFigure:
+	fig, ax = plt.subplots(figsize=(7.5, 7.0))
+	ax.set_aspect("equal")
+	ax.axis("off")
+
 	rings = [
 		(0.75, 1.00, 60.0, SECTOR_TO_SEGMENT_BASAL),
 		(0.50, 0.75, 60.0, SECTOR_TO_SEGMENT_MEDIO),
@@ -83,20 +93,6 @@ def _draw_bullseye(ax, phase_by_seg: dict[int, float], cmap_name: str, show_valu
 		label = "17\n--" if not np.isfinite(val) else f"17\n{val:.0f}°"
 		ax.text(0.0, 0.0, label, ha="center", va="center", fontsize=8, color="black")
 
-
-def build_polar_map(
-	phase_by_seg: dict[int, float],
-	cmap_name: str = "hsv",
-	angle_offset_deg: float = 0.0,
-	show_values: bool = True,
-	title: str | None = None,
-) -> PolarMapFigure:
-	fig, ax = plt.subplots(figsize=(7.5, 7.0))
-	ax.set_aspect("equal")
-	ax.axis("off")
-
-	_draw_bullseye(ax, phase_by_seg, cmap_name=cmap_name, show_values=show_values, angle_offset_deg=angle_offset_deg)
-
 	# TODO calibrar orientación del bullseye vs MyoVation/GE.
 
 	ax.set_xlim(-1.15, 1.35)
@@ -110,101 +106,103 @@ def build_polar_map(
 	cbar.set_label("Fase (°)")
 	cbar.set_ticks([0, 60, 120, 180, 240, 300, 360])
 
-	fig.subplots_adjust(left=0.05, right=0.90, top=0.93, bottom=0.05)
+	fig.tight_layout()
 	return PolarMapFigure(fig=fig, segment_values=dict(phase_by_seg), cmap_name=cmap_name)
+
+
+def save_polar_map(pmfig: "PolarMapFigure", path: str, dpi: int = 150) -> str:
+	pmfig.fig.savefig(path, dpi=dpi, bbox_inches="tight")
+	return path
 
 
 def build_clinical_phase_panel(
 	phase_by_seg: dict[int, float],
 	phases_deg: np.ndarray,
-	metrics: dict | None = None,
-	*,
+	metrics: dict,
 	cmap_name: str = "hsv",
 	title: str | None = None,
 ):
-	"""Panel clínico estilo estación: histograma + polar map con PSD/PHB."""
-	phases = np.asarray(phases_deg, dtype=np.float64)
-	phases = phases[np.isfinite(phases)]
-	if phases.size == 0:
-		raise ValueError("phases_deg está vacío o todo NaN.")
+	fig, (ax_map, ax_hist) = plt.subplots(1, 2, figsize=(12.0, 5.6), gridspec_kw={"width_ratios": [1.05, 1.0]})
+	ax_map.set_aspect("equal")
+	ax_map.axis("off")
 
-	if metrics is None:
-		from core.metrics import calculate_phase_metrics
+	rings = [
+		(0.75, 1.00, 60.0, SECTOR_TO_SEGMENT_BASAL),
+		(0.50, 0.75, 60.0, SECTOR_TO_SEGMENT_MEDIO),
+		(0.25, 0.50, 90.0, SECTOR_TO_SEGMENT_APICAL),
+	]
+	for r_in, r_out, step, sector_lut in rings:
+		for sector_index, seg_id_raw in enumerate(sector_lut):
+			theta_start = float(sector_index * step)
+			theta_end = float((sector_index + 1) * step)
+			seg_id = int(seg_id_raw)
+			wedge = Wedge(
+				(0.0, 0.0),
+				r_out,
+				theta_start,
+				theta_end,
+				width=(r_out - r_in),
+				facecolor=_segment_color(seg_id, phase_by_seg, cmap_name),
+				edgecolor="white",
+				linewidth=1.1,
+			)
+			ax_map.add_patch(wedge)
+			x_pos, y_pos = _wedge_midpoint(r_in, r_out, theta_start, theta_end)
+			value = phase_by_seg.get(seg_id, np.nan)
+			label = f"{seg_id}\n--" if not np.isfinite(value) else f"{seg_id}\n{value:.0f}°"
+			ax_map.text(x_pos, y_pos, label, ha="center", va="center", fontsize=7.5, color="black")
 
-		metrics = calculate_phase_metrics(phases)
-
-	fig = plt.figure(figsize=(12.2, 4.2), facecolor="#d8d8da")
-	gs = fig.add_gridspec(1, 2, width_ratios=[1.2, 1.0], wspace=0.08)
-	ax_hist = fig.add_subplot(gs[0, 0])
-	ax_polar = fig.add_subplot(gs[0, 1])
-
-	ax_hist.set_facecolor("black")
-	hist_bins = np.linspace(0.0, 360.0, 73)
-	hist_vals, hist_edges = np.histogram(phases, bins=hist_bins, range=(0.0, 360.0))
-	hist_centers = 0.5 * (hist_edges[:-1] + hist_edges[1:])
-	hist_widths = np.diff(hist_edges)
-	cmap_hist = get_phase_cmap(cmap_name)
-	for v, c, w in zip(hist_vals, hist_centers, hist_widths):
-		bar_color = cmap_hist(((float(c) % 360.0) / 360.0))
-		ax_hist.bar(
-			float(c),
-			float(v),
-			width=float(w) * 0.96,
-			align="center",
-			color=bar_color,
-			edgecolor="#e5e7eb",
-			linewidth=0.12,
-			alpha=0.96,
-		)
-	ax_hist.set_xlim(0.0, 360.0)
-	ax_hist.set_xticks([0, 45, 90, 135, 180, 225, 270, 315, 360])
-	ax_hist.tick_params(axis="x", colors="white", labelsize=8)
-	ax_hist.tick_params(axis="y", colors="white", labelsize=8)
-	ax_hist.set_xlabel("Onset of contraction (degrees)", color="white", fontsize=8)
-	ax_hist.set_ylabel("Frequency (%)", color="white", fontsize=8)
-	ax_hist.grid(axis="y", color="#3a3a3a", linestyle="-", linewidth=0.4, alpha=0.45)
-	for spine in ax_hist.spines.values():
-		spine.set_color("white")
-
-	phase_sd = float(metrics.get("phase_sd", np.nan))
-	bw = float(metrics.get("bandwidth", np.nan))
-	ax_hist.text(
-		0.53,
-		0.83,
-		f"PSD-{phase_sd:.2f}°\nPHB-{bw:.0f}°",
-		transform=ax_hist.transAxes,
-		color="white",
-		fontsize=16,
-		fontweight="bold",
-		ha="left",
-		va="top",
-	)
-
-	ax_polar.set_facecolor("black")
-	ax_polar.set_aspect("equal")
-	ax_polar.axis("off")
-	_draw_bullseye(ax_polar, phase_by_seg, cmap_name=cmap_name, show_values=False, angle_offset_deg=0.0)
-	ax_polar.set_xlim(-1.08, 1.16)
-	ax_polar.set_ylim(-1.08, 1.08)
+	apex_color = _segment_color(17, phase_by_seg, cmap_name)
+	ax_map.add_patch(Circle((0.0, 0.0), 0.25, facecolor=apex_color, edgecolor="white", linewidth=1.1))
+	apex_value = phase_by_seg.get(17, np.nan)
+	ax_map.text(0.0, 0.0, "17\n--" if not np.isfinite(apex_value) else f"17\n{apex_value:.0f}°", ha="center", va="center", fontsize=7.5, color="black")
+	ax_map.set_xlim(-1.15, 1.15)
+	ax_map.set_ylim(-1.15, 1.15)
+	ax_map.set_title("Mapa polar AHA 17", fontsize=10.5, fontweight="bold")
 
 	cmap = get_phase_cmap(cmap_name)
-	sm = ScalarMappable(norm=Normalize(vmin=0.0, vmax=360.0), cmap=cmap)
-	sm.set_array([])
-	cbar = fig.colorbar(sm, ax=ax_polar, fraction=0.065, pad=0.02)
-	cbar.set_ticks([])
-	cbar.ax.set_facecolor("black")
-	cbar.outline.set_edgecolor("white")
+	scalar_map = ScalarMappable(norm=Normalize(vmin=0.0, vmax=360.0), cmap=cmap)
+	scalar_map.set_array([])
+	colorbar = fig.colorbar(scalar_map, ax=ax_map, fraction=0.046, pad=0.035)
+	colorbar.set_label("Fase (°)")
+	colorbar.set_ticks([0, 60, 120, 180, 240, 300, 360])
 
-	fig.suptitle(title or "SINCRO — Panel polar clínico", fontsize=11.5, fontweight="bold", color="#111827")
-	fig.subplots_adjust(left=0.035, right=0.955, top=0.88, bottom=0.12, wspace=0.12)
+	phase_values = np.asarray(phases_deg, dtype=np.float64)
+	phase_values = phase_values[np.isfinite(phase_values)] % 360.0
+	ax_hist.hist(phase_values, bins=72, range=(0.0, 360.0), color="#2c7fb8", alpha=0.82, edgecolor="white", linewidth=0.45)
+	mean_phase = float(metrics.get("mean_phase", np.nan))
+	if np.isfinite(mean_phase):
+		ax_hist.axvline(mean_phase % 360.0, color="#d7191c", linewidth=2.0, label=f"Media {mean_phase:.1f}°")
+	ax_hist.set_xlim(0.0, 360.0)
+	ax_hist.set_xticks([0, 60, 120, 180, 240, 300, 360])
+	ax_hist.set_xlabel("Fase (°)")
+	ax_hist.set_ylabel("Frecuencia")
+	ax_hist.grid(True, alpha=0.22)
+	ax_hist.set_title("Histograma clínico de fase", fontsize=10.5, fontweight="bold")
+	ax_hist.legend(loc="upper right", fontsize=8)
+
+	metric_text = (
+		f"PSD: {metrics.get('phase_sd', 'N/D')}°\n"
+		f"BW: {metrics.get('bandwidth', 'N/D')}°\n"
+		f"Entropy: {metrics.get('entropy_normalized_pct', 'N/D')}%\n"
+		f"PSD técnico: {metrics.get('technical_classification', metrics.get('classification', 'N/D'))} (no dx)"
+	)
+	ax_hist.text(
+		0.03,
+		0.97,
+		metric_text,
+		transform=ax_hist.transAxes,
+		va="top",
+		ha="left",
+		fontsize=8.6,
+		bbox={"boxstyle": "round,pad=0.35", "facecolor": "white", "edgecolor": "#8aa0b8", "alpha": 0.92},
+	)
+
+	fig.suptitle(title or "Panel polar clínico", fontsize=12.5, fontweight="bold")
+	fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.94])
 	return fig
 
 
 def save_clinical_phase_panel(fig, path: str, dpi: int = 150) -> str:
 	fig.savefig(path, dpi=dpi, bbox_inches="tight")
-	return path
-
-
-def save_polar_map(pmfig: "PolarMapFigure", path: str, dpi: int = 150) -> str:
-	pmfig.fig.savefig(path, dpi=dpi, bbox_inches="tight")
 	return path

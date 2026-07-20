@@ -43,13 +43,14 @@ Basado en el algoritmo de análisis de fase de **Emory (Chen 2005, PMID 16344229
 
 - **FFT primer armónico** de la curva de actividad de cada voxel a lo largo del ciclo cardíaco.
 - **Fase** = momento de contracción (0-360°). **Amplitud** = magnitud del cambio.
-- Métricas de dispersión de fase → grado de disincronía.
+- Métricas de dispersión de fase → estimación de asincronía mecánica intraventricular del VI.
 
-| Métrica | Normal | Severo |
-|---------|--------|--------|
-| Phase SD | < 20° | > 60° |
-| Bandwidth | < 60° | > 120° |
-| Entropy | < 4.0 | > 6.0 |
+GammaSync separa dos lecturas:
+- **Clasificación técnica PSD:** cortes históricos por Phase SD para orientación rápida (NORMAL/MILD/MODERATE/SEVERE).
+- **Interpretación clínica vs DB:** comparación contra referencias publicadas por software/sexo/protocolo (`QGS_JSNM2023`, `ECTb_JSNM2023`, `cREPO_JSNM2023`, `HFV_JSNM2023`, etc.). PSD, BW y entropy no son intercambiables entre paquetes.
+- **Robustez/QC:** además del modo voxel, calcula modo segmentario AHA, bootstrap de PSD/BW/entropy y sensibilidad a cambios de ROI ±1 px.
+
+Entropy se informa como **Shannon (bits)** y como **normalizada (%)** cuando se compara contra literatura clínica.
 
 ## Formatos de entrada soportados
 
@@ -72,7 +73,8 @@ python -m core.dicom_loader "ruta/al/REST_IRNCG_SA001_DS.dcm"
 
 - **Nivel 0:** test sintético (`tests/test_phase_synthetic.py`) — fase matemática conocida.
 - **Nivel 1:** MyoVation/QGS (Xeleris) — EF, volúmenes, segmentación LVSD.
-- **Nivel 2:** Emory Cardiac Toolbox / SyncTool — Phase SD/BW/Entropy (ground-truth de fase).
+- **Nivel 2:** Emory Cardiac Toolbox / SyncTool / 4DM — Phase SD/BW/Entropy (ground-truth de fase).
+- **Nivel 3:** validación local con fantomas/estudios clínicos cuando haya acceso a comparadores externos.
 
 ## Licencia
 

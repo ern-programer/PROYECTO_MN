@@ -5,14 +5,14 @@ SINCRO - core.metrics
 Métricas de asincronía a partir de la distribución de fase (grados 0-360°).
 
 Métricas (Emory / literatura):
-- Phase SD (desviación estándar CIRCULAR)   Normal <20°   Severo >60°
-- Bandwidth (P95 - P5 sobre distribución centrada)   Normal <60°   Severo >120°
+- Phase SD (desviación estándar CIRCULAR)
+- Bandwidth (P95 - P5 sobre distribución centrada)
 - Skewness, Kurtosis (forma de la distribución)
-- Entropy (Shannon, histograma normalizado)   Normal <4.0   Severo >6.0
+- Entropy Shannon (bits) e Entropy normalizada (%)
 - Asynchrony Index (% voxels a >2σ de la media)
 - Peak phase + peak width (moda del histograma y su ancho)
 - Latest activation site (fase máxima → clave para CRT lead positioning)
-- Clasificación: NORMAL / MILD / MODERATE / SEVERE (por Phase SD)
+- Clasificación técnica: NORMAL / MILD / MODERATE / SEVERE (por Phase SD)
 
 NOTA sobre circularidad: la fase es angular (0°=360°). La media y el SD se calculan
 de forma CIRCULAR para no romperse en el wrap. Para bandwidth/skew/kurt/entropy se
@@ -23,7 +23,8 @@ from __future__ import annotations
 import numpy as np
 from scipy import stats
 
-# Umbrales de clasificación por Phase SD (grados)
+# Umbrales técnicos históricos por Phase SD (grados). La interpretación clínica
+# final debe compararse contra una DB normal/software específica (core.normal_db).
 CLASS_THRESHOLDS = {"NORMAL": 20.0, "MILD": 40.0, "MODERATE": 60.0}  # >60 = SEVERE
 
 
@@ -88,11 +89,13 @@ def calculate_phase_metrics(phases_deg: np.ndarray, hist_bins: int = 360) -> dic
     skewness = float(stats.skew(centered)) if n > 2 else 0.0
     kurtosis = float(stats.kurtosis(centered)) if n > 3 else 0.0
 
-    # Entropy (Shannon) sobre histograma 0-360
+    # Entropy Shannon sobre histograma 0-360. La literatura de paquetes clínicos
+    # suele reportar entropy normalizada en porcentaje, por eso se exponen ambas.
     hist, edges = np.histogram(phases_deg, bins=hist_bins, range=(0.0, 360.0))
     p = hist / hist.sum() if hist.sum() > 0 else hist
     nz = p[p > 0]
-    entropy = float(-np.sum(nz * np.log2(nz))) if nz.size else 0.0
+    entropy_shannon = float(-np.sum(nz * np.log2(nz))) if nz.size else 0.0
+    entropy_percent = float(100.0 * entropy_shannon / np.log2(hist_bins)) if hist_bins > 1 else 0.0
 
     # Peak phase (moda) + peak width (FWHM aproximado en nº de bins con >50% del pico)
     bin_centers = (edges[:-1] + edges[1:]) / 2.0
@@ -115,12 +118,15 @@ def calculate_phase_metrics(phases_deg: np.ndarray, hist_bins: int = 360) -> dic
         "bandwidth": round(bandwidth, 2),
         "skewness": round(skewness, 3),
         "kurtosis": round(kurtosis, 3),
-        "entropy": round(entropy, 3),
+        "entropy": round(entropy_shannon, 3),
+        "entropy_shannon_bits": round(entropy_shannon, 3),
+        "entropy_normalized_pct": round(entropy_percent, 2),
         "asynchrony_index": round(ai, 2),
         "peak_phase": round(peak_phase, 2),
         "peak_width": round(peak_width, 2),
         "latest_activation_phase": round(latest_phase, 2),
         "classification": classify_dyssynchrony(phase_sd),
+        "technical_classification": classify_dyssynchrony(phase_sd),
     }
     return metrics
 
