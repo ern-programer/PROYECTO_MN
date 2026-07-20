@@ -200,10 +200,38 @@ def test_real_dicom_if_available():
     print(f"     PSD={metrics['phase_sd']}°, BW={metrics['bandwidth']}°")
 
 
+def test_ecg_extraction_and_compare():
+    """Test: extracción ECG desde texto y comparación manual vs extraído."""
+    from core.ecg_extractor import ECGData, compare_ecg_data, extract_from_pdf_text
+
+    data = extract_from_pdf_text("RITMO SINUSAL FC: 72 QRS: 88ms QT: 390ms")
+    assert data.ritmo == "Sinusal"
+    assert data.fc == 72
+    assert data.qrs_ms == 88
+    assert data.qt_ms == 390
+    assert data.qtc_ms > 0
+    assert data.bri is False
+
+    bri = extract_from_pdf_text("BLOQUEO COMPLETO DE RAMA IZQUIERDA QRS: 152 FC: 68")
+    assert bri.bri is True
+    assert bri.qrs_ms == 152
+
+    neg = extract_from_pdf_text("ECG normal. BRI: NO. QRS 90")
+    assert neg.bri is False
+
+    manual = ECGData(ritmo="Sinusal", fc=70, qrs_ms=90)
+    extraido = extract_from_pdf_text("RITMO SINUSAL FC: 95 QRS: 88")
+    comp = compare_ecg_data(manual, extraido)
+    assert comp["has_differences"] is True
+    assert any(d["field"] == "fc" for d in comp["differences"])
+    print("[OK] Extracción y comparación ECG completada")
+
+
 def _run_all():
     test_full_pipeline_synthetic()
     test_export_formats()
     test_logging()
+    test_ecg_extraction_and_compare()
     test_real_dicom_if_available()
     print("\n[TODOS LOS TESTS DE INTEGRACIÓN PASARON]")
 

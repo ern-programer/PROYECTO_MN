@@ -412,6 +412,26 @@ class MainWindow(QMainWindow):
 		self.ecg_obs_edit = QLineEdit()
 		self.ecg_obs_edit.setPlaceholderText("Observaciones ECG...")
 
+		# Carga de archivo ECG
+		self.ecg_file_path = ""
+		self.ecg_load_btn = QPushButton("Cargar ECG...")
+		self.ecg_load_btn.clicked.connect(self._load_ecg_file)
+		self.ecg_load_btn.setToolTip("Cargar archivo ECG (PDF, JPG, PNG) para adjuntar al informe.")
+
+		self.ecg_preview_label = QLabel("Sin ECG cargado")
+		self.ecg_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+		self.ecg_preview_label.setStyleSheet("color:#666; font-size:9pt; border:1px solid #444; padding:4px;")
+		self.ecg_preview_label.setMaximumHeight(60)
+		self.ecg_preview_label.setWordWrap(True)
+
+		self.ecg_clear_btn = QPushButton("Limpiar ECG")
+		self.ecg_clear_btn.clicked.connect(self._clear_ecg_file)
+		self.ecg_clear_btn.setToolTip("Quitar el archivo ECG cargado.")
+
+		ecg_file_row = QHBoxLayout()
+		ecg_file_row.addWidget(self.ecg_load_btn)
+		ecg_file_row.addWidget(self.ecg_clear_btn)
+
 		ecg_form.addRow("Ritmo", self.ecg_ritmo_combo)
 		ecg_form.addRow("FC", self.ecg_fc_spin)
 		ecg_form.addRow("QRS", self.ecg_qrs_spin)
@@ -420,6 +440,8 @@ class MainWindow(QMainWindow):
 		ecg_form.addRow(self.ecg_brd_check)
 		ecg_form.addRow(self.ecg_marcapasos_check)
 		ecg_form.addRow("Observaciones", self.ecg_obs_edit)
+		ecg_form.addRow("Archivo ECG", ecg_file_row)
+		ecg_form.addRow("", self.ecg_preview_label)
 
 		self.ecg_ritmo_combo.setToolTip("Ritmo cardíaco dominante en el ECG de 12 derivaciones.")
 		self.ecg_fc_spin.setToolTip("Frecuencia cardíaca en latidos por minuto.")
@@ -1370,6 +1392,7 @@ class MainWindow(QMainWindow):
 			"ecg_brd": bool(self.ecg_brd_check.isChecked()),
 			"ecg_marcapasos": bool(self.ecg_marcapasos_check.isChecked()),
 			"ecg_observaciones": str(self.ecg_obs_edit.text()),
+			"ecg_file_path": str(self.ecg_file_path),
 			"updated_at": datetime.now().isoformat(timespec="seconds"),
 		}
 
@@ -1523,6 +1546,12 @@ class MainWindow(QMainWindow):
 			self.ecg_marcapasos_check.setChecked(bool(params["ecg_marcapasos"]))
 		if "ecg_observaciones" in params:
 			self.ecg_obs_edit.setText(str(params["ecg_observaciones"]))
+		if "ecg_file_path" in params:
+			self.ecg_file_path = str(params["ecg_file_path"])
+			if self.ecg_file_path:
+				self.ecg_preview_label.setText(f"ECG adjuntado: {os.path.basename(self.ecg_file_path)}")
+			else:
+				self.ecg_preview_label.setText("Sin ECG cargado")
 
 	def save_current_preset(self):
 		patient = self._current_patient_key()
@@ -1647,6 +1676,98 @@ class MainWindow(QMainWindow):
 				self._refresh_presets_for_current_patient()
 			if self.auto_run_check.isChecked():
 				self.process_auto()
+
+	def _manual_ecg_data(self):
+		from core.ecg_extractor import ECGData
+		return ECGData(
+			ritmo=str(self.ecg_ritmo_combo.currentText()),
+			fc=int(self.ecg_fc_spin.value()),
+			qrs_ms=int(self.ecg_qrs_spin.value()),
+			qt_ms=int(self.ecg_qt_spin.value()),
+			bri=bool(self.ecg_bri_check.isChecked()),
+			brd=bool(self.ecg_brd_check.isChecked()),
+			marcapasos=bool(self.ecg_marcapasos_check.isChecked()),
+			observaciones=str(self.ecg_obs_edit.text()),
+			fuente="manual",
+		)
+
+	def _apply_extracted_ecg(self, data):
+		if data.ritmo and data.ritmo != "No especificado":
+			self.ecg_ritmo_combo.setCurrentText(data.ritmo)
+		if data.fc > 0:
+			self.ecg_fc_spin.setValue(int(data.fc))
+		if data.qrs_ms > 0:
+			self.ecg_qrs_spin.setValue(int(data.qrs_ms))
+		if data.qt_ms > 0:
+			self.ecg_qt_spin.setValue(int(data.qt_ms))
+		self.ecg_bri_check.setChecked(bool(data.bri))
+		self.ecg_brd_check.setChecked(bool(data.brd))
+		self.ecg_marcapasos_check.setChecked(bool(data.marcapasos))
+		if data.observaciones:
+			self.ecg_obs_edit.setText(str(data.observaciones))
+
+	def _load_ecg_file(self):
+		from core.ecg_extractor import compare_ecg_data, extract_ecg
+		path, _ = QFileDialog.getOpenFileName(
+			self,
+			"Cargar ECG de 12 derivaciones",
+			"",
+			"ECG (*.pdf *.scp *.dcm *.dicom);;PDF (*.pdf);;SCP-ECG (*.scp);;DICOM (*.dcm *.dicom);;Todos (*.*)",
+		)
+		if not path:
+			return
+		try:
+			extracted = extract_ecg(path)
+		except Exception as exc:
+			QMessageBox.warning(
+				self,
+				"ECG",
+				f"No se pudieron extraer datos automáticos del ECG:\n{exc}\n\nPodés cargar los valores manualmente.",
+			)
+			self.ecg_file_path = path
+			self.ecg_preview_label.setText(f"ECG adjuntado (sin extracción): {os.path.basename(path)}")
+			return
+
+		self.ecg_file_path = path
+		manual = self._manual_ecg_data()
+		comparison = compare_ecg_data(manual, extracted)
+
+		resumen = (
+			f"Extraído ({extracted.fuente}, confianza {extracted.confianza}): "
+			f"ritmo={extracted.ritmo or 'N/D'} | FC={extracted.fc or 'N/D'} | "
+			f"QRS={extracted.qrs_ms or 'N/D'}ms | QT={extracted.qt_ms or 'N/D'}ms | "
+			f"BRI={'sí' if extracted.bri else 'no'} | BRD={'sí' if extracted.brd else 'no'} | "
+			f"MP={'sí' if extracted.marcapasos else 'no'}"
+		)
+
+		if comparison["has_differences"]:
+			lineas = ["Se encontraron diferencias entre los valores manuales y los extraídos del ECG:", ""]
+			for d in comparison["differences"]:
+				marca = " [SIGNIFICATIVO]" if d.get("significant") else ""
+				lineas.append(f"• {d['field']}: manual={d['manual']} vs ECG={d['extracted']}{marca}")
+			lineas += ["", "¿Aplicar los valores extraídos del ECG? (Sí = usar ECG, No = conservar manuales)"]
+			resp = QMessageBox.question(
+				self,
+				"ECG: diferencias detectadas",
+				"\n".join(lineas),
+				QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+				QMessageBox.StandardButton.Yes,
+			)
+			if resp == QMessageBox.StandardButton.Yes:
+				self._apply_extracted_ecg(extracted)
+				self._log(f"ECG cargado y aplicado desde {os.path.basename(path)} ({comparison['n_significant']} diferencias significativas).")
+			else:
+				self._log(f"ECG adjuntado desde {os.path.basename(path)}; se conservaron los valores manuales.")
+		else:
+			self._apply_extracted_ecg(extracted)
+			self._log(f"ECG cargado desde {os.path.basename(path)}; sin diferencias con valores manuales.")
+
+		self.ecg_preview_label.setText(resumen)
+
+	def _clear_ecg_file(self):
+		self.ecg_file_path = ""
+		self.ecg_preview_label.setText("Sin ECG cargado")
+		self._log("ECG desvinculado del estudio.")
 
 	def _find_axis_companion_path(self, sa_path: str, axis_code: str) -> str | None:
 		base = os.path.basename(sa_path)

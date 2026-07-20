@@ -338,6 +338,8 @@ def generate_report(
 		ecg_data.append(["Conducción", ", ".join(ecg_flags)])
 	if processing_params.get("ecg_observaciones"):
 		ecg_data.append(["Observaciones", str(processing_params.get("ecg_observaciones", ""))])
+	if processing_params.get("ecg_file_path"):
+		ecg_data.append(["Archivo ECG", os.path.basename(str(processing_params.get("ecg_file_path", "")))])
 
 	if ecg_data:
 		story.append(Spacer(1, 3 * mm))
