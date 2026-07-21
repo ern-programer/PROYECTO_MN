@@ -149,6 +149,10 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_timer = QTimer(self)
 		self.cine_crudo_timer.timeout.connect(self._advance_cine_crudo_frame)
 		self.cine_crudo_play_btn: QToolButton | None = None
+		self.cine_crudo_correct_btn: QToolButton | None = None
+		self.cine_crudo_compare_check: QCheckBox | None = None
+		self.cine_crudo_corrected_projections = None
+		self.cine_crudo_motion_result = None
 		self._tooltips_cache_main: dict[QWidget, str] = {}
 		self._ui_show_helpers = True
 		self._ui_enable_tooltips = True
@@ -1085,6 +1089,16 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_mode_combo.setCurrentText("Continuo")
 				self.cine_crudo_mode_combo.setToolTip("Continuo: loop 1→N→1. Rebote: 1→N→1→N (ping-pong).")
 				toolbar.addWidget(self.cine_crudo_mode_combo)
+				self.cine_crudo_correct_btn = QToolButton()
+				self.cine_crudo_correct_btn.setText("Corregir")
+				self.cine_crudo_correct_btn.setToolTip("Aplica motion correction COM a las proyecciones crudas y habilita comparación.")
+				self.cine_crudo_correct_btn.clicked.connect(self._apply_cine_crudo_motion_correction)
+				toolbar.addWidget(self.cine_crudo_correct_btn)
+				self.cine_crudo_compare_check = QCheckBox("Comparar")
+				self.cine_crudo_compare_check.setToolTip("Muestra original y corregido en paralelo (original | corregido).")
+				self.cine_crudo_compare_check.setEnabled(False)
+				self.cine_crudo_compare_check.toggled.connect(self._refresh_cine_crudo_view)
+				toolbar.addWidget(self.cine_crudo_compare_check)
 				self.cine_crudo_frame_label = QLabel("--/--")
 				self.cine_crudo_frame_label.setStyleSheet("color:#444;")
 				toolbar.addWidget(self.cine_crudo_frame_label)
@@ -5853,8 +5867,22 @@ class MainWindow(QMainWindow):
 			frames_arr = projections[gate_mid]  # (angles, H, W)
 			self.cine_crudo_matrix_txt = f"Gated gate {gate_mid + 1}/{n_gates} · {n_angles}áng × {H}×{W}px"
 
+		compare_on = bool(self.cine_crudo_compare_check is not None and self.cine_crudo_compare_check.isChecked())
+		corrected_frames_arr = None
+		if compare_on and self.cine_crudo_corrected_projections is not None:
+			corrected = np.asarray(self.cine_crudo_corrected_projections, dtype=np.float64)
+			if source == "UngGat":
+				from core.raw_projections import ungate_projections
+				corrected_frames_arr = ungate_projections(corrected)
+			else:
+				gate_mid = corrected.shape[0] // 2
+				corrected_frames_arr = corrected[gate_mid]
+			self.cine_crudo_matrix_txt += " | original|corregido"
+
 		# Escala global (percentil 99 de todo el set) para que el movimiento sea comparable
 		p99 = float(np.percentile(frames_arr, 99.0)) or 1.0
+		if corrected_frames_arr is not None:
+			p99 = max(p99, float(np.percentile(corrected_frames_arr, 99.0)) or 1.0)
 		if p99 <= 0:
 			p99 = 1.0
 		frames: list[QPixmap] = []
@@ -5864,14 +5892,53 @@ class MainWindow(QMainWindow):
 			for a in range(frames_arr.shape[0]):
 				img = np.clip(frames_arr[a] / p99, 0, 1)
 				rgb = (np.asarray(cmap(img)[..., :3]) * 255).astype(np.uint8)
+				if corrected_frames_arr is not None:
+					img_corr = np.clip(corrected_frames_arr[a] / p99, 0, 1)
+					rgb_corr = (np.asarray(cmap(img_corr)[..., :3]) * 255).astype(np.uint8)
+					rgb = np.concatenate([rgb, rgb_corr], axis=1)
 				frames.append(self._rgb_frame_to_qpixmap_raw(rgb))
 		except Exception:
 			for a in range(frames_arr.shape[0]):
 				img = (np.clip(frames_arr[a] / p99, 0, 1) * 255).astype(np.uint8)
+				if corrected_frames_arr is not None:
+					img_corr = (np.clip(corrected_frames_arr[a] / p99, 0, 1) * 255).astype(np.uint8)
+					img = np.concatenate([img, img_corr], axis=1)
 				frames.append(self._rgb_frame_to_qpixmap_raw(img))
 		self.cine_crudo_frames = frames
 		self.cine_crudo_timer.setInterval(max(40, int(self.cine_crudo_speed_spin.value() if hasattr(self, "cine_crudo_speed_spin") else 120)))
 		self._set_cine_crudo_frame(0)
+
+	def _apply_cine_crudo_motion_correction(self):
+		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
+			return
+		try:
+			from core.raw_projections import motion_correct_projections
+			projections = np.asarray(self.study.cube, dtype=np.float64)
+			self._set_progress(55, "Aplicando motion correction al crudo...")
+			result = motion_correct_projections(projections, axis="xy")
+			self.cine_crudo_motion_result = result
+			self.cine_crudo_corrected_projections = np.asarray(result.get("corrected"), dtype=np.float64)
+			if self.cine_crudo_compare_check is not None:
+				self.cine_crudo_compare_check.setEnabled(True)
+				self.cine_crudo_compare_check.setChecked(True)
+			from core.raw_projections import center_of_mass_tracking
+			ty_before = center_of_mass_tracking(projections, axis="y")
+			ty_after = center_of_mass_tracking(self.cine_crudo_corrected_projections, axis="y")
+			self._log(
+				f"Motion correction aplicada: mov={'sí' if result.get('motion_detected') else 'no'} | "
+				f"max shift {result.get('max_shift_px')} px | corrección axis={result.get('axis_corrected')} | "
+				f"Y shift {ty_before.get('max_shift_px')}→{ty_after.get('max_shift_px')} px | "
+				f"outliers Y {ty_before.get('n_outliers')}→{ty_after.get('n_outliers')}"
+			)
+			self._refresh_cine_crudo_view()
+			self._set_progress(100, "Motion correction lista")
+		except Exception as exc:
+			self._log(f"[WARN] Motion correction falló: {exc}")
+			self._set_progress(100, "Crudo cargado")
+
+	def _refresh_cine_crudo_view(self):
+		source = str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
+		self._load_cine_crudo_frames(source)
 
 	def _set_cine_crudo_frame(self, idx: int):
 		if not self.cine_crudo_frames:

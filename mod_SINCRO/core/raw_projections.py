@@ -257,3 +257,72 @@ def center_of_mass_tracking(projections: np.ndarray, axis: str = "y") -> dict:
         "max_shift_px": round(max_shift, 2),
         "motion_suspected": bool(max_shift > 1.5 or outliers.sum() >= 2),
     }
+
+
+def motion_correct_projections(
+    projections: np.ndarray,
+    axis: str = "y",
+    threshold_frac: float = 0.20,
+) -> dict:
+    """
+    Motion correction completa de proyecciones SPECT gated (flujo Odyssey).
+
+    Flujo:
+      1. Tracking del centro de masa del corazón vs ángulo (sobre suma de gates,
+         alta estadística = UngGat implícito).
+      2. Detección de outliers y cálculo de shifts para alinear a la mediana.
+      3. Aplicación de los mismos shifts a TODAS las proyecciones (todos los gates
+         comparten la misma posición angular → el paciente se mueve igual).
+      4. Retorna proyecciones corregidas + métricas de la corrección.
+
+    Parameters
+    ----------
+    projections : ndarray (n_gates, n_angles, H, W)
+        Proyecciones crudas gated.
+    axis : 'y' (vertical, default, la más común) o 'x' o 'xy' (ambas).
+    threshold_frac : float
+        Fracción del máximo para aislar el corazón del fondo.
+
+    Returns
+    -------
+    dict con:
+        corrected : ndarray (n_gates, n_angles, H, W) — proyecciones corregidas.
+        tracking_y, tracking_x : dict — resultados del COM tracking por eje.
+        applied_shifts_y, applied_shifts_x : ndarray — shifts aplicados por ángulo.
+        motion_detected : bool
+        max_shift_px : float
+    """
+    proj = np.asarray(projections, dtype=np.float64)
+    if proj.ndim != 4:
+        raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibió {proj.shape}")
+
+    axes_to_correct = ["y", "x"] if axis == "xy" else [axis]
+    tracking = {}
+    shifts_y = np.zeros((proj.shape[1],), dtype=np.float64)
+    shifts_x = np.zeros((proj.shape[1],), dtype=np.float64)
+
+    for ax in axes_to_correct:
+        trk = center_of_mass_tracking(proj, axis=ax)
+        tracking[ax] = trk
+        if ax == "y":
+            shifts_y = np.asarray(trk["suggested_shifts_px"], dtype=np.float64)
+        else:
+            shifts_x = np.asarray(trk["suggested_shifts_px"], dtype=np.float64)
+
+    corrected = apply_shifts_to_projections(proj, shifts_y, shifts_x)
+    max_shift = float(max(
+        float(np.abs(shifts_y).max()) if shifts_y.size else 0.0,
+        float(np.abs(shifts_x).max()) if shifts_x.size else 0.0,
+    ))
+    motion_detected = any(tracking[ax]["motion_suspected"] for ax in axes_to_correct)
+
+    return {
+        "corrected": corrected,
+        "tracking_y": tracking.get("y"),
+        "tracking_x": tracking.get("x"),
+        "applied_shifts_y": shifts_y,
+        "applied_shifts_x": shifts_x,
+        "motion_detected": bool(motion_detected),
+        "max_shift_px": round(max_shift, 2),
+        "axis_corrected": axis,
+    }
