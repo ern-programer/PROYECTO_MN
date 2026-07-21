@@ -155,6 +155,7 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_seed_btn: QToolButton | None = None
 		self.cine_crudo_seed: tuple[float, float] | None = None
 		self.cine_crudo_seed_mode = False
+		self.cine_crudo_ref_index: int | None = None
 		self.cine_crudo_corrected_projections = None
 		self.cine_crudo_motion_result = None
 		self._tooltips_cache_main: dict[QWidget, str] = {}
@@ -1195,6 +1196,16 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_apply_offset_btn.setToolTip("Aplica offset global X/Y a todos los frames corregidos.")
 				self.cine_crudo_apply_offset_btn.clicked.connect(self._apply_cine_crudo_manual_offset)
 				toolbar2.addWidget(self.cine_crudo_apply_offset_btn)
+				self.cine_crudo_set_ref_btn = QToolButton()
+				self.cine_crudo_set_ref_btn.setText("Usar frame ref")
+				self.cine_crudo_set_ref_btn.setToolTip("Fija el frame actual como referencia (shift=0) para la corrección.")
+				self.cine_crudo_set_ref_btn.clicked.connect(self._set_cine_crudo_reference_frame)
+				toolbar2.addWidget(self.cine_crudo_set_ref_btn)
+				self.cine_crudo_shift_plot_btn = QToolButton()
+				self.cine_crudo_shift_plot_btn.setText("Curvas shift")
+				self.cine_crudo_shift_plot_btn.setToolTip("Muestra curvas X/Y de shift por frame (estilo Xeleris).")
+				self.cine_crudo_shift_plot_btn.clicked.connect(self._show_cine_crudo_shift_curves)
+				toolbar2.addWidget(self.cine_crudo_shift_plot_btn)
 				toolbar2.addStretch(1)
 			toolbar.addStretch(1)
 			tab_layout.addLayout(toolbar)
@@ -6074,9 +6085,9 @@ class MainWindow(QMainWindow):
 			axis = str(self.cine_crudo_axis_combo.currentText()).lower() if hasattr(self, "cine_crudo_axis_combo") else "y"
 			threshold = self._cine_crudo_threshold_value()
 			seed = self.cine_crudo_seed  # el pick del usuario aplica a TODOS los métodos (COM, Stasis, Hopkins, GammaSync)
-			ref_idx = int(getattr(self, "_cine_crudo_current_frame", 0))
+			ref_idx = int(self.cine_crudo_ref_index if self.cine_crudo_ref_index is not None else getattr(self, "_cine_crudo_current_frame", 0))
 			if method == "auto":
-				# Auto: correr varios métodos y elegir el que minimiza shift residual en Y.
+				# Auto: correr varios métodos y elegir por score clínico (residual Y/X + outliers + energía de shift).
 				from core.raw_projections import center_of_mass_tracking
 				candidates = ["com", "odyssey", "stasis", "hopkins", "gammasync", "threshold"]
 				best_result = None
@@ -6094,13 +6105,21 @@ class MainWindow(QMainWindow):
 						ref_index=ref_idx,
 					)
 					ty_m = center_of_mass_tracking(np.asarray(res_m.get("corrected"), dtype=np.float64), axis="y")
-					score = float(ty_m.get("max_shift_px", 0.0)) + 0.15 * float(res_m.get("max_shift_px", 0.0))
+					tx_m = center_of_mass_tracking(np.asarray(res_m.get("corrected"), dtype=np.float64), axis="x")
+					score = (
+						1.00 * float(ty_m.get("max_shift_px", 0.0))
+						+ 0.60 * float(tx_m.get("max_shift_px", 0.0))
+						+ 0.20 * float(ty_m.get("n_outliers", 0))
+						+ 0.15 * float(res_m.get("max_shift_px", 0.0))
+					)
 					if score < best_score:
 						best_score = score
 						best_result = res_m
 						best_method = m
 				result = best_result
-				self._log(f"Auto-método: elegido {best_method} (score {best_score:.2f}).")
+				if result is not None:
+					result["method_auto_selected"] = best_method
+				self._log(f"Auto-método: elegido {best_method} (score {best_score:.2f}, ref frame {ref_idx}).")
 			else:
 				result = motion_correct_projections(
 					projections,
@@ -6166,6 +6185,63 @@ class MainWindow(QMainWindow):
 			self._log(f"Offset manual aplicado: OffY={offy:+.2f}px OffX={offx:+.2f}px")
 		except Exception as exc:
 			self._log(f"[WARN] Aplicar offset manual falló: {exc}")
+
+	def _set_cine_crudo_reference_frame(self):
+		"""Fija el frame actual como referencia de corrección (shift=0 en ese frame)."""
+		if not self.cine_crudo_frames:
+			QMessageBox.information(self, "SINCRO", "Primero cargá el cine crudo.")
+			return
+		self.cine_crudo_ref_index = int(getattr(self, "_cine_crudo_current_frame", self.cine_crudo_index))
+		self._log(f"Frame de referencia fijado: {self.cine_crudo_ref_index}. La próxima corrección ancla shift=0 en ese frame.")
+
+	def _show_cine_crudo_shift_curves(self):
+		"""Muestra curvas de shifts X/Y vs frame (estilo Xeleris) para depurar la corrección."""
+		if self.cine_crudo_motion_result is None:
+			QMessageBox.information(self, "SINCRO", "Primero ejecutá una corrección.")
+			return
+		try:
+			import matplotlib.pyplot as plt
+			sy = np.asarray(self.cine_crudo_motion_result.get("applied_shifts_y", []), dtype=np.float64)
+			sx = np.asarray(self.cine_crudo_motion_result.get("applied_shifts_x", []), dtype=np.float64)
+			n = int(max(len(sy), len(sx)))
+			if n == 0:
+				QMessageBox.information(self, "SINCRO", "No hay shifts para graficar.")
+				return
+			x = np.arange(n)
+			fig, axes = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
+			fig.patch.set_facecolor("#0b1220")
+			axes[0].plot(x, sy, "-o", color="gold", ms=3)
+			axes[0].axhline(0.0, color="#94a3b8", lw=1, alpha=0.6)
+			axes[0].set_ylabel("Shift Y (px)", color="white")
+			axes[0].set_title("Y Shifts vs Frame", color="white", fontsize=10)
+			axes[0].grid(alpha=0.25)
+			axes[1].plot(x, sx, "-o", color="cyan", ms=3)
+			axes[1].axhline(0.0, color="#94a3b8", lw=1, alpha=0.6)
+			axes[1].set_ylabel("Shift X (px)", color="white")
+			axes[1].set_xlabel("Frame", color="white")
+			axes[1].set_title("X Shifts vs Frame", color="white", fontsize=10)
+			axes[1].grid(alpha=0.25)
+			for ax in axes:
+				ax.set_facecolor("#0b1220")
+				ax.tick_params(colors="white")
+				for s in ax.spines.values():
+					s.set_color("#334155")
+			ref_txt = str(self.cine_crudo_ref_index) if self.cine_crudo_ref_index is not None else "auto(frame actual)"
+			meth = str(self.cine_crudo_motion_result.get("method_auto_selected") or self.cine_crudo_motion_result.get("method") or "?")
+			fig.suptitle(f"Curvas de shift — método {meth} | ref {ref_txt}", color="white", fontsize=11, fontweight="bold")
+			fig.tight_layout(rect=[0, 0, 1, 0.95])
+			out_png = os.path.join(self.output_dir, "motion_shift_curves.png")
+			fig.savefig(out_png, dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
+			plt.close(fig)
+			if "ungated" in self.preview_labels:
+				pix = QPixmap(out_png)
+				self.preview_pixmaps["ungated"] = pix
+				self.preview_base_sizes["ungated"] = pix.size()
+				self._apply_preview_zoom("ungated")
+				self._select_tab_by_title("ungated")
+			self._log("Curvas de shift generadas: motion_shift_curves.png")
+		except Exception as exc:
+			self._log(f"[WARN] Curvas de shift fallaron: {exc}")
 
 	def _refresh_cine_crudo_view(self):
 		source = str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
