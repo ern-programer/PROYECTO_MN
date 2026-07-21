@@ -467,6 +467,137 @@ def _tracking_odyssey(
     }
 
 
+def _tracking_stasis(
+    projections: np.ndarray,
+    axis: str,
+    threshold_frac: float,
+    seed: tuple[float, float] | None = None,
+) -> dict:
+    """
+    Tracking estilo Stasis (método Xeleris/Myovation).
+
+    Concepto: el corazón vuelve a una posición "estática" (baseline) entre
+    movimientos respiratorios. Stasis detecta esa posición de referencia como
+    la MODA (valor más frecuente) del centro del órgano a lo largo de los frames,
+    y corrige cada frame hacia esa referencia estática (no hacia la mediana).
+
+    Ventaja vs mediana: la mediana se sesga si el paciente pasa más tiempo en una
+    posición no-baseline; la moda (stasis) captura la posición de reposo real.
+    Hopkins es una variante que pondera por estabilidad temporal.
+    """
+    from scipy.ndimage import center_of_mass as _com
+
+    proj = np.asarray(projections, dtype=np.float64)
+    summed = proj.sum(axis=0)
+    n_angles = summed.shape[0]
+    threshold_frac = float(threshold_frac)
+    threshold_frac = min(max(threshold_frac, 0.01), 0.90)
+
+    # Centro del órgano por frame (con selección de componente si hay seed o auto).
+    centers = np.full((n_angles,), np.nan, dtype=np.float64)
+    for a in range(n_angles):
+        img = summed[a]
+        if img.max() <= 0:
+            continue
+        mask = img > (threshold_frac * img.max())
+        organ = _select_organ_component(mask, seed=seed, auto=(seed is None))
+        if organ.sum() < 4:
+            continue
+        cy, cx = _com(organ)
+        centers[a] = cy if axis == "y" else cx
+
+    valid = np.isfinite(centers)
+    if valid.sum() < 3:
+        return {"axis": axis, "com_series": centers, "method": "stasis", "threshold_frac": threshold_frac, "_stasis_shifts": np.zeros((n_angles,))}
+
+    # Referencia estática (stasis): moda del centro redondeado a 0.5px.
+    # Agrupa frames por posición similar y toma la posición del grupo más grande.
+    rounded = np.round(centers[valid] * 2.0) / 2.0  # resolución 0.5px
+    # Hopkins: pondera por estabilidad (frames consecutivos en la misma posición).
+    best_ref, best_count = None, -1
+    for val in np.unique(rounded):
+        count = int(np.sum(rounded == val))
+        if count > best_count:
+            best_count, best_ref = count, float(val)
+    if best_ref is None:
+        best_ref = float(np.median(centers[valid]))
+
+    # Shifts: llevar cada frame a la referencia estática.
+    shifts = np.where(valid, best_ref - centers, 0.0)
+    return {
+        "axis": axis,
+        "com_series": centers,
+        "method": "stasis",
+        "threshold_frac": threshold_frac,
+        "stasis_reference": best_ref,
+        "stasis_baseline_frames": best_count,
+        "_stasis_shifts": shifts,
+    }
+
+
+def _tracking_hopkins(
+    projections: np.ndarray,
+    axis: str,
+    threshold_frac: float,
+    seed: tuple[float, float] | None = None,
+) -> dict:
+    """
+    Tracking estilo Hopkins (variante de Stasis con estabilidad temporal).
+
+    Similar a Stasis pero la referencia se calcula como el centro del frame más
+    estable (el que minimiza la varianza con sus vecinos temporales), no la moda.
+    Útil cuando el movimiento es gradual (respiración) más que por saltos.
+    """
+    from scipy.ndimage import center_of_mass as _com
+
+    proj = np.asarray(projections, dtype=np.float64)
+    summed = proj.sum(axis=0)
+    n_angles = summed.shape[0]
+    threshold_frac = float(threshold_frac)
+    threshold_frac = min(max(threshold_frac, 0.01), 0.90)
+
+    centers = np.full((n_angles,), np.nan, dtype=np.float64)
+    for a in range(n_angles):
+        img = summed[a]
+        if img.max() <= 0:
+            continue
+        mask = img > (threshold_frac * img.max())
+        organ = _select_organ_component(mask, seed=seed, auto=(seed is None))
+        if organ.sum() < 4:
+            continue
+        cy, cx = _com(organ)
+        centers[a] = cy if axis == "y" else cx
+
+    valid = np.isfinite(centers)
+    if valid.sum() < 3:
+        return {"axis": axis, "com_series": centers, "method": "hopkins", "threshold_frac": threshold_frac, "_hopkins_shifts": np.zeros((n_angles,))}
+
+    # Referencia Hopkins: centro del frame con menor varianza local (más estable).
+    valid_idx = np.where(valid)[0]
+    best_ref, best_var = None, 1e18
+    for idx in valid_idx:
+        lo = max(0, idx - 1)
+        hi = min(n_angles, idx + 2)
+        neighbors = centers[lo:hi][np.isfinite(centers[lo:hi])]
+        if neighbors.size < 2:
+            continue
+        var = float(np.var(neighbors))
+        if var < best_var:
+            best_var, best_ref = var, float(centers[idx])
+    if best_ref is None:
+        best_ref = float(np.median(centers[valid]))
+
+    shifts = np.where(valid, best_ref - centers, 0.0)
+    return {
+        "axis": axis,
+        "com_series": centers,
+        "method": "hopkins",
+        "threshold_frac": threshold_frac,
+        "hopkins_reference": best_ref,
+        "_hopkins_shifts": shifts,
+    }
+
+
 def _finalize_tracking(tracking: dict) -> dict:
     """Calcula outliers, shifts y flag de movimiento para un tracking dado."""
     com_series = np.asarray(tracking.get("com_series", []), dtype=np.float64)
@@ -513,6 +644,8 @@ def motion_correct_projections(
 
     Methods:
       - gammasync: threshold + selección de componente del órgano (corazón), automática o por seed (click). Recomendado.
+      - stasis: referencia estática (moda) del centro del órgano, como Xeleris Stasis.
+      - hopkins: referencia del frame más estable temporalmente, como Xeleris Hopkins.
       - odyssey: re-proyección iterativa (manual LX).
       - com: centro de masa sobre máscara por threshold.
       - threshold: centro del bounding box de la máscara por threshold.
@@ -522,8 +655,8 @@ def motion_correct_projections(
         raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibió {proj.shape}")
 
     method = str(method or "gammasync").strip().lower()
-    if method not in ("gammasync", "com", "threshold", "odyssey"):
-        raise ValueError("method debe ser 'gammasync', 'com', 'threshold' u 'odyssey'")
+    if method not in ("gammasync", "stasis", "hopkins", "com", "threshold", "odyssey"):
+        raise ValueError("method debe ser 'gammasync', 'stasis', 'hopkins', 'com', 'threshold' u 'odyssey'")
 
     axes_to_correct = ["y", "x"] if axis == "xy" else [axis]
     tracking = {}
@@ -533,6 +666,20 @@ def motion_correct_projections(
     for ax in axes_to_correct:
         if method == "gammasync":
             trk = _finalize_tracking(_tracking_gammasync(proj, axis=ax, threshold_frac=threshold_frac, seed=seed))
+        elif method == "stasis":
+            trk = _tracking_stasis(proj, axis=ax, threshold_frac=threshold_frac, seed=seed)
+            stasis_shifts = np.asarray(trk.pop("_stasis_shifts", np.zeros((proj.shape[1],))), dtype=np.float64)
+            trk = _finalize_tracking(trk)
+            trk["suggested_shifts_px"] = stasis_shifts
+            trk["max_shift_px"] = round(float(np.abs(stasis_shifts).max()) if stasis_shifts.size else 0.0, 2)
+            trk["motion_suspected"] = bool(trk["max_shift_px"] > 1.5 or trk.get("n_outliers", 0) >= 2)
+        elif method == "hopkins":
+            trk = _tracking_hopkins(proj, axis=ax, threshold_frac=threshold_frac, seed=seed)
+            hopkins_shifts = np.asarray(trk.pop("_hopkins_shifts", np.zeros((proj.shape[1],))), dtype=np.float64)
+            trk = _finalize_tracking(trk)
+            trk["suggested_shifts_px"] = hopkins_shifts
+            trk["max_shift_px"] = round(float(np.abs(hopkins_shifts).max()) if hopkins_shifts.size else 0.0, 2)
+            trk["motion_suspected"] = bool(trk["max_shift_px"] > 1.5 or trk.get("n_outliers", 0) >= 2)
         elif method == "odyssey":
             trk = _tracking_odyssey(proj, axis=ax, threshold_frac=threshold_frac)
             # Odyssey: usar los shifts acumulados de las iteraciones, no la mediana.
