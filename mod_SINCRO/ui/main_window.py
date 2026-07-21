@@ -151,6 +151,7 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_play_btn: QToolButton | None = None
 		self.cine_crudo_correct_btn: QToolButton | None = None
 		self.cine_crudo_compare_check: QCheckBox | None = None
+		self.cine_crudo_mask_check: QCheckBox | None = None
 		self.cine_crudo_corrected_projections = None
 		self.cine_crudo_motion_result = None
 		self._tooltips_cache_main: dict[QWidget, str] = {}
@@ -1102,18 +1103,20 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_axis_combo.setToolTip("Eje de corrección: solo Y (default clínico), solo X, o ambos.")
 				toolbar.addWidget(self.cine_crudo_axis_combo)
 				toolbar.addWidget(QLabel("Thr"))
-				self.cine_crudo_threshold_spin = QDoubleSpinBox()
-				self.cine_crudo_threshold_spin.setRange(0.05, 0.80)
-				self.cine_crudo_threshold_spin.setSingleStep(0.05)
-				self.cine_crudo_threshold_spin.setValue(0.20)
-				self.cine_crudo_threshold_spin.setDecimals(2)
-				self.cine_crudo_threshold_spin.setToolTip("Fracción del máximo para aislar el órgano en el tracking.")
-				toolbar.addWidget(self.cine_crudo_threshold_spin)
-				self.cine_crudo_mask_btn = QToolButton()
-				self.cine_crudo_mask_btn.setText("Ver máscara")
-				self.cine_crudo_mask_btn.setToolTip("Muestra la máscara del threshold sobre la proyección actual (como Select Object de Odyssey). Ajustá Thr hasta aislar el corazón.")
-				self.cine_crudo_mask_btn.clicked.connect(self._show_cine_crudo_threshold_mask)
-				toolbar.addWidget(self.cine_crudo_mask_btn)
+				self.cine_crudo_threshold_slider = QSlider(Qt.Orientation.Horizontal)
+				self.cine_crudo_threshold_slider.setRange(5, 80)
+				self.cine_crudo_threshold_slider.setValue(20)
+				self.cine_crudo_threshold_slider.setMaximumWidth(110)
+				self.cine_crudo_threshold_slider.setToolTip("Threshold para aislar el corazón (Select Object). Mová el slider y mirá la máscara en vivo.")
+				self.cine_crudo_threshold_label = QLabel("0.20")
+				self.cine_crudo_threshold_label.setStyleSheet("color:#444; min-width:34px;")
+				self.cine_crudo_threshold_slider.valueChanged.connect(self._on_cine_crudo_threshold_changed)
+				toolbar.addWidget(self.cine_crudo_threshold_slider)
+				toolbar.addWidget(self.cine_crudo_threshold_label)
+				self.cine_crudo_mask_check = QCheckBox("Máscara")
+				self.cine_crudo_mask_check.setToolTip("Superpone la máscara del threshold sobre la proyección actual en tiempo real.")
+				self.cine_crudo_mask_check.toggled.connect(self._refresh_cine_crudo_view)
+				toolbar.addWidget(self.cine_crudo_mask_check)
 				self.cine_crudo_correct_btn = QToolButton()
 				self.cine_crudo_correct_btn.setText("Corregir")
 				self.cine_crudo_correct_btn.setToolTip("Aplica motion correction con método/eje/threshold seleccionados.")
@@ -5915,6 +5918,9 @@ class MainWindow(QMainWindow):
 			p99 = max(p99, float(np.percentile(corrected_frames_arr, 99.0)) or 1.0)
 		if p99 <= 0:
 			p99 = 1.0
+		# Máscara de threshold en tiempo real (Select Object estilo Odyssey)
+		mask_on = bool(self.cine_crudo_mask_check is not None and self.cine_crudo_mask_check.isChecked())
+		thr_val = self._cine_crudo_threshold_value()
 		frames: list[QPixmap] = []
 		try:
 			import matplotlib.cm as _cm
@@ -5922,6 +5928,12 @@ class MainWindow(QMainWindow):
 			for a in range(frames_arr.shape[0]):
 				img = np.clip(frames_arr[a] / p99, 0, 1)
 				rgb = (np.asarray(cmap(img)[..., :3]) * 255).astype(np.uint8)
+				if mask_on:
+					frame_img = frames_arr[a]
+					fmax = float(frame_img.max()) if frame_img.size else 0.0
+					mask = frame_img > (thr_val * fmax) if fmax > 0 else np.zeros_like(frame_img, dtype=bool)
+					rgb = rgb.copy()
+					rgb[mask] = (0.45 * rgb[mask] + 0.55 * np.array([255, 255, 255])).astype(np.uint8)
 				if corrected_frames_arr is not None:
 					img_corr = np.clip(corrected_frames_arr[a] / p99, 0, 1)
 					rgb_corr = (np.asarray(cmap(img_corr)[..., :3]) * 255).astype(np.uint8)
@@ -5947,7 +5959,7 @@ class MainWindow(QMainWindow):
 			self._set_progress(55, "Aplicando motion correction al crudo...")
 			method = str(self.cine_crudo_method_combo.currentText()).lower() if hasattr(self, "cine_crudo_method_combo") else "com"
 			axis = str(self.cine_crudo_axis_combo.currentText()).lower() if hasattr(self, "cine_crudo_axis_combo") else "y"
-			threshold = float(self.cine_crudo_threshold_spin.value()) if hasattr(self, "cine_crudo_threshold_spin") else 0.20
+			threshold = self._cine_crudo_threshold_value()
 			result = motion_correct_projections(projections, axis=axis, method=method, threshold_frac=threshold)
 			self.cine_crudo_motion_result = result
 			self.cine_crudo_corrected_projections = np.asarray(result.get("corrected"), dtype=np.float64)
@@ -5972,59 +5984,6 @@ class MainWindow(QMainWindow):
 	def _refresh_cine_crudo_view(self):
 		source = str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
 		self._load_cine_crudo_frames(source)
-
-	def _show_cine_crudo_threshold_mask(self):
-		"""Muestra la máscara del threshold sobre la proyección actual (Select Object estilo Odyssey)."""
-		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
-			QMessageBox.information(self, "SINCRO", "Cargá un estudio crudo primero.")
-			return
-		import matplotlib
-		matplotlib.use("Agg")
-		import matplotlib.pyplot as plt
-		from core.raw_projections import ungate_projections
-
-		projections = np.asarray(self.study.cube, dtype=np.float64)
-		ung = ungate_projections(projections)
-		n_angles = ung.shape[0]
-		thr = float(self.cine_crudo_threshold_spin.value()) if hasattr(self, "cine_crudo_threshold_spin") else 0.20
-		current = int(self.cine_crudo_index) % max(1, len(self.cine_crudo_frames)) if self.cine_crudo_frames else n_angles // 2
-		angle = min(current, n_angles - 1)
-		img = ung[angle]
-		mask = img > (thr * img.max()) if img.max() > 0 else np.zeros_like(img, dtype=bool)
-
-		fig, axes = plt.subplots(1, 3, figsize=(13, 4.5))
-		fig.patch.set_facecolor("#0b1220")
-		axes[0].imshow(img, cmap="hot")
-		axes[0].set_title(f"Proyección áng {angle} (UngGat)", color="white")
-		axes[1].imshow(mask, cmap="gray")
-		axes[1].set_title(f"Máscara thr={thr:.2f}", color="white")
-		overlay = np.zeros((*img.shape, 4))
-		mx = float(img.max()) if img.max() > 0 else 1.0
-		overlay[..., 0] = np.clip(img / mx, 0, 1)
-		overlay[..., 3] = 0.85
-		axes[2].imshow(overlay)
-		axes[2].imshow(np.ma.masked_where(~mask, mask), cmap="spring", alpha=0.55)
-		axes[2].set_title("Objeto aislado (corazón esperado)", color="white")
-		for ax in axes:
-			ax.axis("off")
-			ax.set_facecolor("#0b1220")
-		frac = float(mask.sum()) / float(mask.size) if mask.size else 0.0
-		fig.suptitle(
-			f"Select Object — thr {thr:.2f} | máscara {int(mask.sum())} px ({100.0 * frac:.1f}% del FOV) | "
-			"Ajustá Thr hasta aislar SOLO el corazón (Odyssey: 'only the organ of interest highlighted')",
-			color="white", fontsize=10.5,
-		)
-		fig.tight_layout(rect=[0, 0, 1, 0.92])
-		out_png = os.path.join(self.output_dir, "threshold_mask_preview.png")
-		fig.savefig(out_png, dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
-		plt.close(fig)
-		if "ungated" in self.preview_labels:
-			pix = QPixmap(out_png)
-			self.preview_pixmaps["ungated"] = pix
-			self.preview_base_sizes["ungated"] = pix.size()
-			self._apply_preview_zoom("ungated")
-			self._select_tab_by_title("ungated")
-		self._log(f"Preview máscara: thr={thr:.2f} → {int(mask.sum())} px ({100.0 * frac:.1f}% FOV) en ángulo {angle}.")
 
 	def _open_cine_crudo_fine_adjust(self):
 		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
@@ -6065,7 +6024,7 @@ class MainWindow(QMainWindow):
 			from core.raw_projections import motion_correct_projections
 			method = str(self.cine_crudo_method_combo.currentText()).lower() if hasattr(self, "cine_crudo_method_combo") else "com"
 			axis = str(self.cine_crudo_axis_combo.currentText()).lower() if hasattr(self, "cine_crudo_axis_combo") else "y"
-			threshold = float(self.cine_crudo_threshold_spin.value()) if hasattr(self, "cine_crudo_threshold_spin") else 0.20
+			threshold = self._cine_crudo_threshold_value()
 			result = motion_correct_projections(
 				projections,
 				axis=axis,
@@ -6140,6 +6099,21 @@ class MainWindow(QMainWindow):
 
 	def _on_cine_crudo_speed_changed(self, value: int):
 		self.cine_crudo_timer.setInterval(max(40, int(value)))
+
+	def _cine_crudo_threshold_value(self) -> float:
+		if hasattr(self, "cine_crudo_threshold_slider"):
+			return float(self.cine_crudo_threshold_slider.value()) / 100.0
+		return 0.20
+
+	def _on_cine_crudo_threshold_changed(self, value: int):
+		thr = float(value) / 100.0
+		if hasattr(self, "cine_crudo_threshold_label"):
+			self.cine_crudo_threshold_label.setText(f"{thr:.2f}")
+		# Actualización en tiempo real: solo regenerar frames si la máscara está activa.
+		if self.cine_crudo_mask_check is not None and self.cine_crudo_mask_check.isChecked():
+			self._load_cine_crudo_frames(
+				str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
+			)
 
 	def _on_cine_crudo_source_changed(self, source: str):
 		self._load_cine_crudo_frames(str(source))
