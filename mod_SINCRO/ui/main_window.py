@@ -6264,7 +6264,7 @@ class MainWindow(QMainWindow):
 				self.preview_base_sizes["ungated"] = pix.size()
 				self._apply_preview_zoom("ungated")
 				self._select_tab_by_title("ungated")
-			self._log(f"Grilla transaxial pick generada (thr {thr:.2f}, {n_angles} ángulos) → pestaña ungated.")
+			self._log(f"Grilla transaxial pick generada (thr {thr:.2f}, {n_slices} cortes) → pestaña ungated.")
 		except Exception as exc:
 			self._log(f"[ERROR] Grilla pick falló: {exc}")
 			QMessageBox.warning(self, "SINCRO", f"No se pudo generar la grilla pick:\n{exc}")
