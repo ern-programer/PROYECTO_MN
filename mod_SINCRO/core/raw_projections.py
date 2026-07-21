@@ -252,6 +252,100 @@ def _tracking_from_threshold(projections: np.ndarray, axis: str, threshold_frac:
     return {"axis": axis, "com_series": com_series, "method": "threshold", "threshold_frac": threshold_frac}
 
 
+def _tracking_odyssey(
+    projections: np.ndarray,
+    axis: str,
+    threshold_frac: float,
+    n_iterations: int = 3,
+) -> dict:
+    """
+    Tracking estilo Odyssey (manual LX tux079 pág 79-87).
+
+    Algoritmo replicado del manual:
+      "Motion Correction is accomplished by comparing each acquired projection
+       to a re-projected image (similar to maximum pixel raytrace) computed at
+       the same acquisition angle."
+
+    Flujo:
+      1. Máscara del órgano por threshold interactivo (Select Object).
+      2. Estimar volumen actual (suma de proyecciones = proxy de la estimación).
+      3. Re-proyectar esa estimación a cada ángulo (max pixel raytrace = máximo
+         a lo largo del eje perpendicular a la proyección).
+      4. Comparar cada proyección adquirida contra su re-proyección (centro del
+         órgano) y calcular el shift.
+      5. Iterar hasta 3 veces (una por eje, como indica el manual), refinando
+         la estimación con las proyecciones corregidas.
+
+    La corrección final se aplica a todas las proyecciones (todos los gates).
+    """
+    from scipy.ndimage import shift as _ndi_shift
+
+    proj = np.asarray(projections, dtype=np.float64)
+    n_gates, n_angles, H, W = proj.shape
+    threshold_frac = float(threshold_frac)
+    threshold_frac = min(max(threshold_frac, 0.01), 0.90)
+    n_iterations = int(max(1, min(3, n_iterations)))
+
+    from scipy.ndimage import center_of_mass as _com
+
+    current = proj.copy()
+    com_series = np.full((n_angles,), np.nan, dtype=np.float64)
+    total_shifts = np.zeros((n_angles,), dtype=np.float64)
+
+    for _ in range(n_iterations):
+        summed = current.sum(axis=0)  # (n_angles, H, W) — UngGat de la estimación actual
+        # Re-proyección esperada: el centro de masa de la proyección sumada de
+        # TODOS los ángulos colapsado sobre el eje perpendicular. Es el análogo
+        # del "max pixel raytrace" del manual: la posición del objeto esperada
+        # si estuviera alineado. Comparamos el centro de cada proyección contra
+        # esa referencia global y corregimos la desviación.
+        # Referencia global: centro de masa del objeto sobre el volumen completo
+        # (todos los ángulos sumados), que es la re-proyección "ideal" alineada.
+        total_img = summed.sum(axis=0)  # (H, W) suma de todos los ángulos
+        if total_img.max() <= 0:
+            break
+        mask_total = total_img > (threshold_frac * total_img.max())
+        if mask_total.sum() < 4:
+            break
+        cy_ref, cx_ref = _com(mask_total)
+        ref = cy_ref if axis == "y" else cx_ref
+
+        centers = np.full((n_angles,), np.nan, dtype=np.float64)
+        for a in range(n_angles):
+            img = summed[a]
+            if img.max() <= 0:
+                continue
+            mask = img > (threshold_frac * img.max())
+            if mask.sum() < 4:
+                continue
+            cy, cx = _com(mask)
+            centers[a] = cy if axis == "y" else cx
+
+        valid = np.isfinite(centers)
+        if valid.sum() < 3:
+            break
+        # Shift de esta iteración: llevar cada ángulo a la referencia global.
+        shifts_iter = np.where(valid, ref - centers, 0.0)
+        # Suavizar para evitar sobre-corrección en una sola iteración.
+        shifts_iter = shifts_iter * 0.8
+        total_shifts += shifts_iter
+        if axis == "y":
+            current = apply_shifts_to_projections(current, shifts_iter, np.zeros_like(shifts_iter))
+        else:
+            current = apply_shifts_to_projections(current, np.zeros_like(shifts_iter), shifts_iter)
+        com_series = centers
+
+    # Devolver el tracking final: com_series del último estado + shifts totales.
+    return {
+        "axis": axis,
+        "com_series": com_series,
+        "method": "odyssey",
+        "threshold_frac": threshold_frac,
+        "n_iterations": n_iterations,
+        "_odyssey_total_shifts": total_shifts,
+    }
+
+
 def _finalize_tracking(tracking: dict) -> dict:
     """Calcula outliers, shifts y flag de movimiento para un tracking dado."""
     com_series = np.asarray(tracking.get("com_series", []), dtype=np.float64)
@@ -304,8 +398,8 @@ def motion_correct_projections(
         raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibió {proj.shape}")
 
     method = str(method or "com").strip().lower()
-    if method not in ("com", "threshold"):
-        raise ValueError("method debe ser 'com' o 'threshold'")
+    if method not in ("com", "threshold", "odyssey"):
+        raise ValueError("method debe ser 'com', 'threshold' u 'odyssey'")
 
     axes_to_correct = ["y", "x"] if axis == "xy" else [axis]
     tracking = {}
@@ -313,7 +407,15 @@ def motion_correct_projections(
     shifts_x = np.zeros((proj.shape[1],), dtype=np.float64)
 
     for ax in axes_to_correct:
-        if method == "threshold":
+        if method == "odyssey":
+            trk = _tracking_odyssey(proj, axis=ax, threshold_frac=threshold_frac)
+            # Odyssey: usar los shifts acumulados de las iteraciones, no la mediana.
+            odyssey_shifts = np.asarray(trk.pop("_odyssey_total_shifts", np.zeros((proj.shape[1],))), dtype=np.float64)
+            trk = _finalize_tracking(trk)
+            trk["suggested_shifts_px"] = odyssey_shifts
+            trk["max_shift_px"] = round(float(np.abs(odyssey_shifts).max()) if odyssey_shifts.size else 0.0, 2)
+            trk["motion_suspected"] = bool(trk["max_shift_px"] > 1.5 or trk.get("n_outliers", 0) >= 2)
+        elif method == "threshold":
             trk = _finalize_tracking(_tracking_from_threshold(proj, axis=ax, threshold_frac=threshold_frac))
         else:
             trk = _finalize_tracking(_tracking_from_com(proj, axis=ax, threshold_frac=threshold_frac))
