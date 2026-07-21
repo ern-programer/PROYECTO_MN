@@ -299,13 +299,48 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
     spacing_between_slices_mm = _to_float_or_none(_get(ds, (0x0018, 0x0088), None))
     z_spacing_mm = spacing_between_slices_mm if spacing_between_slices_mm else slice_thickness_mm
 
-    # --- Caso 1: proyecciones crudas → no soportado aún (requiere reconstrucción) ---
+    # --- Caso 1: proyecciones crudas → cargar como RawGatedProjections (cine/QC/gating/motion) ---
     if _is_raw_projections(ds):
-        raise LoaderError(
-            "El estudio son PROYECCIONES CRUDAS (GATED TOMO + AngularViewVector). "
-            "Requiere reconstrucción SPECT (Butterworth + FBP) antes del análisis de fase. "
-            "Usar una serie Short Axis reconstruida (ej: *_SA con Gated), o implementar recon (futuro)."
+        from core.raw_projections import load_raw_projections
+        raw = load_raw_projections(path)
+        # Devolver un GatedStudy en modo "raw": cube = proyecciones (gates, angles, H, W),
+        # reconstructed=False para que la UI lo trate como crudo, no como SA reconstruido.
+        notes.append(
+            f"CRUDO gated: {raw.n_gates} gates × {raw.n_angles} ángulos × {raw.rows}×{raw.cols}. "
+            "Modo proyecciones: cine QC, gating y motion correction disponibles; "
+            "análisis de fase requiere reconstrucción."
         )
+        study = GatedStudy(
+            cube=raw.projections,
+            n_gates=raw.n_gates,
+            n_slices=raw.n_angles,   # en modo raw, "slices" = ángulos de proyección
+            rows=raw.rows,
+            cols=raw.cols,
+            pixel_spacing=pixel_spacing,
+            z_spacing_mm=z_spacing_mm,
+            slice_thickness_mm=slice_thickness_mm,
+            spacing_between_slices_mm=spacing_between_slices_mm,
+            source_path=path,
+            image_type=itype,
+            series_description=raw.series_description,
+            study_description=raw.study_description,
+            patient_name=raw.patient_name,
+            patient_id=raw.patient_id,
+            patient_sex=patient_sex,
+            patient_birth_date=patient_birth_date,
+            study_date=study_date,
+            study_time=study_time,
+            accession_number=accession_number,
+            study_instance_uid=study_instance_uid,
+            was_montage=False,
+            had_summed_frame=False,
+            reconstructed=False,
+            qc_first_harmonic=0.0,
+            qc_passed=False,
+            gating_info=raw.gating_info,
+            notes=notes + raw.notes,
+        )
+        return study
 
     arr = ds.pixel_array.astype(np.float64)
     if arr.ndim == 2:

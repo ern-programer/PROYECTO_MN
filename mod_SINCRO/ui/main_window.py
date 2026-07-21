@@ -1700,6 +1700,97 @@ class MainWindow(QMainWindow):
 			fuente="manual",
 		)
 
+	def _handle_raw_projections_loaded(self, path: str, t_total: float):
+		"""Maneja un estudio crudo (proyecciones gated): genera panel QC y muestra info/gating."""
+		import matplotlib
+		matplotlib.use("Agg")
+		import matplotlib.pyplot as plt
+		from core.raw_projections import build_sinograms, center_of_mass_tracking
+
+		projections = np.asarray(self.study.cube, dtype=np.float64)  # (gates, angles, H, W)
+		n_gates, n_angles = int(projections.shape[0]), int(projections.shape[1])
+		gating = getattr(self.study, "gating_info", {}) or {}
+
+		self._set_progress(40, "Generando QC de proyecciones crudas...")
+		sh, sv = build_sinograms(projections)
+		ty = center_of_mass_tracking(projections, axis="y")
+		tx = center_of_mass_tracking(projections, axis="x")
+
+		fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+		fig.patch.set_facecolor("#0b1220")
+		axes[0, 0].imshow(sh.T, cmap="hot", aspect="auto")
+		axes[0, 0].set_title("Sinograma H (perfil vertical vs angulo)", color="white")
+		axes[1, 0].imshow(sv.T, cmap="hot", aspect="auto")
+		axes[1, 0].set_title("Sinograma V (perfil horizontal vs angulo)", color="white")
+
+		summed = projections.sum(axis=0)
+		pos = [(0, 1, 0), (0, 2, n_angles // 3), (1, 1, 2 * n_angles // 3)]
+		for r, c, a in pos:
+			axes[r, c].imshow(summed[a], cmap="hot")
+			axes[r, c].set_title(f"Proyeccion ang {a}", color="white")
+			axes[r, c].axis("off")
+
+		axc = axes[1, 2]
+		ang = np.arange(n_angles)
+		axc.plot(ang, ty["com_series"], "o-", color="cyan", label="COM Y", ms=4)
+		axc.plot(ang, tx["com_series"], "s-", color="orange", label="COM X", ms=4)
+		out_y = np.where(ty["outliers"])[0]
+		if out_y.size:
+			axc.plot(out_y, ty["com_series"][out_y], "r*", ms=13, label=f"outliers Y ({ty['n_outliers']})")
+		axc.set_title(f"COM tracking: mov Y={ty['motion_suspected']} (max {ty['max_shift_px']}px)", color="white", fontsize=10)
+		axc.set_xlabel("angulo"); axc.set_ylabel("centro de masa (px)")
+		axc.legend(fontsize=8); axc.grid(alpha=0.3)
+
+		for ax in axes.ravel():
+			ax.set_facecolor("#0b1220")
+			ax.tick_params(colors="white")
+			for s in ax.spines.values():
+				s.set_color("#334155")
+
+		ctx_label = self._study_context_label(path_override=path, study_obj=self.study)
+		fc = gating.get("heart_rate") or gating.get("heart_rate_est") or "N/D"
+		fig.suptitle(
+			f"QC Crudo Gated — {ctx_label} | {n_gates} gates × {n_angles} ángulos | FC {fc} lpm",
+			color="white", fontsize=12, fontweight="bold",
+		)
+		fig.tight_layout(rect=[0, 0, 1, 0.95])
+		self._stamp_export_figure(fig, None)
+		out_png = os.path.join(self.output_dir, "qc_crudo_proyecciones.png")
+		fig.savefig(out_png, dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
+		plt.close(fig)
+
+		# Mostrar el panel en la pestaña ungated (reutilizada como visor QC crudo)
+		if "ungated" in self.preview_labels:
+			pix = QPixmap(out_png)
+			self.preview_pixmaps["ungated"] = pix
+			self.preview_base_sizes["ungated"] = pix.size()
+			self._apply_preview_zoom("ungated")
+			self._select_tab_by_title("ungated")
+
+		mov_txt = "MOVIMIENTO detectado" if ty["motion_suspected"] else "sin movimiento significativo"
+		self._log(
+			f"CRUDO cargado: {n_gates} gates × {n_angles} ángulos | FC {fc} lpm | "
+			f"{mov_txt} (max shift {ty['max_shift_px']}px Y, {tx['max_shift_px']}px X). "
+		 f"Panel QC: qc_crudo_proyecciones.png"
+		)
+		self._set_progress(100, "Crudo cargado (QC listo)")
+		self.statusBar().showMessage("Crudo cargado: QC de proyecciones listo")
+
+		QMessageBox.information(
+			self,
+			"Estudio crudo (proyecciones gated)",
+			f"Se cargó el estudio CRUDO: {n_gates} gates × {n_angles} ángulos.\n\n"
+			f"• FC adquisición: {fc} lpm\n"
+			f"• Motion tracking: {mov_txt} (max {ty['max_shift_px']}px)\n"
+			f"• Panel QC generado en la pestaña 'ungated'.\n\n"
+			"El análisis de fase (segmentación/PSD/BW) requiere reconstrucción. "
+			"Próximo paso del pipeline: motion correction y reconstrucción gate-por-gate.",
+		)
+		try:
+			get_logger().log_processing_end(path, perf_counter() - t_total, {"mode": "raw_projections"})
+		except Exception:
+			pass
+
 	def _preload_acquisition_ecg(self):
 		"""Precarga datos del ECG de adquisición (3 derivaciones) embebidos en el DICOM SPECT."""
 		gating = getattr(self.study, "gating_info", None) or {}
@@ -2825,6 +2916,10 @@ class MainWindow(QMainWindow):
 				self._cache_phase_sig = ""
 				self._invalidate_output_cache()
 				self._preload_acquisition_ecg()
+			# --- Modo crudo: proyecciones (no reconstruido) → panel QC + cine + gating ---
+			if not bool(getattr(self.study, "reconstructed", True)):
+				self._handle_raw_projections_loaded(path, t_total)
+				return
 			self.compare_gate_spin.setRange(1, max(1, int(self.study.cube.shape[0])))
 			self.compare_gate_spin.setValue(max(1, int(self.study.cube.shape[0] // 2) + 1))
 			if self.axis_companions:
