@@ -204,97 +204,108 @@ def build_sinograms(projections: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return sino_h, sino_v
 
 
-def center_of_mass_tracking(projections: np.ndarray, axis: str = "y") -> dict:
-    """
-    Tracking del centro de masa del corazón vs ángulo (base de motion correction).
-
-    Parameters
-    ----------
-    projections : ndarray (n_gates, n_angles, H, W)
-    axis : 'y' (vertical, default, la más común) o 'x' (horizontal)
-
-    Returns
-    -------
-    dict con serie de COM vs ángulo, outliers y sugerencia de shifts.
-    """
+def _tracking_from_com(projections: np.ndarray, axis: str, threshold_frac: float) -> dict:
+    """Tracking simple por centro de masa sobre máscara por threshold."""
     from scipy.ndimage import center_of_mass as _com
 
     proj = np.asarray(projections, dtype=np.float64)
-    summed = proj.sum(axis=0)  # (n_angles, H, W)
+    summed = proj.sum(axis=0)
     n_angles = summed.shape[0]
     com_series = np.full((n_angles,), np.nan, dtype=np.float64)
+    threshold_frac = float(threshold_frac)
+    threshold_frac = min(max(threshold_frac, 0.01), 0.90)
 
     for a in range(n_angles):
         img = summed[a]
         if img.max() <= 0:
             continue
-        # Threshold al 20% del máximo para aislar el corazón del fondo
-        mask = img > (0.20 * img.max())
+        mask = img > (threshold_frac * img.max())
         if mask.sum() < 4:
             continue
         cy, cx = _com(mask)
         com_series[a] = cy if axis == "y" else cx
 
-    # Detectar outliers por desviación robusta (mediana ± k*MAD)
-    valid = np.isfinite(com_series)
+    return {"axis": axis, "com_series": com_series, "method": "com", "threshold_frac": threshold_frac}
+
+
+def _tracking_from_threshold(projections: np.ndarray, axis: str, threshold_frac: float) -> dict:
+    """Tracking por bounding box de la máscara (más parecido a flujo Odyssey threshold + centro del objeto)."""
+    proj = np.asarray(projections, dtype=np.float64)
+    summed = proj.sum(axis=0)
+    n_angles = summed.shape[0]
+    com_series = np.full((n_angles,), np.nan, dtype=np.float64)
+    threshold_frac = float(threshold_frac)
+    threshold_frac = min(max(threshold_frac, 0.01), 0.90)
+
+    for a in range(n_angles):
+        img = summed[a]
+        if img.max() <= 0:
+            continue
+        mask = img > (threshold_frac * img.max())
+        ys, xs = np.where(mask)
+        if ys.size < 4:
+            continue
+        cy = 0.5 * (float(ys.min()) + float(ys.max()))
+        cx = 0.5 * (float(xs.min()) + float(xs.max()))
+        com_series[a] = cy if axis == "y" else cx
+
+    return {"axis": axis, "com_series": com_series, "method": "threshold", "threshold_frac": threshold_frac}
+
+
+def _finalize_tracking(tracking: dict) -> dict:
+    """Calcula outliers, shifts y flag de movimiento para un tracking dado."""
+    com_series = np.asarray(tracking.get("com_series", []), dtype=np.float64)
+    n_angles = com_series.shape[0]
     outliers = np.zeros((n_angles,), dtype=bool)
     shifts = np.zeros((n_angles,), dtype=np.float64)
+    valid = np.isfinite(com_series)
     if valid.sum() >= 3:
         med = float(np.median(com_series[valid]))
         mad = float(np.median(np.abs(com_series[valid] - med)))
         sigma = 1.4826 * mad if mad > 0 else 1.0
         outliers = valid & (np.abs(com_series - med) > 2.5 * sigma)
-        # Shift sugerido = mediana - valor (para alinear todo a la mediana)
         shifts = np.where(valid, med - com_series, 0.0)
 
     max_shift = float(np.nanmax(np.abs(shifts))) if valid.any() else 0.0
-    return {
-        "axis": axis,
-        "com_series": com_series,
+    tracking.update({
         "outliers": outliers,
         "suggested_shifts_px": shifts,
         "n_outliers": int(outliers.sum()),
         "max_shift_px": round(max_shift, 2),
         "motion_suspected": bool(max_shift > 1.5 or outliers.sum() >= 2),
-    }
+    })
+    return tracking
+
+
+def center_of_mass_tracking(projections: np.ndarray, axis: str = "y", threshold_frac: float = 0.20) -> dict:
+    """
+    Tracking del centro de masa del corazón vs ángulo (base de motion correction).
+    """
+    return _finalize_tracking(_tracking_from_com(projections, axis=axis, threshold_frac=threshold_frac))
 
 
 def motion_correct_projections(
     projections: np.ndarray,
     axis: str = "y",
     threshold_frac: float = 0.20,
+    method: str = "com",
+    manual_shifts_y: np.ndarray | None = None,
+    manual_shifts_x: np.ndarray | None = None,
 ) -> dict:
     """
-    Motion correction completa de proyecciones SPECT gated (flujo Odyssey).
+    Motion correction de proyecciones SPECT gated.
 
-    Flujo:
-      1. Tracking del centro de masa del corazón vs ángulo (sobre suma de gates,
-         alta estadística = UngGat implícito).
-      2. Detección de outliers y cálculo de shifts para alinear a la mediana.
-      3. Aplicación de los mismos shifts a TODAS las proyecciones (todos los gates
-         comparten la misma posición angular → el paciente se mueve igual).
-      4. Retorna proyecciones corregidas + métricas de la corrección.
-
-    Parameters
-    ----------
-    projections : ndarray (n_gates, n_angles, H, W)
-        Proyecciones crudas gated.
-    axis : 'y' (vertical, default, la más común) o 'x' o 'xy' (ambas).
-    threshold_frac : float
-        Fracción del máximo para aislar el corazón del fondo.
-
-    Returns
-    -------
-    dict con:
-        corrected : ndarray (n_gates, n_angles, H, W) — proyecciones corregidas.
-        tracking_y, tracking_x : dict — resultados del COM tracking por eje.
-        applied_shifts_y, applied_shifts_x : ndarray — shifts aplicados por ángulo.
-        motion_detected : bool
-        max_shift_px : float
+    Methods:
+      - com: centro de masa sobre máscara por threshold.
+      - threshold: centro del bounding box de la máscara por threshold (más robusto a hígado/ruido en algunos casos).
     """
     proj = np.asarray(projections, dtype=np.float64)
     if proj.ndim != 4:
         raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibió {proj.shape}")
+
+    method = str(method or "com").strip().lower()
+    if method not in ("com", "threshold"):
+        raise ValueError("method debe ser 'com' o 'threshold'")
 
     axes_to_correct = ["y", "x"] if axis == "xy" else [axis]
     tracking = {}
@@ -302,12 +313,20 @@ def motion_correct_projections(
     shifts_x = np.zeros((proj.shape[1],), dtype=np.float64)
 
     for ax in axes_to_correct:
-        trk = center_of_mass_tracking(proj, axis=ax)
+        if method == "threshold":
+            trk = _finalize_tracking(_tracking_from_threshold(proj, axis=ax, threshold_frac=threshold_frac))
+        else:
+            trk = _finalize_tracking(_tracking_from_com(proj, axis=ax, threshold_frac=threshold_frac))
         tracking[ax] = trk
         if ax == "y":
             shifts_y = np.asarray(trk["suggested_shifts_px"], dtype=np.float64)
         else:
             shifts_x = np.asarray(trk["suggested_shifts_px"], dtype=np.float64)
+
+    if manual_shifts_y is not None:
+        shifts_y = np.asarray(manual_shifts_y, dtype=np.float64)
+    if manual_shifts_x is not None:
+        shifts_x = np.asarray(manual_shifts_x, dtype=np.float64)
 
     corrected = apply_shifts_to_projections(proj, shifts_y, shifts_x)
     max_shift = float(max(
@@ -325,4 +344,7 @@ def motion_correct_projections(
         "motion_detected": bool(motion_detected),
         "max_shift_px": round(max_shift, 2),
         "axis_corrected": axis,
+        "method": method,
+        "threshold_frac": float(threshold_frac),
+        "manual_override": bool(manual_shifts_y is not None or manual_shifts_x is not None),
     }

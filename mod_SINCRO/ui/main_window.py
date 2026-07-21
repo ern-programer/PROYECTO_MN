@@ -1089,11 +1089,36 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_mode_combo.setCurrentText("Continuo")
 				self.cine_crudo_mode_combo.setToolTip("Continuo: loop 1→N→1. Rebote: 1→N→1→N (ping-pong).")
 				toolbar.addWidget(self.cine_crudo_mode_combo)
+				toolbar.addWidget(QLabel("Método"))
+				self.cine_crudo_method_combo = QComboBox()
+				self.cine_crudo_method_combo.addItems(["COM", "Threshold"])
+				self.cine_crudo_method_combo.setCurrentText("COM")
+				self.cine_crudo_method_combo.setToolTip("COM: centro de masa. Threshold: centro de bounding box (a veces más robusto a hígado).")
+				toolbar.addWidget(self.cine_crudo_method_combo)
+				toolbar.addWidget(QLabel("Eje"))
+				self.cine_crudo_axis_combo = QComboBox()
+				self.cine_crudo_axis_combo.addItems(["Y", "X", "XY"])
+				self.cine_crudo_axis_combo.setCurrentText("Y")
+				self.cine_crudo_axis_combo.setToolTip("Eje de corrección: solo Y (default clínico), solo X, o ambos.")
+				toolbar.addWidget(self.cine_crudo_axis_combo)
+				toolbar.addWidget(QLabel("Thr"))
+				self.cine_crudo_threshold_spin = QDoubleSpinBox()
+				self.cine_crudo_threshold_spin.setRange(0.05, 0.80)
+				self.cine_crudo_threshold_spin.setSingleStep(0.05)
+				self.cine_crudo_threshold_spin.setValue(0.20)
+				self.cine_crudo_threshold_spin.setDecimals(2)
+				self.cine_crudo_threshold_spin.setToolTip("Fracción del máximo para aislar el órgano en el tracking.")
+				toolbar.addWidget(self.cine_crudo_threshold_spin)
 				self.cine_crudo_correct_btn = QToolButton()
 				self.cine_crudo_correct_btn.setText("Corregir")
-				self.cine_crudo_correct_btn.setToolTip("Aplica motion correction COM a las proyecciones crudas y habilita comparación.")
+				self.cine_crudo_correct_btn.setToolTip("Aplica motion correction con método/eje/threshold seleccionados.")
 				self.cine_crudo_correct_btn.clicked.connect(self._apply_cine_crudo_motion_correction)
 				toolbar.addWidget(self.cine_crudo_correct_btn)
+				self.cine_crudo_fine_btn = QToolButton()
+				self.cine_crudo_fine_btn.setText("Ajuste fino")
+				self.cine_crudo_fine_btn.setToolTip("Edita manualmente shifts Y/X del frame actual para ajuste fino.")
+				self.cine_crudo_fine_btn.clicked.connect(self._open_cine_crudo_fine_adjust)
+				toolbar.addWidget(self.cine_crudo_fine_btn)
 				self.cine_crudo_compare_check = QCheckBox("Comparar")
 				self.cine_crudo_compare_check.setToolTip("Muestra original y corregido en paralelo (original | corregido).")
 				self.cine_crudo_compare_check.setEnabled(False)
@@ -5915,7 +5940,10 @@ class MainWindow(QMainWindow):
 			from core.raw_projections import motion_correct_projections
 			projections = np.asarray(self.study.cube, dtype=np.float64)
 			self._set_progress(55, "Aplicando motion correction al crudo...")
-			result = motion_correct_projections(projections, axis="xy")
+			method = str(self.cine_crudo_method_combo.currentText()).lower() if hasattr(self, "cine_crudo_method_combo") else "com"
+			axis = str(self.cine_crudo_axis_combo.currentText()).lower() if hasattr(self, "cine_crudo_axis_combo") else "y"
+			threshold = float(self.cine_crudo_threshold_spin.value()) if hasattr(self, "cine_crudo_threshold_spin") else 0.20
+			result = motion_correct_projections(projections, axis=axis, method=method, threshold_frac=threshold)
 			self.cine_crudo_motion_result = result
 			self.cine_crudo_corrected_projections = np.asarray(result.get("corrected"), dtype=np.float64)
 			if self.cine_crudo_compare_check is not None:
@@ -5939,6 +5967,63 @@ class MainWindow(QMainWindow):
 	def _refresh_cine_crudo_view(self):
 		source = str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
 		self._load_cine_crudo_frames(source)
+
+	def _open_cine_crudo_fine_adjust(self):
+		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
+			return
+		if not self.cine_crudo_frames:
+			QMessageBox.information(self, "SINCRO", "Primero cargá el cine del crudo.")
+			return
+		projections = np.asarray(self.study.cube, dtype=np.float64)
+		n_angles = int(projections.shape[1])
+		current = int(self.cine_crudo_index) % max(1, len(self.cine_crudo_frames))
+		result = self.cine_crudo_motion_result or {}
+		sy = np.asarray(result.get("applied_shifts_y", np.zeros((n_angles,), dtype=np.float64)), dtype=np.float64)
+		sx = np.asarray(result.get("applied_shifts_x", np.zeros((n_angles,), dtype=np.float64)), dtype=np.float64)
+		dialog = QDialog(self)
+		dialog.setWindowTitle(f"Ajuste fino motion correction — ángulo {current}")
+		form = QFormLayout(dialog)
+		sy_spin = QDoubleSpinBox()
+		sy_spin.setRange(-30.0, 30.0)
+		sy_spin.setDecimals(2)
+		sy_spin.setSingleStep(0.25)
+		sy_spin.setValue(float(sy[current]) if current < sy.size else 0.0)
+		sx_spin = QDoubleSpinBox()
+		sx_spin.setRange(-30.0, 30.0)
+		sx_spin.setDecimals(2)
+		sx_spin.setSingleStep(0.25)
+		sx_spin.setValue(float(sx[current]) if current < sx.size else 0.0)
+		form.addRow("Shift Y (px)", sy_spin)
+		form.addRow("Shift X (px)", sx_spin)
+		buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+		form.addRow(buttons)
+		buttons.accepted.connect(dialog.accept)
+		buttons.rejected.connect(dialog.reject)
+		if dialog.exec() != QDialog.DialogCode.Accepted:
+			return
+		sy[current] = float(sy_spin.value())
+		sx[current] = float(sx_spin.value())
+		try:
+			from core.raw_projections import motion_correct_projections
+			method = str(self.cine_crudo_method_combo.currentText()).lower() if hasattr(self, "cine_crudo_method_combo") else "com"
+			axis = str(self.cine_crudo_axis_combo.currentText()).lower() if hasattr(self, "cine_crudo_axis_combo") else "y"
+			threshold = float(self.cine_crudo_threshold_spin.value()) if hasattr(self, "cine_crudo_threshold_spin") else 0.20
+			result = motion_correct_projections(
+				projections,
+				axis=axis,
+				method=method,
+				threshold_frac=threshold,
+				manual_shifts_y=sy,
+				manual_shifts_x=sx,
+			)
+			self.cine_crudo_motion_result = result
+			self.cine_crudo_corrected_projections = np.asarray(result.get("corrected"), dtype=np.float64)
+			if self.cine_crudo_compare_check is not None:
+				self.cine_crudo_compare_check.setEnabled(True)
+			self._log(f"Ajuste fino aplicado en ángulo {current}: shiftY={sy[current]:+.2f}px shiftX={sx[current]:+.2f}px")
+			self._refresh_cine_crudo_view()
+		except Exception as exc:
+			self._log(f"[WARN] Ajuste fino falló: {exc}")
 
 	def _set_cine_crudo_frame(self, idx: int):
 		if not self.cine_crudo_frames:
