@@ -1258,6 +1258,11 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_export_btn.setToolTip("Exporta shifts Y/X por frame (CSV) + proyecciones corregidas (.npz) para comparar y calibrar métodos.")
 				self.cine_crudo_export_btn.clicked.connect(self._export_cine_crudo_correction)
 				toolbar3.addWidget(self.cine_crudo_export_btn)
+				self.cine_crudo_save_dcm_btn = QToolButton()
+				self.cine_crudo_save_dcm_btn.setText("Grabar DICOM")
+				self.cine_crudo_save_dcm_btn.setToolTip("Graba las proyecciones corregidas como un DICOM GATED TOMO nuevo (misma estructura y geometría que el original, re-cargable por SINCRO o Xeleris).")
+				self.cine_crudo_save_dcm_btn.clicked.connect(self._save_cine_crudo_corrected_dicom)
+				toolbar3.addWidget(self.cine_crudo_save_dcm_btn)
 				toolbar3.addStretch(1)
 			toolbar.addStretch(1)
 			tab_layout.addLayout(toolbar)
@@ -6424,6 +6429,45 @@ class MainWindow(QMainWindow):
 			)
 		except Exception as exc:
 			self._log(f"[WARN] Exportar corrección falló: {exc}")
+
+	def _save_cine_crudo_corrected_dicom(self):
+		"""Graba las proyecciones corregidas como un DICOM GATED TOMO nuevo (re-cargable)."""
+		if self.cine_crudo_corrected_projections is None:
+			QMessageBox.information(self, "SINCRO", "Primero ejecutá una corrección (automática o manual con flechas).")
+			return
+		source_path = str(getattr(self.study, "source_path", "") or "")
+		if not source_path or not os.path.exists(source_path):
+			QMessageBox.warning(self, "SINCRO", "No encuentro el DICOM original para preservar la cabecera. Grabá desde el estudio cargado.")
+			return
+		try:
+			from PyQt6.QtWidgets import QFileDialog
+			from core.raw_projections import save_corrected_projections_dicom
+			method = str(self.cine_crudo_motion_result.get("method_auto_selected") or self.cine_crudo_motion_result.get("method") or "manual") if self.cine_crudo_motion_result else "manual"
+			base_name = os.path.splitext(os.path.basename(source_path))[0]
+			default_path = os.path.join(self.output_dir, f"{base_name}_MOTIONCORR_{method}.dcm")
+			path, _flt = QFileDialog.getSaveFileName(
+				self, "Grabar DICOM corregido", default_path,
+				"DICOM (*.dcm);;Todos los archivos (*.*)",
+			)
+			if not path:
+				return
+			base, ext = os.path.splitext(path)
+			if ext.lower() != ".dcm":
+				path = base + ".dcm"
+			out = save_corrected_projections_dicom(
+				source_path,
+				np.asarray(self.cine_crudo_corrected_projections, dtype=np.float64),
+				path,
+				series_description_suffix=f"MOTION CORR {method}",
+			)
+			self._log(f"DICOM corregido grabado: {os.path.basename(out)} (método {method}).")
+			QMessageBox.information(
+				self, "SINCRO",
+				f"DICOM corregido grabado:\n• {out}\n\nSerie nueva GATED TOMO (misma geometría que el original), re-cargable por SINCRO o Xeleris.",
+			)
+		except Exception as exc:
+			self._log(f"[WARN] Grabar DICOM corregido falló: {exc}")
+			QMessageBox.warning(self, "SINCRO", f"No se pudo grabar el DICOM:\n{exc}")
 
 	def _show_cine_crudo_shift_curves(self):
 		"""Muestra curvas de shifts X/Y vs frame (estilo Xeleris) para depurar la corrección."""

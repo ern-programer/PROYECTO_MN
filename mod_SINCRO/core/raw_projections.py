@@ -9,6 +9,7 @@ NO reconstruye: eso queda para el pipeline OPEN (FBP/Butterworth).
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -138,6 +139,105 @@ def ungate_projections(projections: np.ndarray) -> np.ndarray:
     if proj.ndim != 4:
         raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibió {proj.shape}")
     return proj.sum(axis=0)
+
+
+def save_corrected_projections_dicom(
+    source_path: str,
+    corrected: np.ndarray,
+    output_path: str,
+    series_description_suffix: str = "MOTION CORR (GammaSync)",
+) -> str:
+    """
+    Graba las proyecciones corregidas como un DICOM GATED TOMO nuevo, preservando
+    la estructura del original (vectores angulares/temporales, geometría, gating).
+
+    Re-lee el DICOM original y reemplaza SOLO los píxeles con las proyecciones
+    corregidas, respetando el ORDEN ORIGINAL de frames (usa AngularViewVector /
+    TimeSlotVector si están; si no, reshape inverso). Asigna nuevos SOP/Series UID
+    para que sea una serie distinta re-cargable por el mismo loader o por Xeleris.
+
+    Parameters
+    ----------
+    source_path : str
+        Ruta del DICOM crudo original (para copiar cabecera y mapeo de frames).
+    corrected : ndarray (n_gates, n_angles, H, W)
+        Proyecciones corregidas (mismo shape que las cargadas).
+    output_path : str
+        Ruta .dcm de salida.
+    series_description_suffix : str
+        Texto que se añade a SeriesDescription para identificar la serie corregida.
+
+    Returns
+    -------
+    str
+        Ruta del archivo guardado.
+    """
+    try:
+        import pydicom
+        from pydicom.uid import generate_uid
+    except ImportError as exc:
+        raise ImportError("pydicom requerido para exportar DICOM") from exc
+
+    corr = np.asarray(corrected, dtype=np.float64)
+    if corr.ndim != 4:
+        raise ValueError(f"corrected debe ser 4D (gates,angles,H,W); recibió {corr.shape}")
+    n_gates, n_angles, H, W = corr.shape
+
+    ds = pydicom.dcmread(source_path)
+    orig = ds.pixel_array
+    orig_dtype = orig.dtype
+    if orig.ndim != 3:
+        raise ValueError(f"El DICOM original no es multiframe 3D; shape {orig.shape}")
+    n_frames = orig.shape[0]
+    if orig.shape[1:] != (H, W):
+        raise ValueError(f"Dimensiones no coinciden: original {orig.shape[1:]} vs corregido {(H, W)}")
+
+    # Reconstruir el array plano (n_frames, H, W) en el ORDEN ORIGINAL.
+    flat = np.zeros((n_frames, H, W), dtype=np.float64)
+    ang_vec = _get(ds, (0x0054, 0x0090), None)   # AngularViewVector
+    time_vec = _get(ds, (0x0054, 0x0070), None)  # TimeSlotVector
+    if ang_vec is not None and time_vec is not None and len(ang_vec) == n_frames and len(time_vec) == n_frames:
+        av = [int(v) for v in ang_vec]
+        tv = [int(v) for v in time_vec]
+        for f in range(n_frames):
+            flat[f] = corr[tv[f] - 1, av[f] - 1]
+    elif n_frames == n_gates * n_angles:
+        flat = corr.reshape(n_frames, H, W)
+    else:
+        raise ValueError(
+            f"No se pudo mapear el corregido al orden original: frames={n_frames}, "
+            f"gates×ángulos={n_gates}×{n_angles}."
+        )
+
+    # Preservar el rango/escala original: los shifts con interpolación producen floats;
+    # se redondea y se recorta al rango válido del dtype original (conteos NM).
+    flat = np.clip(np.round(flat), 0, None)
+    if np.issubdtype(orig_dtype, np.integer):
+        info = np.iinfo(orig_dtype)
+        flat = np.clip(flat, info.min, info.max)
+    flat = flat.astype(orig_dtype)
+
+    ds.PixelData = flat.tobytes()
+
+    # Nueva identidad de serie/instancia para no pisar el original.
+    ds.SOPInstanceUID = generate_uid()
+    if hasattr(ds, "file_meta") and ds.file_meta is not None:
+        ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+    ds.SeriesInstanceUID = generate_uid()
+    try:
+        ds.SeriesNumber = str(int(getattr(ds, "SeriesNumber", 0) or 0) + 900)
+    except (ValueError, TypeError):
+        ds.SeriesNumber = "901"
+    prev_desc = str(getattr(ds, "SeriesDescription", "") or "").strip()
+    ds.SeriesDescription = (f"{prev_desc} {series_description_suffix}").strip()[:64]
+    itype = list(ds.ImageType) if "ImageType" in ds else []
+    if "DERIVED" not in itype:
+        itype = ["DERIVED"] + [t for t in itype if t != "ORIGINAL"]
+        ds.ImageType = itype
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    pydicom.dcmwrite(output_path, ds, write_like_original=False)
+    return output_path
 
 
 def reconstruct_transaxial_slices(
