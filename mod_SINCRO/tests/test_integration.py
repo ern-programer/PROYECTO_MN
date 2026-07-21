@@ -227,11 +227,40 @@ def test_ecg_extraction_and_compare():
     print("[OK] Extracción y comparación ECG completada")
 
 
+def test_ungating_and_dicom_export():
+    """Test: desgatillado y exportación DICOM del UngRaw."""
+    import tempfile
+    from core.dicom_export import save_ungated_dicom
+    from core.ungating import ungate, ungate_stats
+
+    # Cubo sintético 8 gates
+    cube = np.random.default_rng(1).integers(0, 100, (8, 4, 12, 12)).astype(np.float64)
+    ug = ungate(cube)
+    assert ug.shape == (4, 12, 12)
+    assert np.isclose(ug.sum(), cube.sum())
+
+    st = ungate_stats(cube)
+    assert st["n_gates"] == 8
+    assert st["total_counts"] > 0
+
+    # Export DCM round-trip
+    import pydicom
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "ug.dcm")
+        save_ungated_dicom(ug, out, pixel_spacing=(3.0, 3.0), slice_thickness_mm=3.0)
+        ds = pydicom.dcmread(out)
+        assert int(ds.NumberOfFrames) == 4
+        assert ds.Rows == 12 and ds.Columns == 12
+        assert "RECON TOMO" in ds.ImageType
+    print("[OK] Desgatillado y exportación DICOM UngRaw completada")
+
+
 def _run_all():
     test_full_pipeline_synthetic()
     test_export_formats()
     test_logging()
     test_ecg_extraction_and_compare()
+    test_ungating_and_dicom_export()
     test_real_dicom_if_available()
     print("\n[TODOS LOS TESTS DE INTEGRACIÓN PASARON]")
 

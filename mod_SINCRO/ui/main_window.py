@@ -603,6 +603,9 @@ class MainWindow(QMainWindow):
 		self.ui_config_btn = QPushButton("Config UI")
 		self.ui_config_btn.clicked.connect(self.open_ui_preferences_dialog)
 		self.ui_config_btn.setToolTip("Configura helpers, tooltips y modo compacto de botones.")
+		self.export_ungated_btn = QPushButton("Ungated DCM")
+		self.export_ungated_btn.clicked.connect(self._export_ungated_dicom)
+		self.export_ungated_btn.setToolTip("Exporta el desgatillado (suma de gates = perfusión total) como DICOM NM no-gated para compartir o releer.")
 		button_row.addWidget(self.restart_btn, 0, 0, 1, 2)
 		button_row.addWidget(self.process_btn, 1, 0)
 		button_row.addWidget(self.auto_btn, 1, 1)
@@ -612,7 +615,8 @@ class MainWindow(QMainWindow):
 		button_row.addWidget(self.compare_stress_rest_btn, 4, 0, 1, 2)
 		button_row.addWidget(self.load_one_or_two_btn, 5, 0, 1, 2)
 		button_row.addWidget(self.advanced_toggle_btn, 6, 0, 1, 2)
-		button_row.addWidget(self.ui_config_btn, 7, 0, 1, 2)
+		button_row.addWidget(self.export_ungated_btn, 7, 0)
+		button_row.addWidget(self.ui_config_btn, 7, 1)
 		# Ubicar Acciones arriba de Procesamiento para tener comandos a la vista.
 		self._sidebar_layout.insertWidget(1, button_box)
 
@@ -3032,6 +3036,12 @@ class MainWindow(QMainWindow):
 				self._export_structured_results()
 			except Exception as exc:
 				self._log(f"[WARN] Exportación estructurada falló: {exc}")
+
+			# Desgatillado (UngRaw): imagen de perfusión total
+			try:
+				self._write_ungated_output()
+			except Exception as exc:
+				self._log(f"[WARN] Desgatillado falló: {exc}")
 		except Exception as exc:
 			self._set_progress(0, "Error")
 			self.statusBar().showMessage("Error")
@@ -3434,6 +3444,76 @@ class MainWindow(QMainWindow):
 			ref_txt = "normal según límite superior"
 		cut_txt = f"cutoff {float(cutoff):.1f}{unit}" if cutoff is not None else "cutoff n/d"
 		return f"  {label}: {value:.1f}{unit} | {ref_txt} | {cut_txt} | z={zt} → {flag}"
+
+	def _write_ungated_output(self):
+		"""Genera la imagen de perfusión desgatillada (UngRaw) en el directorio de salida."""
+		if self.study is None:
+			return
+		from core.ungating import ungate, ungate_stats
+		import matplotlib
+		matplotlib.use("Agg")
+		import matplotlib.pyplot as plt
+
+		ug = ungate(self.study.cube)
+		stats = ungate_stats(self.study.cube)
+		n_slices = ug.shape[0]
+		cols = int(np.ceil(np.sqrt(n_slices)))
+		rows = int(np.ceil(n_slices / cols))
+
+		fig, axes = plt.subplots(rows, cols, figsize=(cols * 1.6, rows * 1.7))
+		axes = np.atleast_1d(axes).ravel()
+		vmax = float(ug.max()) if ug.size else 1.0
+		for idx in range(rows * cols):
+			ax = axes[idx]
+			ax.axis("off")
+			if idx < n_slices:
+				ax.imshow(ug[idx], cmap=str(self.report_cmap_polar_perf.currentText()), vmin=0, vmax=vmax)
+				ax.set_title(f"{idx + 1}", fontsize=7, color="white", pad=1)
+		ctx_label = self._study_context_label(
+			path_override=str(getattr(self, "_output_study_path_override", "") or self.file_edit.text().strip()),
+			study_obj=self.study,
+		)
+		fig.suptitle(
+			f"Desgatillado (UngRaw) — {ctx_label}\n"
+			f"counts totales {stats.get('total_counts', 0):.0f} | CV gates {stats.get('counts_per_gate_cv_pct', 0):.1f}%",
+			fontsize=10, fontweight="bold", color="white",
+		)
+		fig.patch.set_facecolor("#0b1220")
+		fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.93])
+		self._stamp_export_figure(fig, None)
+		out_path = os.path.join(self.output_dir, "perfusion_ungated.png")
+		fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+		plt.close(fig)
+		self._log(f"Desgatillado generado: perfusion_ungated.png (counts {stats.get('total_counts', 0):.0f})")
+
+	def _export_ungated_dicom(self):
+		"""Exporta el desgatillado como DICOM NM no-gated (UngRaw) para compartir/releer."""
+		if self.study is None:
+			QMessageBox.information(self, "SINCRO", "Primero cargá un estudio.")
+			return
+		from core.ungating import ungate
+		from core.dicom_export import save_ungated_dicom
+		default_name = os.path.join(self.output_dir, "ungated_perfusion.dcm")
+		path, _ = QFileDialog.getSaveFileName(
+			self,
+			"Guardar desgatillado DICOM",
+			default_name,
+			"DICOM (*.dcm);;Todos (*.*)",
+		)
+		if not path:
+			return
+		try:
+			ug = ungate(self.study.cube)
+			save_ungated_dicom(ug, path, source_study=self.study)
+			self._log(f"Desgatillado DICOM guardado: {path}")
+			self.statusBar().showMessage("Desgatillado DICOM guardado.")
+			try:
+				get_logger().log_export("dcm_ungated", path)
+			except Exception:
+				pass
+		except Exception as exc:
+			QMessageBox.critical(self, "Error exportando DICOM", str(exc))
+			self._log(f"[ERROR] Exportar desgatillado: {exc}")
 
 	def _export_structured_results(self):
 		"""Exporta resultados a JSON/CSV/Excel en el directorio de salida."""
