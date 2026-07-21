@@ -140,6 +140,13 @@ class MainWindow(QMainWindow):
 		self.polar_cine_playing = False
 		self.polar_cine_timer = QTimer(self)
 		self.polar_cine_timer.timeout.connect(self._advance_polar_cine_frame)
+		# Cine crudo (proyecciones SPECT)
+		self.cine_crudo_frames: list[QPixmap] = []
+		self.cine_crudo_index = 0
+		self.cine_crudo_playing = False
+		self.cine_crudo_timer = QTimer(self)
+		self.cine_crudo_timer.timeout.connect(self._advance_cine_crudo_frame)
+		self.cine_crudo_play_btn: QToolButton | None = None
 		self._tooltips_cache_main: dict[QWidget, str] = {}
 		self._ui_show_helpers = True
 		self._ui_enable_tooltips = True
@@ -177,6 +184,7 @@ class MainWindow(QMainWindow):
 			"histograma",
 			"comparacion_stress_rest",
 			"ungated",
+			"cine_crudo",
 		]
 		self._advanced_extra_tab_order = [
 			"polar_perfusion_directa",
@@ -965,6 +973,7 @@ class MainWindow(QMainWindow):
 			"panel_funcional_gated": "Panel funcional gated",
 			"bullseye_directo": "bullseye_directo",
 			"ungated": "ungated",
+			"cine_crudo": "cine_crudo",
 		}
 		preview_help_texts = {
 			"slices_fase": "Vista de referencia del slice/gate medio con máscara y fase superpuesta. Útil para control de calidad de segmentación.",
@@ -978,6 +987,7 @@ class MainWindow(QMainWindow):
 			"panel_funcional_gated": "Panel funcional integrado (ED/ES, fase, amplitud y curvas) para lectura clínica rápida.",
 			"bullseye_directo": "Bull's-eye de perfusión segmentaria AHA (17): resumen compacto de intensidad regional.",
 			"ungated": "Desgatillado (UngRaw): suma de todos los gates = perfusión total con máxima estadística. Base para cortes anatómicos y comparación contra RECON del fabricante.",
+			"cine_crudo": "Cine de proyecciones crudas SPECT: revisá el movimiento del paciente entre ángulos antes de reconstruir. Selector gated/UngGat, play/pause, velocidad y frame-by-frame.",
 		}
 		for name in [
 			"slices_fase",
@@ -991,6 +1001,7 @@ class MainWindow(QMainWindow):
 			"panel_funcional_gated",
 			"bullseye_directo",
 			"ungated",
+			"cine_crudo",
 		]:
 			tab = QWidget()
 			tab_layout = QVBoxLayout(tab)
@@ -1023,6 +1034,38 @@ class MainWindow(QMainWindow):
 				restart_btn.clicked.connect(self._restart_polar_cine_preview)
 				toolbar.addWidget(play_btn)
 				toolbar.addWidget(restart_btn)
+			if name == "cine_crudo":
+				self.cine_crudo_play_btn = QToolButton()
+				self.cine_crudo_play_btn.setText("Play")
+				self.cine_crudo_play_btn.clicked.connect(self._toggle_cine_crudo)
+				toolbar.addWidget(self.cine_crudo_play_btn)
+				prev_btn = QToolButton()
+				prev_btn.setText("|<")
+				prev_btn.setToolTip("Frame anterior")
+				prev_btn.clicked.connect(lambda _=False: self._step_cine_crudo(-1))
+				toolbar.addWidget(prev_btn)
+				next_btn = QToolButton()
+				next_btn.setText(">|")
+				next_btn.setToolTip("Frame siguiente")
+				next_btn.clicked.connect(lambda _=False: self._step_cine_crudo(1))
+				toolbar.addWidget(next_btn)
+				toolbar.addWidget(QLabel("Vel."))
+				self.cine_crudo_speed_spin = QSpinBox()
+				self.cine_crudo_speed_spin.setRange(40, 1000)
+				self.cine_crudo_speed_spin.setSingleStep(20)
+				self.cine_crudo_speed_spin.setValue(120)
+				self.cine_crudo_speed_spin.setSuffix(" ms")
+				self.cine_crudo_speed_spin.valueChanged.connect(self._on_cine_crudo_speed_changed)
+				toolbar.addWidget(self.cine_crudo_speed_spin)
+				toolbar.addWidget(QLabel("Fuente"))
+				self.cine_crudo_source_combo = QComboBox()
+				self.cine_crudo_source_combo.addItems(["UngGat", "Gated"])
+				self.cine_crudo_source_combo.setCurrentText("UngGat")
+				self.cine_crudo_source_combo.currentTextChanged.connect(self._on_cine_crudo_source_changed)
+				toolbar.addWidget(self.cine_crudo_source_combo)
+				self.cine_crudo_frame_label = QLabel("--/--")
+				self.cine_crudo_frame_label.setStyleSheet("color:#444;")
+				toolbar.addWidget(self.cine_crudo_frame_label)
 			toolbar.addStretch(1)
 			tab_layout.addLayout(toolbar)
 
@@ -1792,6 +1835,17 @@ class MainWindow(QMainWindow):
 			self.preview_pixmaps["ungated"] = pix
 			self.preview_base_sizes["ungated"] = pix.size()
 			self._apply_preview_zoom("ungated")
+
+		# Cargar cine del crudo en la pestaña cine_crudo (UngGat por defecto, alta estadística)
+		if "cine_crudo" in self.preview_labels:
+			try:
+				source = str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
+				self._load_cine_crudo_frames(source)
+				self._select_tab_by_title("cine_crudo")
+			except Exception as exc:
+				self._log(f"[WARN] No se pudo cargar cine crudo: {exc}")
+				self._select_tab_by_title("ungated")
+		else:
 			self._select_tab_by_title("ungated")
 
 		mov_txt = "MOVIMIENTO detectado" if ty["motion_suspected"] else "sin movimiento significativo"
@@ -1825,10 +1879,13 @@ class MainWindow(QMainWindow):
 			return
 		aplicado = []
 		fc = gating.get("heart_rate") or gating.get("heart_rate_est")
-		if fc:
+		# Ignorar FC absurda (placeholder GE: RR=1ms → FC=60000)
+		if fc and 25 <= int(fc) <= 250:
 			self.ecg_fc_spin.setValue(int(fc))
 			aplicado.append(f"FC={fc} lpm")
-		if gating.get("rr_mean_ms"):
+		elif fc:
+			aplicado.append("FC no confiable (placeholder en DICOM)")
+		if gating.get("rr_mean_ms") and not gating.get("rr_placeholder"):
 			rr_txt = f"RR medio {gating['rr_mean_ms']:.0f} ms"
 			if gating.get("rr_cv_pct") is not None:
 				rr_txt += f" (CV {gating['rr_cv_pct']:.1f}%)"
@@ -5737,6 +5794,98 @@ class MainWindow(QMainWindow):
 
 	def _on_polar_cine_speed_changed(self, value: int):
 		self.polar_cine_timer.setInterval(max(40, int(value)))
+
+	# --- Cine crudo (proyecciones SPECT) ---
+	def _rgb_frame_to_qpixmap_raw(self, rgb: np.ndarray) -> QPixmap:
+		h, w = rgb.shape[:2]
+		if rgb.ndim == 2:
+			qimg = QImage(rgb.data, w, h, w, QImage.Format.Format_Grayscale8)
+		else:
+			qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+		return QPixmap.fromImage(qimg.copy())
+
+	def _load_cine_crudo_frames(self, source: str = "UngGat"):
+		"""Carga frames del cine crudo desde proyecciones en memoria (UngGat o gated)."""
+		self.cine_crudo_timer.stop()
+		self.cine_crudo_playing = False
+		self.cine_crudo_frames = []
+		self.cine_crudo_index = 0
+		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
+			return
+		projections = np.asarray(self.study.cube, dtype=np.float64)  # (gates, angles, H, W)
+		if source == "UngGat":
+			from core.raw_projections import ungate_projections
+			frames_arr = ungate_projections(projections)  # (angles, H, W)
+		else:  # Gated — gate medio
+			gate_mid = projections.shape[0] // 2
+			frames_arr = projections[gate_mid]  # (angles, H, W)
+
+		# Escala global (percentil 99 de todo el set) para que el movimiento sea comparable
+		p99 = float(np.percentile(frames_arr, 99.0)) or 1.0
+		if p99 <= 0:
+			p99 = 1.0
+		frames: list[QPixmap] = []
+		try:
+			import matplotlib.cm as _cm
+			cmap = _cm.get_cmap("hot")
+			for a in range(frames_arr.shape[0]):
+				img = np.clip(frames_arr[a] / p99, 0, 1)
+				rgb = (np.asarray(cmap(img)[..., :3]) * 255).astype(np.uint8)
+				frames.append(self._rgb_frame_to_qpixmap_raw(rgb))
+		except Exception:
+			for a in range(frames_arr.shape[0]):
+				img = (np.clip(frames_arr[a] / p99, 0, 1) * 255).astype(np.uint8)
+				frames.append(self._rgb_frame_to_qpixmap_raw(img))
+		self.cine_crudo_frames = frames
+		self.cine_crudo_timer.setInterval(max(40, int(self.cine_crudo_speed_spin.value() if hasattr(self, "cine_crudo_speed_spin") else 120)))
+		self._set_cine_crudo_frame(0)
+
+	def _set_cine_crudo_frame(self, idx: int):
+		if not self.cine_crudo_frames:
+			if "cine_crudo" in self.preview_labels:
+				self.preview_labels["cine_crudo"].setText("Cargá un estudio crudo (proyecciones gated)")
+			return
+		self.cine_crudo_index = int(idx) % len(self.cine_crudo_frames)
+		pix = self.cine_crudo_frames[self.cine_crudo_index]
+		self.preview_pixmaps["cine_crudo"] = pix
+		self.preview_base_sizes["cine_crudo"] = pix.size()
+		self._apply_preview_zoom("cine_crudo")
+		if hasattr(self, "cine_crudo_frame_label"):
+			self.cine_crudo_frame_label.setText(f"{self.cine_crudo_index + 1}/{len(self.cine_crudo_frames)}")
+
+	def _advance_cine_crudo_frame(self):
+		if not self.cine_crudo_frames:
+			self.cine_crudo_timer.stop()
+			self.cine_crudo_playing = False
+			self._update_cine_crudo_toggle_text()
+			return
+		self._set_cine_crudo_frame((self.cine_crudo_index + 1) % len(self.cine_crudo_frames))
+
+	def _step_cine_crudo(self, delta: int):
+		if not self.cine_crudo_frames:
+			return
+		self._set_cine_crudo_frame((self.cine_crudo_index + int(delta)) % len(self.cine_crudo_frames))
+
+	def _toggle_cine_crudo(self):
+		if not self.cine_crudo_frames:
+			return
+		self.cine_crudo_playing = not bool(self.cine_crudo_playing)
+		if self.cine_crudo_playing:
+			self.cine_crudo_timer.start()
+		else:
+			self.cine_crudo_timer.stop()
+		self._update_cine_crudo_toggle_text()
+
+	def _update_cine_crudo_toggle_text(self):
+		if self.cine_crudo_play_btn is not None:
+			self.cine_crudo_play_btn.setText("Pause" if self.cine_crudo_playing else "Play")
+
+	def _on_cine_crudo_speed_changed(self, value: int):
+		self.cine_crudo_timer.setInterval(max(40, int(value)))
+
+	def _on_cine_crudo_source_changed(self, source: str):
+		self._load_cine_crudo_frames(str(source))
+		self._log(f"Cine crudo: fuente {source} ({len(self.cine_crudo_frames)} frames).")
 
 	def _rebuild_tabs_for_mode(self):
 		current_title = self.tabs.tabText(self.tabs.currentIndex()) if self.tabs.count() > 0 else ""

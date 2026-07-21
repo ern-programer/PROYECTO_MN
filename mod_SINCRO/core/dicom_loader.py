@@ -137,7 +137,9 @@ def _extract_gating_info(ds) -> dict:
     if rr_vec is not None:
         try:
             rr = [float(v) for v in rr_vec]
-            rr = [v for v in rr if v > 0]
+            # Filtrar placeholders inválidos: RR fisiológico está ~250-2000 ms.
+            # GE/Xeleris a veces exporta 1.0 ms como placeholder → descartar.
+            rr = [v for v in rr if 250.0 <= v <= 2000.0]
             if rr:
                 info["rr_intervals_ms"] = rr
                 info["rr_mean_ms"] = float(_np.mean(rr))
@@ -145,6 +147,9 @@ def _extract_gating_info(ds) -> dict:
                 # FC estimada desde RR medio si no vino HeartRate
                 if "heart_rate" not in info and info["rr_mean_ms"] > 0:
                     info["heart_rate_est"] = int(round(60000.0 / info["rr_mean_ms"]))
+            else:
+                # RR vector inválido/placeholder → no reportar FC estimada ni RR
+                info["rr_placeholder"] = True
         except Exception:
             pass
 
@@ -187,6 +192,42 @@ def _extract_gating_info(ds) -> dict:
             info["n_beats"] = int(n_beats)
         except Exception:
             pass
+
+    # Frame time / duración por gate (ms) — útil para ponderar desgatillado si gates no uniformes
+    ft = _get(ds, (0x0018, 0x1063), None)  # FrameTime (a veces por frame en NM)
+    if ft is not None:
+        try:
+            info["frame_time_ms"] = float(ft)
+        except Exception:
+            pass
+    # TimeSlotTime (0054,0030) — duración del time slot en segundos
+    tst = _get(ds, (0x0054, 0x0030), None)
+    if tst is not None:
+        try:
+            info["time_slot_time_s"] = float(tst)
+        except Exception:
+            pass
+    # TriggerTime (0018,1060) — tiempo desde trigger nominal
+    tt = _get(ds, (0x0018, 0x1060), None)
+    if tt is not None:
+        try:
+            info["trigger_time_ms"] = float(tt)
+        except Exception:
+            pass
+    # NumberOfTimeSlots / TimeSlices (gates)
+    nslots = _get(ds, (0x0054, 0x0071), None) or _get(ds, (0x0054, 0x0101), None)
+    if nslots is not None:
+        try:
+            info["n_time_slots"] = int(nslots)
+        except Exception:
+            pass
+    # Framing type / cardiac synchronization technique
+    framing = _get(ds, (0x0018, 0x1064), None)
+    if framing:
+        info["cardiac_framing_type"] = str(framing)
+    sync_tech = _get(ds, (0x0018, 0x9037), None)
+    if sync_tech:
+        info["cardiac_sync_technique"] = str(sync_tech)
 
     # QC simple: variabilidad RR alta sugiere FA/extrasístoles
     if info.get("rr_cv_pct") is not None:
