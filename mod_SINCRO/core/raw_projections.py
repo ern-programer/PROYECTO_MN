@@ -731,6 +731,86 @@ def _tracking_hopkins(
     }
 
 
+def _tracking_sinusoid(
+    projections: np.ndarray,
+    axis: str,
+    threshold_frac: float,
+    seed: tuple[float, float] | None = None,
+    angles_deg: np.ndarray | None = None,
+) -> dict:
+    """
+    Tracking sinusoidal (referencia geométricamente correcta para SPECT).
+
+    Fundamento: cuando el gantry rota, el centro proyectado de un objeto ESTÁTICO
+    NO es constante: describe una sinusoide vs ángulo (esa es la transformada de
+    Radon / sinograma). Por eso forzar el centro a una constante (mediana/moda/
+    stasis) pelea contra la geometría de rotación y en el eje X (transaxial)
+    EMPEORA el estudio.
+
+    Este método ajusta la curva esperada centro(θ) = a + b·cos(θ) + c·sin(θ)
+    (posición de un objeto rígido en rotación) por mínimos cuadrados robustos, y
+    corrige SOLO el residuo (desviación respecto de la sinusoide = movimiento real
+    del paciente). Así preserva la geometría y elimina únicamente el movimiento.
+    """
+    from scipy.ndimage import center_of_mass as _com
+
+    proj = np.asarray(projections, dtype=np.float64)
+    summed = proj.sum(axis=0)
+    n_angles = summed.shape[0]
+    threshold_frac = min(max(float(threshold_frac), 0.01), 0.90)
+
+    centers = np.full((n_angles,), np.nan, dtype=np.float64)
+    for a in range(n_angles):
+        img = summed[a]
+        if img.max() <= 0:
+            continue
+        organ = _organ_mask(img, threshold_frac, seed=seed, use_organ_selection=True)
+        if organ.sum() < 4:
+            continue
+        cy, cx = _com(organ)
+        centers[a] = cy if axis == "y" else cx
+
+    valid = np.isfinite(centers)
+    if valid.sum() < 4:
+        return {"axis": axis, "com_series": centers, "method": "sinusoid",
+                "threshold_frac": threshold_frac, "_sinusoid_shifts": np.zeros((n_angles,))}
+
+    # Ángulos: usar los reales si están; si no, asumir barrido uniforme.
+    if angles_deg is not None and len(angles_deg) == n_angles:
+        theta = np.deg2rad(np.asarray(angles_deg, dtype=np.float64))
+    else:
+        theta = np.deg2rad(np.linspace(0.0, 360.0, n_angles, endpoint=False))
+
+    def _fit(mask: np.ndarray) -> np.ndarray:
+        A = np.column_stack([np.ones(mask.sum()), np.cos(theta[mask]), np.sin(theta[mask])])
+        coef, *_ = np.linalg.lstsq(A, centers[mask], rcond=None)
+        return coef
+
+    # Ajuste robusto: 1 pasada de rechazo de outliers (movimiento brusco) y refit.
+    fit_mask = valid.copy()
+    coef = _fit(fit_mask)
+    fitted_all = coef[0] + coef[1] * np.cos(theta) + coef[2] * np.sin(theta)
+    resid = centers - fitted_all
+    rv = resid[valid]
+    sigma = 1.4826 * float(np.median(np.abs(rv - np.median(rv)))) if rv.size else 0.0
+    if sigma > 0:
+        keep = valid & (np.abs(resid) <= 2.5 * sigma)
+        if keep.sum() >= 4:
+            coef = _fit(keep)
+            fitted_all = coef[0] + coef[1] * np.cos(theta) + coef[2] * np.sin(theta)
+
+    # Shift = referencia sinusoidal esperada - centro medido (corrige solo el movimiento).
+    shifts = np.where(valid, fitted_all - centers, 0.0)
+    return {
+        "axis": axis,
+        "com_series": centers,
+        "sinusoid_fit": fitted_all,
+        "method": "sinusoid",
+        "threshold_frac": threshold_frac,
+        "_sinusoid_shifts": shifts,
+    }
+
+
 def _finalize_tracking(tracking: dict) -> dict:
     """Calcula outliers, shifts y flag de movimiento para un tracking dado."""
     com_series = np.asarray(tracking.get("com_series", []), dtype=np.float64)
@@ -774,12 +854,14 @@ def motion_correct_projections(
     max_abs_shift_px: float = 4.0,
     smooth_sigma: float = 1.0,
     ref_index: int | None = None,
+    angles_deg: np.ndarray | None = None,
 ) -> dict:
     """
     Motion correction de proyecciones SPECT gated.
 
     Methods:
-      - gammasync: threshold + selección de componente del órgano (corazón), automática o por seed (click). Recomendado.
+      - sinusoid: ajusta la sinusoide esperada de rotación y corrige solo el residuo (movimiento real). Correcto geométricamente para SPECT. Recomendado.
+      - gammasync: threshold + selección de componente del órgano (corazón), automática o por seed (click).
       - stasis: referencia estática (moda) del centro del órgano, como Xeleris Stasis.
       - hopkins: referencia del frame más estable temporalmente, como Xeleris Hopkins.
       - odyssey: re-proyección iterativa (manual LX).
@@ -791,8 +873,8 @@ def motion_correct_projections(
         raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibió {proj.shape}")
 
     method = str(method or "gammasync").strip().lower()
-    if method not in ("gammasync", "stasis", "hopkins", "com", "threshold", "odyssey"):
-        raise ValueError("method debe ser 'gammasync', 'stasis', 'hopkins', 'com', 'threshold' u 'odyssey'")
+    if method not in ("sinusoid", "gammasync", "stasis", "hopkins", "com", "threshold", "odyssey"):
+        raise ValueError("method debe ser 'sinusoid', 'gammasync', 'stasis', 'hopkins', 'com', 'threshold' u 'odyssey'")
 
     axes_to_correct = ["y", "x"] if axis == "xy" else [axis]
     tracking = {}
@@ -800,7 +882,14 @@ def motion_correct_projections(
     shifts_x = np.zeros((proj.shape[1],), dtype=np.float64)
 
     for ax in axes_to_correct:
-        if method == "gammasync":
+        if method == "sinusoid":
+            trk = _tracking_sinusoid(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, angles_deg=angles_deg)
+            sin_shifts = np.asarray(trk.pop("_sinusoid_shifts", np.zeros((proj.shape[1],))), dtype=np.float64)
+            trk = _finalize_tracking(trk)
+            trk["suggested_shifts_px"] = sin_shifts
+            trk["max_shift_px"] = round(float(np.abs(sin_shifts).max()) if sin_shifts.size else 0.0, 2)
+            trk["motion_suspected"] = bool(trk["max_shift_px"] > 1.5 or trk.get("n_outliers", 0) >= 2)
+        elif method == "gammasync":
             trk = _finalize_tracking(_tracking_gammasync(proj, axis=ax, threshold_frac=threshold_frac, seed=seed))
         elif method == "stasis":
             trk = _tracking_stasis(proj, axis=ax, threshold_frac=threshold_frac, seed=seed)

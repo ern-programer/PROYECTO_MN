@@ -1103,9 +1103,9 @@ class MainWindow(QMainWindow):
 				toolbar2 = QHBoxLayout()
 				toolbar2.addWidget(QLabel("Método"))
 				self.cine_crudo_method_combo = QComboBox()
-				self.cine_crudo_method_combo.addItems(["Auto", "GammaSync", "Stasis", "Hopkins", "Odyssey", "COM", "Threshold"])
-				self.cine_crudo_method_combo.setCurrentText("GammaSync")
-				self.cine_crudo_method_combo.setToolTip("GammaSync: selección de órgano automática/click. Stasis: referencia estática (moda, Xeleris). Hopkins: frame más estable (Xeleris). Odyssey: re-proyección iterativa. COM: centro de masa. Threshold: bounding box.")
+				self.cine_crudo_method_combo.addItems(["Auto", "Sinusoide", "GammaSync", "Stasis", "Hopkins", "Odyssey", "COM", "Threshold"])
+				self.cine_crudo_method_combo.setCurrentText("Sinusoide")
+				self.cine_crudo_method_combo.setToolTip("Sinusoide: ajusta la sinusoide de rotación esperada y corrige solo el residuo (movimiento real). Correcto geométricamente para SPECT. GammaSync: selección de órgano automática/click. Stasis: referencia estática (moda, Xeleris). Hopkins: frame más estable (Xeleris). Odyssey: re-proyección iterativa. COM: centro de masa. Threshold: bounding box.")
 				toolbar2.addWidget(self.cine_crudo_method_combo)
 				toolbar2.addWidget(QLabel("Eje"))
 				self.cine_crudo_axis_combo = QComboBox()
@@ -1163,17 +1163,56 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_correct_btn.setToolTip("Aplica motion correction con método/eje/threshold seleccionados.")
 				self.cine_crudo_correct_btn.clicked.connect(self._apply_cine_crudo_motion_correction)
 				toolbar2.addWidget(self.cine_crudo_correct_btn)
+				toolbar2.addStretch(1)
+
+				# --- Fila 3 (toolbar corrección manual + export): flechas + offset + referencia + curvas + exportar ---
+				toolbar3 = QHBoxLayout()
+				toolbar3.addWidget(QLabel("Manual"))
+				self.cine_crudo_up_btn = QToolButton()
+				self.cine_crudo_up_btn.setText("↑")
+				self.cine_crudo_up_btn.setToolTip("Subir el frame ACTUAL (shift Y −paso). Corrección manual frame a frame en vivo.")
+				self.cine_crudo_up_btn.clicked.connect(lambda _=False: self._nudge_cine_crudo_frame(-self._cine_crudo_nudge_step(), 0.0))
+				toolbar3.addWidget(self.cine_crudo_up_btn)
+				self.cine_crudo_down_btn = QToolButton()
+				self.cine_crudo_down_btn.setText("↓")
+				self.cine_crudo_down_btn.setToolTip("Bajar el frame ACTUAL (shift Y +paso).")
+				self.cine_crudo_down_btn.clicked.connect(lambda _=False: self._nudge_cine_crudo_frame(self._cine_crudo_nudge_step(), 0.0))
+				toolbar3.addWidget(self.cine_crudo_down_btn)
+				self.cine_crudo_left_btn = QToolButton()
+				self.cine_crudo_left_btn.setText("←")
+				self.cine_crudo_left_btn.setToolTip("Mover el frame ACTUAL a la izquierda (shift X −paso).")
+				self.cine_crudo_left_btn.clicked.connect(lambda _=False: self._nudge_cine_crudo_frame(0.0, -self._cine_crudo_nudge_step()))
+				toolbar3.addWidget(self.cine_crudo_left_btn)
+				self.cine_crudo_right_btn = QToolButton()
+				self.cine_crudo_right_btn.setText("→")
+				self.cine_crudo_right_btn.setToolTip("Mover el frame ACTUAL a la derecha (shift X +paso).")
+				self.cine_crudo_right_btn.clicked.connect(lambda _=False: self._nudge_cine_crudo_frame(0.0, self._cine_crudo_nudge_step()))
+				toolbar3.addWidget(self.cine_crudo_right_btn)
+				toolbar3.addWidget(QLabel("Paso"))
+				self.cine_crudo_nudge_step_spin = QDoubleSpinBox()
+				self.cine_crudo_nudge_step_spin.setRange(0.10, 5.0)
+				self.cine_crudo_nudge_step_spin.setSingleStep(0.10)
+				self.cine_crudo_nudge_step_spin.setDecimals(2)
+				self.cine_crudo_nudge_step_spin.setValue(0.50)
+				self.cine_crudo_nudge_step_spin.setMaximumWidth(64)
+				self.cine_crudo_nudge_step_spin.setToolTip("Tamaño del paso (px) de las flechas de corrección manual.")
+				toolbar3.addWidget(self.cine_crudo_nudge_step_spin)
+				self.cine_crudo_reset_manual_btn = QToolButton()
+				self.cine_crudo_reset_manual_btn.setText("Reset frame")
+				self.cine_crudo_reset_manual_btn.setToolTip("Pone el shift del frame actual en 0 (deshace la corrección manual de ese frame).")
+				self.cine_crudo_reset_manual_btn.clicked.connect(self._reset_cine_crudo_frame_shift)
+				toolbar3.addWidget(self.cine_crudo_reset_manual_btn)
 				self.cine_crudo_fine_btn = QToolButton()
 				self.cine_crudo_fine_btn.setText("Ajuste fino")
 				self.cine_crudo_fine_btn.setToolTip("Edita manualmente shifts Y/X del frame actual para ajuste fino.")
 				self.cine_crudo_fine_btn.clicked.connect(self._open_cine_crudo_fine_adjust)
-				toolbar2.addWidget(self.cine_crudo_fine_btn)
+				toolbar3.addWidget(self.cine_crudo_fine_btn)
 				self.cine_crudo_compare_check = QCheckBox("Comparar")
 				self.cine_crudo_compare_check.setToolTip("Muestra original y corregido en paralelo (original | corregido).")
 				self.cine_crudo_compare_check.setEnabled(False)
 				self.cine_crudo_compare_check.toggled.connect(self._refresh_cine_crudo_view)
-				toolbar2.addWidget(self.cine_crudo_compare_check)
-				toolbar2.addWidget(QLabel("OffY"))
+				toolbar3.addWidget(self.cine_crudo_compare_check)
+				toolbar3.addWidget(QLabel("OffY"))
 				self.cine_crudo_offset_y_spin = QDoubleSpinBox()
 				self.cine_crudo_offset_y_spin.setRange(-10.0, 10.0)
 				self.cine_crudo_offset_y_spin.setDecimals(2)
@@ -1181,8 +1220,8 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_offset_y_spin.setValue(0.0)
 				self.cine_crudo_offset_y_spin.setMaximumWidth(70)
 				self.cine_crudo_offset_y_spin.setToolTip("Offset manual global Y (px) para ajuste visual de la corrección.")
-				toolbar2.addWidget(self.cine_crudo_offset_y_spin)
-				toolbar2.addWidget(QLabel("OffX"))
+				toolbar3.addWidget(self.cine_crudo_offset_y_spin)
+				toolbar3.addWidget(QLabel("OffX"))
 				self.cine_crudo_offset_x_spin = QDoubleSpinBox()
 				self.cine_crudo_offset_x_spin.setRange(-10.0, 10.0)
 				self.cine_crudo_offset_x_spin.setDecimals(2)
@@ -1190,27 +1229,33 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_offset_x_spin.setValue(0.0)
 				self.cine_crudo_offset_x_spin.setMaximumWidth(70)
 				self.cine_crudo_offset_x_spin.setToolTip("Offset manual global X (px) para ajuste visual de la corrección.")
-				toolbar2.addWidget(self.cine_crudo_offset_x_spin)
+				toolbar3.addWidget(self.cine_crudo_offset_x_spin)
 				self.cine_crudo_apply_offset_btn = QToolButton()
 				self.cine_crudo_apply_offset_btn.setText("Aplicar offset")
 				self.cine_crudo_apply_offset_btn.setToolTip("Aplica offset global X/Y a todos los frames corregidos.")
 				self.cine_crudo_apply_offset_btn.clicked.connect(self._apply_cine_crudo_manual_offset)
-				toolbar2.addWidget(self.cine_crudo_apply_offset_btn)
+				toolbar3.addWidget(self.cine_crudo_apply_offset_btn)
 				self.cine_crudo_set_ref_btn = QToolButton()
 				self.cine_crudo_set_ref_btn.setText("Usar frame ref")
 				self.cine_crudo_set_ref_btn.setToolTip("Fija el frame actual como referencia (shift=0) para la corrección.")
 				self.cine_crudo_set_ref_btn.clicked.connect(self._set_cine_crudo_reference_frame)
-				toolbar2.addWidget(self.cine_crudo_set_ref_btn)
+				toolbar3.addWidget(self.cine_crudo_set_ref_btn)
 				self.cine_crudo_shift_plot_btn = QToolButton()
 				self.cine_crudo_shift_plot_btn.setText("Curvas shift")
 				self.cine_crudo_shift_plot_btn.setToolTip("Muestra curvas X/Y de shift por frame (estilo Xeleris).")
 				self.cine_crudo_shift_plot_btn.clicked.connect(self._show_cine_crudo_shift_curves)
-				toolbar2.addWidget(self.cine_crudo_shift_plot_btn)
-				toolbar2.addStretch(1)
+				toolbar3.addWidget(self.cine_crudo_shift_plot_btn)
+				self.cine_crudo_export_btn = QToolButton()
+				self.cine_crudo_export_btn.setText("Exportar corrección")
+				self.cine_crudo_export_btn.setToolTip("Exporta shifts Y/X por frame (CSV) + proyecciones corregidas (.npz) para comparar y calibrar métodos.")
+				self.cine_crudo_export_btn.clicked.connect(self._export_cine_crudo_correction)
+				toolbar3.addWidget(self.cine_crudo_export_btn)
+				toolbar3.addStretch(1)
 			toolbar.addStretch(1)
 			tab_layout.addLayout(toolbar)
 			if name == "cine_crudo":
 				tab_layout.addLayout(toolbar2)
+				tab_layout.addLayout(toolbar3)
 
 			label = QLabel("Sin procesar")
 			label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -6082,14 +6127,17 @@ class MainWindow(QMainWindow):
 			projections = np.asarray(self.study.cube, dtype=np.float64)
 			self._set_progress(55, "Aplicando motion correction al crudo...")
 			method = str(self.cine_crudo_method_combo.currentText()).lower() if hasattr(self, "cine_crudo_method_combo") else "gammasync"
+			if method == "sinusoide":
+				method = "sinusoid"
 			axis = str(self.cine_crudo_axis_combo.currentText()).lower() if hasattr(self, "cine_crudo_axis_combo") else "y"
 			threshold = self._cine_crudo_threshold_value()
 			seed = self.cine_crudo_seed  # el pick del usuario aplica a TODOS los métodos (COM, Stasis, Hopkins, GammaSync)
+			angles = getattr(self.study, "angles_deg", None)
 			ref_idx = int(self.cine_crudo_ref_index if self.cine_crudo_ref_index is not None else getattr(self, "_cine_crudo_current_frame", 0))
 			if method == "auto":
 				# Auto: correr varios métodos y elegir por score clínico (residual Y/X + outliers + energía de shift).
 				from core.raw_projections import center_of_mass_tracking
-				candidates = ["com", "odyssey", "stasis", "hopkins", "gammasync", "threshold"]
+				candidates = ["sinusoid", "com", "odyssey", "stasis", "hopkins", "gammasync", "threshold"]
 				best_result = None
 				best_method = None
 				best_score = 1e18
@@ -6103,6 +6151,7 @@ class MainWindow(QMainWindow):
 						max_abs_shift_px=4.0,
 						smooth_sigma=1.0,
 						ref_index=ref_idx,
+						angles_deg=angles,
 					)
 					ty_m = center_of_mass_tracking(np.asarray(res_m.get("corrected"), dtype=np.float64), axis="y")
 					tx_m = center_of_mass_tracking(np.asarray(res_m.get("corrected"), dtype=np.float64), axis="x")
@@ -6130,6 +6179,7 @@ class MainWindow(QMainWindow):
 					max_abs_shift_px=4.0,
 					smooth_sigma=1.0,
 					ref_index=ref_idx,
+					angles_deg=angles,
 				)
 			self.cine_crudo_motion_result = result
 			self.cine_crudo_corrected_projections = np.asarray(result.get("corrected"), dtype=np.float64)
@@ -6193,6 +6243,144 @@ class MainWindow(QMainWindow):
 			return
 		self.cine_crudo_ref_index = int(getattr(self, "_cine_crudo_current_frame", self.cine_crudo_index))
 		self._log(f"Frame de referencia fijado: {self.cine_crudo_ref_index}. La próxima corrección ancla shift=0 en ese frame.")
+
+	def _cine_crudo_nudge_step(self) -> float:
+		"""Tamaño del paso (px) de las flechas de corrección manual."""
+		if hasattr(self, "cine_crudo_nudge_step_spin"):
+			return float(self.cine_crudo_nudge_step_spin.value())
+		return 0.5
+
+	def _cine_crudo_ensure_shift_arrays(self):
+		"""Garantiza que exista un motion_result con arrays de shift por frame (para edición manual)."""
+		projections = np.asarray(self.study.cube, dtype=np.float64)
+		n_angles = int(projections.shape[1])
+		if self.cine_crudo_motion_result is None:
+			self.cine_crudo_motion_result = {
+				"corrected": projections.copy(),
+				"applied_shifts_y": np.zeros((n_angles,), dtype=np.float64),
+				"applied_shifts_x": np.zeros((n_angles,), dtype=np.float64),
+				"method": "manual",
+				"manual_edited": True,
+			}
+			self.cine_crudo_corrected_projections = projections.copy()
+		return projections, n_angles
+
+	def _nudge_cine_crudo_frame(self, dy: float, dx: float):
+		"""Corrige manualmente SOLO el frame actual: suma dy/dx a su shift y aplica en vivo."""
+		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
+			return
+		if not self.cine_crudo_frames:
+			QMessageBox.information(self, "SINCRO", "Primero cargá el cine del crudo.")
+			return
+		try:
+			from core.raw_projections import apply_shifts_to_projections
+			projections, n_angles = self._cine_crudo_ensure_shift_arrays()
+			idx = int(getattr(self, "_cine_crudo_current_frame", self.cine_crudo_index)) % n_angles
+			sy = np.asarray(self.cine_crudo_motion_result.get("applied_shifts_y", np.zeros((n_angles,))), dtype=np.float64).copy()
+			sx = np.asarray(self.cine_crudo_motion_result.get("applied_shifts_x", np.zeros((n_angles,))), dtype=np.float64).copy()
+			if sy.size != n_angles:
+				sy = np.zeros((n_angles,), dtype=np.float64)
+			if sx.size != n_angles:
+				sx = np.zeros((n_angles,), dtype=np.float64)
+			sy[idx] += float(dy)
+			sx[idx] += float(dx)
+			corr = apply_shifts_to_projections(projections, sy, sx)
+			self.cine_crudo_corrected_projections = np.asarray(corr, dtype=np.float64)
+			self.cine_crudo_motion_result["applied_shifts_y"] = sy
+			self.cine_crudo_motion_result["applied_shifts_x"] = sx
+			self.cine_crudo_motion_result["corrected"] = self.cine_crudo_corrected_projections
+			self.cine_crudo_motion_result["manual_edited"] = True
+			if self.cine_crudo_compare_check is not None:
+				self.cine_crudo_compare_check.setEnabled(True)
+			self._refresh_cine_crudo_view()
+			self._set_cine_crudo_frame(idx)
+			self._log(f"Manual frame {idx}: shift acumulado Y={sy[idx]:+.2f} X={sx[idx]:+.2f} px (Δ Y={dy:+.2f} X={dx:+.2f})")
+		except Exception as exc:
+			self._log(f"[WARN] Ajuste manual falló: {exc}")
+
+	def _reset_cine_crudo_frame_shift(self):
+		"""Pone el shift del frame actual en 0 (deshace la corrección manual de ese frame)."""
+		if self.cine_crudo_motion_result is None or self.study is None:
+			return
+		if not self.cine_crudo_frames:
+			return
+		try:
+			from core.raw_projections import apply_shifts_to_projections
+			projections = np.asarray(self.study.cube, dtype=np.float64)
+			n_angles = int(projections.shape[1])
+			idx = int(getattr(self, "_cine_crudo_current_frame", self.cine_crudo_index)) % n_angles
+			sy = np.asarray(self.cine_crudo_motion_result.get("applied_shifts_y", np.zeros((n_angles,))), dtype=np.float64).copy()
+			sx = np.asarray(self.cine_crudo_motion_result.get("applied_shifts_x", np.zeros((n_angles,))), dtype=np.float64).copy()
+			if sy.size == n_angles:
+				sy[idx] = 0.0
+			if sx.size == n_angles:
+				sx[idx] = 0.0
+			corr = apply_shifts_to_projections(projections, sy, sx)
+			self.cine_crudo_corrected_projections = np.asarray(corr, dtype=np.float64)
+			self.cine_crudo_motion_result["applied_shifts_y"] = sy
+			self.cine_crudo_motion_result["applied_shifts_x"] = sx
+			self.cine_crudo_motion_result["corrected"] = self.cine_crudo_corrected_projections
+			self._refresh_cine_crudo_view()
+			self._set_cine_crudo_frame(idx)
+			self._log(f"Frame {idx}: shift reseteado a 0.")
+		except Exception as exc:
+			self._log(f"[WARN] Reset de frame falló: {exc}")
+
+	def _export_cine_crudo_correction(self):
+		"""Exporta shifts Y/X por frame (CSV) + proyecciones corregidas (.npz) para comparar/calibrar métodos."""
+		if self.cine_crudo_motion_result is None:
+			QMessageBox.information(self, "SINCRO", "Primero ejecutá una corrección (automática o manual con flechas).")
+			return
+		try:
+			from PyQt6.QtWidgets import QFileDialog
+			sy = np.asarray(self.cine_crudo_motion_result.get("applied_shifts_y", []), dtype=np.float64)
+			sx = np.asarray(self.cine_crudo_motion_result.get("applied_shifts_x", []), dtype=np.float64)
+			n = int(max(sy.size, sx.size))
+			if n == 0:
+				QMessageBox.information(self, "SINCRO", "No hay shifts para exportar.")
+				return
+			if sy.size != n:
+				sy = np.zeros((n,), dtype=np.float64)
+			if sx.size != n:
+				sx = np.zeros((n,), dtype=np.float64)
+			method = str(self.cine_crudo_motion_result.get("method_auto_selected") or self.cine_crudo_motion_result.get("method") or "manual")
+			default_base = os.path.join(self.output_dir, f"motion_correction_{method}")
+			path, _flt = QFileDialog.getSaveFileName(
+				self, "Exportar corrección de movimiento", default_base,
+				"CSV de shifts (*.csv);;Todos los archivos (*.*)",
+			)
+			if not path:
+				return
+			base, ext = os.path.splitext(path)
+			csv_path = path if ext.lower() == ".csv" else base + ".csv"
+			# CSV: frame, angulo_deg, shift_y_px, shift_x_px
+			angles = getattr(self.study, "angles_deg", None)
+			lines = ["frame,angle_deg,shift_y_px,shift_x_px"]
+			for i in range(n):
+				ang = float(angles[i]) if (angles is not None and i < len(angles)) else float("nan")
+				lines.append(f"{i},{ang:.3f},{sy[i]:.4f},{sx[i]:.4f}")
+			csv_text = "\n".join(lines) + "\n"
+			with open(csv_path, "wb") as fh:
+				fh.write(csv_text.encode("utf-8"))
+			# NPZ: shifts + proyecciones corregidas (para reconstruir/comparar).
+			npz_path = base + ".npz"
+			corrected = np.asarray(self.cine_crudo_corrected_projections, dtype=np.float32) if self.cine_crudo_corrected_projections is not None else None
+			save_kwargs = {
+				"shifts_y": sy.astype(np.float32),
+				"shifts_x": sx.astype(np.float32),
+				"method": np.array(method),
+				"ref_index": np.array(self.cine_crudo_ref_index if self.cine_crudo_ref_index is not None else -1),
+			}
+			if corrected is not None:
+				save_kwargs["corrected"] = corrected
+			np.savez_compressed(npz_path, **save_kwargs)
+			self._log(f"Corrección exportada: {os.path.basename(csv_path)} + {os.path.basename(npz_path)} (método {method}, {n} frames).")
+			QMessageBox.information(
+				self, "SINCRO",
+				f"Exportado:\n• {csv_path}\n• {npz_path}\n\nShifts Y/X por frame y proyecciones corregidas para comparar/calibrar.",
+			)
+		except Exception as exc:
+			self._log(f"[WARN] Exportar corrección falló: {exc}")
 
 	def _show_cine_crudo_shift_curves(self):
 		"""Muestra curvas de shifts X/Y vs frame (estilo Xeleris) para depurar la corrección."""
