@@ -6206,53 +6206,66 @@ class MainWindow(QMainWindow):
 		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
 			QMessageBox.information(self, "SINCRO", "Cargá un estudio crudo primero.")
 			return
-		import matplotlib
-		matplotlib.use("Agg")
-		import matplotlib.pyplot as plt
-		from core.raw_projections import ungate_projections
+		try:
+			import matplotlib.pyplot as plt
+			from core.raw_projections import ungate_projections
 
-		projections = np.asarray(self.study.cube, dtype=np.float64)
-		ung = ungate_projections(projections)  # (n_angles, H, W)
-		n_angles, H, W = ung.shape
-		thr = self._cine_crudo_threshold_value()
+			projections = np.asarray(self.study.cube, dtype=np.float64)
+			ung = ungate_projections(projections)  # (n_angles, H, W)
+			n_angles, H, W = ung.shape
+			thr = self._cine_crudo_threshold_value()
 
-		# Grilla de todos los ángulos (cortes transaxiales) con máscara superpuesta.
-		cols = int(np.ceil(np.sqrt(n_angles)))
-		rows = int(np.ceil(n_angles / cols))
-		fig, axes = plt.subplots(rows, cols, figsize=(cols * 1.5, rows * 1.6))
-		axes = np.atleast_1d(axes).ravel()
-		p99 = float(np.percentile(ung, 99.0)) or 1.0
-		for idx in range(rows * cols):
-			ax = axes[idx]
-			ax.axis("off")
-			ax.set_facecolor("#0b1220")
-			if idx < n_angles:
-				img = ung[idx]
-				ax.imshow(img, cmap="hot", vmin=0, vmax=p99)
-				mask = img > (thr * img.max()) if img.max() > 0 else np.zeros_like(img, dtype=bool)
-				ax.contour(mask, levels=[0.5], colors="spring", linewidths=0.8)
-				ax.set_title(f"{idx}", fontsize=7, color="white", pad=1)
-		ctx_label = self._study_context_label(
-			path_override=str(getattr(self, "_output_study_path_override", "") or self.file_edit.text().strip()),
-			study_obj=self.study,
-		)
-		fig.suptitle(
-			f"Grilla transaxial pick — {ctx_label} | thr {thr:.2f} | "
-			"Discriminá corazón de hígado y hacé pick con 'Elegir corazón' en cine_crudo",
-			color="white", fontsize=10.5, fontweight="bold",
-		)
-		fig.patch.set_facecolor("#0b1220")
-		fig.tight_layout(rect=[0, 0, 1, 0.94])
-		out_png = os.path.join(self.output_dir, "grilla_pick_transaxial.png")
-		fig.savefig(out_png, dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
-		plt.close(fig)
-		if "ungated" in self.preview_labels:
-			pix = QPixmap(out_png)
-			self.preview_pixmaps["ungated"] = pix
-			self.preview_base_sizes["ungated"] = pix.size()
-			self._apply_preview_zoom("ungated")
-			self._select_tab_by_title("ungated")
-		self._log(f"Grilla transaxial pick generada (thr {thr:.2f}, {n_angles} ángulos) → pestaña ungated.")
+			# Grilla de cortes transaxiales con máscara. Limitar a 64 subplots para evitar saturar matplotlib.
+			max_plots = 64
+			if n_angles > max_plots:
+				step = int(np.ceil(n_angles / max_plots))
+				ung = ung[::step]
+				n_angles = ung.shape[0]
+				self._log(f"Grilla pick: submuestreo cada {step} ángulos ({n_angles} de {projections.shape[1]}) para performance.")
+			cols = int(np.ceil(np.sqrt(n_angles)))
+			rows = int(np.ceil(n_angles / cols))
+			fig, axes = plt.subplots(rows, cols, figsize=(cols * 1.5, rows * 1.6))
+			axes = np.atleast_1d(axes).ravel()
+			p99 = float(np.percentile(ung, 99.0)) or 1.0
+			for idx in range(rows * cols):
+				ax = axes[idx]
+				ax.axis("off")
+				ax.set_facecolor("#0b1220")
+				if idx < n_angles:
+					img = ung[idx]
+					ax.imshow(img, cmap="hot", vmin=0, vmax=p99)
+					mask = img > (thr * img.max()) if img.max() > 0 else np.zeros_like(img, dtype=bool)
+					# Contorno de la máscara solo si tiene píxeles (evita crash con máscara vacía).
+					if mask.any():
+						try:
+							ax.contour(mask.astype(np.uint8), levels=[0.5], colors="spring", linewidths=0.8)
+						except Exception:
+							pass
+					ax.set_title(f"{idx}", fontsize=7, color="white", pad=1)
+			ctx_label = self._study_context_label(
+				path_override=str(getattr(self, "_output_study_path_override", "") or self.file_edit.text().strip()),
+				study_obj=self.study,
+			)
+			fig.suptitle(
+				f"Grilla transaxial pick — {ctx_label} | thr {thr:.2f} | "
+				"Discriminá corazón de hígado y hacé pick con 'Elegir corazón' en cine_crudo",
+				color="white", fontsize=10.5, fontweight="bold",
+			)
+			fig.patch.set_facecolor("#0b1220")
+			fig.tight_layout(rect=[0, 0, 1, 0.94])
+			out_png = os.path.join(self.output_dir, "grilla_pick_transaxial.png")
+			fig.savefig(out_png, dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
+			plt.close(fig)
+			if "ungated" in self.preview_labels:
+				pix = QPixmap(out_png)
+				self.preview_pixmaps["ungated"] = pix
+				self.preview_base_sizes["ungated"] = pix.size()
+				self._apply_preview_zoom("ungated")
+				self._select_tab_by_title("ungated")
+			self._log(f"Grilla transaxial pick generada (thr {thr:.2f}, {n_angles} ángulos) → pestaña ungated.")
+		except Exception as exc:
+			self._log(f"[ERROR] Grilla pick falló: {exc}")
+			QMessageBox.warning(self, "SINCRO", f"No se pudo generar la grilla pick:\n{exc}")
 
 	def _cine_crudo_threshold_value(self) -> float:
 		if hasattr(self, "cine_crudo_threshold_slider"):
