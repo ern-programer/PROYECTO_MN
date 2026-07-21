@@ -1150,9 +1150,17 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_seed_btn = QToolButton()
 				self.cine_crudo_seed_btn.setText("Elegir corazón")
 				self.cine_crudo_seed_btn.setCheckable(True)
-				self.cine_crudo_seed_btn.setToolTip("Activá y hacé CLICK en el corazón sobre la imagen para que el tracking siga solo ese órgano (evita hígado). Desactivá para automático.")
+				self.cine_crudo_seed_btn.setToolTip("Activá y hacé CLICK en el corazón sobre la imagen. Con 'Radio ROI' > 0 el tracking sigue SOLO una ventana alrededor del corazón (umbral local), así el hígado —aunque tenga más cuentas y sea más grande— queda fuera y no engancha el tracking.")
 				self.cine_crudo_seed_btn.toggled.connect(self._on_cine_crudo_seed_mode_toggled)
 				toolbar2.addWidget(self.cine_crudo_seed_btn)
+				toolbar2.addWidget(QLabel("Radio ROI"))
+				self.cine_crudo_roi_spin = QSpinBox()
+				self.cine_crudo_roi_spin.setRange(0, 40)
+				self.cine_crudo_roi_spin.setValue(12)
+				self.cine_crudo_roi_spin.setSuffix(" px")
+				self.cine_crudo_roi_spin.setMaximumWidth(72)
+				self.cine_crudo_roi_spin.setToolTip("Radio de la ventana de tracking alrededor del corazón (tras el click). 0 = desactivado (usa componente global). 10–16 px suele aislar el corazón del hígado en matriz 64².")
+				toolbar2.addWidget(self.cine_crudo_roi_spin)
 				self.cine_crudo_grid_btn = QToolButton()
 				self.cine_crudo_grid_btn.setText("Grilla pick")
 				self.cine_crudo_grid_btn.setToolTip("Grilla de cortes transaxiales con máscara para discriminar corazón de hígado antes del pick (como Odyssey).")
@@ -6102,6 +6110,20 @@ class MainWindow(QMainWindow):
 						mask = _select_organ_component(mask, seed=self.cine_crudo_seed, auto=(self.cine_crudo_seed is None))
 					rgb = rgb.copy()
 					rgb[mask] = (0.45 * rgb[mask] + 0.55 * np.array([255, 255, 255])).astype(np.uint8)
+				# Caja ROI de tracking: si hay corazón elegido y radio > 0, dibujar el recuadro
+				# para que el usuario vea la ventana que sigue al corazón (excluye el hígado).
+				roi_r = int(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 0
+				if self.cine_crudo_seed is not None and roi_r > 0:
+					rgb = rgb.copy()
+					sy, sx = int(round(self.cine_crudo_seed[0])), int(round(self.cine_crudo_seed[1]))
+					H0, W0 = rgb.shape[0], rgb.shape[1]
+					y0, y1 = max(0, sy - roi_r), min(H0 - 1, sy + roi_r)
+					x0, x1 = max(0, sx - roi_r), min(W0 - 1, sx + roi_r)
+					box = np.array([0, 255, 0], dtype=np.uint8)
+					rgb[y0, x0:x1 + 1] = box
+					rgb[y1, x0:x1 + 1] = box
+					rgb[y0:y1 + 1, x0] = box
+					rgb[y0:y1 + 1, x1] = box
 				if corrected_frames_arr is not None:
 					img_corr = np.clip(corrected_frames_arr[a] / p99, 0, 1)
 					rgb_corr = (np.asarray(cmap(img_corr)[..., :3]) * 255).astype(np.uint8)
@@ -6133,6 +6155,7 @@ class MainWindow(QMainWindow):
 			threshold = self._cine_crudo_threshold_value()
 			seed = self.cine_crudo_seed  # el pick del usuario aplica a TODOS los métodos (COM, Stasis, Hopkins, GammaSync)
 			angles = getattr(self.study, "angles_deg", None)
+			roi_radius = float(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 0.0
 			ref_idx = int(self.cine_crudo_ref_index if self.cine_crudo_ref_index is not None else getattr(self, "_cine_crudo_current_frame", 0))
 			if method == "auto":
 				# Auto: correr varios métodos y elegir por JITTER real (saltos frame-a-frame),
@@ -6163,6 +6186,7 @@ class MainWindow(QMainWindow):
 						smooth_sigma=1.0,
 						ref_index=ref_idx,
 						angles_deg=angles,
+						roi_radius=roi_radius,
 					)
 					corr_m = np.asarray(res_m.get("corrected"), dtype=np.float64)
 					# Score = jitter residual (lo que realmente se ve como saltos en el cine).
@@ -6186,6 +6210,7 @@ class MainWindow(QMainWindow):
 					smooth_sigma=1.0,
 					ref_index=ref_idx,
 					angles_deg=angles,
+					roi_radius=roi_radius,
 				)
 			self.cine_crudo_motion_result = result
 			self.cine_crudo_corrected_projections = np.asarray(result.get("corrected"), dtype=np.float64)

@@ -261,31 +261,22 @@ def _tracking_from_com(
     axis: str,
     threshold_frac: float,
     seed: tuple[float, float] | None = None,
+    roi_radius: float = 0.0,
 ) -> dict:
     """Tracking simple por centro de masa sobre máscara por threshold.
 
     Si hay seed (pick del usuario en el corazón), usa SOLO la componente de ese
-    órgano (evita hígado); si no, usa la máscara completa por threshold.
+    órgano (evita hígado); si además hay roi_radius>0, usa tracking por ventana
+    local (ignora el hígado aunque tenga más cuentas).
     """
-    from scipy.ndimage import center_of_mass as _com
-
     proj = np.asarray(projections, dtype=np.float64)
     summed = proj.sum(axis=0)
-    n_angles = summed.shape[0]
-    com_series = np.full((n_angles,), np.nan, dtype=np.float64)
     threshold_frac = float(threshold_frac)
     threshold_frac = min(max(threshold_frac, 0.01), 0.90)
 
-    for a in range(n_angles):
-        img = summed[a]
-        if img.max() <= 0:
-            continue
-        # Máscara del órgano (selección de componente disponible en todos los métodos).
-        mask = _organ_mask(img, threshold_frac, seed=seed, use_organ_selection=True)
-        if mask.sum() < 4:
-            continue
-        cy, cx = _com(mask)
-        com_series[a] = cy if axis == "y" else cx
+    com_series = _heart_center_series(
+        summed, axis=axis, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius,
+    )
 
     return {"axis": axis, "com_series": com_series, "method": "com", "threshold_frac": threshold_frac, "seed": seed}
 
@@ -444,11 +435,90 @@ def _center_series_with_component_tracking(
     return centers
 
 
+def _heart_center_series(
+    summed: np.ndarray,
+    *,
+    axis: str,
+    threshold_frac: float,
+    seed: tuple[float, float] | None = None,
+    roi_radius: float = 0.0,
+    continuity: bool = True,
+    local_thresh_frac: float = 0.5,
+) -> np.ndarray:
+    """
+    Serie de centros del CORAZÓN por frame, robusta al hígado.
+
+    PROBLEMA: en SPECT cardíaco el hígado suele tener MÁS cuentas y ser MÁS grande
+    que el corazón, así que el umbral global + "componente central/grande" se
+    enganchan con el hígado, y hasta el click falla si corazón e hígado quedan
+    pegados en un mismo blob.
+
+    SOLUCIÓN (seed + roi_radius > 0): TRACKING POR VENTANA (ROI). Se computa el
+    centroide SOLO dentro de una caja de radio `roi_radius` alrededor del corazón,
+    con umbral LOCAL (relativo al máximo DENTRO de la ventana). Así el hígado —que
+    está fuera de la caja— no influye aunque tenga más cuentas. La caja sigue al
+    corazón por continuidad frame a frame (si se mueve, la ventana lo acompaña).
+
+    Sin seed o roi_radius=0: cae al enfoque de máscara por componente (_organ_mask).
+    """
+    from scipy.ndimage import center_of_mass as _com
+
+    summed = np.asarray(summed, dtype=np.float64)
+    n = int(summed.shape[0])
+    h, w = int(summed.shape[1]), int(summed.shape[2])
+    centers = np.full((n,), np.nan, dtype=np.float64)
+
+    use_window = (
+        seed is not None
+        and np.isfinite(seed[0]) and np.isfinite(seed[1])
+        and float(roi_radius) > 0
+    )
+
+    if use_window:
+        cy, cx = float(seed[0]), float(seed[1])
+        r = max(2, int(round(float(roi_radius))))
+        ltf = min(max(float(local_thresh_frac), 0.05), 0.95)
+        for a in range(n):
+            img = summed[a]
+            if img.max() <= 0:
+                continue
+            iy, ix = int(round(cy)), int(round(cx))
+            y0, y1 = max(0, iy - r), min(h, iy + r + 1)
+            x0, x1 = max(0, ix - r), min(w, ix + r + 1)
+            sub = img[y0:y1, x0:x1]
+            if sub.size == 0 or sub.max() <= 0:
+                continue
+            # Umbral LOCAL: dentro de la ventana el corazón es el pico dominante.
+            m = sub > (ltf * sub.max())
+            if not m.any():
+                continue
+            gy, gx = _com(sub * m)  # centroide ponderado por cuentas del corazón
+            gy += y0
+            gx += x0
+            centers[a] = gy if axis == "y" else gx
+            if continuity:
+                cy, cx = gy, gx  # la ventana persigue al corazón
+        return centers
+
+    # Fallback: máscara por componente global (auto o por seed sin ventana).
+    for a in range(n):
+        img = summed[a]
+        if img.max() <= 0:
+            continue
+        organ = _organ_mask(img, threshold_frac, seed=seed, use_organ_selection=True)
+        if organ.sum() < 4:
+            continue
+        cy, cx = _com(organ)
+        centers[a] = cy if axis == "y" else cx
+    return centers
+
+
 def _tracking_gammasync(
     projections: np.ndarray,
     axis: str,
     threshold_frac: float,
     seed: tuple[float, float] | None = None,
+    roi_radius: float = 0.0,
 ) -> dict:
     """
     Tracking GammaSync: threshold + selección de componente del órgano (corazón).
@@ -458,22 +528,27 @@ def _tracking_gammasync(
       2. Selección de la componente del órgano:
          - si el usuario dio seed (click en el corazón), sigue esa componente;
          - si es automático, elige la componente central/grande (corazón), evitando hígado.
+         - si hay roi_radius>0, usa ventana local alrededor del seed (ignora hígado).
       3. El tracking usa SOLO esa componente → el hígado no influye en la corrección.
     """
     proj = np.asarray(projections, dtype=np.float64)
     summed = proj.sum(axis=0)
-    n_angles = int(summed.shape[0])
     threshold_frac = float(threshold_frac)
     threshold_frac = min(max(threshold_frac, 0.01), 0.90)
 
-    com_series = _center_series_with_component_tracking(
-        summed,
-        axis=axis,
-        threshold_frac=threshold_frac,
-        seed=seed,
-        continuity=True,
-        bbox_mode=False,
-    )
+    if seed is not None and float(roi_radius) > 0:
+        com_series = _heart_center_series(
+            summed, axis=axis, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius,
+        )
+    else:
+        com_series = _center_series_with_component_tracking(
+            summed,
+            axis=axis,
+            threshold_frac=threshold_frac,
+            seed=seed,
+            continuity=True,
+            bbox_mode=False,
+        )
 
     return {
         "axis": axis,
@@ -607,6 +682,7 @@ def _tracking_stasis(
     axis: str,
     threshold_frac: float,
     seed: tuple[float, float] | None = None,
+    roi_radius: float = 0.0,
 ) -> dict:
     """
     Tracking estilo Stasis (método Xeleris/Myovation).
@@ -628,17 +704,10 @@ def _tracking_stasis(
     threshold_frac = float(threshold_frac)
     threshold_frac = min(max(threshold_frac, 0.01), 0.90)
 
-    # Centro del órgano por frame (con selección de componente si hay seed o auto).
-    centers = np.full((n_angles,), np.nan, dtype=np.float64)
-    for a in range(n_angles):
-        img = summed[a]
-        if img.max() <= 0:
-            continue
-        organ = _organ_mask(img, threshold_frac, seed=seed, use_organ_selection=True)
-        if organ.sum() < 4:
-            continue
-        cy, cx = _com(organ)
-        centers[a] = cy if axis == "y" else cx
+    # Centro del órgano por frame (ventana ROI si hay seed+radio, si no componente).
+    centers = _heart_center_series(
+        summed, axis=axis, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius,
+    )
 
     valid = np.isfinite(centers)
     if valid.sum() < 3:
@@ -674,6 +743,7 @@ def _tracking_hopkins(
     axis: str,
     threshold_frac: float,
     seed: tuple[float, float] | None = None,
+    roi_radius: float = 0.0,
 ) -> dict:
     """
     Tracking estilo Hopkins (variante de Stasis con estabilidad temporal).
@@ -690,16 +760,9 @@ def _tracking_hopkins(
     threshold_frac = float(threshold_frac)
     threshold_frac = min(max(threshold_frac, 0.01), 0.90)
 
-    centers = np.full((n_angles,), np.nan, dtype=np.float64)
-    for a in range(n_angles):
-        img = summed[a]
-        if img.max() <= 0:
-            continue
-        organ = _organ_mask(img, threshold_frac, seed=seed, use_organ_selection=True)
-        if organ.sum() < 4:
-            continue
-        cy, cx = _com(organ)
-        centers[a] = cy if axis == "y" else cx
+    centers = _heart_center_series(
+        summed, axis=axis, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius,
+    )
 
     valid = np.isfinite(centers)
     if valid.sum() < 3:
@@ -738,6 +801,7 @@ def _tracking_sinusoid(
     seed: tuple[float, float] | None = None,
     angles_deg: np.ndarray | None = None,
     detrend_sigma: float = 3.0,
+    roi_radius: float = 0.0,
 ) -> dict:
     """
     Tracking por detrend (referencia = tendencia suave, corrige SOLO los saltos).
@@ -766,16 +830,9 @@ def _tracking_sinusoid(
     n_angles = summed.shape[0]
     threshold_frac = min(max(float(threshold_frac), 0.01), 0.90)
 
-    centers = np.full((n_angles,), np.nan, dtype=np.float64)
-    for a in range(n_angles):
-        img = summed[a]
-        if img.max() <= 0:
-            continue
-        organ = _organ_mask(img, threshold_frac, seed=seed, use_organ_selection=True)
-        if organ.sum() < 4:
-            continue
-        cy, cx = _com(organ)
-        centers[a] = cy if axis == "y" else cx
+    centers = _heart_center_series(
+        summed, axis=axis, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius,
+    )
 
     valid = np.isfinite(centers)
     if valid.sum() < 5:
@@ -853,6 +910,7 @@ def motion_correct_projections(
     smooth_sigma: float = 1.0,
     ref_index: int | None = None,
     angles_deg: np.ndarray | None = None,
+    roi_radius: float = 0.0,
 ) -> dict:
     """
     Motion correction de proyecciones SPECT gated.
@@ -881,23 +939,23 @@ def motion_correct_projections(
 
     for ax in axes_to_correct:
         if method == "sinusoid":
-            trk = _tracking_sinusoid(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, angles_deg=angles_deg)
+            trk = _tracking_sinusoid(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, angles_deg=angles_deg, roi_radius=roi_radius)
             sin_shifts = np.asarray(trk.pop("_sinusoid_shifts", np.zeros((proj.shape[1],))), dtype=np.float64)
             trk = _finalize_tracking(trk)
             trk["suggested_shifts_px"] = sin_shifts
             trk["max_shift_px"] = round(float(np.abs(sin_shifts).max()) if sin_shifts.size else 0.0, 2)
             trk["motion_suspected"] = bool(trk["max_shift_px"] > 1.5 or trk.get("n_outliers", 0) >= 2)
         elif method == "gammasync":
-            trk = _finalize_tracking(_tracking_gammasync(proj, axis=ax, threshold_frac=threshold_frac, seed=seed))
+            trk = _finalize_tracking(_tracking_gammasync(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius))
         elif method == "stasis":
-            trk = _tracking_stasis(proj, axis=ax, threshold_frac=threshold_frac, seed=seed)
+            trk = _tracking_stasis(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius)
             stasis_shifts = np.asarray(trk.pop("_stasis_shifts", np.zeros((proj.shape[1],))), dtype=np.float64)
             trk = _finalize_tracking(trk)
             trk["suggested_shifts_px"] = stasis_shifts
             trk["max_shift_px"] = round(float(np.abs(stasis_shifts).max()) if stasis_shifts.size else 0.0, 2)
             trk["motion_suspected"] = bool(trk["max_shift_px"] > 1.5 or trk.get("n_outliers", 0) >= 2)
         elif method == "hopkins":
-            trk = _tracking_hopkins(proj, axis=ax, threshold_frac=threshold_frac, seed=seed)
+            trk = _tracking_hopkins(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius)
             hopkins_shifts = np.asarray(trk.pop("_hopkins_shifts", np.zeros((proj.shape[1],))), dtype=np.float64)
             trk = _finalize_tracking(trk)
             trk["suggested_shifts_px"] = hopkins_shifts
@@ -914,7 +972,7 @@ def motion_correct_projections(
         elif method == "threshold":
             trk = _finalize_tracking(_tracking_from_threshold(proj, axis=ax, threshold_frac=threshold_frac, seed=seed))
         else:
-            trk = _finalize_tracking(_tracking_from_com(proj, axis=ax, threshold_frac=threshold_frac, seed=seed))
+            trk = _finalize_tracking(_tracking_from_com(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius))
         tracking[ax] = trk
         if ax == "y":
             shifts_y = np.asarray(trk["suggested_shifts_px"], dtype=np.float64)
