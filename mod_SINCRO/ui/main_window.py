@@ -144,6 +144,8 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_frames: list[QPixmap] = []
 		self.cine_crudo_index = 0
 		self.cine_crudo_playing = False
+		self.cine_crudo_direction = 1  # para modo rebote
+		self.cine_crudo_matrix_txt = ""
 		self.cine_crudo_timer = QTimer(self)
 		self.cine_crudo_timer.timeout.connect(self._advance_cine_crudo_frame)
 		self.cine_crudo_play_btn: QToolButton | None = None
@@ -490,6 +492,13 @@ class MainWindow(QMainWindow):
 		self.report_cmap_amp = _mk_combo("turbo")
 		self.report_cmap_bullseye = _mk_combo("turbo")
 		self.report_cmap_polar_perf = _mk_combo("perf_clinical")
+		self.report_cmap_ungated = _mk_combo("hot")
+		self.report_cmap_cine_crudo = _mk_combo("hot")
+		self.report_cmap_histograma = _mk_combo("hot")
+		self.report_cmap_polar_combo = _mk_combo("french")
+		self.report_cmap_delta_combo = _mk_combo("french")
+		self.report_cmap_stress_rest = _mk_combo("hot")
+		self.report_cmap_polar_cine = _mk_combo("hot")
 
 		def _add_cmap_row(row: int, label_text: str, combo: QComboBox, tip_text: str):
 			label = QLabel(label_text)
@@ -498,15 +507,22 @@ class MainWindow(QMainWindow):
 			report_cmap_layout.addWidget(label, row, 0)
 			report_cmap_layout.addWidget(combo, row, 1)
 
-		_add_cmap_row(1, "[1] slices_fase", self.report_cmap_slices, "Orden clínico 1/9. Afecta la imagen de la pestaña slices_fase (slice/gate, máscara y superposición).")
-		_add_cmap_row(2, "[2] comparacion_ejes (SA/HLA/VLA)", self.report_cmap_axes, "Orden clínico 2/9. Afecta las imágenes de ejes ortogonales SA/HLA/VLA para informe.")
-		_add_cmap_row(3, "[3] comparacion_ejes (grilla)", self.report_cmap_compare, "Orden clínico 3/9. Afecta la grilla multicorte de comparación entre estudios.")
-		_add_cmap_row(4, "[4] panel_funcional_gated (ED/ES)", self.report_cmap_panel_axes, "Orden clínico 4/9. Afecta las imágenes ED/ES del panel funcional gated.")
-		_add_cmap_row(5, "[5] fase (overlay/polar)", self.report_cmap_phase, "Orden clínico 5/9. Afecta mapas de fase (overlay y polar de fase).")
-		_add_cmap_row(6, "[6] polar_clinico", self.report_cmap_polar_clinico, "Orden clínico 6/9. Afecta el panel polar clínico (histograma + bullseye de fase).")
-		_add_cmap_row(7, "[7] panel_funcional_gated (amplitud)", self.report_cmap_amp, "Orden clínico 7/9. Afecta el mapa de amplitud en el panel funcional gated.")
-		_add_cmap_row(8, "[8] bullseye_directo", self.report_cmap_bullseye, "Orden clínico 8/9. Afecta el bullseye directo de perfusión segmentaria AHA.")
-		_add_cmap_row(9, "[9] polar_perfusion_directa", self.report_cmap_polar_perf, "Orden clínico 9/9. Afecta el mapa polar continuo de perfusión (apex-centro, base-borde).")
+		_add_cmap_row(1, "[1] slices_fase", self.report_cmap_slices, "Afecta la imagen de la pestaña slices_fase (slice/gate, máscara y superposición).")
+		_add_cmap_row(2, "[2] comparacion_ejes (SA/HLA/VLA)", self.report_cmap_axes, "Afecta las imágenes de ejes ortogonales SA/HLA/VLA para informe.")
+		_add_cmap_row(3, "[3] comparacion_ejes (grilla)", self.report_cmap_compare, "Afecta la grilla multicorte de comparación entre estudios.")
+		_add_cmap_row(4, "[4] panel_funcional_gated (ED/ES)", self.report_cmap_panel_axes, "Afecta las imágenes ED/ES del panel funcional gated.")
+		_add_cmap_row(5, "[5] fase (overlay/polar)", self.report_cmap_phase, "Afecta mapas de fase (overlay y polar de fase).")
+		_add_cmap_row(6, "[6] polar_clinico", self.report_cmap_polar_clinico, "Afecta el panel polar clínico (histograma + bullseye de fase).")
+		_add_cmap_row(7, "[7] panel_funcional_gated (amplitud)", self.report_cmap_amp, "Afecta el mapa de amplitud en el panel funcional gated.")
+		_add_cmap_row(8, "[8] bullseye_directo", self.report_cmap_bullseye, "Afecta el bullseye directo de perfusión segmentaria AHA.")
+		_add_cmap_row(9, "[9] polar_perfusion_directa", self.report_cmap_polar_perf, "Afecta el mapa polar continuo de perfusión (apex-centro, base-borde).")
+		_add_cmap_row(10, "[10] ungated (desgatillado)", self.report_cmap_ungated, "Afecta la grilla de cortes desgatillados (UngRaw / perfusión total).")
+		_add_cmap_row(11, "[11] cine_crudo (proyecciones)", self.report_cmap_cine_crudo, "Afecta el cine de proyecciones crudas SPECT (gated y UngGat).")
+		_add_cmap_row(12, "[12] histograma", self.report_cmap_histograma, "Afecta el histograma de fase (barras y fondo).")
+		_add_cmap_row(13, "[13] polar_combo", self.report_cmap_polar_combo, "Afecta el panel combinado polar AHA + clínico.")
+		_add_cmap_row(14, "[14] delta_combo", self.report_cmap_delta_combo, "Afecta los mapas delta stress/rest (signed y abs).")
+		_add_cmap_row(15, "[15] stress_vs_rest", self.report_cmap_stress_rest, "Afecta el panel resumen de métricas stress vs rest.")
+		_add_cmap_row(16, "[16] polar_cine_montaje", self.report_cmap_polar_cine, "Afecta el cine polar gatillado (montaje por gate).")
 
 		self._sidebar_layout.addWidget(report_cmap_box)
 
@@ -1063,6 +1079,12 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_source_combo.setCurrentText("UngGat")
 				self.cine_crudo_source_combo.currentTextChanged.connect(self._on_cine_crudo_source_changed)
 				toolbar.addWidget(self.cine_crudo_source_combo)
+				toolbar.addWidget(QLabel("Modo"))
+				self.cine_crudo_mode_combo = QComboBox()
+				self.cine_crudo_mode_combo.addItems(["Continuo", "Rebote"])
+				self.cine_crudo_mode_combo.setCurrentText("Continuo")
+				self.cine_crudo_mode_combo.setToolTip("Continuo: loop 1→N→1. Rebote: 1→N→1→N (ping-pong).")
+				toolbar.addWidget(self.cine_crudo_mode_combo)
 				self.cine_crudo_frame_label = QLabel("--/--")
 				self.cine_crudo_frame_label.setStyleSheet("color:#444;")
 				toolbar.addWidget(self.cine_crudo_frame_label)
@@ -1761,10 +1783,18 @@ class MainWindow(QMainWindow):
 
 		fig, axes = plt.subplots(2, 3, figsize=(15, 8))
 		fig.patch.set_facecolor("#0b1220")
-		axes[0, 0].imshow(sh.T, cmap="hot", aspect="auto")
-		axes[0, 0].set_title("Sinograma H (perfil vertical vs angulo)", color="white")
+		# Sinograma VERTICAL: ángulo en eje Y (vertical), posición axial en X.
+		# sh es (n_angles, H): filas=ángulos → se ve vertical (alto), como Odyssey/Xeleris.
+		axes[0, 0].imshow(sh, cmap="hot", aspect="auto")
+		axes[0, 0].set_title("Sinograma VERTICAL (perfil axial)", color="white")
+		axes[0, 0].set_xlabel("posición axial (px)", color="white")
+		axes[0, 0].set_ylabel("ángulo de proyección", color="white")
+		# Sinograma HORIZONTAL: ángulo en eje X, posición horizontal en Y.
+		# sv es (n_angles, W) → transponer para ángulo en X.
 		axes[1, 0].imshow(sv.T, cmap="hot", aspect="auto")
-		axes[1, 0].set_title("Sinograma V (perfil horizontal vs angulo)", color="white")
+		axes[1, 0].set_title("Sinograma HORIZONTAL (perfil transversal)", color="white")
+		axes[1, 0].set_xlabel("ángulo de proyección", color="white")
+		axes[1, 0].set_ylabel("posición horizontal (px)", color="white")
 
 		summed = projections.sum(axis=0)
 		pos = [(0, 1, 0), (0, 2, n_angles // 3), (1, 1, 2 * n_angles // 3)]
@@ -5813,12 +5843,15 @@ class MainWindow(QMainWindow):
 		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
 			return
 		projections = np.asarray(self.study.cube, dtype=np.float64)  # (gates, angles, H, W)
+		n_gates, n_angles, H, W = projections.shape
 		if source == "UngGat":
 			from core.raw_projections import ungate_projections
 			frames_arr = ungate_projections(projections)  # (angles, H, W)
+			self.cine_crudo_matrix_txt = f"UngGat {n_angles}áng × {H}×{W}px (suma {n_gates} gates)"
 		else:  # Gated — gate medio
-			gate_mid = projections.shape[0] // 2
+			gate_mid = n_gates // 2
 			frames_arr = projections[gate_mid]  # (angles, H, W)
+			self.cine_crudo_matrix_txt = f"Gated gate {gate_mid + 1}/{n_gates} · {n_angles}áng × {H}×{W}px"
 
 		# Escala global (percentil 99 de todo el set) para que el movimiento sea comparable
 		p99 = float(np.percentile(frames_arr, 99.0)) or 1.0
@@ -5845,13 +5878,16 @@ class MainWindow(QMainWindow):
 			if "cine_crudo" in self.preview_labels:
 				self.preview_labels["cine_crudo"].setText("Cargá un estudio crudo (proyecciones gated)")
 			return
-		self.cine_crudo_index = int(idx) % len(self.cine_crudo_frames)
+		n = len(self.cine_crudo_frames)
+		self.cine_crudo_index = int(idx) % n
 		pix = self.cine_crudo_frames[self.cine_crudo_index]
 		self.preview_pixmaps["cine_crudo"] = pix
 		self.preview_base_sizes["cine_crudo"] = pix.size()
 		self._apply_preview_zoom("cine_crudo")
 		if hasattr(self, "cine_crudo_frame_label"):
-			self.cine_crudo_frame_label.setText(f"{self.cine_crudo_index + 1}/{len(self.cine_crudo_frames)}")
+			self.cine_crudo_frame_label.setText(f"{self.cine_crudo_index + 1}/{n}")
+		if hasattr(self, "cine_crudo_frame_label") and self.cine_crudo_matrix_txt:
+			self.cine_crudo_frame_label.setText(f"{self.cine_crudo_index + 1}/{n} · {self.cine_crudo_matrix_txt}")
 
 	def _advance_cine_crudo_frame(self):
 		if not self.cine_crudo_frames:
@@ -5859,7 +5895,19 @@ class MainWindow(QMainWindow):
 			self.cine_crudo_playing = False
 			self._update_cine_crudo_toggle_text()
 			return
-		self._set_cine_crudo_frame((self.cine_crudo_index + 1) % len(self.cine_crudo_frames))
+		n = len(self.cine_crudo_frames)
+		modo = str(self.cine_crudo_mode_combo.currentText()) if hasattr(self, "cine_crudo_mode_combo") else "Continuo"
+		if modo == "Rebote":
+			next_idx = self.cine_crudo_index + self.cine_crudo_direction
+			if next_idx >= n - 1:
+				next_idx = n - 1
+				self.cine_crudo_direction = -1
+			elif next_idx <= 0:
+				next_idx = 0
+				self.cine_crudo_direction = 1
+			self._set_cine_crudo_frame(next_idx)
+		else:  # Continuo (loop)
+			self._set_cine_crudo_frame((self.cine_crudo_index + 1) % n)
 
 	def _step_cine_crudo(self, delta: int):
 		if not self.cine_crudo_frames:
