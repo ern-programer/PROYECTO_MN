@@ -5990,7 +5990,8 @@ class MainWindow(QMainWindow):
 				frames.append(self._rgb_frame_to_qpixmap_raw(img))
 		self.cine_crudo_frames = frames
 		self.cine_crudo_timer.setInterval(max(40, int(self.cine_crudo_speed_spin.value() if hasattr(self, "cine_crudo_speed_spin") else 120)))
-		self._set_cine_crudo_frame(0)
+		# Preservar el frame actual (el que el usuario eligió con las flechas) en vez de resetear a 0.
+		self._set_cine_crudo_frame(int(getattr(self, "_cine_crudo_current_frame", 0)))
 
 	def _apply_cine_crudo_motion_correction(self):
 		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
@@ -6092,6 +6093,8 @@ class MainWindow(QMainWindow):
 			return
 		n = len(self.cine_crudo_frames)
 		self.cine_crudo_index = int(idx) % n
+		# Guardar el frame actual para que el threshold/máscara se aplique sobre él (no siempre frame 0).
+		self._cine_crudo_current_frame = self.cine_crudo_index
 		pix = self.cine_crudo_frames[self.cine_crudo_index]
 		self.preview_pixmaps["cine_crudo"] = pix
 		self.preview_base_sizes["cine_crudo"] = pix.size()
@@ -6125,6 +6128,11 @@ class MainWindow(QMainWindow):
 		if not self.cine_crudo_frames:
 			return
 		self._set_cine_crudo_frame((self.cine_crudo_index + int(delta)) % len(self.cine_crudo_frames))
+		# Si la máscara está activa, regenerar para que se aplique sobre el frame recién elegido.
+		if self.cine_crudo_mask_check is not None and self.cine_crudo_mask_check.isChecked():
+			self._load_cine_crudo_frames(
+				str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
+			)
 
 	def _toggle_cine_crudo(self):
 		if not self.cine_crudo_frames:
