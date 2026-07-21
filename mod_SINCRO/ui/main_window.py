@@ -1258,6 +1258,11 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_export_btn.setToolTip("Exporta shifts Y/X por frame (CSV) + proyecciones corregidas (.npz) para comparar y calibrar métodos.")
 				self.cine_crudo_export_btn.clicked.connect(self._export_cine_crudo_correction)
 				toolbar3.addWidget(self.cine_crudo_export_btn)
+				self.cine_crudo_import_btn = QToolButton()
+				self.cine_crudo_import_btn.setText("Importar corrección")
+				self.cine_crudo_import_btn.setToolTip("Vuelve a cargar una corrección guardada (CSV o NPZ): aplica los shifts Y/X por frame al estudio actual. Podés seguir ajustando con las flechas, Comparar o Grabar DICOM.")
+				self.cine_crudo_import_btn.clicked.connect(self._import_cine_crudo_correction)
+				toolbar3.addWidget(self.cine_crudo_import_btn)
 				self.cine_crudo_save_dcm_btn = QToolButton()
 				self.cine_crudo_save_dcm_btn.setText("Grabar DICOM")
 				self.cine_crudo_save_dcm_btn.setToolTip("Graba las proyecciones corregidas como un DICOM GATED TOMO nuevo (misma estructura y geometría que el original, re-cargable por SINCRO o Xeleris).")
@@ -6429,6 +6434,84 @@ class MainWindow(QMainWindow):
 			)
 		except Exception as exc:
 			self._log(f"[WARN] Exportar corrección falló: {exc}")
+
+	def _import_cine_crudo_correction(self):
+		"""Re-lee una corrección guardada (CSV o NPZ) y aplica los shifts Y/X al estudio actual."""
+		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
+			QMessageBox.information(self, "SINCRO", "Cargá primero el crudo gated (proyecciones) al que aplicar la corrección.")
+			return
+		try:
+			from PyQt6.QtWidgets import QFileDialog
+			from core.raw_projections import apply_shifts_to_projections
+			path, _flt = QFileDialog.getOpenFileName(
+				self, "Importar corrección", self.output_dir,
+				"Corrección (*.csv *.npz);;CSV de shifts (*.csv);;NPZ (*.npz);;Todos los archivos (*.*)",
+			)
+			if not path:
+				return
+			projections = np.asarray(self.study.cube, dtype=np.float64)
+			n_angles = int(projections.shape[1])
+			ext = os.path.splitext(path)[1].lower()
+			method = "importado"
+			ref_index = None
+			if ext == ".npz":
+				data = np.load(path, allow_pickle=True)
+				sy = np.asarray(data["shifts_y"], dtype=np.float64) if "shifts_y" in data else np.zeros((n_angles,))
+				sx = np.asarray(data["shifts_x"], dtype=np.float64) if "shifts_x" in data else np.zeros((n_angles,))
+				if "method" in data:
+					method = f"importado ({str(data['method'])})"
+				if "ref_index" in data:
+					ri = int(data["ref_index"])
+					ref_index = ri if ri >= 0 else None
+			else:
+				# CSV: frame,angle_deg,shift_y_px,shift_x_px
+				with open(path, "rb") as fh:
+					text = fh.read().decode("utf-8", errors="replace")
+				rows = [ln for ln in text.splitlines() if ln.strip()]
+				if rows and rows[0].lower().startswith("frame"):
+					rows = rows[1:]
+				sy = np.zeros((n_angles,), dtype=np.float64)
+				sx = np.zeros((n_angles,), dtype=np.float64)
+				for ln in rows:
+					parts = ln.split(",")
+					if len(parts) < 4:
+						continue
+					try:
+						fi = int(float(parts[0]))
+					except ValueError:
+						continue
+					if 0 <= fi < n_angles:
+						sy[fi] = float(parts[2])
+						sx[fi] = float(parts[3])
+			# Ajustar longitud al estudio actual.
+			if sy.size != n_angles:
+				tmp = np.zeros((n_angles,), dtype=np.float64); tmp[:min(n_angles, sy.size)] = sy[:min(n_angles, sy.size)]; sy = tmp
+			if sx.size != n_angles:
+				tmp = np.zeros((n_angles,), dtype=np.float64); tmp[:min(n_angles, sx.size)] = sx[:min(n_angles, sx.size)]; sx = tmp
+			corr = apply_shifts_to_projections(projections, sy, sx)
+			self.cine_crudo_corrected_projections = np.asarray(corr, dtype=np.float64)
+			self.cine_crudo_ref_index = ref_index
+			self.cine_crudo_motion_result = {
+				"corrected": self.cine_crudo_corrected_projections,
+				"applied_shifts_y": sy,
+				"applied_shifts_x": sx,
+				"method": method,
+				"manual_edited": True,
+				"ref_index": ref_index if ref_index is not None else -1,
+			}
+			if self.cine_crudo_compare_check is not None:
+				self.cine_crudo_compare_check.setEnabled(True)
+			source = str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
+			self._load_cine_crudo_frames(source)
+			self._refresh_cine_crudo_view()
+			self._log(f"Corrección importada de {os.path.basename(path)} ({method}): shift máx Y={np.abs(sy).max():.2f} X={np.abs(sx).max():.2f} px. Podés seguir ajustando con las flechas, Comparar o Grabar DICOM.")
+			QMessageBox.information(
+				self, "SINCRO",
+				f"Corrección importada:\n• {os.path.basename(path)}\n\nShifts aplicados al estudio actual ({n_angles} frames). Activá 'Comparar' para ver original|corregido, seguí ajustando con las flechas o grabá el DICOM corregido.",
+			)
+		except Exception as exc:
+			self._log(f"[WARN] Importar corrección falló: {exc}")
+			QMessageBox.warning(self, "SINCRO", f"No se pudo importar la corrección:\n{exc}")
 
 	def _save_cine_crudo_corrected_dicom(self):
 		"""Graba las proyecciones corregidas como un DICOM GATED TOMO nuevo (re-cargable)."""
