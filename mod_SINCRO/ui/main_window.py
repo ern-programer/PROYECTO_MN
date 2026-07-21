@@ -6208,31 +6208,33 @@ class MainWindow(QMainWindow):
 			return
 		try:
 			import matplotlib.pyplot as plt
-			from core.raw_projections import ungate_projections
+			from core.raw_projections import reconstruct_transaxial_slices
 
 			projections = np.asarray(self.study.cube, dtype=np.float64)
-			ung = ungate_projections(projections)  # (n_angles, H, W)
-			n_angles, H, W = ung.shape
+			angles_deg = getattr(self.study, "angles_deg", None)
+			# Cortes transaxiales anatómicos del bruto (FBP rápido), como los "cortes rápidos" de Odyssey.
+			vol = reconstruct_transaxial_slices(projections, angles_deg)
+			n_slices = vol.shape[0]
 			thr = self._cine_crudo_threshold_value()
 
 			# Grilla de cortes transaxiales con máscara. Limitar a 64 subplots para evitar saturar matplotlib.
 			max_plots = 64
-			if n_angles > max_plots:
-				step = int(np.ceil(n_angles / max_plots))
-				ung = ung[::step]
-				n_angles = ung.shape[0]
-				self._log(f"Grilla pick: submuestreo cada {step} ángulos ({n_angles} de {projections.shape[1]}) para performance.")
-			cols = int(np.ceil(np.sqrt(n_angles)))
-			rows = int(np.ceil(n_angles / cols))
+			if n_slices > max_plots:
+				step = int(np.ceil(n_slices / max_plots))
+				vol = vol[::step]
+				n_slices = vol.shape[0]
+				self._log(f"Grilla pick: submuestreo cada {step} cortes ({n_slices} de {vol.shape[0]}) para performance.")
+			cols = int(np.ceil(np.sqrt(n_slices)))
+			rows = int(np.ceil(n_slices / cols))
 			fig, axes = plt.subplots(rows, cols, figsize=(cols * 1.5, rows * 1.6))
 			axes = np.atleast_1d(axes).ravel()
-			p99 = float(np.percentile(ung, 99.0)) or 1.0
+			p99 = float(np.percentile(vol, 99.0)) or 1.0
 			for idx in range(rows * cols):
 				ax = axes[idx]
 				ax.axis("off")
 				ax.set_facecolor("#0b1220")
-				if idx < n_angles:
-					img = ung[idx]
+				if idx < n_slices:
+					img = vol[idx]
 					ax.imshow(img, cmap="hot", vmin=0, vmax=p99)
 					mask = img > (thr * img.max()) if img.max() > 0 else np.zeros_like(img, dtype=bool)
 					# Contorno de la máscara solo si tiene píxeles (evita crash con máscara vacía).
@@ -6247,7 +6249,7 @@ class MainWindow(QMainWindow):
 				study_obj=self.study,
 			)
 			fig.suptitle(
-				f"Grilla transaxial pick — {ctx_label} | thr {thr:.2f} | "
+				f"Grilla transaxial pick (FBP) — {ctx_label} | thr {thr:.2f} | "
 				"Discriminá corazón de hígado y hacé pick con 'Elegir corazón' en cine_crudo",
 				color="white", fontsize=10.5, fontweight="bold",
 			)

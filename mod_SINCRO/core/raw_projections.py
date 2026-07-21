@@ -140,6 +140,58 @@ def ungate_projections(projections: np.ndarray) -> np.ndarray:
     return proj.sum(axis=0)
 
 
+def reconstruct_transaxial_slices(
+    projections: np.ndarray,
+    angles_deg: np.ndarray | None = None,
+    filter_name: str = "ramp",
+) -> np.ndarray:
+    """
+    Reconstrucción transaxial rápida (FBP) del bruto para generar cortes
+    transaxiales anatómicos (como los "cortes rápidos" de Odyssey para motion
+    correction / pick de órgano).
+
+    Las proyecciones gated son (n_gates, n_angles, H, W). Se suman los gates
+    (UngGat) y se reconstruye cada slice transaxial (cada fila H) por FBP con
+    iradon. El resultado es un volumen (H_slices, W, W) donde cada slice es una
+    vista transaxial anatómica (corazón separable del hígado).
+
+    Parameters
+    ----------
+    projections : ndarray (n_gates, n_angles, H, W)
+        Proyecciones crudas gated.
+    angles_deg : ndarray (n_angles,), optional
+        Ángulos en grados de cada proyección. Si es None, distribución uniforme 0-180.
+    filter_name : str
+        Filtro FBP de iradon ('ramp', 'shepp-logan', 'cosine', 'hamming', 'hann').
+
+    Returns
+    -------
+    ndarray (H_slices, W, W)
+        Volumen transaxial reconstruido (cortes anatómicos).
+    """
+    from skimage.transform import iradon
+
+    proj = np.asarray(projections, dtype=np.float64)
+    if proj.ndim != 4:
+        raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibió {proj.shape}")
+    ung = proj.sum(axis=0)  # (n_angles, H, W) — UngGat
+    n_angles, H, W = ung.shape
+
+    if angles_deg is None:
+        # SPECT típico: 180° o 360°. iradon espera los ángulos de las proyecciones.
+        angles_deg = np.linspace(0.0, 360.0, n_angles, endpoint=False)
+    angles_deg = np.asarray(angles_deg, dtype=np.float64)
+
+    # Reconstruir cada slice transaxial (fila H) con FBP.
+    # iradon espera sinograma como (detector, ángulos) → transposeamos (H, n_angles).
+    volume = np.zeros((H, W, W), dtype=np.float64)
+    for s in range(H):
+        sino = ung[:, s, :].T  # (W, n_angles) — sinograma del slice s
+        rec = iradon(sino, theta=angles_deg, filter_name=filter_name, output_size=W)
+        volume[s] = rec
+    return volume
+
+
 def apply_shifts_to_projections(projections: np.ndarray, shifts_y: np.ndarray, shifts_x: np.ndarray | None = None) -> np.ndarray:
     """
     Aplica shifts de motion correction a las proyecciones (Y-only por defecto, como Odyssey).
