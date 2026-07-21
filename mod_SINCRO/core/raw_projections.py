@@ -723,6 +723,8 @@ def motion_correct_projections(
     seed: tuple[float, float] | None = None,
     manual_shifts_y: np.ndarray | None = None,
     manual_shifts_x: np.ndarray | None = None,
+    max_abs_shift_px: float = 4.0,
+    smooth_sigma: float = 1.0,
 ) -> dict:
     """
     Motion correction de proyecciones SPECT gated.
@@ -788,6 +790,27 @@ def motion_correct_projections(
     if manual_shifts_x is not None:
         shifts_x = np.asarray(manual_shifts_x, dtype=np.float64)
 
+    # Regularización anti-deriva: suaviza jitter frame a frame y limita amplitud.
+    # Evita corrimientos desmesurados cuando el tracking se engancha con hígado/ruido.
+    def _regularize_shifts(arr: np.ndarray, *, do_smooth: bool = True) -> np.ndarray:
+        out = np.asarray(arr, dtype=np.float64).copy()
+        if out.size == 0:
+            return out
+        if do_smooth and smooth_sigma and float(smooth_sigma) > 0 and out.size >= 5:
+            try:
+                from scipy.ndimage import gaussian_filter1d
+                out = gaussian_filter1d(out, sigma=float(smooth_sigma), mode="nearest")
+            except Exception:
+                pass
+        if max_abs_shift_px and float(max_abs_shift_px) > 0:
+            lim = float(max_abs_shift_px)
+            out = np.clip(out, -lim, lim)
+        return out
+
+    # Si el usuario cargó shifts manuales, no suavizar para respetar su edición.
+    shifts_y = _regularize_shifts(shifts_y, do_smooth=(manual_shifts_y is None))
+    shifts_x = _regularize_shifts(shifts_x, do_smooth=(manual_shifts_x is None))
+
     corrected = apply_shifts_to_projections(proj, shifts_y, shifts_x)
     max_shift = float(max(
         float(np.abs(shifts_y).max()) if shifts_y.size else 0.0,
@@ -806,5 +829,7 @@ def motion_correct_projections(
         "axis_corrected": axis,
         "method": method,
         "threshold_frac": float(threshold_frac),
+        "max_abs_shift_px": float(max_abs_shift_px),
+        "smooth_sigma": float(smooth_sigma),
         "manual_override": bool(manual_shifts_y is not None or manual_shifts_x is not None),
     }

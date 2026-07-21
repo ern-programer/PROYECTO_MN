@@ -1172,6 +1172,29 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_compare_check.setEnabled(False)
 				self.cine_crudo_compare_check.toggled.connect(self._refresh_cine_crudo_view)
 				toolbar2.addWidget(self.cine_crudo_compare_check)
+				toolbar2.addWidget(QLabel("OffY"))
+				self.cine_crudo_offset_y_spin = QDoubleSpinBox()
+				self.cine_crudo_offset_y_spin.setRange(-10.0, 10.0)
+				self.cine_crudo_offset_y_spin.setDecimals(2)
+				self.cine_crudo_offset_y_spin.setSingleStep(0.25)
+				self.cine_crudo_offset_y_spin.setValue(0.0)
+				self.cine_crudo_offset_y_spin.setMaximumWidth(70)
+				self.cine_crudo_offset_y_spin.setToolTip("Offset manual global Y (px) para ajuste visual de la corrección.")
+				toolbar2.addWidget(self.cine_crudo_offset_y_spin)
+				toolbar2.addWidget(QLabel("OffX"))
+				self.cine_crudo_offset_x_spin = QDoubleSpinBox()
+				self.cine_crudo_offset_x_spin.setRange(-10.0, 10.0)
+				self.cine_crudo_offset_x_spin.setDecimals(2)
+				self.cine_crudo_offset_x_spin.setSingleStep(0.25)
+				self.cine_crudo_offset_x_spin.setValue(0.0)
+				self.cine_crudo_offset_x_spin.setMaximumWidth(70)
+				self.cine_crudo_offset_x_spin.setToolTip("Offset manual global X (px) para ajuste visual de la corrección.")
+				toolbar2.addWidget(self.cine_crudo_offset_x_spin)
+				self.cine_crudo_apply_offset_btn = QToolButton()
+				self.cine_crudo_apply_offset_btn.setText("Aplicar offset")
+				self.cine_crudo_apply_offset_btn.setToolTip("Aplica offset global X/Y a todos los frames corregidos.")
+				self.cine_crudo_apply_offset_btn.clicked.connect(self._apply_cine_crudo_manual_offset)
+				toolbar2.addWidget(self.cine_crudo_apply_offset_btn)
 				toolbar2.addStretch(1)
 			toolbar.addStretch(1)
 			tab_layout.addLayout(toolbar)
@@ -6051,7 +6074,15 @@ class MainWindow(QMainWindow):
 			axis = str(self.cine_crudo_axis_combo.currentText()).lower() if hasattr(self, "cine_crudo_axis_combo") else "y"
 			threshold = self._cine_crudo_threshold_value()
 			seed = self.cine_crudo_seed  # el pick del usuario aplica a TODOS los métodos (COM, Stasis, Hopkins, GammaSync)
-			result = motion_correct_projections(projections, axis=axis, method=method, threshold_frac=threshold, seed=seed)
+			result = motion_correct_projections(
+				projections,
+				axis=axis,
+				method=method,
+				threshold_frac=threshold,
+				seed=seed,
+				max_abs_shift_px=4.0,
+				smooth_sigma=1.0,
+			)
 			self.cine_crudo_motion_result = result
 			self.cine_crudo_corrected_projections = np.asarray(result.get("corrected"), dtype=np.float64)
 			if self.cine_crudo_compare_check is not None:
@@ -6060,6 +6091,17 @@ class MainWindow(QMainWindow):
 			from core.raw_projections import center_of_mass_tracking
 			ty_before = center_of_mass_tracking(projections, axis="y")
 			ty_after = center_of_mass_tracking(self.cine_crudo_corrected_projections, axis="y")
+			# Guardrail: si la corrección empeora claramente, volver al original para no dañar el estudio.
+			if float(ty_after.get("max_shift_px", 0.0)) > 1.15 * float(ty_before.get("max_shift_px", 0.0)):
+				self.cine_crudo_corrected_projections = projections.copy()
+				if self.cine_crudo_motion_result is not None:
+					self.cine_crudo_motion_result["corrected"] = self.cine_crudo_corrected_projections
+				self._log(
+					"[WARN] Corrección descartada automáticamente: empeoró el movimiento "
+					f"(Y {ty_before.get('max_shift_px')}→{ty_after.get('max_shift_px')} px). "
+					"Se conserva ORIGINAL."
+				)
+				ty_after = center_of_mass_tracking(self.cine_crudo_corrected_projections, axis="y")
 			self._log(
 				f"Motion correction aplicada: mov={'sí' if result.get('motion_detected') else 'no'} | "
 				f"max shift {result.get('max_shift_px')} px | corrección axis={result.get('axis_corrected')} | "
@@ -6071,6 +6113,30 @@ class MainWindow(QMainWindow):
 		except Exception as exc:
 			self._log(f"[WARN] Motion correction falló: {exc}")
 			self._set_progress(100, "Crudo cargado")
+
+	def _apply_cine_crudo_manual_offset(self):
+		"""Aplica offset manual global X/Y a la corrección ya calculada para ajuste visual rápido."""
+		if self.study is None or self.cine_crudo_motion_result is None:
+			QMessageBox.information(self, "SINCRO", "Primero ejecutá una corrección automática.")
+			return
+		try:
+			from core.raw_projections import apply_shifts_to_projections
+			projections = np.asarray(self.study.cube, dtype=np.float64)
+			sy = np.asarray(self.cine_crudo_motion_result.get("applied_shifts_y", np.zeros((projections.shape[1],))), dtype=np.float64)
+			sx = np.asarray(self.cine_crudo_motion_result.get("applied_shifts_x", np.zeros((projections.shape[1],))), dtype=np.float64)
+			offy = float(self.cine_crudo_offset_y_spin.value()) if hasattr(self, "cine_crudo_offset_y_spin") else 0.0
+			offx = float(self.cine_crudo_offset_x_spin.value()) if hasattr(self, "cine_crudo_offset_x_spin") else 0.0
+			sy2 = sy + offy
+			sx2 = sx + offx
+			corr = apply_shifts_to_projections(projections, sy2, sx2)
+			self.cine_crudo_corrected_projections = np.asarray(corr, dtype=np.float64)
+			self.cine_crudo_motion_result["corrected"] = self.cine_crudo_corrected_projections
+			self.cine_crudo_motion_result["applied_shifts_y"] = sy2
+			self.cine_crudo_motion_result["applied_shifts_x"] = sx2
+			self._refresh_cine_crudo_view()
+			self._log(f"Offset manual aplicado: OffY={offy:+.2f}px OffX={offx:+.2f}px")
+		except Exception as exc:
+			self._log(f"[WARN] Aplicar offset manual falló: {exc}")
 
 	def _refresh_cine_crudo_view(self):
 		source = str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
