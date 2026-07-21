@@ -1152,6 +1152,11 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_seed_btn.setToolTip("Activá y hacé CLICK en el corazón sobre la imagen para que el tracking siga solo ese órgano (evita hígado). Desactivá para automático.")
 				self.cine_crudo_seed_btn.toggled.connect(self._on_cine_crudo_seed_mode_toggled)
 				toolbar2.addWidget(self.cine_crudo_seed_btn)
+				self.cine_crudo_grid_btn = QToolButton()
+				self.cine_crudo_grid_btn.setText("Grilla pick")
+				self.cine_crudo_grid_btn.setToolTip("Grilla de cortes transaxiales con máscara para discriminar corazón de hígado antes del pick (como Odyssey).")
+				self.cine_crudo_grid_btn.clicked.connect(self._show_cine_crudo_transaxial_grid)
+				toolbar2.addWidget(self.cine_crudo_grid_btn)
 				self.cine_crudo_correct_btn = QToolButton()
 				self.cine_crudo_correct_btn.setText("Corregir")
 				self.cine_crudo_correct_btn.setToolTip("Aplica motion correction con método/eje/threshold seleccionados.")
@@ -5976,6 +5981,8 @@ class MainWindow(QMainWindow):
 			gate_mid = n_gates // 2
 			frames_arr = projections[gate_mid]  # (angles, H, W)
 			self.cine_crudo_matrix_txt = f"Gated gate {gate_mid + 1}/{n_gates} · {n_angles}áng × {H}×{W}px"
+		# Cuentas por frame (suma de píxeles de cada proyección) para el contador.
+		self.cine_crudo_counts = frames_arr.sum(axis=(1, 2)).astype(np.float64) if frames_arr.ndim == 3 else np.zeros((frames_arr.shape[0],), dtype=np.float64)
 
 		compare_on = bool(self.cine_crudo_compare_check is not None and self.cine_crudo_compare_check.isChecked())
 		corrected_frames_arr = None
@@ -6140,9 +6147,12 @@ class MainWindow(QMainWindow):
 		self.preview_base_sizes["cine_crudo"] = pix.size()
 		self._apply_preview_zoom("cine_crudo")
 		if hasattr(self, "cine_crudo_frame_label"):
-			self.cine_crudo_frame_label.setText(f"{self.cine_crudo_index + 1}/{n}")
-		if hasattr(self, "cine_crudo_frame_label") and self.cine_crudo_matrix_txt:
-			self.cine_crudo_frame_label.setText(f"{self.cine_crudo_index + 1}/{n} · {self.cine_crudo_matrix_txt}")
+			counts_txt = ""
+			counts = getattr(self, "cine_crudo_counts", None)
+			if counts is not None and self.cine_crudo_index < len(counts):
+				counts_txt = f" · {int(counts[self.cine_crudo_index]):,} cts"
+			matrix_txt = f" · {self.cine_crudo_matrix_txt}" if self.cine_crudo_matrix_txt else ""
+			self.cine_crudo_frame_label.setText(f"Img {self.cine_crudo_index + 1}/{n}{counts_txt}{matrix_txt}")
 
 	def _advance_cine_crudo_frame(self):
 		if not self.cine_crudo_frames:
@@ -6190,6 +6200,59 @@ class MainWindow(QMainWindow):
 
 	def _on_cine_crudo_speed_changed(self, value: int):
 		self.cine_crudo_timer.setInterval(max(40, int(value)))
+
+	def _show_cine_crudo_transaxial_grid(self):
+		"""Grilla de cortes transaxiales con máscara para discriminar corazón de hígado antes del pick (estilo Odyssey)."""
+		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
+			QMessageBox.information(self, "SINCRO", "Cargá un estudio crudo primero.")
+			return
+		import matplotlib
+		matplotlib.use("Agg")
+		import matplotlib.pyplot as plt
+		from core.raw_projections import ungate_projections
+
+		projections = np.asarray(self.study.cube, dtype=np.float64)
+		ung = ungate_projections(projections)  # (n_angles, H, W)
+		n_angles, H, W = ung.shape
+		thr = self._cine_crudo_threshold_value()
+
+		# Grilla de todos los ángulos (cortes transaxiales) con máscara superpuesta.
+		cols = int(np.ceil(np.sqrt(n_angles)))
+		rows = int(np.ceil(n_angles / cols))
+		fig, axes = plt.subplots(rows, cols, figsize=(cols * 1.5, rows * 1.6))
+		axes = np.atleast_1d(axes).ravel()
+		p99 = float(np.percentile(ung, 99.0)) or 1.0
+		for idx in range(rows * cols):
+			ax = axes[idx]
+			ax.axis("off")
+			ax.set_facecolor("#0b1220")
+			if idx < n_angles:
+				img = ung[idx]
+				ax.imshow(img, cmap="hot", vmin=0, vmax=p99)
+				mask = img > (thr * img.max()) if img.max() > 0 else np.zeros_like(img, dtype=bool)
+				ax.contour(mask, levels=[0.5], colors="spring", linewidths=0.8)
+				ax.set_title(f"{idx}", fontsize=7, color="white", pad=1)
+		ctx_label = self._study_context_label(
+			path_override=str(getattr(self, "_output_study_path_override", "") or self.file_edit.text().strip()),
+			study_obj=self.study,
+		)
+		fig.suptitle(
+			f"Grilla transaxial pick — {ctx_label} | thr {thr:.2f} | "
+			"Discriminá corazón de hígado y hacé pick con 'Elegir corazón' en cine_crudo",
+			color="white", fontsize=10.5, fontweight="bold",
+		)
+		fig.patch.set_facecolor("#0b1220")
+		fig.tight_layout(rect=[0, 0, 1, 0.94])
+		out_png = os.path.join(self.output_dir, "grilla_pick_transaxial.png")
+		fig.savefig(out_png, dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
+		plt.close(fig)
+		if "ungated" in self.preview_labels:
+			pix = QPixmap(out_png)
+			self.preview_pixmaps["ungated"] = pix
+			self.preview_base_sizes["ungated"] = pix.size()
+			self._apply_preview_zoom("ungated")
+			self._select_tab_by_title("ungated")
+		self._log(f"Grilla transaxial pick generada (thr {thr:.2f}, {n_angles} ángulos) → pestaña ungated.")
 
 	def _cine_crudo_threshold_value(self) -> float:
 		if hasattr(self, "cine_crudo_threshold_slider"):
