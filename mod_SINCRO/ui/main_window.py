@@ -152,6 +152,9 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_correct_btn: QToolButton | None = None
 		self.cine_crudo_compare_check: QCheckBox | None = None
 		self.cine_crudo_mask_check: QCheckBox | None = None
+		self.cine_crudo_seed_btn: QToolButton | None = None
+		self.cine_crudo_seed: tuple[float, float] | None = None
+		self.cine_crudo_seed_mode = False
 		self.cine_crudo_corrected_projections = None
 		self.cine_crudo_motion_result = None
 		self._tooltips_cache_main: dict[QWidget, str] = {}
@@ -1099,9 +1102,9 @@ class MainWindow(QMainWindow):
 				toolbar2 = QHBoxLayout()
 				toolbar2.addWidget(QLabel("Método"))
 				self.cine_crudo_method_combo = QComboBox()
-				self.cine_crudo_method_combo.addItems(["Odyssey", "COM", "Threshold"])
-				self.cine_crudo_method_combo.setCurrentText("Odyssey")
-				self.cine_crudo_method_combo.setToolTip("Odyssey: re-proyección iterativa (manual LX, recomendado). COM: centro de masa. Threshold: bounding box.")
+				self.cine_crudo_method_combo.addItems(["GammaSync", "Odyssey", "COM", "Threshold"])
+				self.cine_crudo_method_combo.setCurrentText("GammaSync")
+				self.cine_crudo_method_combo.setToolTip("GammaSync: threshold + selección de órgano (corazón) automática o por click (recomendado). Odyssey: re-proyección iterativa. COM: centro de masa. Threshold: bounding box.")
 				toolbar2.addWidget(self.cine_crudo_method_combo)
 				toolbar2.addWidget(QLabel("Eje"))
 				self.cine_crudo_axis_combo = QComboBox()
@@ -1143,6 +1146,12 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_mask_check.setToolTip("Superpone la máscara del threshold sobre la proyección actual en tiempo real.")
 				self.cine_crudo_mask_check.toggled.connect(self._refresh_cine_crudo_view)
 				toolbar2.addWidget(self.cine_crudo_mask_check)
+				self.cine_crudo_seed_btn = QToolButton()
+				self.cine_crudo_seed_btn.setText("Elegir corazón")
+				self.cine_crudo_seed_btn.setCheckable(True)
+				self.cine_crudo_seed_btn.setToolTip("Activá y hacé CLICK en el corazón sobre la imagen para que el tracking siga solo ese órgano (evita hígado). Desactivá para automático.")
+				self.cine_crudo_seed_btn.toggled.connect(self._on_cine_crudo_seed_mode_toggled)
+				toolbar2.addWidget(self.cine_crudo_seed_btn)
 				self.cine_crudo_correct_btn = QToolButton()
 				self.cine_crudo_correct_btn.setText("Corregir")
 				self.cine_crudo_correct_btn.setToolTip("Aplica motion correction con método/eje/threshold seleccionados.")
@@ -1177,6 +1186,8 @@ class MainWindow(QMainWindow):
 				label.setToolTip("Zoom con los botones +/- o 100% arriba de cada panel.")
 			self.preview_labels[name] = label
 			self.preview_zoom[name] = 1.0
+			if name == "cine_crudo":
+				label.mousePressEvent = self._on_cine_crudo_image_clicked
 			scroller = QScrollArea()
 			scroller.setWidgetResizable(False)
 			scroller.setWidget(label)
@@ -5958,6 +5969,11 @@ class MainWindow(QMainWindow):
 					frame_img = frames_arr[a]
 					fmax = float(frame_img.max()) if frame_img.size else 0.0
 					mask = frame_img > (thr_val * fmax) if fmax > 0 else np.zeros_like(frame_img, dtype=bool)
+					# Si método GammaSync: mostrar solo la componente del órgano (corazón), no toda la máscara.
+					method_now = str(self.cine_crudo_method_combo.currentText()).lower() if hasattr(self, "cine_crudo_method_combo") else "gammasync"
+					if method_now == "gammasync":
+						from core.raw_projections import _select_organ_component
+						mask = _select_organ_component(mask, seed=self.cine_crudo_seed, auto=(self.cine_crudo_seed is None))
 					rgb = rgb.copy()
 					rgb[mask] = (0.45 * rgb[mask] + 0.55 * np.array([255, 255, 255])).astype(np.uint8)
 				if corrected_frames_arr is not None:
@@ -5983,10 +5999,11 @@ class MainWindow(QMainWindow):
 			from core.raw_projections import motion_correct_projections
 			projections = np.asarray(self.study.cube, dtype=np.float64)
 			self._set_progress(55, "Aplicando motion correction al crudo...")
-			method = str(self.cine_crudo_method_combo.currentText()).lower() if hasattr(self, "cine_crudo_method_combo") else "com"
+			method = str(self.cine_crudo_method_combo.currentText()).lower() if hasattr(self, "cine_crudo_method_combo") else "gammasync"
 			axis = str(self.cine_crudo_axis_combo.currentText()).lower() if hasattr(self, "cine_crudo_axis_combo") else "y"
 			threshold = self._cine_crudo_threshold_value()
-			result = motion_correct_projections(projections, axis=axis, method=method, threshold_frac=threshold)
+			seed = self.cine_crudo_seed if method == "gammasync" else None
+			result = motion_correct_projections(projections, axis=axis, method=method, threshold_frac=threshold, seed=seed)
 			self.cine_crudo_motion_result = result
 			self.cine_crudo_corrected_projections = np.asarray(result.get("corrected"), dtype=np.float64)
 			if self.cine_crudo_compare_check is not None:
@@ -6157,6 +6174,51 @@ class MainWindow(QMainWindow):
 		if not hasattr(self, "cine_crudo_threshold_slider"):
 			return
 		self.cine_crudo_threshold_slider.setValue(self.cine_crudo_threshold_slider.value() + int(delta))
+
+	def _on_cine_crudo_seed_mode_toggled(self, checked: bool):
+		self.cine_crudo_seed_mode = bool(checked)
+		if not checked:
+			self.cine_crudo_seed = None
+			self._log("Selección de órgano: modo automático (seed limpiado).")
+			self._refresh_cine_crudo_view()
+		else:
+			self._log("Selección de órgano: hacé CLICK en el corazón sobre la imagen de cine_crudo.")
+
+	def _on_cine_crudo_image_clicked(self, event):
+		"""Captura el click del usuario sobre la imagen de cine_crudo para elegir el órgano (corazón)."""
+		if not self.cine_crudo_seed_mode:
+			return
+		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
+			return
+		label = self.preview_labels.get("cine_crudo")
+		if label is None:
+			return
+		pix = self.preview_pixmaps.get("cine_crudo")
+		if pix is None or pix.isNull():
+			return
+		# Convertir coordenadas del click (widget) a coordenadas de imagen (matriz proyección).
+		zoom = float(self.preview_zoom.get("cine_crudo", 1.0))
+		lw, lh = label.width(), label.height()
+		pw, ph = pix.width(), pix.height()
+		# El QPixmap se muestra escalado con KeepAspectRatio dentro del label.
+		scale = min(lw / max(1, pw), lh / max(1, ph)) * zoom
+		dw, dh = pw * scale, ph * scale
+		x0 = (lw - dw) / 2.0
+		y0 = (lh - dh) / 2.0
+		rx = (event.pos().x() - x0) / max(1e-6, scale)
+		ry = (event.pos().y() - y0) / max(1e-6, scale)
+		# La imagen puede estar concatenada (original|corregido) → usar la mitad izquierda.
+		projections = np.asarray(self.study.cube, dtype=np.float64)
+		H, W = int(projections.shape[2]), int(projections.shape[3])
+		if pw > W * 1.5:  # concatenado → la proyección está en la mitad izquierda
+			rx = rx
+		rx = float(np.clip(rx, 0, W - 1))
+		ry = float(np.clip(ry, 0, H - 1))
+		self.cine_crudo_seed = (ry, rx)  # (y, x) en coordenadas de matriz
+		self.cine_crudo_seed_btn.setChecked(False)
+		self.cine_crudo_seed_mode = False
+		self._log(f"Órgano seleccionado por usuario en (y={ry:.1f}, x={rx:.1f}) — el tracking seguirá solo esa componente.")
+		self._refresh_cine_crudo_view()
 
 	def _on_cine_crudo_source_changed(self, source: str):
 		self._load_cine_crudo_frames(str(source))

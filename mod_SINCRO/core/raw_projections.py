@@ -228,6 +228,127 @@ def _tracking_from_com(projections: np.ndarray, axis: str, threshold_frac: float
     return {"axis": axis, "com_series": com_series, "method": "com", "threshold_frac": threshold_frac}
 
 
+def _select_organ_component(
+    mask: np.ndarray,
+    seed: tuple[float, float] | None = None,
+    auto: bool = True,
+) -> np.ndarray:
+    """
+    Selecciona la componente conexa del órgano deseado dentro de la máscara por threshold.
+
+    Flujo (como Odyssey "Select Object" / GammaSync):
+      1. La máscara por threshold suele contener corazón + hígado + ruido.
+      2. Se etiquetan las componentes conexas.
+      3. Si el usuario dio un seed (click en el corazón), se elige la componente
+         que contiene ese punto (o la más cercana a él).
+      4. Si es automático, se elige la componente más compatible con corazón:
+         central, grande, no pegada al borde inferior/lateral (típico hígado).
+
+    Returns
+    -------
+    ndarray bool — máscara solo del órgano seleccionado (vacía si no hay).
+    """
+    from scipy.ndimage import center_of_mass as _com
+    from scipy.ndimage import label as _label
+
+    mask = np.asarray(mask, dtype=bool)
+    if not mask.any():
+        return np.zeros_like(mask, dtype=bool)
+    lbl, n = _label(mask)
+    if n <= 0:
+        return np.zeros_like(mask, dtype=bool)
+
+    h, w = mask.shape
+    cy0, cx0 = (h - 1) * 0.5, (w - 1) * 0.5
+
+    # Selección por seed (click del usuario)
+    if seed is not None and np.isfinite(seed[0]) and np.isfinite(seed[1]):
+        sy, sx = float(seed[0]), float(seed[1])
+        iy, ix = int(round(sy)), int(round(sx))
+        if 0 <= iy < h and 0 <= ix < w and lbl[iy, ix] > 0:
+            return lbl == lbl[iy, ix]
+        # Si el click no cae en una componente, elegir la más cercana.
+        best, best_d = None, 1e18
+        for cid in range(1, n + 1):
+            comp = lbl == cid
+            if comp.sum() < 4:
+                continue
+            cy, cx = _com(comp)
+            d = (cy - sy) ** 2 + (cx - sx) ** 2
+            if d < best_d:
+                best_d, best = d, comp
+        if best is not None:
+            return best
+        return np.zeros_like(mask, dtype=bool)
+
+    if not auto:
+        return mask
+
+    # Selección automática GammaSync: componente central y grande (corazón),
+    # evitando la más periférica/inferior (típico hígado).
+    best, best_score = None, -1e18
+    for cid in range(1, n + 1):
+        comp = lbl == cid
+        area = int(comp.sum())
+        if area < 6:
+            continue
+        cy, cx = _com(comp)
+        dist_c = float(np.hypot(cy - cy0, cx - cx0)) / max(1.0, 0.5 * min(h, w))
+        area_frac = area / float(h * w)
+        # Score: favorece central y con área razonable, penaliza muy periférico.
+        score = 2.0 * (1.0 - dist_c) + 1.0 * min(1.0, area_frac / 0.05)
+        if dist_c > 0.95:
+            score -= 2.0
+        if score > best_score:
+            best_score, best = score, comp
+    return best if best is not None else mask
+
+
+def _tracking_gammasync(
+    projections: np.ndarray,
+    axis: str,
+    threshold_frac: float,
+    seed: tuple[float, float] | None = None,
+) -> dict:
+    """
+    Tracking GammaSync: threshold + selección de componente del órgano (corazón).
+
+    Flujo (el que pediste):
+      1. Threshold enmascara corazón + hígado + ruido.
+      2. Selección de la componente del órgano:
+         - si el usuario dio seed (click en el corazón), sigue esa componente;
+         - si es automático, elige la componente central/grande (corazón), evitando hígado.
+      3. El tracking usa SOLO esa componente → el hígado no influye en la corrección.
+    """
+    from scipy.ndimage import center_of_mass as _com
+
+    proj = np.asarray(projections, dtype=np.float64)
+    summed = proj.sum(axis=0)
+    n_angles = summed.shape[0]
+    com_series = np.full((n_angles,), np.nan, dtype=np.float64)
+    threshold_frac = float(threshold_frac)
+    threshold_frac = min(max(threshold_frac, 0.01), 0.90)
+
+    for a in range(n_angles):
+        img = summed[a]
+        if img.max() <= 0:
+            continue
+        mask = img > (threshold_frac * img.max())
+        organ = _select_organ_component(mask, seed=seed, auto=(seed is None))
+        if organ.sum() < 4:
+            continue
+        cy, cx = _com(organ)
+        com_series[a] = cy if axis == "y" else cx
+
+    return {
+        "axis": axis,
+        "com_series": com_series,
+        "method": "gammasync",
+        "threshold_frac": threshold_frac,
+        "seed": seed,
+    }
+
+
 def _tracking_from_threshold(projections: np.ndarray, axis: str, threshold_frac: float) -> dict:
     """Tracking por bounding box de la máscara (más parecido a flujo Odyssey threshold + centro del objeto)."""
     proj = np.asarray(projections, dtype=np.float64)
@@ -383,6 +504,7 @@ def motion_correct_projections(
     axis: str = "y",
     threshold_frac: float = 0.20,
     method: str = "com",
+    seed: tuple[float, float] | None = None,
     manual_shifts_y: np.ndarray | None = None,
     manual_shifts_x: np.ndarray | None = None,
 ) -> dict:
@@ -390,16 +512,18 @@ def motion_correct_projections(
     Motion correction de proyecciones SPECT gated.
 
     Methods:
+      - gammasync: threshold + selección de componente del órgano (corazón), automática o por seed (click). Recomendado.
+      - odyssey: re-proyección iterativa (manual LX).
       - com: centro de masa sobre máscara por threshold.
-      - threshold: centro del bounding box de la máscara por threshold (más robusto a hígado/ruido en algunos casos).
+      - threshold: centro del bounding box de la máscara por threshold.
     """
     proj = np.asarray(projections, dtype=np.float64)
     if proj.ndim != 4:
         raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibió {proj.shape}")
 
-    method = str(method or "com").strip().lower()
-    if method not in ("com", "threshold", "odyssey"):
-        raise ValueError("method debe ser 'com', 'threshold' u 'odyssey'")
+    method = str(method or "gammasync").strip().lower()
+    if method not in ("gammasync", "com", "threshold", "odyssey"):
+        raise ValueError("method debe ser 'gammasync', 'com', 'threshold' u 'odyssey'")
 
     axes_to_correct = ["y", "x"] if axis == "xy" else [axis]
     tracking = {}
@@ -407,7 +531,9 @@ def motion_correct_projections(
     shifts_x = np.zeros((proj.shape[1],), dtype=np.float64)
 
     for ax in axes_to_correct:
-        if method == "odyssey":
+        if method == "gammasync":
+            trk = _finalize_tracking(_tracking_gammasync(proj, axis=ax, threshold_frac=threshold_frac, seed=seed))
+        elif method == "odyssey":
             trk = _tracking_odyssey(proj, axis=ax, threshold_frac=threshold_frac)
             # Odyssey: usar los shifts acumulados de las iteraciones, no la mediana.
             odyssey_shifts = np.asarray(trk.pop("_odyssey_total_shifts", np.zeros((proj.shape[1],))), dtype=np.float64)
