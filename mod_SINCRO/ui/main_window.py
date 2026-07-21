@@ -1916,6 +1916,46 @@ class MainWindow(QMainWindow):
 		fig.savefig(out_png, dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
 		plt.close(fig)
 
+		# Grilla de cortes transaxiales (discriminar corazón de hígado, como Odyssey).
+		# Los cortes son las proyecciones sumadas (UngGat) en grilla, con threshold aplicado,
+		# para que el usuario vea todas las vistas y elija en cuál hacer pick en el corazón.
+		try:
+			from core.raw_projections import ungate_projections
+			unggat = ungate_projections(projections)  # (angles, H, W)
+			thr_grid = 0.20
+			fig2, axes2 = plt.subplots(4, 8, figsize=(16, 8))
+			fig2.patch.set_facecolor("#0b1220")
+			p99g = float(np.percentile(unggat, 99.0)) or 1.0
+			for idx, ax in enumerate(axes2.ravel()):
+				ax.axis("off")
+				ax.set_facecolor("#0b1220")
+				if idx >= n_angles:
+					continue
+				img = unggat[idx]
+				img_n = np.clip(img / p99g, 0, 1)
+				ax.imshow(img_n, cmap="hot")
+				# Máscara por threshold en naranja (como Odyssey) para discriminar órganos.
+				mask = img > (thr_grid * img.max()) if img.max() > 0 else np.zeros_like(img, dtype=bool)
+				ov = np.ma.masked_where(~mask, mask)
+				ax.imshow(ov, cmap="autumn", alpha=0.55)
+				counts = float(img.sum())
+				ax.set_title(f"#{idx} · {counts:.0f}c", color="white", fontsize=7, pad=1)
+			fig2.suptitle(
+				f"Cortes transaxiales (UngGat) + threshold {thr_grid:.2f} — elegí el frame y hacé pick en el corazón (evitar hígado) | {ctx_label}",
+				color="white", fontsize=11, fontweight="bold",
+			)
+			fig2.tight_layout(rect=[0, 0, 1, 0.94])
+			grid_png = os.path.join(self.output_dir, "cortes_pick_corazon.png")
+			fig2.savefig(grid_png, dpi=130, bbox_inches="tight", facecolor=fig2.get_facecolor())
+			plt.close(fig2)
+			if "ungated" in self.preview_labels:
+				pix = QPixmap(grid_png)
+				self.preview_pixmaps["ungated"] = pix
+				self.preview_base_sizes["ungated"] = pix.size()
+				self._apply_preview_zoom("ungated")
+		except Exception as exc:
+			self._log(f"[WARN] No se pudo generar grilla de cortes: {exc}")
+
 		# Cine del crudo (proyecciones por ángulo) y del UngGat (desgatillado alta estadística)
 		try:
 			from core.raw_projections import ungate_projections
