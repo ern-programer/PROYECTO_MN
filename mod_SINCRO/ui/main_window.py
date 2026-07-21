@@ -1056,6 +1056,7 @@ class MainWindow(QMainWindow):
 				toolbar.addWidget(play_btn)
 				toolbar.addWidget(restart_btn)
 			if name == "cine_crudo":
+				# --- Fila 1 (toolbar principal): zoom + reproducción + navegación + fuente/modo ---
 				self.cine_crudo_play_btn = QToolButton()
 				self.cine_crudo_play_btn.setText("Play")
 				self.cine_crudo_play_btn.clicked.connect(self._toggle_cine_crudo)
@@ -1090,53 +1091,78 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_mode_combo.setCurrentText("Continuo")
 				self.cine_crudo_mode_combo.setToolTip("Continuo: loop 1→N→1. Rebote: 1→N→1→N (ping-pong).")
 				toolbar.addWidget(self.cine_crudo_mode_combo)
-				toolbar.addWidget(QLabel("Método"))
+				self.cine_crudo_frame_label = QLabel("--/--")
+				self.cine_crudo_frame_label.setStyleSheet("color:#444;")
+				toolbar.addWidget(self.cine_crudo_frame_label)
+
+				# --- Fila 2 (toolbar motion correction): método + eje + threshold mejorado + acciones ---
+				toolbar2 = QHBoxLayout()
+				toolbar2.addWidget(QLabel("Método"))
 				self.cine_crudo_method_combo = QComboBox()
 				self.cine_crudo_method_combo.addItems(["Odyssey", "COM", "Threshold"])
 				self.cine_crudo_method_combo.setCurrentText("Odyssey")
 				self.cine_crudo_method_combo.setToolTip("Odyssey: re-proyección iterativa (manual LX, recomendado). COM: centro de masa. Threshold: bounding box.")
-				toolbar.addWidget(self.cine_crudo_method_combo)
-				toolbar.addWidget(QLabel("Eje"))
+				toolbar2.addWidget(self.cine_crudo_method_combo)
+				toolbar2.addWidget(QLabel("Eje"))
 				self.cine_crudo_axis_combo = QComboBox()
 				self.cine_crudo_axis_combo.addItems(["Y", "X", "XY"])
 				self.cine_crudo_axis_combo.setCurrentText("Y")
 				self.cine_crudo_axis_combo.setToolTip("Eje de corrección: solo Y (default clínico), solo X, o ambos.")
-				toolbar.addWidget(self.cine_crudo_axis_combo)
-				toolbar.addWidget(QLabel("Thr"))
+				toolbar2.addWidget(self.cine_crudo_axis_combo)
+
+				# Threshold mejorado: botón - , slider amplio, botón + , spin numérico sincronizado
+				toolbar2.addWidget(QLabel("Thr"))
+				thr_minus = QToolButton()
+				thr_minus.setText("−")
+				thr_minus.setToolTip("Bajar threshold de a 0.01")
+				thr_minus.clicked.connect(lambda _=False: self._step_cine_crudo_threshold(-1))
+				toolbar2.addWidget(thr_minus)
 				self.cine_crudo_threshold_slider = QSlider(Qt.Orientation.Horizontal)
-				self.cine_crudo_threshold_slider.setRange(5, 80)
+				self.cine_crudo_threshold_slider.setRange(1, 100)
 				self.cine_crudo_threshold_slider.setValue(20)
-				self.cine_crudo_threshold_slider.setMaximumWidth(110)
+				self.cine_crudo_threshold_slider.setMinimumWidth(220)
 				self.cine_crudo_threshold_slider.setToolTip("Threshold para aislar el corazón (Select Object). Mová el slider y mirá la máscara en vivo.")
-				self.cine_crudo_threshold_label = QLabel("0.20")
-				self.cine_crudo_threshold_label.setStyleSheet("color:#444; min-width:34px;")
 				self.cine_crudo_threshold_slider.valueChanged.connect(self._on_cine_crudo_threshold_changed)
-				toolbar.addWidget(self.cine_crudo_threshold_slider)
-				toolbar.addWidget(self.cine_crudo_threshold_label)
+				toolbar2.addWidget(self.cine_crudo_threshold_slider, 1)
+				thr_plus = QToolButton()
+				thr_plus.setText("+")
+				thr_plus.setToolTip("Subir threshold de a 0.01")
+				thr_plus.clicked.connect(lambda _=False: self._step_cine_crudo_threshold(1))
+				toolbar2.addWidget(thr_plus)
+				self.cine_crudo_threshold_spin = QDoubleSpinBox()
+				self.cine_crudo_threshold_spin.setRange(0.01, 1.00)
+				self.cine_crudo_threshold_spin.setSingleStep(0.01)
+				self.cine_crudo_threshold_spin.setDecimals(2)
+				self.cine_crudo_threshold_spin.setValue(0.20)
+				self.cine_crudo_threshold_spin.setMaximumWidth(64)
+				self.cine_crudo_threshold_spin.setToolTip("Valor numérico del threshold (sincronizado con el slider).")
+				self.cine_crudo_threshold_spin.valueChanged.connect(self._on_cine_crudo_threshold_spin_changed)
+				toolbar2.addWidget(self.cine_crudo_threshold_spin)
+
 				self.cine_crudo_mask_check = QCheckBox("Máscara")
 				self.cine_crudo_mask_check.setToolTip("Superpone la máscara del threshold sobre la proyección actual en tiempo real.")
 				self.cine_crudo_mask_check.toggled.connect(self._refresh_cine_crudo_view)
-				toolbar.addWidget(self.cine_crudo_mask_check)
+				toolbar2.addWidget(self.cine_crudo_mask_check)
 				self.cine_crudo_correct_btn = QToolButton()
 				self.cine_crudo_correct_btn.setText("Corregir")
 				self.cine_crudo_correct_btn.setToolTip("Aplica motion correction con método/eje/threshold seleccionados.")
 				self.cine_crudo_correct_btn.clicked.connect(self._apply_cine_crudo_motion_correction)
-				toolbar.addWidget(self.cine_crudo_correct_btn)
+				toolbar2.addWidget(self.cine_crudo_correct_btn)
 				self.cine_crudo_fine_btn = QToolButton()
 				self.cine_crudo_fine_btn.setText("Ajuste fino")
 				self.cine_crudo_fine_btn.setToolTip("Edita manualmente shifts Y/X del frame actual para ajuste fino.")
 				self.cine_crudo_fine_btn.clicked.connect(self._open_cine_crudo_fine_adjust)
-				toolbar.addWidget(self.cine_crudo_fine_btn)
+				toolbar2.addWidget(self.cine_crudo_fine_btn)
 				self.cine_crudo_compare_check = QCheckBox("Comparar")
 				self.cine_crudo_compare_check.setToolTip("Muestra original y corregido en paralelo (original | corregido).")
 				self.cine_crudo_compare_check.setEnabled(False)
 				self.cine_crudo_compare_check.toggled.connect(self._refresh_cine_crudo_view)
-				toolbar.addWidget(self.cine_crudo_compare_check)
-				self.cine_crudo_frame_label = QLabel("--/--")
-				self.cine_crudo_frame_label.setStyleSheet("color:#444;")
-				toolbar.addWidget(self.cine_crudo_frame_label)
+				toolbar2.addWidget(self.cine_crudo_compare_check)
+				toolbar2.addStretch(1)
 			toolbar.addStretch(1)
 			tab_layout.addLayout(toolbar)
+			if name == "cine_crudo":
+				tab_layout.addLayout(toolbar2)
 
 			label = QLabel("Sin procesar")
 			label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -6107,13 +6133,30 @@ class MainWindow(QMainWindow):
 
 	def _on_cine_crudo_threshold_changed(self, value: int):
 		thr = float(value) / 100.0
-		if hasattr(self, "cine_crudo_threshold_label"):
-			self.cine_crudo_threshold_label.setText(f"{thr:.2f}")
+		if hasattr(self, "cine_crudo_threshold_spin"):
+			self.cine_crudo_threshold_spin.blockSignals(True)
+			self.cine_crudo_threshold_spin.setValue(thr)
+			self.cine_crudo_threshold_spin.blockSignals(False)
 		# Actualización en tiempo real: solo regenerar frames si la máscara está activa.
 		if self.cine_crudo_mask_check is not None and self.cine_crudo_mask_check.isChecked():
 			self._load_cine_crudo_frames(
 				str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
 			)
+
+	def _on_cine_crudo_threshold_spin_changed(self, value: float):
+		if hasattr(self, "cine_crudo_threshold_slider"):
+			self.cine_crudo_threshold_slider.blockSignals(True)
+			self.cine_crudo_threshold_slider.setValue(int(round(float(value) * 100.0)))
+			self.cine_crudo_threshold_slider.blockSignals(False)
+		if self.cine_crudo_mask_check is not None and self.cine_crudo_mask_check.isChecked():
+			self._load_cine_crudo_frames(
+				str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
+			)
+
+	def _step_cine_crudo_threshold(self, delta: int):
+		if not hasattr(self, "cine_crudo_threshold_slider"):
+			return
+		self.cine_crudo_threshold_slider.setValue(self.cine_crudo_threshold_slider.value() + int(delta))
 
 	def _on_cine_crudo_source_changed(self, source: str):
 		self._load_cine_crudo_frames(str(source))
