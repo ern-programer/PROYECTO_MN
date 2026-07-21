@@ -204,8 +204,17 @@ def build_sinograms(projections: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return sino_h, sino_v
 
 
-def _tracking_from_com(projections: np.ndarray, axis: str, threshold_frac: float) -> dict:
-    """Tracking simple por centro de masa sobre máscara por threshold."""
+def _tracking_from_com(
+    projections: np.ndarray,
+    axis: str,
+    threshold_frac: float,
+    seed: tuple[float, float] | None = None,
+) -> dict:
+    """Tracking simple por centro de masa sobre máscara por threshold.
+
+    Si hay seed (pick del usuario en el corazón), usa SOLO la componente de ese
+    órgano (evita hígado); si no, usa la máscara completa por threshold.
+    """
     from scipy.ndimage import center_of_mass as _com
 
     proj = np.asarray(projections, dtype=np.float64)
@@ -219,13 +228,14 @@ def _tracking_from_com(projections: np.ndarray, axis: str, threshold_frac: float
         img = summed[a]
         if img.max() <= 0:
             continue
-        mask = img > (threshold_frac * img.max())
+        # Máscara del órgano (selección de componente disponible en todos los métodos).
+        mask = _organ_mask(img, threshold_frac, seed=seed, use_organ_selection=True)
         if mask.sum() < 4:
             continue
         cy, cx = _com(mask)
         com_series[a] = cy if axis == "y" else cx
 
-    return {"axis": axis, "com_series": com_series, "method": "com", "threshold_frac": threshold_frac}
+    return {"axis": axis, "com_series": com_series, "method": "com", "threshold_frac": threshold_frac, "seed": seed}
 
 
 def _select_organ_component(
@@ -302,6 +312,31 @@ def _select_organ_component(
         if score > best_score:
             best_score, best = score, comp
     return best if best is not None else mask
+
+
+def _organ_mask(
+    img: np.ndarray,
+    threshold_frac: float,
+    seed: tuple[float, float] | None = None,
+    use_organ_selection: bool = True,
+) -> np.ndarray:
+    """
+    Máscara del órgano para tracking, disponible como ajuste en TODOS los métodos.
+
+    - Si use_organ_selection es False: máscara simple por threshold (máscara completa).
+    - Si hay seed (pick del usuario): componente del órgano bajo el pick.
+    - Si no hay seed (automático): componente central/grande (corazón, evita hígado).
+
+    Esto permite que cualquier método (COM, Stasis, Hopkins, Odyssey, Threshold)
+    use la selección de órgano como ajuste para evitar que el hígado influya.
+    """
+    img = np.asarray(img, dtype=np.float64)
+    if img.size == 0 or img.max() <= 0:
+        return np.zeros_like(img, dtype=bool)
+    mask = img > (threshold_frac * img.max())
+    if not use_organ_selection:
+        return mask
+    return _select_organ_component(mask, seed=seed, auto=(seed is None))
 
 
 def _tracking_gammasync(
@@ -499,8 +534,7 @@ def _tracking_stasis(
         img = summed[a]
         if img.max() <= 0:
             continue
-        mask = img > (threshold_frac * img.max())
-        organ = _select_organ_component(mask, seed=seed, auto=(seed is None))
+        organ = _organ_mask(img, threshold_frac, seed=seed, use_organ_selection=True)
         if organ.sum() < 4:
             continue
         cy, cx = _com(organ)
@@ -561,8 +595,7 @@ def _tracking_hopkins(
         img = summed[a]
         if img.max() <= 0:
             continue
-        mask = img > (threshold_frac * img.max())
-        organ = _select_organ_component(mask, seed=seed, auto=(seed is None))
+        organ = _organ_mask(img, threshold_frac, seed=seed, use_organ_selection=True)
         if organ.sum() < 4:
             continue
         cy, cx = _com(organ)
@@ -691,7 +724,7 @@ def motion_correct_projections(
         elif method == "threshold":
             trk = _finalize_tracking(_tracking_from_threshold(proj, axis=ax, threshold_frac=threshold_frac))
         else:
-            trk = _finalize_tracking(_tracking_from_com(proj, axis=ax, threshold_frac=threshold_frac))
+            trk = _finalize_tracking(_tracking_from_com(proj, axis=ax, threshold_frac=threshold_frac, seed=seed))
         tracking[ax] = trk
         if ax == "y":
             shifts_y = np.asarray(trk["suggested_shifts_px"], dtype=np.float64)

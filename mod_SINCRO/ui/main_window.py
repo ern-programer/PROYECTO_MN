@@ -6003,7 +6003,7 @@ class MainWindow(QMainWindow):
 			method = str(self.cine_crudo_method_combo.currentText()).lower() if hasattr(self, "cine_crudo_method_combo") else "gammasync"
 			axis = str(self.cine_crudo_axis_combo.currentText()).lower() if hasattr(self, "cine_crudo_axis_combo") else "y"
 			threshold = self._cine_crudo_threshold_value()
-			seed = self.cine_crudo_seed if method == "gammasync" else None
+			seed = self.cine_crudo_seed  # el pick del usuario aplica a TODOS los métodos (COM, Stasis, Hopkins, GammaSync)
 			result = motion_correct_projections(projections, axis=axis, method=method, threshold_frac=threshold, seed=seed)
 			self.cine_crudo_motion_result = result
 			self.cine_crudo_corrected_projections = np.asarray(result.get("corrected"), dtype=np.float64)
