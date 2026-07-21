@@ -116,6 +116,69 @@ def load_raw_projections(path: str) -> RawGatedProjections:
     )
 
 
+def ungate_projections(projections: np.ndarray) -> np.ndarray:
+    """
+    Desgatilla el crudo gated: suma todos los gates por proyección → UngGat.
+
+    El UngGat tiene ~n_gates× más cuentas que cada gate individual, por lo que
+    es la base de trabajo para motion correction, reconstrucción y cortes
+    (flujo Odyssey: desgatillar primero, trabajar con alta estadística, luego
+    aplicar los mismos parámetros geométricos al gated).
+
+    Parameters
+    ----------
+    projections : ndarray (n_gates, n_angles, H, W)
+
+    Returns
+    -------
+    ndarray (n_angles, H, W)
+        Proyecciones desgatilladas (UngGat / suma de gates).
+    """
+    proj = np.asarray(projections, dtype=np.float64)
+    if proj.ndim != 4:
+        raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibió {proj.shape}")
+    return proj.sum(axis=0)
+
+
+def apply_shifts_to_projections(projections: np.ndarray, shifts_y: np.ndarray, shifts_x: np.ndarray | None = None) -> np.ndarray:
+    """
+    Aplica shifts de motion correction a las proyecciones (Y-only por defecto, como Odyssey).
+
+    El mismo shift se aplica a la proyección completa (todos los gates comparten
+    la misma posición angular → el paciente se mueve igual en esa proyección).
+
+    Parameters
+    ----------
+    projections : ndarray (n_gates, n_angles, H, W) o (n_angles, H, W)
+    shifts_y : ndarray (n_angles,) — shift vertical en px por ángulo.
+    shifts_x : ndarray (n_angles,), optional — shift horizontal en px por ángulo.
+
+    Returns
+    -------
+    ndarray — proyecciones corregidas con la misma forma que la entrada.
+    """
+    from scipy.ndimage import shift as _ndi_shift
+
+    proj = np.asarray(projections, dtype=np.float64)
+    shifts_y = np.asarray(shifts_y, dtype=np.float64)
+    if shifts_x is None:
+        shifts_x = np.zeros_like(shifts_y)
+    else:
+        shifts_x = np.asarray(shifts_x, dtype=np.float64)
+
+    if proj.ndim == 3:  # (angles, H, W) — UngGat
+        out = np.empty_like(proj)
+        for a in range(proj.shape[0]):
+            out[a] = _ndi_shift(proj[a], shift=(shifts_y[a], shifts_x[a]), order=1, mode="nearest")
+        return out
+    if proj.ndim == 4:  # (gates, angles, H, W) — gated
+        out = np.empty_like(proj)
+        for a in range(proj.shape[1]):
+            out[:, a] = _ndi_shift(proj[:, a], shift=(0.0, shifts_y[a], shifts_x[a]), order=1, mode="nearest")
+        return out
+    raise ValueError(f"projections debe ser 3D o 4D; recibió {proj.shape}")
+
+
 def build_sinograms(projections: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
     Genera sinogramas horizontal y vertical para QC visual (estilo Odyssey).

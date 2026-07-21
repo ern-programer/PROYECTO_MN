@@ -1759,6 +1759,33 @@ class MainWindow(QMainWindow):
 		fig.savefig(out_png, dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
 		plt.close(fig)
 
+		# Cine del crudo (proyecciones por ángulo) y del UngGat (desgatillado alta estadística)
+		try:
+			from core.raw_projections import ungate_projections
+			from PIL import Image
+			unggat = ungate_projections(projections)  # (angles, H, W) suma gates
+
+			def _norm_frame(img):
+				img = np.asarray(img, dtype=np.float64)
+				mx = float(img.max()) if img.size else 1.0
+				if mx <= 0:
+					mx = 1.0
+				return (np.clip(img / mx, 0, 1) * 255).astype(np.uint8)
+
+			# GIF crudo gated: primer gate (o gate medio) por ángulo
+			gate_mid = n_gates // 2
+			frames_crudo = [Image.fromarray(_norm_frame(projections[gate_mid, a])).convert("P") for a in range(n_angles)]
+			gif_crudo = os.path.join(self.output_dir, "cine_crudo_gated.gif")
+			frames_crudo[0].save(gif_crudo, save_all=True, append_images=frames_crudo[1:], duration=120, loop=0)
+
+			# GIF UngGat (suma gates, alta estadística)
+			frames_unggat = [Image.fromarray(_norm_frame(unggat[a])).convert("P") for a in range(n_angles)]
+			gif_unggat = os.path.join(self.output_dir, "cine_unggat.gif")
+			frames_unggat[0].save(gif_unggat, save_all=True, append_images=frames_unggat[1:], duration=120, loop=0)
+			self._log(f"Cines generados: cine_crudo_gated.gif (gate {gate_mid}) + cine_unggat.gif (UngGat {n_gates}× cuentas)")
+		except Exception as exc:
+			self._log(f"[WARN] No se pudo generar cine del crudo: {exc}")
+
 		# Mostrar el panel en la pestaña ungated (reutilizada como visor QC crudo)
 		if "ungated" in self.preview_labels:
 			pix = QPixmap(out_png)
