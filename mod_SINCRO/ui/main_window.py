@@ -963,6 +963,7 @@ class MainWindow(QMainWindow):
 			"comparacion_stress_rest": "stress_vs_rest",
 			"panel_funcional_gated": "Panel funcional gated",
 			"bullseye_directo": "bullseye_directo",
+			"ungated": "ungated",
 		}
 		preview_help_texts = {
 			"slices_fase": "Vista de referencia del slice/gate medio con máscara y fase superpuesta. Útil para control de calidad de segmentación.",
@@ -975,6 +976,7 @@ class MainWindow(QMainWindow):
 			"comparacion_stress_rest": "Resumen de métricas de disincronía stress vs rest (PSD/BW/Kurtosis/Entropy) e interpretación clínica.",
 			"panel_funcional_gated": "Panel funcional integrado (ED/ES, fase, amplitud y curvas) para lectura clínica rápida.",
 			"bullseye_directo": "Bull's-eye de perfusión segmentaria AHA (17): resumen compacto de intensidad regional.",
+			"ungated": "Desgatillado (UngRaw): suma de todos los gates = perfusión total con máxima estadística. Base para cortes anatómicos y comparación contra RECON del fabricante.",
 		}
 		for name in [
 			"slices_fase",
@@ -987,6 +989,7 @@ class MainWindow(QMainWindow):
 			"comparacion_stress_rest",
 			"panel_funcional_gated",
 			"bullseye_directo",
+			"ungated",
 		]:
 			tab = QWidget()
 			tab_layout = QVBoxLayout(tab)
@@ -1114,7 +1117,7 @@ class MainWindow(QMainWindow):
 		return self._tab_name_from_title(self.tabs.tabText(idx))
 
 	def _default_preview_tabs(self) -> set[str]:
-		tabs = {"slices_fase", "polar_combo", "delta_combo", "histograma", "comparacion_stress_rest"}
+		tabs = {"slices_fase", "polar_combo", "delta_combo", "histograma", "comparacion_stress_rest", "ungated"}
 		active = self._active_tab_name()
 		if active:
 			tabs.add(active)
@@ -1133,6 +1136,7 @@ class MainWindow(QMainWindow):
 			"bullseye_directo": ("bullseye_directo.png",),
 			"polar_perfusion_directa": ("polar_perfusion_directa.png",),
 			"polar_cine_montaje": ("polar_cine_montaje.png",),
+			"ungated": ("perfusion_ungated.png",),
 		}
 		return mapping.get(str(name), tuple())
 
@@ -5332,8 +5336,14 @@ class MainWindow(QMainWindow):
 		if name == "comparacion_ejes":
 			self._load_compare_axes_preview()
 			return
-		path = os.path.join(self.output_dir, f"{name}.png")
+		fname = "perfusion_ungated.png" if name == "ungated" else f"{name}.png"
+		path = os.path.join(self.output_dir, fname)
 		label = self.preview_labels[name]
+		if name == "ungated" and not os.path.exists(path) and self.study is not None:
+			try:
+				self._write_ungated_output()
+			except Exception:
+				pass
 		if os.path.exists(path):
 			pix = QPixmap(path)
 			self.preview_pixmaps[name] = pix
