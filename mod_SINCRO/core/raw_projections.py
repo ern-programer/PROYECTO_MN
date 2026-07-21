@@ -737,22 +737,29 @@ def _tracking_sinusoid(
     threshold_frac: float,
     seed: tuple[float, float] | None = None,
     angles_deg: np.ndarray | None = None,
+    detrend_sigma: float = 3.0,
 ) -> dict:
     """
-    Tracking sinusoidal (referencia geométricamente correcta para SPECT).
+    Tracking por detrend (referencia = tendencia suave, corrige SOLO los saltos).
 
-    Fundamento: cuando el gantry rota, el centro proyectado de un objeto ESTÁTICO
-    NO es constante: describe una sinusoide vs ángulo (esa es la transformada de
-    Radon / sinograma). Por eso forzar el centro a una constante (mediana/moda/
-    stasis) pelea contra la geometría de rotación y en el eje X (transaxial)
-    EMPEORA el estudio.
+    Fundamento: la posición del órgano vs ángulo tiene DOS componentes:
+      1. Tendencia LEGÍTIMA de la geometría de rotación — para el eje X (transaxial)
+         es una sinusoide (el sinograma); para el eje Y (axial) es casi constante
+         (la rotación no cambia la posición axial). Esta componente NO se corrige.
+      2. Saltos/jitter de MOVIMIENTO del paciente = desviaciones de alta frecuencia
+         respecto de esa tendencia. Esto es lo único que hay que corregir.
 
-    Este método ajusta la curva esperada centro(θ) = a + b·cos(θ) + c·sin(θ)
-    (posición de un objeto rígido en rotación) por mínimos cuadrados robustos, y
-    corrige SOLO el residuo (desviación respecto de la sinusoide = movimiento real
-    del paciente). Así preserva la geometría y elimina únicamente el movimiento.
+    Método: se estima la tendencia suave con un filtro pasa-bajos robusto
+    (mediana para matar saltos bruscos + gaussiano para suavizar) y el shift de
+    cada frame = tendencia − centro medido. Así se eliminan los saltos leves
+    preservando la geometría de rotación (a diferencia de com/stasis/hopkins que
+    fuerzan el centro a una constante y en X pelean contra el sinograma).
+
+    IMPORTANTE: estos shifts NO deben re-suavizarse (el shift ES el residuo de
+    alta frecuencia; suavizarlo lo anula y la corrección queda igual al original).
     """
     from scipy.ndimage import center_of_mass as _com
+    from scipy.ndimage import gaussian_filter1d, median_filter
 
     proj = np.asarray(projections, dtype=np.float64)
     summed = proj.sum(axis=0)
@@ -771,40 +778,31 @@ def _tracking_sinusoid(
         centers[a] = cy if axis == "y" else cx
 
     valid = np.isfinite(centers)
-    if valid.sum() < 4:
+    if valid.sum() < 5:
         return {"axis": axis, "com_series": centers, "method": "sinusoid",
                 "threshold_frac": threshold_frac, "_sinusoid_shifts": np.zeros((n_angles,))}
 
-    # Ángulos: usar los reales si están; si no, asumir barrido uniforme.
-    if angles_deg is not None and len(angles_deg) == n_angles:
-        theta = np.deg2rad(np.asarray(angles_deg, dtype=np.float64))
-    else:
-        theta = np.deg2rad(np.linspace(0.0, 360.0, n_angles, endpoint=False))
+    # Rellenar huecos por interpolación para poder filtrar de forma continua.
+    idx = np.arange(n_angles)
+    cf = centers.copy()
+    if (~valid).any():
+        cf[~valid] = np.interp(idx[~valid], idx[valid], centers[valid])
 
-    def _fit(mask: np.ndarray) -> np.ndarray:
-        A = np.column_stack([np.ones(mask.sum()), np.cos(theta[mask]), np.sin(theta[mask])])
-        coef, *_ = np.linalg.lstsq(A, centers[mask], rcond=None)
-        return coef
+    # Referencia = tendencia suave (pasa-bajos robusto): mediana (rechaza saltos
+    # bruscos) seguida de gaussiano (suaviza). Para X queda ~sinusoide, para Y ~plano.
+    ksize = 5 if n_angles >= 5 else (n_angles // 2 * 2 + 1)
+    ksize = max(3, ksize)
+    ref = gaussian_filter1d(
+        median_filter(cf, size=ksize, mode="nearest"),
+        sigma=float(detrend_sigma), mode="nearest",
+    )
 
-    # Ajuste robusto: 1 pasada de rechazo de outliers (movimiento brusco) y refit.
-    fit_mask = valid.copy()
-    coef = _fit(fit_mask)
-    fitted_all = coef[0] + coef[1] * np.cos(theta) + coef[2] * np.sin(theta)
-    resid = centers - fitted_all
-    rv = resid[valid]
-    sigma = 1.4826 * float(np.median(np.abs(rv - np.median(rv)))) if rv.size else 0.0
-    if sigma > 0:
-        keep = valid & (np.abs(resid) <= 2.5 * sigma)
-        if keep.sum() >= 4:
-            coef = _fit(keep)
-            fitted_all = coef[0] + coef[1] * np.cos(theta) + coef[2] * np.sin(theta)
-
-    # Shift = referencia sinusoidal esperada - centro medido (corrige solo el movimiento).
-    shifts = np.where(valid, fitted_all - centers, 0.0)
+    # Shift = tendencia esperada − centro medido (corrige solo los saltos/jitter).
+    shifts = np.where(valid, ref - centers, 0.0)
     return {
         "axis": axis,
         "com_series": centers,
-        "sinusoid_fit": fitted_all,
+        "reference_trend": ref,
         "method": "sinusoid",
         "threshold_frac": threshold_frac,
         "_sinusoid_shifts": shifts,
@@ -946,8 +944,13 @@ def motion_correct_projections(
         return out
 
     # Si el usuario cargó shifts manuales, no suavizar para respetar su edición.
-    shifts_y = _regularize_shifts(shifts_y, do_smooth=(manual_shifts_y is None))
-    shifts_x = _regularize_shifts(shifts_x, do_smooth=(manual_shifts_x is None))
+    # El método 'sinusoid' tampoco se suaviza: su shift ES el residuo de alta
+    # frecuencia (los saltos); suavizarlo lo anularía y la corrección quedaría
+    # igual al original.
+    smooth_y = (manual_shifts_y is None) and (method != "sinusoid")
+    smooth_x = (manual_shifts_x is None) and (method != "sinusoid")
+    shifts_y = _regularize_shifts(shifts_y, do_smooth=smooth_y)
+    shifts_x = _regularize_shifts(shifts_x, do_smooth=smooth_x)
 
     # Anclaje a frame de referencia elegido por usuario: ese frame queda en shift 0.
     if ref_index is not None and int(ref_index) >= 0:

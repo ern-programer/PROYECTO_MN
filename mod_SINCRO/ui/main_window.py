@@ -6135,8 +6135,19 @@ class MainWindow(QMainWindow):
 			angles = getattr(self.study, "angles_deg", None)
 			ref_idx = int(self.cine_crudo_ref_index if self.cine_crudo_ref_index is not None else getattr(self, "_cine_crudo_current_frame", 0))
 			if method == "auto":
-				# Auto: correr varios métodos y elegir por score clínico (residual Y/X + outliers + energía de shift).
+				# Auto: correr varios métodos y elegir por JITTER real (saltos frame-a-frame),
+				# no por desviación de la mediana (que mezcla la sinusoide de rotación con el movimiento).
 				from core.raw_projections import center_of_mass_tracking
+
+				def _jitter(pr, ax):
+					c = np.asarray(center_of_mass_tracking(np.asarray(pr, dtype=np.float64), axis=ax).get("com_series", []), dtype=np.float64)
+					v = np.isfinite(c)
+					if v.sum() < 3:
+						return 0.0
+					return float(np.std(np.diff(c[v])))
+
+				jy0 = _jitter(projections, "y")
+				jx0 = _jitter(projections, "x")
 				candidates = ["sinusoid", "com", "odyssey", "stasis", "hopkins", "gammasync", "threshold"]
 				best_result = None
 				best_method = None
@@ -6153,14 +6164,9 @@ class MainWindow(QMainWindow):
 						ref_index=ref_idx,
 						angles_deg=angles,
 					)
-					ty_m = center_of_mass_tracking(np.asarray(res_m.get("corrected"), dtype=np.float64), axis="y")
-					tx_m = center_of_mass_tracking(np.asarray(res_m.get("corrected"), dtype=np.float64), axis="x")
-					score = (
-						1.00 * float(ty_m.get("max_shift_px", 0.0))
-						+ 0.60 * float(tx_m.get("max_shift_px", 0.0))
-						+ 0.20 * float(ty_m.get("n_outliers", 0))
-						+ 0.15 * float(res_m.get("max_shift_px", 0.0))
-					)
+					corr_m = np.asarray(res_m.get("corrected"), dtype=np.float64)
+					# Score = jitter residual (lo que realmente se ve como saltos en el cine).
+					score = 1.00 * _jitter(corr_m, "y") + 0.60 * _jitter(corr_m, "x")
 					if score < best_score:
 						best_score = score
 						best_result = res_m
@@ -6187,24 +6193,36 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_compare_check.setEnabled(True)
 				self.cine_crudo_compare_check.setChecked(True)
 			from core.raw_projections import center_of_mass_tracking
-			ty_before = center_of_mass_tracking(projections, axis="y")
-			ty_after = center_of_mass_tracking(self.cine_crudo_corrected_projections, axis="y")
-			# Guardrail: si la corrección empeora claramente, volver al original para no dañar el estudio.
-			if float(ty_after.get("max_shift_px", 0.0)) > 1.15 * float(ty_before.get("max_shift_px", 0.0)):
+
+			def _jit(pr, ax):
+				c = np.asarray(center_of_mass_tracking(np.asarray(pr, dtype=np.float64), axis=ax).get("com_series", []), dtype=np.float64)
+				v = np.isfinite(c)
+				if v.sum() < 3:
+					return 0.0
+				return float(np.std(np.diff(c[v])))
+
+			# Guardrail por JITTER real (saltos frame-a-frame), no por desviación de la mediana.
+			jy_before = _jit(projections, "y")
+			jy_after = _jit(self.cine_crudo_corrected_projections, "y")
+			jx_before = _jit(projections, "x")
+			jx_after = _jit(self.cine_crudo_corrected_projections, "x")
+			worse = (jy_after > 1.10 * max(jy_before, 1e-6)) and (jy_after + jx_after > jy_before + jx_before)
+			if worse and not bool(result.get("manual_override")):
 				self.cine_crudo_corrected_projections = projections.copy()
 				if self.cine_crudo_motion_result is not None:
 					self.cine_crudo_motion_result["corrected"] = self.cine_crudo_corrected_projections
+					self.cine_crudo_motion_result["applied_shifts_y"] = np.zeros((int(projections.shape[1]),), dtype=np.float64)
+					self.cine_crudo_motion_result["applied_shifts_x"] = np.zeros((int(projections.shape[1]),), dtype=np.float64)
 				self._log(
-					"[WARN] Corrección descartada automáticamente: empeoró el movimiento "
-					f"(Y {ty_before.get('max_shift_px')}→{ty_after.get('max_shift_px')} px). "
-					"Se conserva ORIGINAL."
+					"[WARN] Corrección descartada automáticamente: aumentó los saltos "
+					f"(jitter Y {jy_before:.2f}→{jy_after:.2f}, X {jx_before:.2f}→{jx_after:.2f}). "
+					"Se conserva ORIGINAL. Probá con 'Elegir corazón' (click) o corrección manual con flechas."
 				)
-				ty_after = center_of_mass_tracking(self.cine_crudo_corrected_projections, axis="y")
+				jy_after, jx_after = jy_before, jx_before
 			self._log(
-				f"Motion correction aplicada: mov={'sí' if result.get('motion_detected') else 'no'} | "
-				f"max shift {result.get('max_shift_px')} px | corrección axis={result.get('axis_corrected')} | "
-				f"Y shift {ty_before.get('max_shift_px')}→{ty_after.get('max_shift_px')} px | "
-				f"outliers Y {ty_before.get('n_outliers')}→{ty_after.get('n_outliers')}"
+				f"Motion correction aplicada: método {result.get('method_auto_selected') or result.get('method')} | "
+				f"jitter Y {jy_before:.2f}→{jy_after:.2f} · X {jx_before:.2f}→{jx_after:.2f} | "
+				f"max shift {result.get('max_shift_px')} px | axis={result.get('axis_corrected')}"
 			)
 			self._refresh_cine_crudo_view()
 			self._set_progress(100, "Motion correction lista")
