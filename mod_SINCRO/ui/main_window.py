@@ -176,6 +176,7 @@ class MainWindow(QMainWindow):
 			"delta_combo",
 			"histograma",
 			"comparacion_stress_rest",
+			"ungated",
 		]
 		self._advanced_extra_tab_order = [
 			"polar_perfusion_directa",
