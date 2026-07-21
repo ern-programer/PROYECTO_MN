@@ -391,6 +391,59 @@ def _organ_mask(
     return _select_organ_component(mask, seed=seed, auto=(seed is None))
 
 
+def _center_series_with_component_tracking(
+    summed: np.ndarray,
+    *,
+    axis: str,
+    threshold_frac: float,
+    seed: tuple[float, float] | None = None,
+    continuity: bool = True,
+    bbox_mode: bool = False,
+) -> np.ndarray:
+    """
+    Serie de centros por frame con continuidad temporal de componente.
+
+    Si no hay seed de usuario, usa selección automática en el primer frame y
+    luego "arrastre" por continuidad (componente más cercana al centro previo)
+    para evitar saltos corazón<->hígado entre frames.
+    """
+    from scipy.ndimage import center_of_mass as _com
+
+    n_frames = int(summed.shape[0])
+    centers = np.full((n_frames,), np.nan, dtype=np.float64)
+    prev_center: tuple[float, float] | None = seed
+
+    for a in range(n_frames):
+        img = summed[a]
+        if img.max() <= 0:
+            continue
+        mask = img > (threshold_frac * img.max())
+        if not mask.any():
+            continue
+
+        # Prioridad: seed usuario > continuidad temporal > automático.
+        if seed is not None:
+            organ = _select_organ_component(mask, seed=seed, auto=False)
+        elif continuity and prev_center is not None:
+            organ = _select_organ_component(mask, seed=prev_center, auto=False)
+        else:
+            organ = _select_organ_component(mask, seed=None, auto=True)
+
+        if organ.sum() < 4:
+            continue
+
+        if bbox_mode:
+            ys, xs = np.where(organ)
+            cy = 0.5 * (float(ys.min()) + float(ys.max()))
+            cx = 0.5 * (float(xs.min()) + float(xs.max()))
+        else:
+            cy, cx = _com(organ)
+        centers[a] = cy if axis == "y" else cx
+        prev_center = (float(cy), float(cx))
+
+    return centers
+
+
 def _tracking_gammasync(
     projections: np.ndarray,
     axis: str,
@@ -407,25 +460,20 @@ def _tracking_gammasync(
          - si es automático, elige la componente central/grande (corazón), evitando hígado.
       3. El tracking usa SOLO esa componente → el hígado no influye en la corrección.
     """
-    from scipy.ndimage import center_of_mass as _com
-
     proj = np.asarray(projections, dtype=np.float64)
     summed = proj.sum(axis=0)
-    n_angles = summed.shape[0]
-    com_series = np.full((n_angles,), np.nan, dtype=np.float64)
+    n_angles = int(summed.shape[0])
     threshold_frac = float(threshold_frac)
     threshold_frac = min(max(threshold_frac, 0.01), 0.90)
 
-    for a in range(n_angles):
-        img = summed[a]
-        if img.max() <= 0:
-            continue
-        mask = img > (threshold_frac * img.max())
-        organ = _select_organ_component(mask, seed=seed, auto=(seed is None))
-        if organ.sum() < 4:
-            continue
-        cy, cx = _com(organ)
-        com_series[a] = cy if axis == "y" else cx
+    com_series = _center_series_with_component_tracking(
+        summed,
+        axis=axis,
+        threshold_frac=threshold_frac,
+        seed=seed,
+        continuity=True,
+        bbox_mode=False,
+    )
 
     return {
         "axis": axis,
@@ -436,26 +484,27 @@ def _tracking_gammasync(
     }
 
 
-def _tracking_from_threshold(projections: np.ndarray, axis: str, threshold_frac: float) -> dict:
+def _tracking_from_threshold(
+    projections: np.ndarray,
+    axis: str,
+    threshold_frac: float,
+    seed: tuple[float, float] | None = None,
+) -> dict:
     """Tracking por bounding box de la máscara (más parecido a flujo Odyssey threshold + centro del objeto)."""
     proj = np.asarray(projections, dtype=np.float64)
     summed = proj.sum(axis=0)
-    n_angles = summed.shape[0]
-    com_series = np.full((n_angles,), np.nan, dtype=np.float64)
+    n_angles = int(summed.shape[0])
     threshold_frac = float(threshold_frac)
     threshold_frac = min(max(threshold_frac, 0.01), 0.90)
 
-    for a in range(n_angles):
-        img = summed[a]
-        if img.max() <= 0:
-            continue
-        mask = img > (threshold_frac * img.max())
-        ys, xs = np.where(mask)
-        if ys.size < 4:
-            continue
-        cy = 0.5 * (float(ys.min()) + float(ys.max()))
-        cx = 0.5 * (float(xs.min()) + float(xs.max()))
-        com_series[a] = cy if axis == "y" else cx
+    com_series = _center_series_with_component_tracking(
+        summed,
+        axis=axis,
+        threshold_frac=threshold_frac,
+        seed=seed,
+        continuity=True,
+        bbox_mode=True,
+    )
 
     return {"axis": axis, "com_series": com_series, "method": "threshold", "threshold_frac": threshold_frac}
 
@@ -465,6 +514,7 @@ def _tracking_odyssey(
     axis: str,
     threshold_frac: float,
     n_iterations: int = 3,
+    seed: tuple[float, float] | None = None,
 ) -> dict:
     """
     Tracking estilo Odyssey (manual LX tux079 pág 79-87).
@@ -518,16 +568,14 @@ def _tracking_odyssey(
         cy_ref, cx_ref = _com(mask_total)
         ref = cy_ref if axis == "y" else cx_ref
 
-        centers = np.full((n_angles,), np.nan, dtype=np.float64)
-        for a in range(n_angles):
-            img = summed[a]
-            if img.max() <= 0:
-                continue
-            mask = img > (threshold_frac * img.max())
-            if mask.sum() < 4:
-                continue
-            cy, cx = _com(mask)
-            centers[a] = cy if axis == "y" else cx
+        centers = _center_series_with_component_tracking(
+            summed,
+            axis=axis,
+            threshold_frac=threshold_frac,
+            seed=seed,
+            continuity=True,
+            bbox_mode=False,
+        )
 
         valid = np.isfinite(centers)
         if valid.sum() < 3:
@@ -725,6 +773,7 @@ def motion_correct_projections(
     manual_shifts_x: np.ndarray | None = None,
     max_abs_shift_px: float = 4.0,
     smooth_sigma: float = 1.0,
+    ref_index: int | None = None,
 ) -> dict:
     """
     Motion correction de proyecciones SPECT gated.
@@ -768,7 +817,7 @@ def motion_correct_projections(
             trk["max_shift_px"] = round(float(np.abs(hopkins_shifts).max()) if hopkins_shifts.size else 0.0, 2)
             trk["motion_suspected"] = bool(trk["max_shift_px"] > 1.5 or trk.get("n_outliers", 0) >= 2)
         elif method == "odyssey":
-            trk = _tracking_odyssey(proj, axis=ax, threshold_frac=threshold_frac)
+            trk = _tracking_odyssey(proj, axis=ax, threshold_frac=threshold_frac, seed=seed)
             # Odyssey: usar los shifts acumulados de las iteraciones, no la mediana.
             odyssey_shifts = np.asarray(trk.pop("_odyssey_total_shifts", np.zeros((proj.shape[1],))), dtype=np.float64)
             trk = _finalize_tracking(trk)
@@ -776,7 +825,7 @@ def motion_correct_projections(
             trk["max_shift_px"] = round(float(np.abs(odyssey_shifts).max()) if odyssey_shifts.size else 0.0, 2)
             trk["motion_suspected"] = bool(trk["max_shift_px"] > 1.5 or trk.get("n_outliers", 0) >= 2)
         elif method == "threshold":
-            trk = _finalize_tracking(_tracking_from_threshold(proj, axis=ax, threshold_frac=threshold_frac))
+            trk = _finalize_tracking(_tracking_from_threshold(proj, axis=ax, threshold_frac=threshold_frac, seed=seed))
         else:
             trk = _finalize_tracking(_tracking_from_com(proj, axis=ax, threshold_frac=threshold_frac, seed=seed))
         tracking[ax] = trk
@@ -810,6 +859,12 @@ def motion_correct_projections(
     # Si el usuario cargó shifts manuales, no suavizar para respetar su edición.
     shifts_y = _regularize_shifts(shifts_y, do_smooth=(manual_shifts_y is None))
     shifts_x = _regularize_shifts(shifts_x, do_smooth=(manual_shifts_x is None))
+
+    # Anclaje a frame de referencia elegido por usuario: ese frame queda en shift 0.
+    if ref_index is not None and int(ref_index) >= 0:
+        ridx = int(ref_index) % int(proj.shape[1])
+        shifts_y = shifts_y - float(shifts_y[ridx])
+        shifts_x = shifts_x - float(shifts_x[ridx])
 
     corrected = apply_shifts_to_projections(proj, shifts_y, shifts_x)
     max_shift = float(max(

@@ -1102,7 +1102,7 @@ class MainWindow(QMainWindow):
 				toolbar2 = QHBoxLayout()
 				toolbar2.addWidget(QLabel("Método"))
 				self.cine_crudo_method_combo = QComboBox()
-				self.cine_crudo_method_combo.addItems(["GammaSync", "Stasis", "Hopkins", "Odyssey", "COM", "Threshold"])
+				self.cine_crudo_method_combo.addItems(["Auto", "GammaSync", "Stasis", "Hopkins", "Odyssey", "COM", "Threshold"])
 				self.cine_crudo_method_combo.setCurrentText("GammaSync")
 				self.cine_crudo_method_combo.setToolTip("GammaSync: selección de órgano automática/click. Stasis: referencia estática (moda, Xeleris). Hopkins: frame más estable (Xeleris). Odyssey: re-proyección iterativa. COM: centro de masa. Threshold: bounding box.")
 				toolbar2.addWidget(self.cine_crudo_method_combo)
@@ -6074,15 +6074,44 @@ class MainWindow(QMainWindow):
 			axis = str(self.cine_crudo_axis_combo.currentText()).lower() if hasattr(self, "cine_crudo_axis_combo") else "y"
 			threshold = self._cine_crudo_threshold_value()
 			seed = self.cine_crudo_seed  # el pick del usuario aplica a TODOS los métodos (COM, Stasis, Hopkins, GammaSync)
-			result = motion_correct_projections(
-				projections,
-				axis=axis,
-				method=method,
-				threshold_frac=threshold,
-				seed=seed,
-				max_abs_shift_px=4.0,
-				smooth_sigma=1.0,
-			)
+			ref_idx = int(getattr(self, "_cine_crudo_current_frame", 0))
+			if method == "auto":
+				# Auto: correr varios métodos y elegir el que minimiza shift residual en Y.
+				from core.raw_projections import center_of_mass_tracking
+				candidates = ["com", "odyssey", "stasis", "hopkins", "gammasync", "threshold"]
+				best_result = None
+				best_method = None
+				best_score = 1e18
+				for m in candidates:
+					res_m = motion_correct_projections(
+						projections,
+						axis=axis,
+						method=m,
+						threshold_frac=threshold,
+						seed=seed,
+						max_abs_shift_px=4.0,
+						smooth_sigma=1.0,
+						ref_index=ref_idx,
+					)
+					ty_m = center_of_mass_tracking(np.asarray(res_m.get("corrected"), dtype=np.float64), axis="y")
+					score = float(ty_m.get("max_shift_px", 0.0)) + 0.15 * float(res_m.get("max_shift_px", 0.0))
+					if score < best_score:
+						best_score = score
+						best_result = res_m
+						best_method = m
+				result = best_result
+				self._log(f"Auto-método: elegido {best_method} (score {best_score:.2f}).")
+			else:
+				result = motion_correct_projections(
+					projections,
+					axis=axis,
+					method=method,
+					threshold_frac=threshold,
+					seed=seed,
+					max_abs_shift_px=4.0,
+					smooth_sigma=1.0,
+					ref_index=ref_idx,
+				)
 			self.cine_crudo_motion_result = result
 			self.cine_crudo_corrected_projections = np.asarray(result.get("corrected"), dtype=np.float64)
 			if self.cine_crudo_compare_check is not None:
