@@ -157,6 +157,7 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_seed_mode = False
 		self.cine_crudo_band_upper: float | None = None
 		self.cine_crudo_band_lower: float | None = None
+		self.cine_crudo_compare_line_y: float | None = None
 		self._cine_crudo_drag_marker: str | None = None
 		self.cine_crudo_ref_index: int | None = None
 		self.cine_crudo_corrected_projections = None
@@ -1265,6 +1266,10 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_sino_check.setToolTip("Muestra a la derecha el sinograma vertical Y vs ángulo; con Comparar activo agrega original/corregido como Odyssey.")
 				self.cine_crudo_sino_check.toggled.connect(self._refresh_cine_crudo_view)
 				toolbar4.addWidget(self.cine_crudo_sino_check)
+				self.cine_crudo_compare_line_check = QCheckBox("Línea ref")
+				self.cine_crudo_compare_line_check.setToolTip("Muestra una línea horizontal arrastrable para comparar si el salto quedó alineado entre original/corregido.")
+				self.cine_crudo_compare_line_check.toggled.connect(self._refresh_cine_crudo_view)
+				toolbar4.addWidget(self.cine_crudo_compare_line_check)
 				toolbar4.addStretch(1)
 
 				# --- Fila 5 (offset global + curvas + IO): offset X/Y + curvas + exportar/importar/grabar DICOM ---
@@ -6153,6 +6158,23 @@ class MainWindow(QMainWindow):
 		}
 		return np.array(colors.get(name, colors["arena"]), dtype=np.float64)
 
+	def _draw_cine_crudo_reference_line(self, rgb: np.ndarray, H: int) -> np.ndarray:
+		show_line = bool(hasattr(self, "cine_crudo_compare_line_check") and self.cine_crudo_compare_line_check.isChecked())
+		if not show_line:
+			return rgb
+		if self.cine_crudo_compare_line_y is None:
+			if self.cine_crudo_seed is not None:
+				self.cine_crudo_compare_line_y = float(self.cine_crudo_seed[0])
+			else:
+				self.cine_crudo_compare_line_y = 0.5 * float(H - 1)
+		y = int(np.clip(round(float(self.cine_crudo_compare_line_y)), 0, max(0, rgb.shape[0] - 1)))
+		marker = self._cine_crudo_marker_color()
+		out = rgb.copy()
+		out[y, :, :] = (0.18 * out[y, :, :].astype(np.float64) + 0.82 * marker).astype(np.uint8)
+		if y + 1 < out.shape[0]:
+			out[y + 1, :, :] = (0.58 * out[y + 1, :, :].astype(np.float64) + 0.42 * marker).astype(np.uint8)
+		return out
+
 	def _append_cine_crudo_sinogram_panel(self, rgb: np.ndarray, frames_arr: np.ndarray, corrected_frames_arr: np.ndarray | None, frame_idx: int) -> np.ndarray:
 		show_sino = bool(hasattr(self, "cine_crudo_sino_check") and self.cine_crudo_sino_check.isChecked())
 		if not show_sino:
@@ -6280,6 +6302,7 @@ class MainWindow(QMainWindow):
 					rgb_corr = (np.asarray(cmap(img_corr)[..., :3]) * 255).astype(np.uint8)
 					rgb = np.concatenate([rgb, rgb_corr], axis=1)
 				rgb = self._append_cine_crudo_sinogram_panel(rgb, frames_arr, corrected_frames_arr, a)
+				rgb = self._draw_cine_crudo_reference_line(rgb, H)
 				frames.append(self._rgb_frame_to_qpixmap_raw(rgb))
 		except Exception:
 			for a in range(frames_arr.shape[0]):
@@ -6867,6 +6890,7 @@ class MainWindow(QMainWindow):
 			self.cine_crudo_seed_mode = False
 			self.cine_crudo_band_upper = None
 			self.cine_crudo_band_lower = None
+			self.cine_crudo_compare_line_y = None
 			self._cine_crudo_drag_marker = None
 			self.cine_crudo_ref_index = None
 			self.cine_crudo_corrected_projections = None
@@ -7136,6 +7160,7 @@ class MainWindow(QMainWindow):
 			self.cine_crudo_seed = None
 			self.cine_crudo_band_upper = None
 			self.cine_crudo_band_lower = None
+			self.cine_crudo_compare_line_y = None
 			self._cine_crudo_drag_marker = None
 			self._log("Selección de órgano: modo automático (seed limpiado).")
 			self._refresh_cine_crudo_view()
@@ -7160,6 +7185,14 @@ class MainWindow(QMainWindow):
 			if abs(ry0 - yl) <= hit_tol:
 				self._cine_crudo_drag_marker = "lower"
 				return
+		show_ref = bool(hasattr(self, "cine_crudo_compare_line_check") and self.cine_crudo_compare_line_check.isChecked())
+		if not self.cine_crudo_seed_mode and show_ref:
+			line_y = self.cine_crudo_compare_line_y
+			if line_y is None:
+				line_y = float(self.cine_crudo_seed[0]) if self.cine_crudo_seed is not None else 0.5 * float(H_map - 1)
+			if abs(ry0 - float(line_y)) <= 6.0:
+				self._cine_crudo_drag_marker = "compare_line"
+				return
 		if not self.cine_crudo_seed_mode:
 			return
 		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
@@ -7172,6 +7205,8 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_seed_btn.setChecked(False)
 		self.cine_crudo_seed_btn.blockSignals(False)
 		self.cine_crudo_seed = (ry, rx)  # (y, x) en coordenadas de matriz
+		if self.cine_crudo_compare_line_y is None:
+			self.cine_crudo_compare_line_y = float(ry)
 		if hasattr(self, "cine_crudo_roi_mode_combo") and "banda" in str(self.cine_crudo_roi_mode_combo.currentText()).lower():
 			r = float(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 8.0
 			self.cine_crudo_band_upper = float(np.clip(ry - r, 0, H_map - 1))
@@ -7180,13 +7215,17 @@ class MainWindow(QMainWindow):
 		self._refresh_cine_crudo_view()
 
 	def _on_cine_crudo_image_dragged(self, event):
-		if self._cine_crudo_drag_marker not in ("upper", "lower"):
+		if self._cine_crudo_drag_marker not in ("upper", "lower", "compare_line"):
 			return
 		pos = self._cine_crudo_event_to_matrix(event)
 		if pos is None:
 			return
 		ry, _rx, H, _W = pos
 		margin = 2.0
+		if self._cine_crudo_drag_marker == "compare_line":
+			self.cine_crudo_compare_line_y = float(np.clip(ry, 0, H - 1.0))
+			self._refresh_cine_crudo_view()
+			return
 		if self._cine_crudo_drag_marker == "upper":
 			lower = self.cine_crudo_band_lower
 			if lower is None and self.cine_crudo_seed is not None:
@@ -7213,6 +7252,8 @@ class MainWindow(QMainWindow):
 				f"Markers Banda Y ajustados: upper={self.cine_crudo_band_upper:.1f}, "
 				f"lower={self.cine_crudo_band_lower:.1f}."
 			)
+		elif self._cine_crudo_drag_marker == "compare_line":
+			self._log(f"Línea de referencia ajustada: y={self.cine_crudo_compare_line_y:.1f}.")
 		self._cine_crudo_drag_marker = None
 
 	def _on_cine_crudo_source_changed(self, source: str):
