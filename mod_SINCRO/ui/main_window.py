@@ -1175,6 +1175,13 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_roi_mode_combo.setToolTip("Caja: ventana local alrededor del click. Banda Y: dos líneas horizontales upper/lower; usa toda la franja cardíaca y penaliza focos alejados en X para reducir hígado/intestino.")
 				self.cine_crudo_roi_mode_combo.currentTextChanged.connect(self._refresh_cine_crudo_view)
 				toolbar3.addWidget(self.cine_crudo_roi_mode_combo)
+				toolbar3.addWidget(QLabel("Color"))
+				self.cine_crudo_marker_color_combo = QComboBox()
+				self.cine_crudo_marker_color_combo.addItems(["Arena", "Cian", "Blanco", "Negro", "Magenta", "Verde"])
+				self.cine_crudo_marker_color_combo.setMaximumWidth(86)
+				self.cine_crudo_marker_color_combo.setToolTip("Color de cruz, markers y línea de frame del sinograma. Cambialo según el colormap/contraste.")
+				self.cine_crudo_marker_color_combo.currentTextChanged.connect(self._refresh_cine_crudo_view)
+				toolbar3.addWidget(self.cine_crudo_marker_color_combo)
 				self.cine_crudo_liver_suppress_check = QCheckBox("Atenuar hígado")
 				self.cine_crudo_liver_suppress_check.setToolTip("Atenúa focos hepato-intestinales SOLO para el tracking, guiado por los markers Y. No modifica las cuentas usadas para corregir ni el DICOM exportado.")
 				toolbar3.addWidget(self.cine_crudo_liver_suppress_check)
@@ -6121,16 +6128,30 @@ class MainWindow(QMainWindow):
 			return None
 		projections = np.asarray(self.study.cube, dtype=np.float64)
 		H, W = int(projections.shape[2]), int(projections.shape[3])
-		zoom = float(self.preview_zoom.get("cine_crudo", 1.0))
 		lw, lh = label.width(), label.height()
 		pw, ph = pix.width(), pix.height()
-		scale = min(lw / max(1, pw), lh / max(1, ph)) * zoom
+		shown = label.pixmap()
+		if shown is not None and not shown.isNull():
+			lw, lh = shown.width(), shown.height()
+		scale = min(lw / max(1, pw), lh / max(1, ph))
 		dw, dh = pw * scale, ph * scale
-		x0 = (lw - dw) / 2.0
-		y0 = (lh - dh) / 2.0
+		x0 = (label.width() - dw) / 2.0
+		y0 = (label.height() - dh) / 2.0
 		rx = (event.pos().x() - x0) / max(1e-6, scale)
 		ry = (event.pos().y() - y0) / max(1e-6, scale)
 		return float(np.clip(ry, 0, H - 1)), float(np.clip(rx, 0, W - 1)), H, W
+
+	def _cine_crudo_marker_color(self) -> np.ndarray:
+		name = str(self.cine_crudo_marker_color_combo.currentText()).lower() if hasattr(self, "cine_crudo_marker_color_combo") else "arena"
+		colors = {
+			"cian": (80, 220, 235),
+			"blanco": (245, 245, 235),
+			"negro": (15, 18, 20),
+			"magenta": (230, 90, 190),
+			"verde": (95, 210, 130),
+			"arena": (188, 174, 122),
+		}
+		return np.array(colors.get(name, colors["arena"]), dtype=np.float64)
 
 	def _append_cine_crudo_sinogram_panel(self, rgb: np.ndarray, frames_arr: np.ndarray, corrected_frames_arr: np.ndarray | None, frame_idx: int) -> np.ndarray:
 		show_sino = bool(hasattr(self, "cine_crudo_sino_check") and self.cine_crudo_sino_check.isChecked())
@@ -6148,7 +6169,7 @@ class MainWindow(QMainWindow):
 				img = np.clip(prof / max(1e-6, p99), 0, 1)
 				panel = (np.asarray(cmap(img)[..., :3]) * 255).astype(np.uint8)  # vertical: ang rows × Y cols
 				row = int(np.clip(frame_idx, 0, panel.shape[0] - 1))
-				panel[row, :, :] = (170, 155, 110)
+				panel[row, :, :] = self._cine_crudo_marker_color().astype(np.uint8)
 				panels.append(panel)
 			sino = np.concatenate(panels, axis=1) if len(panels) > 1 else panels[0]
 			gap = np.full((rgb.shape[0], 4, 3), 18, dtype=np.uint8)
@@ -6226,17 +6247,17 @@ class MainWindow(QMainWindow):
 					rgb = rgb.copy()
 					sy, sx = int(round(self.cine_crudo_seed[0])), int(round(self.cine_crudo_seed[1]))
 					H0, W0 = rgb.shape[0], rgb.shape[1]
-					marker = np.array([178, 164, 112], dtype=np.float64)
+					marker = self._cine_crudo_marker_color()
 
 					def _hline(yy, xa, xb):
 						yy = int(np.clip(yy, 0, H0 - 1))
 						xa = int(np.clip(xa, 0, W0 - 1)); xb = int(np.clip(xb, 0, W0 - 1))
-						rgb[yy, xa:xb + 1] = (0.62 * rgb[yy, xa:xb + 1].astype(np.float64) + 0.38 * marker).astype(np.uint8)
+						rgb[yy, xa:xb + 1] = (0.35 * rgb[yy, xa:xb + 1].astype(np.float64) + 0.65 * marker).astype(np.uint8)
 
 					def _vline(xx, ya, yb):
 						xx = int(np.clip(xx, 0, W0 - 1))
 						ya = int(np.clip(ya, 0, H0 - 1)); yb = int(np.clip(yb, 0, H0 - 1))
-						rgb[ya:yb + 1, xx] = (0.62 * rgb[ya:yb + 1, xx].astype(np.float64) + 0.38 * marker).astype(np.uint8)
+						rgb[ya:yb + 1, xx] = (0.35 * rgb[ya:yb + 1, xx].astype(np.float64) + 0.65 * marker).astype(np.uint8)
 
 					# Caja ROI o banda horizontal (upper/lower) si el radio > 0.
 					if roi_r > 0:
@@ -7132,10 +7153,11 @@ class MainWindow(QMainWindow):
 		bounds = self._cine_crudo_band_bounds(H_map) if "banda" in roi_mode else None
 		if not self.cine_crudo_seed_mode and bounds is not None:
 			yu, yl = bounds
-			if abs(ry0 - yu) <= 2.5:
+			hit_tol = 5.0
+			if abs(ry0 - yu) <= hit_tol:
 				self._cine_crudo_drag_marker = "upper"
 				return
-			if abs(ry0 - yl) <= 2.5:
+			if abs(ry0 - yl) <= hit_tol:
 				self._cine_crudo_drag_marker = "lower"
 				return
 		if not self.cine_crudo_seed_mode:
