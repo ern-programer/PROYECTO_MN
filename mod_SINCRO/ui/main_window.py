@@ -159,6 +159,7 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_band_lower: float | None = None
 		self.cine_crudo_compare_line_y: float | None = None
 		self._cine_crudo_drag_marker: str | None = None
+		self._cine_crudo_last_drag_refresh = 0.0
 		self.cine_crudo_ref_index: int | None = None
 		self.cine_crudo_corrected_projections = None
 		self.cine_crudo_motion_result = None
@@ -1340,9 +1341,9 @@ class MainWindow(QMainWindow):
 			self.preview_labels[name] = label
 			self.preview_zoom[name] = 1.0
 			if name == "cine_crudo":
-				label.mousePressEvent = self._on_cine_crudo_image_clicked
-				label.mouseMoveEvent = self._on_cine_crudo_image_dragged
-				label.mouseReleaseEvent = self._on_cine_crudo_image_released
+				label.mousePressEvent = self._on_cine_crudo_mouse_press_safe
+				label.mouseMoveEvent = self._on_cine_crudo_mouse_move_safe
+				label.mouseReleaseEvent = self._on_cine_crudo_mouse_release_safe
 			scroller = QScrollArea()
 			scroller.setWidgetResizable(False)
 			scroller.setWidget(label)
@@ -7167,6 +7168,27 @@ class MainWindow(QMainWindow):
 		else:
 			self._log("Selección de órgano: hacé CLICK en el corazón sobre la imagen de cine_crudo.")
 
+	def _on_cine_crudo_mouse_press_safe(self, event):
+		try:
+			self._on_cine_crudo_image_clicked(event)
+		except Exception as exc:
+			self._cine_crudo_drag_marker = None
+			self._log(f"[WARN] Evento mouse cine_crudo (press) falló: {exc}")
+
+	def _on_cine_crudo_mouse_move_safe(self, event):
+		try:
+			self._on_cine_crudo_image_dragged(event)
+		except Exception as exc:
+			self._cine_crudo_drag_marker = None
+			self._log(f"[WARN] Evento mouse cine_crudo (drag) falló: {exc}")
+
+	def _on_cine_crudo_mouse_release_safe(self, event):
+		try:
+			self._on_cine_crudo_image_released(event)
+		except Exception as exc:
+			self._cine_crudo_drag_marker = None
+			self._log(f"[WARN] Evento mouse cine_crudo (release) falló: {exc}")
+
 	def _on_cine_crudo_image_clicked(self, event):
 		"""Captura el click del usuario sobre la imagen de cine_crudo para elegir el órgano (corazón)."""
 		pos = self._cine_crudo_event_to_matrix(event)
@@ -7224,7 +7246,10 @@ class MainWindow(QMainWindow):
 		margin = 2.0
 		if self._cine_crudo_drag_marker == "compare_line":
 			self.cine_crudo_compare_line_y = float(np.clip(ry, 0, H - 1.0))
-			self._refresh_cine_crudo_view()
+			now = perf_counter()
+			if now - float(getattr(self, "_cine_crudo_last_drag_refresh", 0.0)) > 0.06:
+				self._cine_crudo_last_drag_refresh = now
+				self._refresh_cine_crudo_view()
 			return
 		if self._cine_crudo_drag_marker == "upper":
 			lower = self.cine_crudo_band_lower
@@ -7244,17 +7269,24 @@ class MainWindow(QMainWindow):
 			self.cine_crudo_roi_spin.blockSignals(True)
 			self.cine_crudo_roi_spin.setValue(int(round(max(1.0, 0.5 * (y1 - y0)))))
 			self.cine_crudo_roi_spin.blockSignals(False)
-		self._refresh_cine_crudo_view()
+		now = perf_counter()
+		if now - float(getattr(self, "_cine_crudo_last_drag_refresh", 0.0)) > 0.06:
+			self._cine_crudo_last_drag_refresh = now
+			self._refresh_cine_crudo_view()
 
 	def _on_cine_crudo_image_released(self, event):
 		if self._cine_crudo_drag_marker in ("upper", "lower"):
+			upper = float(self.cine_crudo_band_upper) if self.cine_crudo_band_upper is not None else float("nan")
+			lower = float(self.cine_crudo_band_lower) if self.cine_crudo_band_lower is not None else float("nan")
 			self._log(
-				f"Markers Banda Y ajustados: upper={self.cine_crudo_band_upper:.1f}, "
-				f"lower={self.cine_crudo_band_lower:.1f}."
+				f"Markers Banda Y ajustados: upper={upper:.1f}, "
+				f"lower={lower:.1f}."
 			)
 		elif self._cine_crudo_drag_marker == "compare_line":
-			self._log(f"Línea de referencia ajustada: y={self.cine_crudo_compare_line_y:.1f}.")
+			line_y = float(self.cine_crudo_compare_line_y) if self.cine_crudo_compare_line_y is not None else float("nan")
+			self._log(f"Línea de referencia ajustada: y={line_y:.1f}.")
 		self._cine_crudo_drag_marker = None
+		self._refresh_cine_crudo_view()
 
 	def _on_cine_crudo_source_changed(self, source: str):
 		self._load_cine_crudo_frames(str(source))
