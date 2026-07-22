@@ -13,7 +13,7 @@ from time import perf_counter
 import numpy as np
 from PyQt6.QtCore import QSize, Qt, QSettings, QTimer
 from PyQt6.QtCore import QUrl
-from PyQt6.QtGui import QDesktopServices, QIcon, QMovie, QPixmap, QColor, QImage
+from PyQt6.QtGui import QDesktopServices, QIcon, QMovie, QPixmap, QColor, QImage, QCursor
 from PyQt6.QtWidgets import (
 	QApplication,
 	QFileDialog,
@@ -159,6 +159,7 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_band_lower: float | None = None
 		self.cine_crudo_compare_line_y: float | None = None
 		self._cine_crudo_drag_marker: str | None = None
+		self._cine_crudo_hover_marker: str | None = None
 		self._cine_crudo_last_drag_refresh = 0.0
 		self.cine_crudo_ref_index: int | None = None
 		self.cine_crudo_corrected_projections = None
@@ -1103,6 +1104,11 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_frame_label = QLabel("--/--")
 				self.cine_crudo_frame_label.setStyleSheet("color:#444;")
 				toolbar.addWidget(self.cine_crudo_frame_label)
+				self.cine_crudo_drag_label = QLabel("drag: —")
+				self.cine_crudo_drag_label.setMinimumWidth(118)
+				self.cine_crudo_drag_label.setStyleSheet("color:#1f3b5b; font-weight:600;")
+				self.cine_crudo_drag_label.setToolTip("Indica qué guía se va a arrastrar: upper, lower o ref.")
+				toolbar.addWidget(self.cine_crudo_drag_label)
 
 				# --- Fila 2 (toolbar motion correction): método + eje + threshold mejorado + acciones ---
 				toolbar2 = QHBoxLayout()
@@ -1264,9 +1270,15 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_compare_check.toggled.connect(self._refresh_cine_crudo_view)
 				toolbar4.addWidget(self.cine_crudo_compare_check)
 				self.cine_crudo_sino_check = QCheckBox("Sinograma")
-				self.cine_crudo_sino_check.setToolTip("Muestra a la derecha el sinograma vertical Y vs ángulo; con Comparar activo agrega original/corregido como Odyssey.")
+				self.cine_crudo_sino_check.setToolTip("Muestra a la derecha el sinograma; con Comparar activo agrega original/corregido como Odyssey.")
 				self.cine_crudo_sino_check.toggled.connect(self._refresh_cine_crudo_view)
 				toolbar4.addWidget(self.cine_crudo_sino_check)
+				self.cine_crudo_sino_axis_combo = QComboBox()
+				self.cine_crudo_sino_axis_combo.addItems(["Sinograma Y", "Sinograma X"])
+				self.cine_crudo_sino_axis_combo.setMaximumWidth(118)
+				self.cine_crudo_sino_axis_combo.setToolTip("Y: perfil horizontal por ángulo. X: perfil vertical por ángulo.")
+				self.cine_crudo_sino_axis_combo.currentTextChanged.connect(self._refresh_cine_crudo_view)
+				toolbar4.addWidget(self.cine_crudo_sino_axis_combo)
 				self.cine_crudo_compare_line_check = QCheckBox("Línea ref")
 				self.cine_crudo_compare_line_check.setToolTip("Muestra una línea horizontal arrastrable para comparar si el salto quedó alineado entre original/corregido.")
 				self.cine_crudo_compare_line_check.toggled.connect(self._refresh_cine_crudo_view)
@@ -1313,6 +1325,16 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_import_btn.setToolTip("Vuelve a cargar una corrección guardada (CSV o NPZ): aplica los shifts Y/X por frame al estudio actual. Podés seguir ajustando con las flechas, Comparar o Grabar DICOM.")
 				self.cine_crudo_import_btn.clicked.connect(self._import_cine_crudo_correction)
 				toolbar5.addWidget(self.cine_crudo_import_btn)
+				self.cine_crudo_save_visual_btn = QToolButton()
+				self.cine_crudo_save_visual_btn.setText("Guardar visual")
+				self.cine_crudo_save_visual_btn.setToolTip("Guarda configuración visual de motion correction: color, Banda Y, línea ref, threshold, método/eje y sinograma.")
+				self.cine_crudo_save_visual_btn.clicked.connect(self._save_cine_crudo_visual_config)
+				toolbar5.addWidget(self.cine_crudo_save_visual_btn)
+				self.cine_crudo_load_visual_btn = QToolButton()
+				self.cine_crudo_load_visual_btn.setText("Cargar visual")
+				self.cine_crudo_load_visual_btn.setToolTip("Carga una configuración visual guardada para repetir la misma lectura/overlay.")
+				self.cine_crudo_load_visual_btn.clicked.connect(self._load_cine_crudo_visual_config)
+				toolbar5.addWidget(self.cine_crudo_load_visual_btn)
 				self.cine_crudo_save_dcm_btn = QToolButton()
 				self.cine_crudo_save_dcm_btn.setText("Grabar DICOM")
 				self.cine_crudo_save_dcm_btn.setToolTip("Graba las proyecciones corregidas como un DICOM GATED TOMO nuevo (misma estructura y geometría que el original, re-cargable por SINCRO o Xeleris).")
@@ -1707,6 +1729,7 @@ class MainWindow(QMainWindow):
 			"ecg_marcapasos": bool(self.ecg_marcapasos_check.isChecked()),
 			"ecg_observaciones": str(self.ecg_obs_edit.text()),
 			"ecg_file_path": str(self.ecg_file_path),
+			"cine_crudo_visual_config": self._collect_cine_crudo_visual_config(),
 			"updated_at": datetime.now().isoformat(timespec="seconds"),
 		}
 
@@ -1866,6 +1889,10 @@ class MainWindow(QMainWindow):
 				self.ecg_preview_label.setText(f"ECG adjuntado: {os.path.basename(self.ecg_file_path)}")
 			else:
 				self.ecg_preview_label.setText("Sin ECG cargado")
+		if "cine_crudo_visual_config" in params:
+			cfg = params.get("cine_crudo_visual_config")
+			if isinstance(cfg, dict):
+				self._apply_cine_crudo_visual_config(cfg, refresh=True)
 
 	def save_current_preset(self):
 		patient = self._current_patient_key()
@@ -6147,6 +6174,137 @@ class MainWindow(QMainWindow):
 		ry = (event.pos().y() - y0) / max(1e-6, scale)
 		return float(np.clip(ry, 0, H - 1)), float(np.clip(rx, 0, W - 1)), H, W, float(rx)
 
+	def _cine_crudo_marker_at_event(self, event) -> str | None:
+		pos = self._cine_crudo_event_to_matrix(event)
+		if pos is None:
+			return None
+		ry0, _rx0, H_map, W_map, rx_raw = pos
+		show_ref = bool(hasattr(self, "cine_crudo_compare_line_check") and self.cine_crudo_compare_line_check.isChecked())
+		line_y = self.cine_crudo_compare_line_y
+		if line_y is None:
+			line_y = float(self.cine_crudo_seed[0]) if self.cine_crudo_seed is not None else 0.5 * float(H_map - 1)
+		if not self.cine_crudo_seed_mode and show_ref and rx_raw >= float(W_map):
+			if abs(ry0 - float(line_y)) <= 6.0:
+				return "compare_line"
+		roi_mode = str(self.cine_crudo_roi_mode_combo.currentText()).lower() if hasattr(self, "cine_crudo_roi_mode_combo") else "caja"
+		bounds = self._cine_crudo_band_bounds(H_map) if "banda" in roi_mode else None
+		if not self.cine_crudo_seed_mode and bounds is not None and rx_raw < float(W_map):
+			yu, yl = bounds
+			if abs(ry0 - yu) <= 5.0:
+				return "upper"
+			if abs(ry0 - yl) <= 5.0:
+				return "lower"
+		if not self.cine_crudo_seed_mode and show_ref:
+			if abs(ry0 - float(line_y)) <= 6.0:
+				return "compare_line"
+		return None
+
+	def _cine_crudo_set_drag_status(self, marker: str | None):
+		label = marker or "—"
+		if marker == "compare_line":
+			label = "ref"
+		if hasattr(self, "cine_crudo_drag_label"):
+			self.cine_crudo_drag_label.setText(f"drag: {label}")
+		self._cine_crudo_hover_marker = marker
+		preview = self.preview_labels.get("cine_crudo") if hasattr(self, "preview_labels") else None
+		if preview is not None:
+			preview.setCursor(QCursor(Qt.CursorShape.SizeVerCursor if marker else Qt.CursorShape.ArrowCursor))
+
+	def _collect_cine_crudo_visual_config(self) -> dict:
+		return {
+			"version": 1,
+			"method": str(self.cine_crudo_method_combo.currentText()) if hasattr(self, "cine_crudo_method_combo") else "Sinusoide",
+			"axis": str(self.cine_crudo_axis_combo.currentText()) if hasattr(self, "cine_crudo_axis_combo") else "Y",
+			"threshold": float(self._cine_crudo_threshold_value()),
+			"roi_mode": str(self.cine_crudo_roi_mode_combo.currentText()) if hasattr(self, "cine_crudo_roi_mode_combo") else "Caja",
+			"roi_radius": int(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 12,
+			"marker_color": str(self.cine_crudo_marker_color_combo.currentText()) if hasattr(self, "cine_crudo_marker_color_combo") else "Arena",
+			"band_upper": None if self.cine_crudo_band_upper is None else float(self.cine_crudo_band_upper),
+			"band_lower": None if self.cine_crudo_band_lower is None else float(self.cine_crudo_band_lower),
+			"reference_line_y": None if self.cine_crudo_compare_line_y is None else float(self.cine_crudo_compare_line_y),
+			"show_reference_line": bool(hasattr(self, "cine_crudo_compare_line_check") and self.cine_crudo_compare_line_check.isChecked()),
+			"show_sinogram": bool(hasattr(self, "cine_crudo_sino_check") and self.cine_crudo_sino_check.isChecked()),
+			"sinogram_axis": str(self.cine_crudo_sino_axis_combo.currentText()) if hasattr(self, "cine_crudo_sino_axis_combo") else "Sinograma Y",
+			"show_mask": bool(self.cine_crudo_mask_check is not None and self.cine_crudo_mask_check.isChecked()),
+			"liver_suppression_enabled": bool(hasattr(self, "cine_crudo_liver_suppress_check") and self.cine_crudo_liver_suppress_check.isChecked()),
+			"liver_suppression_pct": int(self.cine_crudo_liver_suppress_spin.value()) if hasattr(self, "cine_crudo_liver_suppress_spin") else 60,
+		}
+
+	def _apply_cine_crudo_visual_config(self, cfg: dict, refresh: bool = True):
+		if hasattr(self, "cine_crudo_method_combo") and "method" in cfg:
+			self.cine_crudo_method_combo.setCurrentText(str(cfg["method"]))
+		if hasattr(self, "cine_crudo_axis_combo") and "axis" in cfg:
+			self.cine_crudo_axis_combo.setCurrentText(str(cfg["axis"]))
+		if "threshold" in cfg and hasattr(self, "cine_crudo_threshold_slider"):
+			thr = int(round(float(cfg["threshold"]) * 100.0))
+			self.cine_crudo_threshold_slider.setValue(int(np.clip(thr, 1, 100)))
+		if hasattr(self, "cine_crudo_roi_mode_combo") and "roi_mode" in cfg:
+			self.cine_crudo_roi_mode_combo.setCurrentText(str(cfg["roi_mode"]))
+		if hasattr(self, "cine_crudo_roi_spin") and "roi_radius" in cfg:
+			self.cine_crudo_roi_spin.setValue(int(np.clip(int(cfg["roi_radius"]), self.cine_crudo_roi_spin.minimum(), self.cine_crudo_roi_spin.maximum())))
+		if hasattr(self, "cine_crudo_marker_color_combo") and "marker_color" in cfg:
+			self.cine_crudo_marker_color_combo.setCurrentText(str(cfg["marker_color"]))
+		self.cine_crudo_band_upper = None if cfg.get("band_upper") is None else float(cfg.get("band_upper"))
+		self.cine_crudo_band_lower = None if cfg.get("band_lower") is None else float(cfg.get("band_lower"))
+		self.cine_crudo_compare_line_y = None if cfg.get("reference_line_y") is None else float(cfg.get("reference_line_y"))
+		if hasattr(self, "cine_crudo_compare_line_check") and "show_reference_line" in cfg:
+			self.cine_crudo_compare_line_check.setChecked(bool(cfg["show_reference_line"]))
+		if hasattr(self, "cine_crudo_sino_check") and "show_sinogram" in cfg:
+			self.cine_crudo_sino_check.setChecked(bool(cfg["show_sinogram"]))
+		if hasattr(self, "cine_crudo_sino_axis_combo") and "sinogram_axis" in cfg:
+			self.cine_crudo_sino_axis_combo.setCurrentText(str(cfg["sinogram_axis"]))
+		if self.cine_crudo_mask_check is not None and "show_mask" in cfg:
+			self.cine_crudo_mask_check.setChecked(bool(cfg["show_mask"]))
+		if hasattr(self, "cine_crudo_liver_suppress_check") and "liver_suppression_enabled" in cfg:
+			self.cine_crudo_liver_suppress_check.setChecked(bool(cfg["liver_suppression_enabled"]))
+		if hasattr(self, "cine_crudo_liver_suppress_spin") and "liver_suppression_pct" in cfg:
+			self.cine_crudo_liver_suppress_spin.setValue(int(np.clip(int(cfg["liver_suppression_pct"]), self.cine_crudo_liver_suppress_spin.minimum(), self.cine_crudo_liver_suppress_spin.maximum())))
+		if refresh:
+			self._refresh_cine_crudo_view()
+
+	def _save_cine_crudo_visual_config(self):
+		try:
+			default_path = os.path.join(self.presets_dir, "cine_crudo_visual_config.json")
+			path, _flt = QFileDialog.getSaveFileName(
+				self, "Guardar configuración visual cine_crudo", default_path,
+				"Configuración JSON (*.json);;Todos los archivos (*.*)",
+			)
+			if not path:
+				return
+			base, ext = os.path.splitext(path)
+			if ext.lower() != ".json":
+				path = base + ".json"
+			payload = self._collect_cine_crudo_visual_config()
+			payload["saved_at"] = datetime.now().isoformat(timespec="seconds")
+			payload["study_uid"] = str(getattr(self.study, "study_instance_uid", "") or "") if self.study is not None else ""
+			payload["patient_id"] = str(getattr(self.study, "patient_id", "") or "") if self.study is not None else ""
+			with open(path, "wb") as fh:
+				fh.write((json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+			self._log(f"Configuración visual cine_crudo guardada: {os.path.basename(path)}")
+			self.statusBar().showMessage("Configuración visual cine_crudo guardada")
+		except Exception as exc:
+			self._log(f"[WARN] Guardar configuración visual falló: {exc}")
+			QMessageBox.warning(self, "SINCRO", f"No se pudo guardar la configuración visual:\n{exc}")
+
+	def _load_cine_crudo_visual_config(self):
+		try:
+			path, _flt = QFileDialog.getOpenFileName(
+				self, "Cargar configuración visual cine_crudo", self.presets_dir,
+				"Configuración JSON (*.json);;Todos los archivos (*.*)",
+			)
+			if not path:
+				return
+			with open(path, "rb") as fh:
+				cfg = json.loads(fh.read().decode("utf-8", errors="replace"))
+			if not isinstance(cfg, dict):
+				raise ValueError("El archivo no contiene un objeto JSON válido.")
+			self._apply_cine_crudo_visual_config(cfg, refresh=True)
+			self._log(f"Configuración visual cine_crudo cargada: {os.path.basename(path)}")
+			self.statusBar().showMessage("Configuración visual cine_crudo cargada")
+		except Exception as exc:
+			self._log(f"[WARN] Cargar configuración visual falló: {exc}")
+			QMessageBox.warning(self, "SINCRO", f"No se pudo cargar la configuración visual:\n{exc}")
+
 	def _cine_crudo_marker_color(self) -> np.ndarray:
 		name = str(self.cine_crudo_marker_color_combo.currentText()).lower() if hasattr(self, "cine_crudo_marker_color_combo") else "arena"
 		colors = {
@@ -6183,16 +6341,28 @@ class MainWindow(QMainWindow):
 		try:
 			import matplotlib.cm as _cm
 			cmap = _cm.get_cmap("hot")
-			profiles = [np.asarray(frames_arr, dtype=np.float64).sum(axis=2)]  # (ang, Y)
+			sino_axis = str(self.cine_crudo_sino_axis_combo.currentText()).lower() if hasattr(self, "cine_crudo_sino_axis_combo") else "sinograma y"
+			profile_axis = 1 if "x" in sino_axis else 2
+			profiles = [np.asarray(frames_arr, dtype=np.float64).sum(axis=profile_axis)]  # (ang, Y) o (ang, X)
 			if corrected_frames_arr is not None:
-				profiles.append(np.asarray(corrected_frames_arr, dtype=np.float64).sum(axis=2))
+				profiles.append(np.asarray(corrected_frames_arr, dtype=np.float64).sum(axis=profile_axis))
 			p99 = max(float(np.percentile(p, 99.0)) or 1.0 for p in profiles)
 			panels = []
+			marker = self._cine_crudo_marker_color().astype(np.uint8)
 			for prof in profiles:
 				img = np.clip(prof / max(1e-6, p99), 0, 1)
 				panel = (np.asarray(cmap(img)[..., :3]) * 255).astype(np.uint8)  # vertical: ang rows × Y cols
 				row = int(np.clip(frame_idx, 0, panel.shape[0] - 1))
-				panel[row, :, :] = self._cine_crudo_marker_color().astype(np.uint8)
+				panel[row, :, :] = marker
+				if profile_axis == 2:
+					bounds = self._cine_crudo_band_bounds(int(frames_arr.shape[1]))
+					if bounds is not None:
+						for yy in bounds:
+							col = int(np.clip(round(float(yy)), 0, panel.shape[1] - 1))
+							panel[:, col, :] = (0.28 * panel[:, col, :].astype(np.float64) + 0.72 * marker).astype(np.uint8)
+					if self.cine_crudo_compare_line_y is not None and bool(hasattr(self, "cine_crudo_compare_line_check") and self.cine_crudo_compare_line_check.isChecked()):
+						col = int(np.clip(round(float(self.cine_crudo_compare_line_y)), 0, panel.shape[1] - 1))
+						panel[:, col, :] = (0.16 * panel[:, col, :].astype(np.float64) + 0.84 * marker).astype(np.uint8)
 				panels.append(panel)
 			sino = np.concatenate(panels, axis=1) if len(panels) > 1 else panels[0]
 			gap = np.full((rgb.shape[0], 4, 3), 18, dtype=np.uint8)
@@ -7180,6 +7350,7 @@ class MainWindow(QMainWindow):
 			self._on_cine_crudo_image_dragged(event)
 		except Exception as exc:
 			self._cine_crudo_drag_marker = None
+			self._cine_crudo_set_drag_status(None)
 			self._log(f"[WARN] Evento mouse cine_crudo (drag) falló: {exc}")
 
 	def _on_cine_crudo_mouse_release_safe(self, event):
@@ -7187,6 +7358,7 @@ class MainWindow(QMainWindow):
 			self._on_cine_crudo_image_released(event)
 		except Exception as exc:
 			self._cine_crudo_drag_marker = None
+			self._cine_crudo_set_drag_status(None)
 			self._log(f"[WARN] Evento mouse cine_crudo (release) falló: {exc}")
 
 	def _on_cine_crudo_image_clicked(self, event):
@@ -7195,31 +7367,11 @@ class MainWindow(QMainWindow):
 		if pos is None:
 			return
 		ry0, rx0, H_map, W_map, rx_raw = pos
-		show_ref = bool(hasattr(self, "cine_crudo_compare_line_check") and self.cine_crudo_compare_line_check.isChecked())
-		line_y = self.cine_crudo_compare_line_y
-		if line_y is None:
-			line_y = float(self.cine_crudo_seed[0]) if self.cine_crudo_seed is not None else 0.5 * float(H_map - 1)
-		# En panel corregido/sinograma, priorizar la línea ref; los markers Banda Y se arrastran desde el panel original.
-		if not self.cine_crudo_seed_mode and show_ref and rx_raw >= float(W_map):
-			if abs(ry0 - float(line_y)) <= 6.0:
-				self._cine_crudo_drag_marker = "compare_line"
-				return
-		# Si ya hay Banda Y, un click cerca de upper/lower empieza drag aunque no esté activo "Elegir corazón".
-		roi_mode = str(self.cine_crudo_roi_mode_combo.currentText()).lower() if hasattr(self, "cine_crudo_roi_mode_combo") else "caja"
-		bounds = self._cine_crudo_band_bounds(H_map) if "banda" in roi_mode else None
-		if not self.cine_crudo_seed_mode and bounds is not None and rx_raw < float(W_map):
-			yu, yl = bounds
-			hit_tol = 5.0
-			if abs(ry0 - yu) <= hit_tol:
-				self._cine_crudo_drag_marker = "upper"
-				return
-			if abs(ry0 - yl) <= hit_tol:
-				self._cine_crudo_drag_marker = "lower"
-				return
-		if not self.cine_crudo_seed_mode and show_ref:
-			if abs(ry0 - float(line_y)) <= 6.0:
-				self._cine_crudo_drag_marker = "compare_line"
-				return
+		marker = self._cine_crudo_marker_at_event(event)
+		if marker is not None:
+			self._cine_crudo_drag_marker = marker
+			self._cine_crudo_set_drag_status(marker)
+			return
 		if not self.cine_crudo_seed_mode:
 			return
 		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
@@ -7238,12 +7390,15 @@ class MainWindow(QMainWindow):
 			r = float(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 8.0
 			self.cine_crudo_band_upper = float(np.clip(ry - r, 0, H_map - 1))
 			self.cine_crudo_band_lower = float(np.clip(ry + r, 0, H_map - 1))
+		self._cine_crudo_set_drag_status(None)
 		self._log(f"Órgano seleccionado por usuario en (y={ry:.1f}, x={rx:.1f}) — el tracking seguirá solo esa componente.")
 		self._refresh_cine_crudo_view()
 
 	def _on_cine_crudo_image_dragged(self, event):
 		if self._cine_crudo_drag_marker not in ("upper", "lower", "compare_line"):
+			self._cine_crudo_set_drag_status(self._cine_crudo_marker_at_event(event))
 			return
+		self._cine_crudo_set_drag_status(self._cine_crudo_drag_marker)
 		pos = self._cine_crudo_event_to_matrix(event)
 		if pos is None:
 			return
@@ -7291,6 +7446,7 @@ class MainWindow(QMainWindow):
 			line_y = float(self.cine_crudo_compare_line_y) if self.cine_crudo_compare_line_y is not None else float("nan")
 			self._log(f"Línea de referencia ajustada: y={line_y:.1f}.")
 		self._cine_crudo_drag_marker = None
+		self._cine_crudo_set_drag_status(self._cine_crudo_marker_at_event(event))
 		self._refresh_cine_crudo_view()
 
 	def _on_cine_crudo_source_changed(self, source: str):
