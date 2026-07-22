@@ -6971,9 +6971,13 @@ class MainWindow(QMainWindow):
 			rx = rx
 		rx = float(np.clip(rx, 0, W - 1))
 		ry = float(np.clip(ry, 0, H - 1))
-		self.cine_crudo_seed = (ry, rx)  # (y, x) en coordenadas de matriz
-		self.cine_crudo_seed_btn.setChecked(False)
 		self.cine_crudo_seed_mode = False
+		# Despresionar el botón SIN emitir toggled(): de lo contrario
+		# _on_cine_crudo_seed_mode_toggled(False) borraría el seed recién fijado.
+		self.cine_crudo_seed_btn.blockSignals(True)
+		self.cine_crudo_seed_btn.setChecked(False)
+		self.cine_crudo_seed_btn.blockSignals(False)
+		self.cine_crudo_seed = (ry, rx)  # (y, x) en coordenadas de matriz
 		self._log(f"Órgano seleccionado por usuario en (y={ry:.1f}, x={rx:.1f}) — el tracking seguirá solo esa componente.")
 		self._refresh_cine_crudo_view()
 
