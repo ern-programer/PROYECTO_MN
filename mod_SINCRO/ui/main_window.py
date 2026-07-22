@@ -6145,7 +6145,7 @@ class MainWindow(QMainWindow):
 		y0 = (label.height() - dh) / 2.0
 		rx = (event.pos().x() - x0) / max(1e-6, scale)
 		ry = (event.pos().y() - y0) / max(1e-6, scale)
-		return float(np.clip(ry, 0, H - 1)), float(np.clip(rx, 0, W - 1)), H, W
+		return float(np.clip(ry, 0, H - 1)), float(np.clip(rx, 0, W - 1)), H, W, float(rx)
 
 	def _cine_crudo_marker_color(self) -> np.ndarray:
 		name = str(self.cine_crudo_marker_color_combo.currentText()).lower() if hasattr(self, "cine_crudo_marker_color_combo") else "arena"
@@ -7194,11 +7194,20 @@ class MainWindow(QMainWindow):
 		pos = self._cine_crudo_event_to_matrix(event)
 		if pos is None:
 			return
-		ry0, rx0, H_map, _W_map = pos
+		ry0, rx0, H_map, W_map, rx_raw = pos
+		show_ref = bool(hasattr(self, "cine_crudo_compare_line_check") and self.cine_crudo_compare_line_check.isChecked())
+		line_y = self.cine_crudo_compare_line_y
+		if line_y is None:
+			line_y = float(self.cine_crudo_seed[0]) if self.cine_crudo_seed is not None else 0.5 * float(H_map - 1)
+		# En panel corregido/sinograma, priorizar la línea ref; los markers Banda Y se arrastran desde el panel original.
+		if not self.cine_crudo_seed_mode and show_ref and rx_raw >= float(W_map):
+			if abs(ry0 - float(line_y)) <= 6.0:
+				self._cine_crudo_drag_marker = "compare_line"
+				return
 		# Si ya hay Banda Y, un click cerca de upper/lower empieza drag aunque no esté activo "Elegir corazón".
 		roi_mode = str(self.cine_crudo_roi_mode_combo.currentText()).lower() if hasattr(self, "cine_crudo_roi_mode_combo") else "caja"
 		bounds = self._cine_crudo_band_bounds(H_map) if "banda" in roi_mode else None
-		if not self.cine_crudo_seed_mode and bounds is not None:
+		if not self.cine_crudo_seed_mode and bounds is not None and rx_raw < float(W_map):
 			yu, yl = bounds
 			hit_tol = 5.0
 			if abs(ry0 - yu) <= hit_tol:
@@ -7207,11 +7216,7 @@ class MainWindow(QMainWindow):
 			if abs(ry0 - yl) <= hit_tol:
 				self._cine_crudo_drag_marker = "lower"
 				return
-		show_ref = bool(hasattr(self, "cine_crudo_compare_line_check") and self.cine_crudo_compare_line_check.isChecked())
 		if not self.cine_crudo_seed_mode and show_ref:
-			line_y = self.cine_crudo_compare_line_y
-			if line_y is None:
-				line_y = float(self.cine_crudo_seed[0]) if self.cine_crudo_seed is not None else 0.5 * float(H_map - 1)
 			if abs(ry0 - float(line_y)) <= 6.0:
 				self._cine_crudo_drag_marker = "compare_line"
 				return
@@ -7242,7 +7247,7 @@ class MainWindow(QMainWindow):
 		pos = self._cine_crudo_event_to_matrix(event)
 		if pos is None:
 			return
-		ry, _rx, H, _W = pos
+		ry, _rx, H, _W, _rx_raw = pos
 		margin = 2.0
 		if self._cine_crudo_drag_marker == "compare_line":
 			self.cine_crudo_compare_line_y = float(np.clip(ry, 0, H - 1.0))
