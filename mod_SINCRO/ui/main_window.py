@@ -1163,6 +1163,7 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_roi_spin.setSuffix(" px")
 				self.cine_crudo_roi_spin.setMaximumWidth(72)
 				self.cine_crudo_roi_spin.setToolTip("Radio de la ventana de tracking alrededor del corazón (tras el click). 0 = desactivado (usa componente global). 10–16 px suele aislar el corazón del hígado en matriz 64².")
+				self.cine_crudo_roi_spin.valueChanged.connect(self._refresh_cine_crudo_view)
 				toolbar3.addWidget(self.cine_crudo_roi_spin)
 				self.cine_crudo_grid_btn = QToolButton()
 				self.cine_crudo_grid_btn.setText("Grilla pick")
@@ -6129,20 +6130,38 @@ class MainWindow(QMainWindow):
 						mask = _select_organ_component(mask, seed=self.cine_crudo_seed, auto=(self.cine_crudo_seed is None))
 					rgb = rgb.copy()
 					rgb[mask] = (0.45 * rgb[mask] + 0.55 * np.array([255, 255, 255])).astype(np.uint8)
-				# Caja ROI de tracking: si hay corazón elegido y radio > 0, dibujar el recuadro
-				# para que el usuario vea la ventana que sigue al corazón (excluye el hígado).
+				# Marcador del corazón elegido + caja ROI de tracking: para que el usuario VEA
+				# dónde pinchó y qué ventana sigue al corazón (excluye el hígado). Se dibuja
+				# siempre que haya seed, con o sin máscara.
 				roi_r = int(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 0
-				if self.cine_crudo_seed is not None and roi_r > 0:
+				if self.cine_crudo_seed is not None:
 					rgb = rgb.copy()
 					sy, sx = int(round(self.cine_crudo_seed[0])), int(round(self.cine_crudo_seed[1]))
 					H0, W0 = rgb.shape[0], rgb.shape[1]
-					y0, y1 = max(0, sy - roi_r), min(H0 - 1, sy + roi_r)
-					x0, x1 = max(0, sx - roi_r), min(W0 - 1, sx + roi_r)
-					box = np.array([0, 255, 0], dtype=np.uint8)
-					rgb[y0, x0:x1 + 1] = box
-					rgb[y1, x0:x1 + 1] = box
-					rgb[y0:y1 + 1, x0] = box
-					rgb[y0:y1 + 1, x1] = box
+					green = np.array([0, 255, 0], dtype=np.uint8)
+
+					def _hline(yy, xa, xb):
+						yy = int(np.clip(yy, 0, H0 - 1))
+						xa = int(np.clip(xa, 0, W0 - 1)); xb = int(np.clip(xb, 0, W0 - 1))
+						rgb[yy, xa:xb + 1] = green
+
+					def _vline(xx, ya, yb):
+						xx = int(np.clip(xx, 0, W0 - 1))
+						ya = int(np.clip(ya, 0, H0 - 1)); yb = int(np.clip(yb, 0, H0 - 1))
+						rgb[ya:yb + 1, xx] = green
+
+					# Caja ROI (borde de 2 px) si el radio > 0.
+					if roi_r > 0:
+						y0, y1 = sy - roi_r, sy + roi_r
+						x0, x1 = sx - roi_r, sx + roi_r
+						for off in (0, 1):
+							_hline(y0 + off, x0, x1); _hline(y1 - off, x0, x1)
+							_vline(x0 + off, y0, y1); _vline(x1 - off, y0, y1)
+					# Cruz (crosshair) en el centro elegido, siempre visible.
+					_hline(sy, sx - 3, sx + 3)
+					_hline(sy - 1, sx - 3, sx + 3)
+					_vline(sx, sy - 3, sy + 3)
+					_vline(sx + 1, sy - 3, sy + 3)
 				if corrected_frames_arr is not None:
 					img_corr = np.clip(corrected_frames_arr[a] / p99, 0, 1)
 					rgb_corr = (np.asarray(cmap(img_corr)[..., :3]) * 255).astype(np.uint8)
