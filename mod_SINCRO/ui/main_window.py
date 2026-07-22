@@ -1165,6 +1165,13 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_roi_spin.setToolTip("Radio de la ventana de tracking alrededor del corazón (tras el click). 0 = desactivado (usa componente global). 10–16 px suele aislar el corazón del hígado en matriz 64².")
 				self.cine_crudo_roi_spin.valueChanged.connect(self._refresh_cine_crudo_view)
 				toolbar3.addWidget(self.cine_crudo_roi_spin)
+				toolbar3.addWidget(QLabel("Tipo"))
+				self.cine_crudo_roi_mode_combo = QComboBox()
+				self.cine_crudo_roi_mode_combo.addItems(["Caja", "Banda Y"])
+				self.cine_crudo_roi_mode_combo.setMaximumWidth(92)
+				self.cine_crudo_roi_mode_combo.setToolTip("Caja: ventana local alrededor del click. Banda Y: dos líneas horizontales upper/lower; usa toda la franja cardíaca y penaliza focos alejados en X para reducir hígado/intestino.")
+				self.cine_crudo_roi_mode_combo.currentTextChanged.connect(self._refresh_cine_crudo_view)
+				toolbar3.addWidget(self.cine_crudo_roi_mode_combo)
 				self.cine_crudo_grid_btn = QToolButton()
 				self.cine_crudo_grid_btn.setText("Grilla pick")
 				self.cine_crudo_grid_btn.setToolTip("Grilla de cortes transaxiales con máscara para discriminar corazón de hígado antes del pick (como Odyssey).")
@@ -6134,6 +6141,7 @@ class MainWindow(QMainWindow):
 				# dónde pinchó y qué ventana sigue al corazón (excluye el hígado). Se dibuja
 				# siempre que haya seed, con o sin máscara.
 				roi_r = int(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 0
+				roi_mode = str(self.cine_crudo_roi_mode_combo.currentText()).lower() if hasattr(self, "cine_crudo_roi_mode_combo") else "caja"
 				if self.cine_crudo_seed is not None:
 					rgb = rgb.copy()
 					sy, sx = int(round(self.cine_crudo_seed[0])), int(round(self.cine_crudo_seed[1]))
@@ -6150,13 +6158,18 @@ class MainWindow(QMainWindow):
 						ya = int(np.clip(ya, 0, H0 - 1)); yb = int(np.clip(yb, 0, H0 - 1))
 						rgb[ya:yb + 1, xx] = green
 
-					# Caja ROI (borde de 2 px) si el radio > 0.
+					# Caja ROI o banda horizontal (upper/lower) si el radio > 0.
 					if roi_r > 0:
 						y0, y1 = sy - roi_r, sy + roi_r
-						x0, x1 = sx - roi_r, sx + roi_r
-						for off in (0, 1):
-							_hline(y0 + off, x0, x1); _hline(y1 - off, x0, x1)
-							_vline(x0 + off, y0, y1); _vline(x1 - off, y0, y1)
+						if "banda" in roi_mode:
+							for off in (0, 1):
+								_hline(y0 + off, 0, W0 - 1)
+								_hline(y1 - off, 0, W0 - 1)
+						else:
+							x0, x1 = sx - roi_r, sx + roi_r
+							for off in (0, 1):
+								_hline(y0 + off, x0, x1); _hline(y1 - off, x0, x1)
+								_vline(x0 + off, y0, y1); _vline(x1 - off, y0, y1)
 					# Cruz (crosshair) en el centro elegido, siempre visible.
 					_hline(sy, sx - 3, sx + 3)
 					_hline(sy - 1, sx - 3, sx + 3)
@@ -6194,6 +6207,7 @@ class MainWindow(QMainWindow):
 			seed = self.cine_crudo_seed  # el pick del usuario aplica a TODOS los métodos (COM, Stasis, Hopkins, GammaSync)
 			angles = getattr(self.study, "angles_deg", None)
 			roi_radius = float(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 0.0
+			roi_mode = "band" if hasattr(self, "cine_crudo_roi_mode_combo") and "banda" in str(self.cine_crudo_roi_mode_combo.currentText()).lower() else "box"
 			ref_idx = int(self.cine_crudo_ref_index if self.cine_crudo_ref_index is not None else getattr(self, "_cine_crudo_current_frame", 0))
 			if method == "auto":
 				# Auto: correr varios métodos y elegir por JITTER real (saltos frame-a-frame),
@@ -6225,6 +6239,7 @@ class MainWindow(QMainWindow):
 						ref_index=ref_idx,
 						angles_deg=angles,
 						roi_radius=roi_radius,
+						roi_mode=roi_mode,
 					)
 					corr_m = np.asarray(res_m.get("corrected"), dtype=np.float64)
 					# Score = jitter residual (lo que realmente se ve como saltos en el cine).
@@ -6249,6 +6264,7 @@ class MainWindow(QMainWindow):
 					ref_index=ref_idx,
 					angles_deg=angles,
 					roi_radius=roi_radius,
+					roi_mode=roi_mode,
 				)
 			self.cine_crudo_motion_result = result
 			self.cine_crudo_corrected_projections = np.asarray(result.get("corrected"), dtype=np.float64)
