@@ -155,6 +155,9 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_seed_btn: QToolButton | None = None
 		self.cine_crudo_seed: tuple[float, float] | None = None
 		self.cine_crudo_seed_mode = False
+		self.cine_crudo_band_upper: float | None = None
+		self.cine_crudo_band_lower: float | None = None
+		self._cine_crudo_drag_marker: str | None = None
 		self.cine_crudo_ref_index: int | None = None
 		self.cine_crudo_corrected_projections = None
 		self.cine_crudo_motion_result = None
@@ -1251,6 +1254,10 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_compare_check.setEnabled(False)
 				self.cine_crudo_compare_check.toggled.connect(self._refresh_cine_crudo_view)
 				toolbar4.addWidget(self.cine_crudo_compare_check)
+				self.cine_crudo_sino_check = QCheckBox("Sinograma")
+				self.cine_crudo_sino_check.setToolTip("Muestra a la derecha el sinograma vertical Y vs ángulo; con Comparar activo agrega original/corregido como Odyssey.")
+				self.cine_crudo_sino_check.toggled.connect(self._refresh_cine_crudo_view)
+				toolbar4.addWidget(self.cine_crudo_sino_check)
 				toolbar4.addStretch(1)
 
 				# --- Fila 5 (offset global + curvas + IO): offset X/Y + curvas + exportar/importar/grabar DICOM ---
@@ -1322,6 +1329,8 @@ class MainWindow(QMainWindow):
 			self.preview_zoom[name] = 1.0
 			if name == "cine_crudo":
 				label.mousePressEvent = self._on_cine_crudo_image_clicked
+				label.mouseMoveEvent = self._on_cine_crudo_image_dragged
+				label.mouseReleaseEvent = self._on_cine_crudo_image_released
 			scroller = QScrollArea()
 			scroller.setWidgetResizable(False)
 			scroller.setWidget(label)
@@ -6092,6 +6101,64 @@ class MainWindow(QMainWindow):
 			qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
 		return QPixmap.fromImage(qimg.copy())
 
+	def _cine_crudo_band_bounds(self, H: int) -> tuple[float, float] | None:
+		if self.cine_crudo_seed is None:
+			return None
+		if self.cine_crudo_band_upper is not None and self.cine_crudo_band_lower is not None:
+			y0 = float(self.cine_crudo_band_upper)
+			y1 = float(self.cine_crudo_band_lower)
+		else:
+			r = float(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 0.0
+			y0 = float(self.cine_crudo_seed[0]) - r
+			y1 = float(self.cine_crudo_seed[0]) + r
+		y0, y1 = sorted((y0, y1))
+		return float(np.clip(y0, 0, H - 1)), float(np.clip(y1, 0, H - 1))
+
+	def _cine_crudo_event_to_matrix(self, event):
+		label = self.preview_labels.get("cine_crudo")
+		pix = self.preview_pixmaps.get("cine_crudo")
+		if label is None or pix is None or pix.isNull() or self.study is None:
+			return None
+		projections = np.asarray(self.study.cube, dtype=np.float64)
+		H, W = int(projections.shape[2]), int(projections.shape[3])
+		zoom = float(self.preview_zoom.get("cine_crudo", 1.0))
+		lw, lh = label.width(), label.height()
+		pw, ph = pix.width(), pix.height()
+		scale = min(lw / max(1, pw), lh / max(1, ph)) * zoom
+		dw, dh = pw * scale, ph * scale
+		x0 = (lw - dw) / 2.0
+		y0 = (lh - dh) / 2.0
+		rx = (event.pos().x() - x0) / max(1e-6, scale)
+		ry = (event.pos().y() - y0) / max(1e-6, scale)
+		return float(np.clip(ry, 0, H - 1)), float(np.clip(rx, 0, W - 1)), H, W
+
+	def _append_cine_crudo_sinogram_panel(self, rgb: np.ndarray, frames_arr: np.ndarray, corrected_frames_arr: np.ndarray | None, frame_idx: int) -> np.ndarray:
+		show_sino = bool(hasattr(self, "cine_crudo_sino_check") and self.cine_crudo_sino_check.isChecked())
+		if not show_sino:
+			return rgb
+		try:
+			import matplotlib.cm as _cm
+			cmap = _cm.get_cmap("hot")
+			profiles = [np.asarray(frames_arr, dtype=np.float64).sum(axis=2)]  # (ang, Y)
+			if corrected_frames_arr is not None:
+				profiles.append(np.asarray(corrected_frames_arr, dtype=np.float64).sum(axis=2))
+			p99 = max(float(np.percentile(p, 99.0)) or 1.0 for p in profiles)
+			panels = []
+			for prof in profiles:
+				img = np.clip(prof / max(1e-6, p99), 0, 1)
+				panel = (np.asarray(cmap(img)[..., :3]) * 255).astype(np.uint8)  # vertical: ang rows × Y cols
+				row = int(np.clip(frame_idx, 0, panel.shape[0] - 1))
+				panel[row, :, :] = (170, 155, 110)
+				panels.append(panel)
+			sino = np.concatenate(panels, axis=1) if len(panels) > 1 else panels[0]
+			gap = np.full((rgb.shape[0], 4, 3), 18, dtype=np.uint8)
+			if sino.shape[0] != rgb.shape[0]:
+				rep = max(1, int(np.ceil(rgb.shape[0] / max(1, sino.shape[0]))))
+				sino = np.repeat(sino, rep, axis=0)[:rgb.shape[0]]
+			return np.concatenate([rgb, gap, sino], axis=1)
+		except Exception:
+			return rgb
+
 	def _load_cine_crudo_frames(self, source: str = "UngGat"):
 		"""Carga frames del cine crudo desde proyecciones en memoria (UngGat o gated)."""
 		self.cine_crudo_timer.stop()
@@ -6152,48 +6219,46 @@ class MainWindow(QMainWindow):
 						mask = _select_organ_component(mask, seed=self.cine_crudo_seed, auto=(self.cine_crudo_seed is None))
 					rgb = rgb.copy()
 					rgb[mask] = (0.45 * rgb[mask] + 0.55 * np.array([255, 255, 255])).astype(np.uint8)
-				# Marcador del corazón elegido + caja ROI de tracking: para que el usuario VEA
-				# dónde pinchó y qué ventana sigue al corazón (excluye el hígado). Se dibuja
-				# siempre que haya seed, con o sin máscara.
+				# Marcador del corazón elegido + ROI/banda de tracking, con estilo sobrio.
 				roi_r = int(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 0
 				roi_mode = str(self.cine_crudo_roi_mode_combo.currentText()).lower() if hasattr(self, "cine_crudo_roi_mode_combo") else "caja"
 				if self.cine_crudo_seed is not None:
 					rgb = rgb.copy()
 					sy, sx = int(round(self.cine_crudo_seed[0])), int(round(self.cine_crudo_seed[1]))
 					H0, W0 = rgb.shape[0], rgb.shape[1]
-					green = np.array([0, 255, 0], dtype=np.uint8)
+					marker = np.array([178, 164, 112], dtype=np.float64)
 
 					def _hline(yy, xa, xb):
 						yy = int(np.clip(yy, 0, H0 - 1))
 						xa = int(np.clip(xa, 0, W0 - 1)); xb = int(np.clip(xb, 0, W0 - 1))
-						rgb[yy, xa:xb + 1] = green
+						rgb[yy, xa:xb + 1] = (0.62 * rgb[yy, xa:xb + 1].astype(np.float64) + 0.38 * marker).astype(np.uint8)
 
 					def _vline(xx, ya, yb):
 						xx = int(np.clip(xx, 0, W0 - 1))
 						ya = int(np.clip(ya, 0, H0 - 1)); yb = int(np.clip(yb, 0, H0 - 1))
-						rgb[ya:yb + 1, xx] = green
+						rgb[ya:yb + 1, xx] = (0.62 * rgb[ya:yb + 1, xx].astype(np.float64) + 0.38 * marker).astype(np.uint8)
 
 					# Caja ROI o banda horizontal (upper/lower) si el radio > 0.
 					if roi_r > 0:
-						y0, y1 = sy - roi_r, sy + roi_r
 						if "banda" in roi_mode:
-							for off in (0, 1):
-								_hline(y0 + off, 0, W0 - 1)
-								_hline(y1 - off, 0, W0 - 1)
+							bounds = self._cine_crudo_band_bounds(H0)
+							if bounds is not None:
+								y0, y1 = bounds
+								_hline(y0, 0, W0 - 1)
+								_hline(y1, 0, W0 - 1)
 						else:
+							y0, y1 = sy - roi_r, sy + roi_r
 							x0, x1 = sx - roi_r, sx + roi_r
-							for off in (0, 1):
-								_hline(y0 + off, x0, x1); _hline(y1 - off, x0, x1)
-								_vline(x0 + off, y0, y1); _vline(x1 - off, y0, y1)
+							_hline(y0, x0, x1); _hline(y1, x0, x1)
+							_vline(x0, y0, y1); _vline(x1, y0, y1)
 					# Cruz (crosshair) en el centro elegido, siempre visible.
 					_hline(sy, sx - 3, sx + 3)
-					_hline(sy - 1, sx - 3, sx + 3)
 					_vline(sx, sy - 3, sy + 3)
-					_vline(sx + 1, sy - 3, sy + 3)
 				if corrected_frames_arr is not None:
 					img_corr = np.clip(corrected_frames_arr[a] / p99, 0, 1)
 					rgb_corr = (np.asarray(cmap(img_corr)[..., :3]) * 255).astype(np.uint8)
 					rgb = np.concatenate([rgb, rgb_corr], axis=1)
+				rgb = self._append_cine_crudo_sinogram_panel(rgb, frames_arr, corrected_frames_arr, a)
 				frames.append(self._rgb_frame_to_qpixmap_raw(rgb))
 		except Exception:
 			for a in range(frames_arr.shape[0]):
@@ -6223,6 +6288,12 @@ class MainWindow(QMainWindow):
 			angles = getattr(self.study, "angles_deg", None)
 			roi_radius = float(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 0.0
 			roi_mode = "band" if hasattr(self, "cine_crudo_roi_mode_combo") and "banda" in str(self.cine_crudo_roi_mode_combo.currentText()).lower() else "box"
+			if roi_mode == "band" and seed is not None:
+				bounds = self._cine_crudo_band_bounds(int(projections.shape[2]))
+				if bounds is not None:
+					y0, y1 = bounds
+					roi_radius = max(1.0, 0.5 * float(y1 - y0))
+					seed = (0.5 * float(y0 + y1), float(seed[1]))
 			liver_suppression = 0.0
 			if hasattr(self, "cine_crudo_liver_suppress_check") and self.cine_crudo_liver_suppress_check.isChecked():
 				liver_suppression = float(self.cine_crudo_liver_suppress_spin.value()) / 100.0
@@ -6773,6 +6844,9 @@ class MainWindow(QMainWindow):
 
 			self.cine_crudo_seed = None
 			self.cine_crudo_seed_mode = False
+			self.cine_crudo_band_upper = None
+			self.cine_crudo_band_lower = None
+			self._cine_crudo_drag_marker = None
 			self.cine_crudo_ref_index = None
 			self.cine_crudo_corrected_projections = None
 			self.cine_crudo_motion_result = None
@@ -7039,6 +7113,9 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_seed_mode = bool(checked)
 		if not checked:
 			self.cine_crudo_seed = None
+			self.cine_crudo_band_upper = None
+			self.cine_crudo_band_lower = None
+			self._cine_crudo_drag_marker = None
 			self._log("Selección de órgano: modo automático (seed limpiado).")
 			self._refresh_cine_crudo_view()
 		else:
@@ -7046,34 +7123,26 @@ class MainWindow(QMainWindow):
 
 	def _on_cine_crudo_image_clicked(self, event):
 		"""Captura el click del usuario sobre la imagen de cine_crudo para elegir el órgano (corazón)."""
+		pos = self._cine_crudo_event_to_matrix(event)
+		if pos is None:
+			return
+		ry0, rx0, H_map, _W_map = pos
+		# Si ya hay Banda Y, un click cerca de upper/lower empieza drag aunque no esté activo "Elegir corazón".
+		roi_mode = str(self.cine_crudo_roi_mode_combo.currentText()).lower() if hasattr(self, "cine_crudo_roi_mode_combo") else "caja"
+		bounds = self._cine_crudo_band_bounds(H_map) if "banda" in roi_mode else None
+		if not self.cine_crudo_seed_mode and bounds is not None:
+			yu, yl = bounds
+			if abs(ry0 - yu) <= 2.5:
+				self._cine_crudo_drag_marker = "upper"
+				return
+			if abs(ry0 - yl) <= 2.5:
+				self._cine_crudo_drag_marker = "lower"
+				return
 		if not self.cine_crudo_seed_mode:
 			return
 		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
 			return
-		label = self.preview_labels.get("cine_crudo")
-		if label is None:
-			return
-		pix = self.preview_pixmaps.get("cine_crudo")
-		if pix is None or pix.isNull():
-			return
-		# Convertir coordenadas del click (widget) a coordenadas de imagen (matriz proyección).
-		zoom = float(self.preview_zoom.get("cine_crudo", 1.0))
-		lw, lh = label.width(), label.height()
-		pw, ph = pix.width(), pix.height()
-		# El QPixmap se muestra escalado con KeepAspectRatio dentro del label.
-		scale = min(lw / max(1, pw), lh / max(1, ph)) * zoom
-		dw, dh = pw * scale, ph * scale
-		x0 = (lw - dw) / 2.0
-		y0 = (lh - dh) / 2.0
-		rx = (event.pos().x() - x0) / max(1e-6, scale)
-		ry = (event.pos().y() - y0) / max(1e-6, scale)
-		# La imagen puede estar concatenada (original|corregido) → usar la mitad izquierda.
-		projections = np.asarray(self.study.cube, dtype=np.float64)
-		H, W = int(projections.shape[2]), int(projections.shape[3])
-		if pw > W * 1.5:  # concatenado → la proyección está en la mitad izquierda
-			rx = rx
-		rx = float(np.clip(rx, 0, W - 1))
-		ry = float(np.clip(ry, 0, H - 1))
+		ry, rx = float(ry0), float(rx0)
 		self.cine_crudo_seed_mode = False
 		# Despresionar el botón SIN emitir toggled(): de lo contrario
 		# _on_cine_crudo_seed_mode_toggled(False) borraría el seed recién fijado.
@@ -7081,8 +7150,48 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_seed_btn.setChecked(False)
 		self.cine_crudo_seed_btn.blockSignals(False)
 		self.cine_crudo_seed = (ry, rx)  # (y, x) en coordenadas de matriz
+		if hasattr(self, "cine_crudo_roi_mode_combo") and "banda" in str(self.cine_crudo_roi_mode_combo.currentText()).lower():
+			r = float(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 8.0
+			self.cine_crudo_band_upper = float(np.clip(ry - r, 0, H_map - 1))
+			self.cine_crudo_band_lower = float(np.clip(ry + r, 0, H_map - 1))
 		self._log(f"Órgano seleccionado por usuario en (y={ry:.1f}, x={rx:.1f}) — el tracking seguirá solo esa componente.")
 		self._refresh_cine_crudo_view()
+
+	def _on_cine_crudo_image_dragged(self, event):
+		if self._cine_crudo_drag_marker not in ("upper", "lower"):
+			return
+		pos = self._cine_crudo_event_to_matrix(event)
+		if pos is None:
+			return
+		ry, _rx, H, _W = pos
+		margin = 2.0
+		if self._cine_crudo_drag_marker == "upper":
+			lower = self.cine_crudo_band_lower
+			if lower is None and self.cine_crudo_seed is not None:
+				lower = float(self.cine_crudo_seed[0]) + float(self.cine_crudo_roi_spin.value())
+			limit = float(lower) - margin if lower is not None else H - 1
+			self.cine_crudo_band_upper = float(np.clip(ry, 0, max(0.0, limit)))
+		else:
+			upper = self.cine_crudo_band_upper
+			if upper is None and self.cine_crudo_seed is not None:
+				upper = float(self.cine_crudo_seed[0]) - float(self.cine_crudo_roi_spin.value())
+			limit = float(upper) + margin if upper is not None else 0.0
+			self.cine_crudo_band_lower = float(np.clip(ry, min(H - 1.0, limit), H - 1.0))
+		bounds = self._cine_crudo_band_bounds(H)
+		if bounds is not None and hasattr(self, "cine_crudo_roi_spin"):
+			y0, y1 = bounds
+			self.cine_crudo_roi_spin.blockSignals(True)
+			self.cine_crudo_roi_spin.setValue(int(round(max(1.0, 0.5 * (y1 - y0)))))
+			self.cine_crudo_roi_spin.blockSignals(False)
+		self._refresh_cine_crudo_view()
+
+	def _on_cine_crudo_image_released(self, event):
+		if self._cine_crudo_drag_marker in ("upper", "lower"):
+			self._log(
+				f"Markers Banda Y ajustados: upper={self.cine_crudo_band_upper:.1f}, "
+				f"lower={self.cine_crudo_band_lower:.1f}."
+			)
+		self._cine_crudo_drag_marker = None
 
 	def _on_cine_crudo_source_changed(self, source: str):
 		self._load_cine_crudo_frames(str(source))

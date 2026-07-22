@@ -775,7 +775,10 @@ def _heart_center_series(
             gx += x0
             centers[a] = gy if axis == "y" else gx
             if continuity:
-                cy, cx = gy, gx  # la ventana persigue al corazón
+                if mode == "band":
+                    cx = gx  # la banda Y queda fija; solo el prior X acompaña la rotación
+                else:
+                    cy, cx = gy, gx  # la caja persigue al corazón
         return centers
 
     # Fallback: máscara por componente global (auto o por seed sin ventana).
