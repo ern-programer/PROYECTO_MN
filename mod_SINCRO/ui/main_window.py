@@ -1172,6 +1172,16 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_roi_mode_combo.setToolTip("Caja: ventana local alrededor del click. Banda Y: dos líneas horizontales upper/lower; usa toda la franja cardíaca y penaliza focos alejados en X para reducir hígado/intestino.")
 				self.cine_crudo_roi_mode_combo.currentTextChanged.connect(self._refresh_cine_crudo_view)
 				toolbar3.addWidget(self.cine_crudo_roi_mode_combo)
+				self.cine_crudo_liver_suppress_check = QCheckBox("Atenuar hígado")
+				self.cine_crudo_liver_suppress_check.setToolTip("Atenúa focos hepato-intestinales SOLO para el tracking, guiado por los markers Y. No modifica las cuentas usadas para corregir ni el DICOM exportado.")
+				toolbar3.addWidget(self.cine_crudo_liver_suppress_check)
+				self.cine_crudo_liver_suppress_spin = QSpinBox()
+				self.cine_crudo_liver_suppress_spin.setRange(0, 95)
+				self.cine_crudo_liver_suppress_spin.setValue(60)
+				self.cine_crudo_liver_suppress_spin.setSuffix(" %")
+				self.cine_crudo_liver_suppress_spin.setMaximumWidth(72)
+				self.cine_crudo_liver_suppress_spin.setToolTip("Porcentaje de atenuación usado solo en la imagen de tracking. Sugerido: 50–70%.")
+				toolbar3.addWidget(self.cine_crudo_liver_suppress_spin)
 				self.cine_crudo_grid_btn = QToolButton()
 				self.cine_crudo_grid_btn.setText("Grilla pick")
 				self.cine_crudo_grid_btn.setToolTip("Grilla de cortes transaxiales con máscara para discriminar corazón de hígado antes del pick (como Odyssey).")
@@ -6208,6 +6218,9 @@ class MainWindow(QMainWindow):
 			angles = getattr(self.study, "angles_deg", None)
 			roi_radius = float(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 0.0
 			roi_mode = "band" if hasattr(self, "cine_crudo_roi_mode_combo") and "banda" in str(self.cine_crudo_roi_mode_combo.currentText()).lower() else "box"
+			liver_suppression = 0.0
+			if hasattr(self, "cine_crudo_liver_suppress_check") and self.cine_crudo_liver_suppress_check.isChecked():
+				liver_suppression = float(self.cine_crudo_liver_suppress_spin.value()) / 100.0
 			ref_idx = int(self.cine_crudo_ref_index if self.cine_crudo_ref_index is not None else getattr(self, "_cine_crudo_current_frame", 0))
 			if method == "auto":
 				# Auto: correr varios métodos y elegir por JITTER real (saltos frame-a-frame),
@@ -6240,6 +6253,7 @@ class MainWindow(QMainWindow):
 						angles_deg=angles,
 						roi_radius=roi_radius,
 						roi_mode=roi_mode,
+						liver_suppression_frac=liver_suppression,
 					)
 					corr_m = np.asarray(res_m.get("corrected"), dtype=np.float64)
 					# Score = jitter residual (lo que realmente se ve como saltos en el cine).
@@ -6265,6 +6279,7 @@ class MainWindow(QMainWindow):
 					angles_deg=angles,
 					roi_radius=roi_radius,
 					roi_mode=roi_mode,
+					liver_suppression_frac=liver_suppression,
 				)
 			self.cine_crudo_motion_result = result
 			self.cine_crudo_corrected_projections = np.asarray(result.get("corrected"), dtype=np.float64)

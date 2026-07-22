@@ -363,6 +363,8 @@ def _tracking_from_com(
     seed: tuple[float, float] | None = None,
     roi_radius: float = 0.0,
     roi_mode: str = "box",
+    liver_suppression_frac: float = 0.0,
+    liver_suppression_feather: float = 3.0,
 ) -> dict:
     """Tracking simple por centro de masa sobre máscara por threshold.
 
@@ -372,6 +374,10 @@ def _tracking_from_com(
     """
     proj = np.asarray(projections, dtype=np.float64)
     summed = proj.sum(axis=0)
+    summed = _attenuate_hepato_intestinal_for_tracking(
+        summed, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode,
+        attenuation_frac=liver_suppression_frac, feather_px=liver_suppression_feather,
+    )
     threshold_frac = float(threshold_frac)
     threshold_frac = min(max(threshold_frac, 0.01), 0.90)
 
@@ -481,6 +487,77 @@ def _organ_mask(
     if not use_organ_selection:
         return mask
     return _select_organ_component(mask, seed=seed, auto=(seed is None))
+
+
+def _attenuate_hepato_intestinal_for_tracking(
+    summed: np.ndarray,
+    *,
+    seed: tuple[float, float] | None = None,
+    roi_radius: float = 0.0,
+    roi_mode: str = "box",
+    attenuation_frac: float = 0.0,
+    feather_px: float = 3.0,
+) -> np.ndarray:
+    """Atenúa focos hepato-intestinales SOLO para detección de movimiento.
+
+    No modifica el crudo que se corrige/exporta: devuelve una copia para tracking.
+    Con ROI/markers, protege una franja horizontal Y (upper/lower) pero NO fija una
+    caja en X, porque el corazón proyectado se desplaza lateralmente con la rotación.
+    """
+    arr = np.asarray(summed, dtype=np.float64)
+    atten = min(max(float(attenuation_frac), 0.0), 0.95)
+    if atten <= 1e-6 or arr.ndim != 3:
+        return arr
+
+    try:
+        from scipy.ndimage import gaussian_filter
+    except Exception:
+        gaussian_filter = None
+
+    out = np.array(arr, dtype=np.float64, copy=True)
+    n, h, w = out.shape
+    has_seed = seed is not None and np.isfinite(seed[0]) and np.isfinite(seed[1]) and float(roi_radius) > 0
+    mode = str(roi_mode or "box").strip().lower()
+    r = max(2, int(round(float(roi_radius)))) if has_seed else max(3, int(round(0.18 * h)))
+
+    for a in range(n):
+        img = out[a]
+        finite = img[np.isfinite(img)]
+        if finite.size < 12 or float(np.max(finite)) <= 0:
+            continue
+        if has_seed:
+            sy = float(seed[0])
+            y_lower = int(np.clip(round(sy + r), 0, h - 1))
+            # En Banda Y, los markers son la definición clínica de la franja cardíaca.
+            # En Caja, igual protegemos verticalmente, no por X, para no pelear con la rotación.
+            protected = np.zeros((h, w), dtype=bool)
+            y0 = int(np.clip(round(sy - r), 0, h - 1))
+            y1 = int(np.clip(round(sy + r), 0, h - 1))
+            protected[y0:y1 + 1, :] = True
+            candidate_region = np.zeros((h, w), dtype=bool)
+            candidate_region[y_lower + 1:, :] = True
+        else:
+            cy0 = 0.5 * (h - 1)
+            cx0 = 0.5 * (w - 1)
+            ys, xs = np.ogrid[:h, :w]
+            rr = np.sqrt((ys - cy0) ** 2 + (xs - cx0) ** 2)
+            candidate_region = (ys > cy0 + 0.08 * h) & (rr >= 0.35 * min(h, w))
+            protected = np.zeros((h, w), dtype=bool)
+
+        p_hot = float(np.percentile(finite, 88.0))
+        seeds = (img >= p_hot) & candidate_region & (~protected)
+        if int(np.count_nonzero(seeds)) < 4:
+            continue
+        if gaussian_filter is not None:
+            sigma = max(0.6, float(feather_px) * 0.55)
+            soft = gaussian_filter(seeds.astype(np.float64), sigma=sigma)
+            if float(np.max(soft)) > 0:
+                soft = soft / float(np.max(soft))
+        else:
+            soft = seeds.astype(np.float64)
+        soft = np.clip(soft, 0.0, 1.0)
+        out[a] = img * (1.0 - atten * soft)
+    return out
 
 
 def _center_series_with_component_tracking(
@@ -658,6 +735,8 @@ def _tracking_gammasync(
     seed: tuple[float, float] | None = None,
     roi_radius: float = 0.0,
     roi_mode: str = "box",
+    liver_suppression_frac: float = 0.0,
+    liver_suppression_feather: float = 3.0,
 ) -> dict:
     """
     Tracking GammaSync: threshold + selección de componente del órgano (corazón).
@@ -672,6 +751,10 @@ def _tracking_gammasync(
     """
     proj = np.asarray(projections, dtype=np.float64)
     summed = proj.sum(axis=0)
+    summed = _attenuate_hepato_intestinal_for_tracking(
+        summed, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode,
+        attenuation_frac=liver_suppression_frac, feather_px=liver_suppression_feather,
+    )
     threshold_frac = float(threshold_frac)
     threshold_frac = min(max(threshold_frac, 0.01), 0.90)
 
@@ -823,6 +906,8 @@ def _tracking_stasis(
     seed: tuple[float, float] | None = None,
     roi_radius: float = 0.0,
     roi_mode: str = "box",
+    liver_suppression_frac: float = 0.0,
+    liver_suppression_feather: float = 3.0,
 ) -> dict:
     """
     Tracking estilo Stasis (método Xeleris/Myovation).
@@ -840,6 +925,10 @@ def _tracking_stasis(
 
     proj = np.asarray(projections, dtype=np.float64)
     summed = proj.sum(axis=0)
+    summed = _attenuate_hepato_intestinal_for_tracking(
+        summed, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode,
+        attenuation_frac=liver_suppression_frac, feather_px=liver_suppression_feather,
+    )
     n_angles = summed.shape[0]
     threshold_frac = float(threshold_frac)
     threshold_frac = min(max(threshold_frac, 0.01), 0.90)
@@ -885,6 +974,8 @@ def _tracking_hopkins(
     seed: tuple[float, float] | None = None,
     roi_radius: float = 0.0,
     roi_mode: str = "box",
+    liver_suppression_frac: float = 0.0,
+    liver_suppression_feather: float = 3.0,
 ) -> dict:
     """
     Tracking estilo Hopkins (variante de Stasis con estabilidad temporal).
@@ -897,6 +988,10 @@ def _tracking_hopkins(
 
     proj = np.asarray(projections, dtype=np.float64)
     summed = proj.sum(axis=0)
+    summed = _attenuate_hepato_intestinal_for_tracking(
+        summed, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode,
+        attenuation_frac=liver_suppression_frac, feather_px=liver_suppression_feather,
+    )
     n_angles = summed.shape[0]
     threshold_frac = float(threshold_frac)
     threshold_frac = min(max(threshold_frac, 0.01), 0.90)
@@ -944,6 +1039,8 @@ def _tracking_sinusoid(
     detrend_sigma: float = 3.0,
     roi_radius: float = 0.0,
     roi_mode: str = "box",
+    liver_suppression_frac: float = 0.0,
+    liver_suppression_feather: float = 3.0,
 ) -> dict:
     """
     Tracking por detrend (referencia = tendencia suave, corrige SOLO los saltos).
@@ -969,6 +1066,10 @@ def _tracking_sinusoid(
 
     proj = np.asarray(projections, dtype=np.float64)
     summed = proj.sum(axis=0)
+    summed = _attenuate_hepato_intestinal_for_tracking(
+        summed, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode,
+        attenuation_frac=liver_suppression_frac, feather_px=liver_suppression_feather,
+    )
     n_angles = summed.shape[0]
     threshold_frac = min(max(float(threshold_frac), 0.01), 0.90)
 
@@ -1054,6 +1155,8 @@ def motion_correct_projections(
     angles_deg: np.ndarray | None = None,
     roi_radius: float = 0.0,
     roi_mode: str = "box",
+    liver_suppression_frac: float = 0.0,
+    liver_suppression_feather: float = 3.0,
 ) -> dict:
     """
     Motion correction de proyecciones SPECT gated.
@@ -1082,23 +1185,23 @@ def motion_correct_projections(
 
     for ax in axes_to_correct:
         if method == "sinusoid":
-            trk = _tracking_sinusoid(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, angles_deg=angles_deg, roi_radius=roi_radius, roi_mode=roi_mode)
+            trk = _tracking_sinusoid(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, angles_deg=angles_deg, roi_radius=roi_radius, roi_mode=roi_mode, liver_suppression_frac=liver_suppression_frac, liver_suppression_feather=liver_suppression_feather)
             sin_shifts = np.asarray(trk.pop("_sinusoid_shifts", np.zeros((proj.shape[1],))), dtype=np.float64)
             trk = _finalize_tracking(trk)
             trk["suggested_shifts_px"] = sin_shifts
             trk["max_shift_px"] = round(float(np.abs(sin_shifts).max()) if sin_shifts.size else 0.0, 2)
             trk["motion_suspected"] = bool(trk["max_shift_px"] > 1.5 or trk.get("n_outliers", 0) >= 2)
         elif method == "gammasync":
-            trk = _finalize_tracking(_tracking_gammasync(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode))
+            trk = _finalize_tracking(_tracking_gammasync(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode, liver_suppression_frac=liver_suppression_frac, liver_suppression_feather=liver_suppression_feather))
         elif method == "stasis":
-            trk = _tracking_stasis(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode)
+            trk = _tracking_stasis(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode, liver_suppression_frac=liver_suppression_frac, liver_suppression_feather=liver_suppression_feather)
             stasis_shifts = np.asarray(trk.pop("_stasis_shifts", np.zeros((proj.shape[1],))), dtype=np.float64)
             trk = _finalize_tracking(trk)
             trk["suggested_shifts_px"] = stasis_shifts
             trk["max_shift_px"] = round(float(np.abs(stasis_shifts).max()) if stasis_shifts.size else 0.0, 2)
             trk["motion_suspected"] = bool(trk["max_shift_px"] > 1.5 or trk.get("n_outliers", 0) >= 2)
         elif method == "hopkins":
-            trk = _tracking_hopkins(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode)
+            trk = _tracking_hopkins(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode, liver_suppression_frac=liver_suppression_frac, liver_suppression_feather=liver_suppression_feather)
             hopkins_shifts = np.asarray(trk.pop("_hopkins_shifts", np.zeros((proj.shape[1],))), dtype=np.float64)
             trk = _finalize_tracking(trk)
             trk["suggested_shifts_px"] = hopkins_shifts
@@ -1115,7 +1218,7 @@ def motion_correct_projections(
         elif method == "threshold":
             trk = _finalize_tracking(_tracking_from_threshold(proj, axis=ax, threshold_frac=threshold_frac, seed=seed))
         else:
-            trk = _finalize_tracking(_tracking_from_com(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode))
+            trk = _finalize_tracking(_tracking_from_com(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode, liver_suppression_frac=liver_suppression_frac, liver_suppression_feather=liver_suppression_feather))
         tracking[ax] = trk
         if ax == "y":
             shifts_y = np.asarray(trk["suggested_shifts_px"], dtype=np.float64)
