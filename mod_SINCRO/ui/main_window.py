@@ -6406,16 +6406,29 @@ class MainWindow(QMainWindow):
 				return
 			base, ext = os.path.splitext(path)
 			csv_path = path if ext.lower() == ".csv" else base + ".csv"
-			# CSV: frame, angulo_deg, shift_y_px, shift_x_px
+			# Identidad del estudio (para validar en la importación que corresponde al mismo paciente/file).
+			pid = str(getattr(self.study, "patient_id", "") or "")
+			pname = str(getattr(self.study, "patient_name", "") or "")
+			suid = str(getattr(self.study, "study_instance_uid", "") or "")
+			src = str(getattr(self.study, "source_path", "") or "")
+			src_name = os.path.basename(src)
+			# CSV: cabecera de identidad (# ...) + frame, angulo_deg, shift_y_px, shift_x_px
 			angles = getattr(self.study, "angles_deg", None)
-			lines = ["frame,angle_deg,shift_y_px,shift_x_px"]
+			lines = [
+				f"# patient_id={pid}",
+				f"# patient_name={pname}",
+				f"# study_uid={suid}",
+				f"# source_file={src_name}",
+				f"# n_angles={n}",
+				"frame,angle_deg,shift_y_px,shift_x_px",
+			]
 			for i in range(n):
 				ang = float(angles[i]) if (angles is not None and i < len(angles)) else float("nan")
 				lines.append(f"{i},{ang:.3f},{sy[i]:.4f},{sx[i]:.4f}")
 			csv_text = "\n".join(lines) + "\n"
 			with open(csv_path, "wb") as fh:
 				fh.write(csv_text.encode("utf-8"))
-			# NPZ: shifts + proyecciones corregidas (para reconstruir/comparar).
+			# NPZ: shifts + proyecciones corregidas (para reconstruir/comparar) + identidad.
 			npz_path = base + ".npz"
 			corrected = np.asarray(self.cine_crudo_corrected_projections, dtype=np.float32) if self.cine_crudo_corrected_projections is not None else None
 			save_kwargs = {
@@ -6423,6 +6436,11 @@ class MainWindow(QMainWindow):
 				"shifts_x": sx.astype(np.float32),
 				"method": np.array(method),
 				"ref_index": np.array(self.cine_crudo_ref_index if self.cine_crudo_ref_index is not None else -1),
+				"patient_id": np.array(pid),
+				"patient_name": np.array(pname),
+				"study_uid": np.array(suid),
+				"source_file": np.array(src_name),
+				"n_angles": np.array(n),
 			}
 			if corrected is not None:
 				save_kwargs["corrected"] = corrected
@@ -6454,6 +6472,7 @@ class MainWindow(QMainWindow):
 			ext = os.path.splitext(path)[1].lower()
 			method = "importado"
 			ref_index = None
+			ident: dict = {}
 			if ext == ".npz":
 				data = np.load(path, allow_pickle=True)
 				sy = np.asarray(data["shifts_y"], dtype=np.float64) if "shifts_y" in data else np.zeros((n_angles,))
@@ -6463,13 +6482,26 @@ class MainWindow(QMainWindow):
 				if "ref_index" in data:
 					ri = int(data["ref_index"])
 					ref_index = ri if ri >= 0 else None
+				for k in ("patient_id", "patient_name", "study_uid", "source_file", "n_angles"):
+					if k in data:
+						ident[k] = str(data[k])
 			else:
-				# CSV: frame,angle_deg,shift_y_px,shift_x_px
+				# CSV: comentarios de identidad (# key=value) + frame,angle_deg,shift_y_px,shift_x_px
 				with open(path, "rb") as fh:
 					text = fh.read().decode("utf-8", errors="replace")
-				rows = [ln for ln in text.splitlines() if ln.strip()]
-				if rows and rows[0].lower().startswith("frame"):
-					rows = rows[1:]
+				all_lines = [ln for ln in text.splitlines() if ln.strip()]
+				rows = []
+				for ln in all_lines:
+					s = ln.strip()
+					if s.startswith("#"):
+						body = s[1:].strip()
+						if "=" in body:
+							k, v = body.split("=", 1)
+							ident[k.strip()] = v.strip()
+						continue
+					if s.lower().startswith("frame"):
+						continue
+					rows.append(s)
 				sy = np.zeros((n_angles,), dtype=np.float64)
 				sx = np.zeros((n_angles,), dtype=np.float64)
 				for ln in rows:
@@ -6483,6 +6515,48 @@ class MainWindow(QMainWindow):
 					if 0 <= fi < n_angles:
 						sy[fi] = float(parts[2])
 						sx[fi] = float(parts[3])
+			# --- Validar que la corrección corresponde a ESTE paciente/estudio ---
+			cur_pid = str(getattr(self.study, "patient_id", "") or "")
+			cur_suid = str(getattr(self.study, "study_instance_uid", "") or "")
+			cur_src = os.path.basename(str(getattr(self.study, "source_path", "") or ""))
+			reasons: list[str] = []
+			saved_suid = ident.get("study_uid", "")
+			saved_pid = ident.get("patient_id", "")
+			saved_src = ident.get("source_file", "")
+			saved_na = ident.get("n_angles", "")
+			if saved_suid and cur_suid and saved_suid != cur_suid:
+				reasons.append(f"StudyInstanceUID distinto (guardado ≠ actual)")
+			if saved_pid and cur_pid and saved_pid != cur_pid:
+				reasons.append(f"PatientID: guardado '{saved_pid}' ≠ actual '{cur_pid}'")
+			if saved_na:
+				try:
+					if int(float(saved_na)) != n_angles:
+						reasons.append(f"Nº de ángulos: guardado {saved_na} ≠ actual {n_angles}")
+				except ValueError:
+					pass
+			has_ident = bool(saved_suid or saved_pid or saved_src or saved_na)
+			if reasons:
+				QMessageBox.critical(
+					self, "SINCRO — corrección no corresponde",
+					"La corrección guardada NO corresponde a este estudio:\n\n• "
+					+ "\n• ".join(reasons)
+					+ f"\n\nPaciente/archivo actual: {cur_pid or '—'} / {cur_src or '—'}\n"
+					+ f"Corrección guardada: {saved_pid or '—'} / {saved_src or '—'}\n\nNo se cargó nada.",
+				)
+				self._log(f"[BLOQUEADO] Importar corrección: no corresponde al estudio actual — {'; '.join(reasons)}.")
+				return
+			if not has_ident:
+				resp = QMessageBox.question(
+					self, "SINCRO — identidad no verificable",
+					"El archivo de corrección no contiene datos de identidad (paciente/estudio), "
+					"probablemente es de una versión anterior.\n\nNo puedo verificar que corresponda a este estudio. "
+					"¿Cargar de todos modos?",
+					QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+					QMessageBox.StandardButton.No,
+				)
+				if resp != QMessageBox.StandardButton.Yes:
+					self._log("Importar corrección cancelado: identidad no verificable.")
+					return
 			# Ajustar longitud al estudio actual.
 			if sy.size != n_angles:
 				tmp = np.zeros((n_angles,), dtype=np.float64); tmp[:min(n_angles, sy.size)] = sy[:min(n_angles, sy.size)]; sy = tmp
