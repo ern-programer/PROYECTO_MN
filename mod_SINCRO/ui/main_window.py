@@ -1187,6 +1187,11 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_grid_btn.setToolTip("Grilla de cortes transaxiales con máscara para discriminar corazón de hígado antes del pick (como Odyssey).")
 				self.cine_crudo_grid_btn.clicked.connect(self._show_cine_crudo_transaxial_grid)
 				toolbar3.addWidget(self.cine_crudo_grid_btn)
+				self.cine_crudo_synthetic_btn = QToolButton()
+				self.cine_crudo_synthetic_btn.setText("Sintético")
+				self.cine_crudo_synthetic_btn.setToolTip("Carga un crudo sintético: corazón con desplazamiento X por rotación, salto Y respiratorio e hígado/intestino inferior intenso. Útil para probar Banda Y y Atenuar hígado.")
+				self.cine_crudo_synthetic_btn.clicked.connect(self._load_cine_crudo_synthetic)
+				toolbar3.addWidget(self.cine_crudo_synthetic_btn)
 				self.cine_crudo_correct_btn = QToolButton()
 				self.cine_crudo_correct_btn.setText("Corregir")
 				self.cine_crudo_correct_btn.setToolTip("Aplica motion correction con método/eje/threshold seleccionados.")
@@ -6737,6 +6742,73 @@ class MainWindow(QMainWindow):
 	def _refresh_cine_crudo_view(self):
 		source = str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
 		self._load_cine_crudo_frames(source)
+
+	def _load_cine_crudo_synthetic(self):
+		"""Carga un crudo sintético para probar motion correction sin DICOM externo."""
+		try:
+			from core.raw_projections import center_of_mass_tracking, make_synthetic_raw_motion_projections
+
+			raw = make_synthetic_raw_motion_projections()
+			self.study = dicom_loader.GatedStudy(
+				cube=raw.projections,
+				n_gates=raw.n_gates,
+				n_slices=raw.n_angles,
+				rows=raw.rows,
+				cols=raw.cols,
+				pixel_spacing=(6.4, 6.4),
+				source_path="",
+				image_type=["SYNTHETIC", "GATED TOMO"],
+				series_description=raw.series_description,
+				study_description=raw.study_description,
+				patient_name=raw.patient_name,
+				patient_id=raw.patient_id,
+				study_instance_uid="SYNTHETIC.RAW.MOTION",
+				reconstructed=False,
+				qc_first_harmonic=0.0,
+				qc_passed=False,
+				gating_info=raw.gating_info,
+				notes=raw.notes,
+			)
+			self.study.angles_deg = raw.angles_deg
+
+			self.cine_crudo_seed = None
+			self.cine_crudo_seed_mode = False
+			self.cine_crudo_ref_index = None
+			self.cine_crudo_corrected_projections = None
+			self.cine_crudo_motion_result = None
+			if self.cine_crudo_compare_check is not None:
+				self.cine_crudo_compare_check.setChecked(False)
+				self.cine_crudo_compare_check.setEnabled(False)
+			if hasattr(self, "cine_crudo_source_combo"):
+				self.cine_crudo_source_combo.setCurrentText("UngGat")
+			if hasattr(self, "cine_crudo_method_combo"):
+				self.cine_crudo_method_combo.setCurrentText("Sinusoide")
+			if hasattr(self, "cine_crudo_axis_combo"):
+				self.cine_crudo_axis_combo.setCurrentText("Y")
+			if hasattr(self, "cine_crudo_roi_mode_combo"):
+				self.cine_crudo_roi_mode_combo.setCurrentText("Banda Y")
+			if hasattr(self, "cine_crudo_roi_spin"):
+				self.cine_crudo_roi_spin.setValue(8)
+			if hasattr(self, "cine_crudo_liver_suppress_check"):
+				self.cine_crudo_liver_suppress_check.setChecked(True)
+			if hasattr(self, "cine_crudo_liver_suppress_spin"):
+				self.cine_crudo_liver_suppress_spin.setValue(60)
+
+			self._load_cine_crudo_frames("UngGat")
+			self._select_tab_by_title("cine_crudo")
+			ty = center_of_mass_tracking(raw.projections, axis="y")
+			tx = center_of_mass_tracking(raw.projections, axis="x")
+			self._log(
+				"Sintético raw cargado: 8 gates × 60 ángulos × 64×64 | "
+				"corazón con X rotacional + saltos Y, hígado/intestino inferior intenso. "
+				f"COM inicial max Y={ty.get('max_shift_px')}px X={tx.get('max_shift_px')}px. "
+				"Sugerido: Elegir corazón, Banda Y, Atenuar hígado 60%, Corregir."
+			)
+			self._set_progress(100, "Sintético raw cargado")
+			self.statusBar().showMessage("Sintético raw cargado para pruebas de motion correction")
+		except Exception as exc:
+			self._log(f"[WARN] No se pudo cargar sintético raw: {exc}")
+			QMessageBox.warning(self, "SINCRO", f"No se pudo cargar el sintético raw:\n{exc}")
 
 	def _open_cine_crudo_fine_adjust(self):
 		if self.study is None or bool(getattr(self.study, "reconstructed", True)):

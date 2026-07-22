@@ -33,6 +33,69 @@ class RawGatedProjections:
     notes: list[str] = field(default_factory=list)
 
 
+def make_synthetic_raw_motion_projections(
+    n_gates: int = 8,
+    n_angles: int = 60,
+    rows: int = 64,
+    cols: int = 64,
+    heart_counts: float = 120.0,
+    liver_counts: float = 260.0,
+    bowel_counts: float = 150.0,
+    noise_sigma: float = 2.5,
+    seed: int = 42,
+) -> RawGatedProjections:
+    """Genera un crudo gated sintético para probar motion correction.
+
+    Escenario: corazón que se desplaza en X con la rotación y tiene un salto
+    respiratorio en Y, más hígado/intestino inferior intenso. Es útil para probar
+    markers horizontales, ROI por banda y atenuación hepato-intestinal de tracking.
+    """
+    rng = np.random.default_rng(int(seed))
+    H, W = int(rows), int(cols)
+    yy, xx = np.mgrid[0:H, 0:W]
+    angles = np.linspace(0.0, 360.0, int(n_angles), endpoint=False)
+    projections = np.zeros((int(n_gates), int(n_angles), H, W), dtype=np.float64)
+
+    for a, angle in enumerate(angles):
+        theta = np.deg2rad(float(angle))
+        # Geometría esperada de proyección: X oscila con la rotación. El Y axial
+        # queda casi estable salvo el movimiento respiratorio real.
+        cx = 32.0 + 7.0 * np.sin(theta)
+        resp = 2.8 if 20 <= a <= 28 else (-1.7 if 43 <= a <= 49 else 0.0)
+        cy = 31.0 + resp
+        heart_base = heart_counts * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2.0 * 3.3 ** 2))
+        liver = liver_counts * np.exp(-((yy - 48.0) ** 2 + (xx - 35.0) ** 2) / (2.0 * 5.2 ** 2))
+        bowel = bowel_counts * np.exp(-((yy - 42.0) ** 2 + (xx - 53.0) ** 2) / (2.0 * 3.4 ** 2))
+        background = 8.0 + 4.0 * np.exp(-((yy - 32.0) ** 2 + (xx - 32.0) ** 2) / (2.0 * 21.0 ** 2))
+
+        for g in range(int(n_gates)):
+            gate_phase = 2.0 * np.pi * g / max(1, int(n_gates))
+            beat = 1.0 + 0.10 * np.cos(gate_phase)
+            frame = beat * heart_base + liver + bowel + background
+            if noise_sigma > 0:
+                frame = frame + rng.normal(0.0, float(noise_sigma), size=(H, W))
+            projections[g, a] = np.clip(frame, 0.0, None)
+
+    return RawGatedProjections(
+        projections=projections,
+        n_gates=int(n_gates),
+        n_angles=int(n_angles),
+        rows=H,
+        cols=W,
+        angles_deg=angles.astype(np.float64),
+        gating_info={"heart_rate_bpm": 65, "synthetic": True},
+        source_path="",
+        patient_name="SINTETICO^RAW_MOTION",
+        patient_id="SYN_RAW_001",
+        study_description="Sintetico raw motion correction",
+        series_description="SINTETICO GATED TOMO RAW",
+        notes=[
+            "Sintético: corazón con oscilación X por rotación, salto respiratorio Y, hígado/intestino inferior intenso.",
+            "Uso: validar markers Banda Y y atenuación hepato-intestinal solo para tracking.",
+        ],
+    )
+
+
 def _get(ds, tag, default=None):
     return ds[tag].value if tag in ds else default
 
