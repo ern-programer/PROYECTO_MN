@@ -78,6 +78,13 @@ class GatedStudy:
     qc_first_harmonic: float = 0.0
     qc_passed: bool = False
     gating_info: dict = field(default_factory=dict)  # Datos ECG adquisición (3 derivaciones / gating)
+    # --- Geometría de adquisición (solo modo crudo/proyecciones) ---
+    patient_position: str = ""       # HFS/FFS/HFP/FFP
+    start_angle: float | None = None
+    angular_step: float | None = None
+    rotation_direction: str = ""     # CW / CC
+    scan_arc: float | None = None
+    angles_deg: np.ndarray | None = None
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -379,6 +386,12 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
             qc_first_harmonic=0.0,
             qc_passed=False,
             gating_info=raw.gating_info,
+            patient_position=getattr(raw, "patient_position", ""),
+            start_angle=getattr(raw, "start_angle", None),
+            angular_step=getattr(raw, "angular_step", None),
+            rotation_direction=getattr(raw, "rotation_direction", ""),
+            scan_arc=getattr(raw, "scan_arc", None),
+            angles_deg=getattr(raw, "angles_deg", None),
             notes=notes + raw.notes,
         )
         return study

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "method": "Sinusoide",
+  "axis": "Y",
+  "threshold": 0.2,
+  "roi_mode": "Caja",
+  "roi_radius": 5,
+  "marker_color": "Arena",
+  "band_upper": null,
+  "band_lower": null,
+  "reference_line_y": 37.44388609715243,
+  "show_reference_line": true,
+  "show_sinogram": true,
+  "sinogram_axis": "Sinograma X",
+  "show_mask": false,
+  "liver_suppression_enabled": false,
+  "liver_suppression_pct": 60,
+  "saved_at": "2026-07-22T14:01:35",
+  "study_uid": "1.2.840.113704.3.1.36372.65958.85",
+  "patient_id": "VG 4"
+}

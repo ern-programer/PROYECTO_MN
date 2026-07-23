@@ -1,0 +1,229 @@
+{
+  "export_version": "1.0",
+  "export_timestamp": "2026-07-20T16:57:47.615782",
+  "software": {
+    "name": "GammaSync",
+    "version": "1.8.0",
+    "module": "SINCRO"
+  },
+  "study": {
+    "patient_name": "CARDIAC MyoSIGHT",
+    "patient_id": "MyoSIGHT 2",
+    "patient_sex": "F",
+    "study_date": "10/11/2006",
+    "study_description": "+1 DAY BOTH GATED",
+    "series_description": "Myometrix Results",
+    "dimensions": "8x19x22x22"
+  },
+  "segmentation": {
+    "method": "manual",
+    "n_voxels": 1491,
+    "n_slices": 19
+  },
+  "processing": {
+    "seg_method": "manual",
+    "threshold": 0.35,
+    "smooth_sigma": 1.0,
+    "harmonics": 1,
+    "amp_filter": 0.4
+  },
+  "metrics": {
+    "voxel": {
+      "phase_sd_deg": 12.65,
+      "bandwidth_deg": 39.78,
+      "entropy_shannon_bits": 5.451,
+      "entropy_normalized_pct": 64.19,
+      "asynchrony_index_pct": 7.33,
+      "skewness": 0.039,
+      "kurtosis": 0.958,
+      "peak_phase_deg": 115.5,
+      "peak_width_deg": 14.0,
+      "latest_activation_deg": 167.82,
+      "technical_classification": "NORMAL",
+      "n_voxels_kept": 300,
+      "n_voxels_total": 1491,
+      "amp_filter": 0.4
+    },
+    "segmental_aha": {
+      "n_voxels": 11,
+      "mean_phase": 124.03,
+      "phase_sd": 7.6,
+      "bandwidth": 21.44,
+      "skewness": -0.501,
+      "kurtosis": 0.128,
+      "entropy": 2.222,
+      "entropy_shannon_bits": 2.222,
+      "entropy_normalized_pct": 36.02,
+      "asynchrony_index": 9.09,
+      "peak_phase": 122.5,
+      "peak_width": 5.0,
+      "latest_activation_phase": 135.56,
+      "classification": "NORMAL",
+      "technical_classification": "NORMAL",
+      "available": true,
+      "n_segments": 11,
+      "mode": "segmental_aha"
+    },
+    "bootstrap": {
+      "available": true,
+      "n_voxels": 300,
+      "sample_size": 240,
+      "n_iter": 500,
+      "sample_frac": 0.8,
+      "phase_sd": {
+        "mean": 12.62,
+        "ci95_low": 11.27,
+        "ci95_high": 14.0,
+        "sd": 0.69
+      },
+      "bandwidth": {
+        "mean": 40.63,
+        "ci95_low": 33.56,
+        "ci95_high": 49.95,
+        "sd": 4.39
+      },
+      "entropy_normalized_pct": {
+        "mean": 61.95,
+        "ci95_low": 60.31,
+        "ci95_high": 63.59,
+        "sd": 0.83
+      }
+    },
+    "roi_sensitivity": {
+      "available": true,
+      "delta_px": 1.0,
+      "variants": [
+        {
+          "variant": "current",
+          "label": "ROI actual",
+          "mask_voxels": 1491,
+          "phase_voxels": 300,
+          "phase_sd": 12.65,
+          "bandwidth": 39.78,
+          "entropy_normalized_pct": 64.19,
+          "technical_classification": "NORMAL"
+        },
+        {
+          "variant": "inner_roi",
+          "label": "ROI más interna",
+          "mask_voxels": 487,
+          "phase_voxels": 137,
+          "phase_sd": 11.04,
+          "bandwidth": 33.67,
+          "entropy_normalized_pct": 60.16,
+          "technical_classification": "NORMAL"
+        },
+        {
+          "variant": "outer_roi",
+          "label": "ROI más externa",
+          "mask_voxels": 2523,
+          "phase_voxels": 361,
+          "phase_sd": 13.32,
+          "bandwidth": 37.23,
+          "entropy_normalized_pct": 63.94,
+          "technical_classification": "NORMAL"
+        },
+        {
+          "variant": "shift_y_minus",
+          "label": "ROI desplazada -1px Y",
+          "mask_voxels": 1491,
+          "phase_voxels": 269,
+          "phase_sd": 16.92,
+          "bandwidth": 42.02,
+          "entropy_normalized_pct": 64.27,
+          "technical_classification": "NORMAL"
+        },
+        {
+          "variant": "shift_y_plus",
+          "label": "ROI desplazada +1px Y",
+          "mask_voxels": 1491,
+          "phase_voxels": 285,
+          "phase_sd": 11.9,
+          "bandwidth": 37.4,
+          "entropy_normalized_pct": 62.95,
+          "technical_classification": "NORMAL"
+        },
+        {
+          "variant": "shift_x_minus",
+          "label": "ROI desplazada -1px X",
+          "mask_voxels": 1491,
+          "phase_voxels": 271,
+          "phase_sd": 11.51,
+          "bandwidth": 34.63,
+          "entropy_normalized_pct": 62.52,
+          "technical_classification": "NORMAL"
+        },
+        {
+          "variant": "shift_x_plus",
+          "label": "ROI desplazada +1px X",
+          "mask_voxels": 1487,
+          "phase_voxels": 304,
+          "phase_sd": 15.35,
+          "bandwidth": 40.09,
+          "entropy_normalized_pct": 64.12,
+          "technical_classification": "NORMAL"
+        }
+      ],
+      "phase_sd_min": 11.04,
+      "phase_sd_max": 16.92,
+      "bandwidth_min": 33.67,
+      "bandwidth_max": 42.02,
+      "max_phase_sd_delta": 4.27,
+      "max_bandwidth_delta": 6.11,
+      "warn": false
+    }
+  },
+  "normal_db_evaluation": {
+    "dataset": "Mukherjee2016_India",
+    "sex": "male",
+    "protocol": "stress",
+    "info": {
+      "descripcion": "Población India, 120 pac (60H/60F), Tc-99m MIBI, SyncTool/Emory, GE Infinia, 8 frames.",
+      "referencia": "Mukherjee A et al. Indian J Nucl Med 2016;31(4):255-9."
+    },
+    "metrics": {
+      "phase_sd": {
+        "value": 12.65,
+        "available": true,
+        "mean": 14.3,
+        "sd": 4.7,
+        "cutoff": 23.700000000000003,
+        "upper_limit": 23.700000000000003,
+        "z": -0.3510638297872341,
+        "abnormal": false,
+        "method": "mean_plus_2sd"
+      },
+      "bandwidth": {
+        "value": 39.78,
+        "available": true,
+        "mean": 40.1,
+        "sd": 11.9,
+        "cutoff": 63.900000000000006,
+        "upper_limit": 63.900000000000006,
+        "z": -0.02689075630252103,
+        "abnormal": false,
+        "method": "mean_plus_2sd"
+      },
+      "entropy_normalized_pct": {
+        "value": 64.19,
+        "available": false
+      }
+    },
+    "dyssynchrony": false,
+    "clinical_classification": "normal",
+    "interpretation": "sin disincronía significativa vs DB"
+  },
+  "quality_control": {
+    "raw_filter": 0.1,
+    "clinical_filter": 0.4,
+    "raw_classification": "MODERATE",
+    "clinical_classification": "NORMAL",
+    "class_changed": true,
+    "low_confidence_tail_pct": 9.6,
+    "low_confidence_tail_n": 97,
+    "raw_voxels": 1007,
+    "clinical_voxels": 300,
+    "total_voxels": 1491,
+    "warn": true
+  }
+}

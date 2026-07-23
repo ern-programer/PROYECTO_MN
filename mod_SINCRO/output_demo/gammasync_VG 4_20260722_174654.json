@@ -1,0 +1,229 @@
+{
+  "export_version": "1.0",
+  "export_timestamp": "2026-07-22T17:46:54.184007",
+  "software": {
+    "name": "GammaSync",
+    "version": "1.8.0",
+    "module": "SINCRO"
+  },
+  "study": {
+    "patient_name": "CARDIAC MIBI [MOTION]",
+    "patient_id": "VG 4",
+    "patient_sex": "M",
+    "study_date": "02/07/2006",
+    "study_description": "+MIBI SPECT",
+    "series_description": "STR_EM | GammaSync SA cuts",
+    "dimensions": "8x19x64x64"
+  },
+  "segmentation": {
+    "method": "auto",
+    "n_voxels": 14033,
+    "n_slices": 19
+  },
+  "processing": {
+    "seg_method": "auto",
+    "threshold": 0.35,
+    "smooth_sigma": 1.0,
+    "harmonics": 1,
+    "amp_filter": 0.4
+  },
+  "metrics": {
+    "voxel": {
+      "phase_sd_deg": 108.26,
+      "bandwidth_deg": 322.28,
+      "entropy_shannon_bits": 7.763,
+      "entropy_normalized_pct": 91.42,
+      "asynchrony_index_pct": 0.0,
+      "skewness": -0.01,
+      "kurtosis": -0.817,
+      "peak_phase_deg": 137.5,
+      "peak_width_deg": 22.0,
+      "latest_activation_deg": 350.0,
+      "technical_classification": "SEVERE",
+      "n_voxels_kept": 794,
+      "n_voxels_total": 14033,
+      "amp_filter": 0.4
+    },
+    "segmental_aha": {
+      "n_voxels": 15,
+      "mean_phase": 135.07,
+      "phase_sd": 94.82,
+      "bandwidth": 282.91,
+      "skewness": -0.091,
+      "kurtosis": -0.56,
+      "entropy": 3.457,
+      "entropy_shannon_bits": 3.457,
+      "entropy_normalized_pct": 56.02,
+      "asynchrony_index": 0.0,
+      "peak_phase": 132.5,
+      "peak_width": 10.0,
+      "latest_activation_phase": 297.95,
+      "classification": "SEVERE",
+      "technical_classification": "SEVERE",
+      "available": true,
+      "n_segments": 15,
+      "mode": "segmental_aha"
+    },
+    "bootstrap": {
+      "available": true,
+      "n_voxels": 794,
+      "sample_size": 635,
+      "n_iter": 500,
+      "sample_frac": 0.8,
+      "phase_sd": {
+        "mean": 108.37,
+        "ci95_low": 99.21,
+        "ci95_high": 120.42,
+        "sd": 5.59
+      },
+      "bandwidth": {
+        "mean": 320.3,
+        "ci95_low": 296.13,
+        "ci95_high": 332.44,
+        "sd": 10.15
+      },
+      "entropy_normalized_pct": {
+        "mean": 87.29,
+        "ci95_low": 86.2,
+        "ci95_high": 88.41,
+        "sd": 0.55
+      }
+    },
+    "roi_sensitivity": {
+      "available": true,
+      "delta_px": 1.0,
+      "variants": [
+        {
+          "variant": "current",
+          "label": "ROI actual",
+          "mask_voxels": 14033,
+          "phase_voxels": 794,
+          "phase_sd": 108.26,
+          "bandwidth": 322.28,
+          "entropy_normalized_pct": 91.42,
+          "technical_classification": "SEVERE"
+        },
+        {
+          "variant": "inner_roi",
+          "label": "ROI más interna",
+          "mask_voxels": 10698,
+          "phase_voxels": 561,
+          "phase_sd": 107.76,
+          "bandwidth": 331.31,
+          "entropy_normalized_pct": 88.5,
+          "technical_classification": "SEVERE"
+        },
+        {
+          "variant": "outer_roi",
+          "label": "ROI más externa",
+          "mask_voxels": 15674,
+          "phase_voxels": 761,
+          "phase_sd": 106.56,
+          "bandwidth": 335.57,
+          "entropy_normalized_pct": 91.59,
+          "technical_classification": "SEVERE"
+        },
+        {
+          "variant": "shift_y_minus",
+          "label": "ROI desplazada -1px Y",
+          "mask_voxels": 13141,
+          "phase_voxels": 658,
+          "phase_sd": 106.41,
+          "bandwidth": 337.7,
+          "entropy_normalized_pct": 90.32,
+          "technical_classification": "SEVERE"
+        },
+        {
+          "variant": "shift_y_plus",
+          "label": "ROI desplazada +1px Y",
+          "mask_voxels": 13204,
+          "phase_voxels": 659,
+          "phase_sd": 106.03,
+          "bandwidth": 330.39,
+          "entropy_normalized_pct": 89.54,
+          "technical_classification": "SEVERE"
+        },
+        {
+          "variant": "shift_x_minus",
+          "label": "ROI desplazada -1px X",
+          "mask_voxels": 13183,
+          "phase_voxels": 655,
+          "phase_sd": 109.81,
+          "bandwidth": 330.49,
+          "entropy_normalized_pct": 89.67,
+          "technical_classification": "SEVERE"
+        },
+        {
+          "variant": "shift_x_plus",
+          "label": "ROI desplazada +1px X",
+          "mask_voxels": 13172,
+          "phase_voxels": 674,
+          "phase_sd": 103.72,
+          "bandwidth": 341.91,
+          "entropy_normalized_pct": 89.98,
+          "technical_classification": "SEVERE"
+        }
+      ],
+      "phase_sd_min": 103.72,
+      "phase_sd_max": 109.81,
+      "bandwidth_min": 322.28,
+      "bandwidth_max": 341.91,
+      "max_phase_sd_delta": 4.54,
+      "max_bandwidth_delta": 19.63,
+      "warn": false
+    }
+  },
+  "normal_db_evaluation": {
+    "dataset": "Mukherjee2016_India",
+    "sex": "male",
+    "protocol": "stress",
+    "info": {
+      "descripcion": "Población India, 120 pac (60H/60F), Tc-99m MIBI, SyncTool/Emory, GE Infinia, 8 frames.",
+      "referencia": "Mukherjee A et al. Indian J Nucl Med 2016;31(4):255-9."
+    },
+    "metrics": {
+      "phase_sd": {
+        "value": 108.26,
+        "available": true,
+        "mean": 14.3,
+        "sd": 4.7,
+        "cutoff": 23.700000000000003,
+        "upper_limit": 23.700000000000003,
+        "z": 19.99148936170213,
+        "abnormal": true,
+        "method": "mean_plus_2sd"
+      },
+      "bandwidth": {
+        "value": 322.28,
+        "available": true,
+        "mean": 40.1,
+        "sd": 11.9,
+        "cutoff": 63.900000000000006,
+        "upper_limit": 63.900000000000006,
+        "z": 23.7126050420168,
+        "abnormal": true,
+        "method": "mean_plus_2sd"
+      },
+      "entropy_normalized_pct": {
+        "value": 91.42,
+        "available": false
+      }
+    },
+    "dyssynchrony": true,
+    "clinical_classification": "ANORMAL",
+    "interpretation": "disincronía mecánica intraventricular VI vs DB"
+  },
+  "quality_control": {
+    "raw_filter": 0.1,
+    "clinical_filter": 0.4,
+    "raw_classification": "SEVERE",
+    "clinical_classification": "SEVERE",
+    "class_changed": false,
+    "low_confidence_tail_pct": 32.0,
+    "low_confidence_tail_n": 3391,
+    "raw_voxels": 10608,
+    "clinical_voxels": 794,
+    "total_voxels": 14033,
+    "warn": true
+  }
+}

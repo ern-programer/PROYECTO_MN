@@ -164,6 +164,14 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_ref_index: int | None = None
 		self.cine_crudo_corrected_projections = None
 		self.cine_crudo_motion_result = None
+		self.cine_crudo_recon_result = None
+		self.cine_crudo_raw_study_for_recon = None
+		self.cine_crudo_recon_study = None
+		self.cine_crudo_cut_study = None
+		self.cine_crudo_cut_source_label = ""
+		self.cine_crudo_axes_for_export: dict[str, np.ndarray] = {}
+		self.cine_crudo_preview_mode: str | None = None
+		self._cine_crudo_cut_limits_meta: dict | None = None
 		self._tooltips_cache_main: dict[QWidget, str] = {}
 		self._ui_show_helpers = True
 		self._ui_enable_tooltips = True
@@ -498,22 +506,23 @@ class MainWindow(QMainWindow):
 				cb.setCurrentText(current)
 			return cb
 
-		self.report_cmap_slices = _mk_combo("hot")
-		self.report_cmap_axes = _mk_combo("hot")
-		self.report_cmap_compare = _mk_combo("hot")
-		self.report_cmap_panel_axes = _mk_combo("hot")
+		# Perfusión/intensidad → odyssey_cool; crudo → gris; fase/amplitud/delta conservan su escala.
+		self.report_cmap_slices = _mk_combo("odyssey_cool")
+		self.report_cmap_axes = _mk_combo("odyssey_cool")
+		self.report_cmap_compare = _mk_combo("odyssey_cool")
+		self.report_cmap_panel_axes = _mk_combo("odyssey_cool")
 		self.report_cmap_phase = _mk_combo("french")
 		self.report_cmap_polar_clinico = _mk_combo("french")
 		self.report_cmap_amp = _mk_combo("turbo")
-		self.report_cmap_bullseye = _mk_combo("turbo")
-		self.report_cmap_polar_perf = _mk_combo("perf_clinical")
-		self.report_cmap_ungated = _mk_combo("hot")
-		self.report_cmap_cine_crudo = _mk_combo("hot")
+		self.report_cmap_bullseye = _mk_combo("odyssey_cool")
+		self.report_cmap_polar_perf = _mk_combo("odyssey_cool")
+		self.report_cmap_ungated = _mk_combo("odyssey_cool")
+		self.report_cmap_cine_crudo = _mk_combo("gray")
 		self.report_cmap_histograma = _mk_combo("hot")
 		self.report_cmap_polar_combo = _mk_combo("french")
 		self.report_cmap_delta_combo = _mk_combo("french")
-		self.report_cmap_stress_rest = _mk_combo("hot")
-		self.report_cmap_polar_cine = _mk_combo("hot")
+		self.report_cmap_stress_rest = _mk_combo("odyssey_cool")
+		self.report_cmap_polar_cine = _mk_combo("odyssey_cool")
 
 		def _add_cmap_row(row: int, label_text: str, combo: QComboBox, tip_text: str):
 			label = QLabel(label_text)
@@ -845,7 +854,7 @@ class MainWindow(QMainWindow):
 		compare_layout.addLayout(compare_offset_row)
 		self.compare_axes_cmap_combo = QComboBox()
 		self.compare_axes_cmap_combo.addItems(self._all_cmaps)
-		self.compare_axes_cmap_combo.setCurrentText("hot")
+		self.compare_axes_cmap_combo.setCurrentText("odyssey_cool")
 		self.compare_axes_cmap_combo.setToolTip("Escala de colores específica de la pestaña comparacion_ejes.")
 		self.compare_axes_cmap_combo.currentTextChanged.connect(self._schedule_compare_axes_refresh)
 		compare_cmap_row = QHBoxLayout()
@@ -1341,6 +1350,135 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_save_dcm_btn.clicked.connect(self._save_cine_crudo_corrected_dicom)
 				toolbar5.addWidget(self.cine_crudo_save_dcm_btn)
 				toolbar5.addStretch(1)
+
+				# --- Fila 6 (reconstrucción raw): método + filtros separados UngGat/gated + QC ---
+				toolbar6 = QHBoxLayout()
+				toolbar6.addWidget(QLabel("Recon"))
+				self.cine_crudo_recon_method_combo = QComboBox()
+				self.cine_crudo_recon_method_combo.addItems(["FBP", "MLEM", "OSEM"])
+				self.cine_crudo_recon_method_combo.setCurrentText("FBP")
+				self.cine_crudo_recon_method_combo.setMaximumWidth(74)
+				self.cine_crudo_recon_method_combo.setToolTip("Método de reconstrucción desde crudo corregido. MLEM/OSEM son CPU de referencia para validar el flujo.")
+				toolbar6.addWidget(self.cine_crudo_recon_method_combo)
+				toolbar6.addWidget(QLabel("Ung"))
+				self.cine_crudo_ung_filter_combo = QComboBox()
+				self.cine_crudo_ung_filter_combo.addItems(["none", "lowpass", "butterworth", "wiener"])
+				self.cine_crudo_ung_filter_combo.setCurrentText("butterworth")
+				self.cine_crudo_ung_filter_combo.setMaximumWidth(104)
+				self.cine_crudo_ung_filter_combo.setToolTip("Filtro de proyecciones para la rama UngGat/perfusión total.")
+				toolbar6.addWidget(self.cine_crudo_ung_filter_combo)
+				self.cine_crudo_ung_cutoff_spin = QDoubleSpinBox()
+				self.cine_crudo_ung_cutoff_spin.setRange(0.01, 1.00)
+				self.cine_crudo_ung_cutoff_spin.setSingleStep(0.01)
+				self.cine_crudo_ung_cutoff_spin.setDecimals(2)
+				self.cine_crudo_ung_cutoff_spin.setValue(0.52)
+				self.cine_crudo_ung_cutoff_spin.setMaximumWidth(60)
+				self.cine_crudo_ung_cutoff_spin.setToolTip("Cutoff normalizado (fracción de Nyquist) del filtro UngGat. Xeleris FBP: 0.52.")
+				toolbar6.addWidget(self.cine_crudo_ung_cutoff_spin)
+				self.cine_crudo_ung_order_spin = QSpinBox()
+				self.cine_crudo_ung_order_spin.setRange(1, 20)
+				self.cine_crudo_ung_order_spin.setValue(5)
+				self.cine_crudo_ung_order_spin.setMaximumWidth(50)
+				self.cine_crudo_ung_order_spin.setToolTip("Orden del filtro UngGat.")
+				toolbar6.addWidget(self.cine_crudo_ung_order_spin)
+				toolbar6.addWidget(QLabel("Gated"))
+				self.cine_crudo_gated_filter_combo = QComboBox()
+				self.cine_crudo_gated_filter_combo.addItems(["none", "lowpass", "butterworth", "wiener"])
+				self.cine_crudo_gated_filter_combo.setCurrentText("butterworth")
+				self.cine_crudo_gated_filter_combo.setMaximumWidth(104)
+				self.cine_crudo_gated_filter_combo.setToolTip("Filtro de proyecciones para reconstrucción gate-by-gate.")
+				toolbar6.addWidget(self.cine_crudo_gated_filter_combo)
+				self.cine_crudo_gated_cutoff_spin = QDoubleSpinBox()
+				self.cine_crudo_gated_cutoff_spin.setRange(0.01, 1.00)
+				self.cine_crudo_gated_cutoff_spin.setSingleStep(0.01)
+				self.cine_crudo_gated_cutoff_spin.setDecimals(2)
+				self.cine_crudo_gated_cutoff_spin.setValue(0.40)
+				self.cine_crudo_gated_cutoff_spin.setMaximumWidth(60)
+				self.cine_crudo_gated_cutoff_spin.setToolTip("Cutoff normalizado (fracción de Nyquist) del filtro gated. Xeleris FBP: 0.40.")
+				toolbar6.addWidget(self.cine_crudo_gated_cutoff_spin)
+				self.cine_crudo_gated_order_spin = QSpinBox()
+				self.cine_crudo_gated_order_spin.setRange(1, 20)
+				self.cine_crudo_gated_order_spin.setValue(10)
+				self.cine_crudo_gated_order_spin.setMaximumWidth(50)
+				self.cine_crudo_gated_order_spin.setToolTip("Orden del filtro gated. Xeleris FBP: 10.")
+				toolbar6.addWidget(self.cine_crudo_gated_order_spin)
+				toolbar6.addWidget(QLabel("Iter"))
+				self.cine_crudo_iter_spin = QSpinBox()
+				self.cine_crudo_iter_spin.setRange(1, 20)
+				self.cine_crudo_iter_spin.setValue(2)
+				self.cine_crudo_iter_spin.setMaximumWidth(50)
+				self.cine_crudo_iter_spin.setToolTip("Iteraciones para MLEM/OSEM. Para prueba UI usá 1–2; en matriz real puede tardar.")
+				toolbar6.addWidget(self.cine_crudo_iter_spin)
+				toolbar6.addWidget(QLabel("Sub"))
+				self.cine_crudo_osem_subsets_spin = QSpinBox()
+				self.cine_crudo_osem_subsets_spin.setRange(1, 16)
+				self.cine_crudo_osem_subsets_spin.setValue(4)
+				self.cine_crudo_osem_subsets_spin.setMaximumWidth(50)
+				self.cine_crudo_osem_subsets_spin.setToolTip("Subsets para OSEM. En FBP/MLEM se ignora.")
+				toolbar6.addWidget(self.cine_crudo_osem_subsets_spin)
+				self.cine_crudo_recon_btn = QToolButton()
+				self.cine_crudo_recon_btn.setText("Recon raw")
+				self.cine_crudo_recon_btn.setToolTip("Reconstruye desde crudo gated con la corrección actual y muestra QC: UngGat + gates. No altera el procesamiento clínico principal todavía.")
+				self.cine_crudo_recon_btn.clicked.connect(self._reconstruct_cine_crudo_raw)
+				toolbar6.addWidget(self.cine_crudo_recon_btn)
+				self.cine_crudo_reorient_btn = QToolButton()
+				self.cine_crudo_reorient_btn.setText("Reorientar")
+				self.cine_crudo_reorient_btn.setToolTip("Abre la reorientación oblicua interactiva (Rec/Ref estilo Xeleris): definí eje largo del VI en vistas anterior/lateral, ROI y límites Base/Ápex, con preview SA/HLA/VLA en vivo.")
+				self.cine_crudo_reorient_btn.clicked.connect(self._open_cine_crudo_reorientation)
+				self.cine_crudo_reorient_btn.setEnabled(False)
+				toolbar6.addWidget(self.cine_crudo_reorient_btn)
+				toolbar6.addWidget(QLabel("Base"))
+				self.cine_crudo_cut_base_spin = QSpinBox()
+				self.cine_crudo_cut_base_spin.setRange(1, 1)
+				self.cine_crudo_cut_base_spin.setValue(1)
+				self.cine_crudo_cut_base_spin.setMaximumWidth(58)
+				self.cine_crudo_cut_base_spin.setEnabled(False)
+				self.cine_crudo_cut_base_spin.setToolTip("Primer corte SA a conservar (límite basal). Ajuste tipo líneas de límite Odyssey/Xeleris.")
+				self.cine_crudo_cut_base_spin.valueChanged.connect(self._preview_cine_crudo_cut_limits)
+				toolbar6.addWidget(self.cine_crudo_cut_base_spin)
+				toolbar6.addWidget(QLabel("Ápex"))
+				self.cine_crudo_cut_apex_spin = QSpinBox()
+				self.cine_crudo_cut_apex_spin.setRange(1, 1)
+				self.cine_crudo_cut_apex_spin.setValue(1)
+				self.cine_crudo_cut_apex_spin.setMaximumWidth(58)
+				self.cine_crudo_cut_apex_spin.setEnabled(False)
+				self.cine_crudo_cut_apex_spin.setToolTip("Último corte SA a conservar (límite apical). El cubo SA generado baja a sincronía/FEVI.")
+				self.cine_crudo_cut_apex_spin.valueChanged.connect(self._preview_cine_crudo_cut_limits)
+				toolbar6.addWidget(self.cine_crudo_cut_apex_spin)
+				toolbar6.addWidget(QLabel("Esp"))
+				self.cine_crudo_cut_thickness_spin = QSpinBox()
+				self.cine_crudo_cut_thickness_spin.setRange(1, 9)
+				self.cine_crudo_cut_thickness_spin.setValue(1)
+				self.cine_crudo_cut_thickness_spin.setMaximumWidth(50)
+				self.cine_crudo_cut_thickness_spin.setEnabled(False)
+				self.cine_crudo_cut_thickness_spin.setToolTip("Espesor de corte en píxeles. Cada SA se genera promediando este espesor alrededor del plano seleccionado.")
+				self.cine_crudo_cut_thickness_spin.valueChanged.connect(self._preview_cine_crudo_cut_limits)
+				toolbar6.addWidget(self.cine_crudo_cut_thickness_spin)
+				self.cine_crudo_preview_limits_btn = QToolButton()
+				self.cine_crudo_preview_limits_btn.setText("Ver límites")
+				self.cine_crudo_preview_limits_btn.setToolTip("Muestra líneas Base/Ápex sobre el volumen reconstruido y cortes SA de referencia antes de generar ejes.")
+				self.cine_crudo_preview_limits_btn.clicked.connect(self._preview_cine_crudo_cut_limits)
+				self.cine_crudo_preview_limits_btn.setEnabled(False)
+				toolbar6.addWidget(self.cine_crudo_preview_limits_btn)
+				self.cine_crudo_generate_cuts_btn = QToolButton()
+				self.cine_crudo_generate_cuts_btn.setText("Generar cortes")
+				self.cine_crudo_generate_cuts_btn.setToolTip("Genera los cortes cardíacos SA/HLA/VLA desde el volumen reconstruido y los muestra en comparacion_ejes.")
+				self.cine_crudo_generate_cuts_btn.clicked.connect(self._generate_cine_crudo_cardiac_cuts)
+				self.cine_crudo_generate_cuts_btn.setEnabled(False)
+				toolbar6.addWidget(self.cine_crudo_generate_cuts_btn)
+				self.cine_crudo_save_axes_dcm_btn = QToolButton()
+				self.cine_crudo_save_axes_dcm_btn.setText("Guardar ejes DICOM")
+				self.cine_crudo_save_axes_dcm_btn.setToolTip("Guarda SA, HLA y VLA generados como DICOM NM gated multiframe para reutilizar en SINCRO u otro software DICOM.")
+				self.cine_crudo_save_axes_dcm_btn.clicked.connect(self._save_cine_crudo_axes_dicoms)
+				self.cine_crudo_save_axes_dcm_btn.setEnabled(False)
+				toolbar6.addWidget(self.cine_crudo_save_axes_dcm_btn)
+				self.cine_crudo_process_recon_btn = QToolButton()
+				self.cine_crudo_process_recon_btn.setText("Procesar recon")
+				self.cine_crudo_process_recon_btn.setToolTip("Usa los cortes SA generados como estudio activo y corre fase/FEVI. Requiere Generar cortes primero.")
+				self.cine_crudo_process_recon_btn.clicked.connect(self._process_cine_crudo_reconstruction)
+				self.cine_crudo_process_recon_btn.setEnabled(False)
+				toolbar6.addWidget(self.cine_crudo_process_recon_btn)
+				toolbar6.addStretch(1)
 			toolbar.addStretch(1)
 			tab_layout.addLayout(toolbar)
 			if name == "cine_crudo":
@@ -1348,6 +1486,7 @@ class MainWindow(QMainWindow):
 				tab_layout.addLayout(toolbar3)
 				tab_layout.addLayout(toolbar4)
 				tab_layout.addLayout(toolbar5)
+				tab_layout.addLayout(toolbar6)
 
 			label = QLabel("Sin procesar")
 			label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -1363,9 +1502,15 @@ class MainWindow(QMainWindow):
 			self.preview_labels[name] = label
 			self.preview_zoom[name] = 1.0
 			if name == "cine_crudo":
-				label.mousePressEvent = self._on_cine_crudo_mouse_press_safe
-				label.mouseMoveEvent = self._on_cine_crudo_mouse_move_safe
-				label.mouseReleaseEvent = self._on_cine_crudo_mouse_release_safe
+				label.mousePressEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_press_safe(e, lbl))
+				label.mouseMoveEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_move_safe(e, lbl))
+				label.mouseReleaseEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_release_safe(e, lbl))
+			if name == "comparacion_ejes":
+				# Durante preview de límites (cut_limits) también se permite drag
+				# desde esta pestaña para Base/Ápex.
+				label.mousePressEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_press_safe(e, lbl))
+				label.mouseMoveEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_move_safe(e, lbl))
+				label.mouseReleaseEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_release_safe(e, lbl))
 			scroller = QScrollArea()
 			scroller.setWidgetResizable(False)
 			scroller.setWidget(label)
@@ -2052,13 +2197,13 @@ class MainWindow(QMainWindow):
 		fig.patch.set_facecolor("#0b1220")
 		# Sinograma VERTICAL: ángulo en eje Y (vertical), posición axial en X.
 		# sh es (n_angles, H): filas=ángulos → se ve vertical (alto), como Odyssey/Xeleris.
-		axes[0, 0].imshow(sh, cmap="hot", aspect="auto")
+		axes[0, 0].imshow(sh, cmap="gray", aspect="auto")
 		axes[0, 0].set_title("Sinograma VERTICAL (perfil axial)", color="white")
 		axes[0, 0].set_xlabel("posición axial (px)", color="white")
 		axes[0, 0].set_ylabel("ángulo de proyección", color="white")
 		# Sinograma HORIZONTAL: ángulo en eje X, posición horizontal en Y.
 		# sv es (n_angles, W) → transponer para ángulo en X.
-		axes[1, 0].imshow(sv.T, cmap="hot", aspect="auto")
+		axes[1, 0].imshow(sv.T, cmap="gray", aspect="auto")
 		axes[1, 0].set_title("Sinograma HORIZONTAL (perfil transversal)", color="white")
 		axes[1, 0].set_xlabel("ángulo de proyección", color="white")
 		axes[1, 0].set_ylabel("posición horizontal (px)", color="white")
@@ -2066,7 +2211,7 @@ class MainWindow(QMainWindow):
 		summed = projections.sum(axis=0)
 		pos = [(0, 1, 0), (0, 2, n_angles // 3), (1, 1, 2 * n_angles // 3)]
 		for r, c, a in pos:
-			axes[r, c].imshow(summed[a], cmap="hot")
+			axes[r, c].imshow(summed[a], cmap="gray")
 			axes[r, c].set_title(f"Proyeccion ang {a}", color="white")
 			axes[r, c].axis("off")
 
@@ -2116,7 +2261,7 @@ class MainWindow(QMainWindow):
 					continue
 				img = unggat[idx]
 				img_n = np.clip(img / p99g, 0, 1)
-				ax.imshow(img_n, cmap="hot")
+				ax.imshow(img_n, cmap="gray")
 				# Máscara por threshold en naranja (como Odyssey) para discriminar órganos.
 				mask = img > (thr_grid * img.max()) if img.max() > 0 else np.zeros_like(img, dtype=bool)
 				ov = np.ma.masked_where(~mask, mask)
@@ -6340,7 +6485,7 @@ class MainWindow(QMainWindow):
 			return rgb
 		try:
 			import matplotlib.cm as _cm
-			cmap = _cm.get_cmap("hot")
+			cmap = _cm.get_cmap("gray")
 			sino_axis = str(self.cine_crudo_sino_axis_combo.currentText()).lower() if hasattr(self, "cine_crudo_sino_axis_combo") else "sinograma y"
 			profile_axis = 1 if "x" in sino_axis else 2
 			profiles = [np.asarray(frames_arr, dtype=np.float64).sum(axis=profile_axis)]  # (ang, Y) o (ang, X)
@@ -6375,6 +6520,7 @@ class MainWindow(QMainWindow):
 
 	def _load_cine_crudo_frames(self, source: str = "UngGat"):
 		"""Carga frames del cine crudo desde proyecciones en memoria (UngGat o gated)."""
+		self.cine_crudo_preview_mode = None
 		self.cine_crudo_timer.stop()
 		self.cine_crudo_playing = False
 		self.cine_crudo_frames = []
@@ -6418,7 +6564,7 @@ class MainWindow(QMainWindow):
 		frames: list[QPixmap] = []
 		try:
 			import matplotlib.cm as _cm
-			cmap = _cm.get_cmap("hot")
+			cmap = _cm.get_cmap("gray")
 			for a in range(frames_arr.shape[0]):
 				img = np.clip(frames_arr[a] / p99, 0, 1)
 				rgb = (np.asarray(cmap(img)[..., :3]) * 255).astype(np.uint8)
@@ -6976,6 +7122,719 @@ class MainWindow(QMainWindow):
 			self._log(f"[WARN] Grabar DICOM corregido falló: {exc}")
 			QMessageBox.warning(self, "SINCRO", f"No se pudo grabar el DICOM:\n{exc}")
 
+	def _cine_crudo_recon_filter_config(self, branch: str):
+		from core.raw_reconstruction import ProjectionFilterConfig
+
+		if branch == "ungated":
+			kind = str(self.cine_crudo_ung_filter_combo.currentText()) if hasattr(self, "cine_crudo_ung_filter_combo") else "butterworth"
+			cutoff = float(self.cine_crudo_ung_cutoff_spin.value()) if hasattr(self, "cine_crudo_ung_cutoff_spin") else 0.52
+			order = int(self.cine_crudo_ung_order_spin.value()) if hasattr(self, "cine_crudo_ung_order_spin") else 5
+		else:
+			kind = str(self.cine_crudo_gated_filter_combo.currentText()) if hasattr(self, "cine_crudo_gated_filter_combo") else "butterworth"
+			cutoff = float(self.cine_crudo_gated_cutoff_spin.value()) if hasattr(self, "cine_crudo_gated_cutoff_spin") else 0.40
+			order = int(self.cine_crudo_gated_order_spin.value()) if hasattr(self, "cine_crudo_gated_order_spin") else 10
+		return ProjectionFilterConfig(kind=kind, cutoff=cutoff, order=order)
+
+	def _cine_crudo_recon_config(self):
+		from core.raw_reconstruction import RawReconConfig
+
+		method = str(self.cine_crudo_recon_method_combo.currentText()).strip().lower() if hasattr(self, "cine_crudo_recon_method_combo") else "fbp"
+		return RawReconConfig(
+			reconstruction_method=method,
+			ungated_filter=self._cine_crudo_recon_filter_config("ungated"),
+			gated_filter=self._cine_crudo_recon_filter_config("gated"),
+			iterative_iterations=int(self.cine_crudo_iter_spin.value()) if hasattr(self, "cine_crudo_iter_spin") else 2,
+			osem_subsets=int(self.cine_crudo_osem_subsets_spin.value()) if hasattr(self, "cine_crudo_osem_subsets_spin") else 4,
+			display_slice_step_px=2,
+		)
+
+	def _identity_cine_crudo_motion_result(self, projections: np.ndarray, method: str) -> dict:
+		n_angles = int(np.asarray(projections).shape[1])
+		return {
+			"corrected": np.asarray(projections, dtype=np.float64),
+			"applied_shifts_y": np.zeros((n_angles,), dtype=np.float64),
+			"applied_shifts_x": np.zeros((n_angles,), dtype=np.float64),
+			"method": method,
+			"axis_corrected": "none",
+			"max_shift_px": 0.0,
+		}
+
+	def _write_cine_crudo_recon_qc(self, result, source_label: str) -> str:
+		import matplotlib.pyplot as plt
+
+		ung = np.asarray(result.ungated_volume, dtype=np.float64)
+		gated = np.asarray(result.gated_volume, dtype=np.float64)
+		mid_slice = int(np.clip(ung.shape[0] // 2, 0, ung.shape[0] - 1))
+		mid_y = int(np.clip(ung.shape[1] // 2, 0, ung.shape[1] - 1))
+		mid_x = int(np.clip(ung.shape[2] // 2, 0, ung.shape[2] - 1))
+		mid_gate = int(np.clip(gated.shape[0] // 2, 0, gated.shape[0] - 1))
+
+		def _norm(img2d: np.ndarray) -> np.ndarray:
+			arr = np.asarray(img2d, dtype=np.float64)
+			p99 = float(np.percentile(arr, 99.0)) if arr.size else 0.0
+			if p99 <= 0.0:
+				p99 = float(np.max(arr)) if arr.size else 1.0
+			return np.clip(arr / max(p99, 1e-8), 0.0, 1.0)
+
+		def _axis_triplet(vol3d: np.ndarray) -> list[tuple[str, np.ndarray]]:
+			vol = np.asarray(vol3d, dtype=np.float64)
+			sa = vol[mid_slice]
+			hla = np.fliplr(np.rot90(vol[:, mid_y, :], k=1))
+			vla = np.flipud(np.rot90(vol[:, :, mid_x], k=-1))
+			return [("SA", sa), ("HLA", hla), ("VLA", vla)]
+
+		rows = [
+			("UngGat", _axis_triplet(ung)),
+			(f"Gate {mid_gate + 1}", _axis_triplet(gated[mid_gate])),
+		]
+		fig, axes = plt.subplots(2, 3, figsize=(11.5, 7.2))
+		for row_idx, (row_label, planes) in enumerate(rows):
+			for col_idx, (axis_name, img) in enumerate(planes):
+				ax = axes[row_idx, col_idx]
+				ax.imshow(_norm(img), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="auto" if axis_name != "SA" else "equal")
+				ax.set_title(f"{row_label} · {axis_name}", color="white", fontsize=9, fontweight="bold")
+				ax.axis("off")
+				ax.set_facecolor("#0b1220")
+				if axis_name == "SA":
+					ax.text(0.03, 0.05, f"z={mid_slice + 1}", transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
+				elif axis_name == "HLA":
+					ax.text(0.03, 0.05, f"y={mid_y + 1}", transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
+				else:
+					ax.text(0.03, 0.05, f"x={mid_x + 1}", transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
+		cfg = result.config
+		fig.patch.set_facecolor("#0b1220")
+		fig.suptitle(
+			f"Recon raw {cfg.reconstruction_method.upper()} · cortes SA/HLA/VLA | fuente: {source_label} | "
+			f"Ung={cfg.ungated_filter.kind} {cfg.ungated_filter.cutoff:.2f}/{cfg.ungated_filter.order} | "
+			f"Gated={cfg.gated_filter.kind} {cfg.gated_filter.cutoff:.2f}/{cfg.gated_filter.order}",
+			color="white", fontsize=10.5, fontweight="bold",
+		)
+		fig.tight_layout(rect=[0, 0, 1, 0.91])
+		out_png = os.path.join(self.output_dir, "raw_reconstruction_qc.png")
+		fig.savefig(out_png, dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
+		plt.close(fig)
+		return out_png
+
+	def _reconstruct_cine_crudo_raw(self):
+		"""Reconstruye desde crudo: usa corrección si existe, si no usa crudo original."""
+		raw_study = self.cine_crudo_raw_study_for_recon
+		if raw_study is None and self.study is not None and not bool(getattr(self.study, "reconstructed", True)):
+			raw_study = self.study
+			self.cine_crudo_raw_study_for_recon = self.study
+		if raw_study is None:
+			QMessageBox.information(self, "SINCRO", "Cargá un estudio crudo gated en cine_crudo primero.")
+			return
+		try:
+			from core.raw_reconstruction import reconstruct_raw_gated_pipeline
+
+			projections = np.asarray(raw_study.cube, dtype=np.float64)
+			angles = getattr(raw_study, "angles_deg", None)
+			cfg = self._cine_crudo_recon_config()
+			if self.cine_crudo_motion_result is not None and self.cine_crudo_corrected_projections is not None:
+				motion = dict(self.cine_crudo_motion_result)
+				source_label = "corregido por motion correction"
+			else:
+				motion = self._identity_cine_crudo_motion_result(projections, "sin_correccion")
+				source_label = "crudo original sin correccion"
+
+			if cfg.reconstruction_method.lower() in {"mlem", "osem"} and projections.shape[-1] >= 64:
+				self._log("[INFO] MLEM/OSEM CPU en matriz real puede tardar; para pruebas rápidas usá Iter=1-2.")
+			self._set_progress(45, f"Reconstruyendo raw ({cfg.reconstruction_method.upper()})...")
+			result = reconstruct_raw_gated_pipeline(projections, angles, motion_result=motion, config=cfg)
+			self.cine_crudo_recon_result = result
+			out_png = self._write_cine_crudo_recon_qc(result, source_label)
+			self.cine_crudo_preview_mode = "recon_qc"
+			if "cine_crudo" in self.preview_labels:
+				pix = QPixmap(out_png)
+				self.preview_pixmaps["cine_crudo"] = pix
+				self.preview_base_sizes["cine_crudo"] = pix.size()
+				self._apply_preview_zoom("cine_crudo")
+				self._select_tab_by_title("cine_crudo")
+
+			self.cine_crudo_recon_study = None
+			self.cine_crudo_cut_study = None
+			self.cine_crudo_cut_source_label = source_label
+			self.cine_crudo_reoriented_gated = None
+			self.cine_crudo_reoriented_ungated = None
+			if hasattr(self, "cine_crudo_reorient_btn"):
+				self.cine_crudo_reorient_btn.setEnabled(True)
+			if hasattr(self, "cine_crudo_process_recon_btn"):
+				self.cine_crudo_process_recon_btn.setEnabled(False)
+			n_slices = int(result.gated_volume.shape[1])
+			if hasattr(self, "cine_crudo_cut_base_spin") and hasattr(self, "cine_crudo_cut_apex_spin"):
+				self.cine_crudo_cut_base_spin.setEnabled(True)
+				self.cine_crudo_cut_apex_spin.setEnabled(True)
+				self.cine_crudo_cut_base_spin.setRange(1, max(1, n_slices))
+				self.cine_crudo_cut_apex_spin.setRange(1, max(1, n_slices))
+				self.cine_crudo_cut_base_spin.setValue(1)
+				self.cine_crudo_cut_apex_spin.setValue(max(1, n_slices))
+			if hasattr(self, "cine_crudo_cut_thickness_spin"):
+				self.cine_crudo_cut_thickness_spin.setEnabled(True)
+			if hasattr(self, "cine_crudo_preview_limits_btn"):
+				self.cine_crudo_preview_limits_btn.setEnabled(True)
+			if hasattr(self, "cine_crudo_generate_cuts_btn"):
+				self.cine_crudo_generate_cuts_btn.setEnabled(True)
+			self._preview_cine_crudo_cut_limits()
+			self._log(
+				f"Recon raw lista: fuente={source_label}; método={cfg.reconstruction_method.upper()}; "
+				f"UngGat={cfg.ungated_filter.kind} {cfg.ungated_filter.cutoff:.2f}/{cfg.ungated_filter.order}; "
+				f"Gated={cfg.gated_filter.kind} {cfg.gated_filter.cutoff:.2f}/{cfg.gated_filter.order}; "
+				f"volumen gated={result.gated_volume.shape}. Ajustá límites Base/Ápex y tocá Generar cortes."
+			)
+			self._set_progress(100, "Recon raw lista; definí límites de cortes")
+		except Exception as exc:
+			self._log(f"[ERROR] Recon raw falló: {exc}")
+			self._set_progress(100, "Recon raw falló")
+			QMessageBox.warning(self, "SINCRO", f"No se pudo reconstruir desde crudo:\n{exc}")
+
+	def _cine_crudo_cut_bounds(self, n_slices: int) -> tuple[int, int]:
+		base = int(self.cine_crudo_cut_base_spin.value()) if hasattr(self, "cine_crudo_cut_base_spin") else 1
+		apex = int(self.cine_crudo_cut_apex_spin.value()) if hasattr(self, "cine_crudo_cut_apex_spin") else int(n_slices)
+		z0 = int(np.clip(min(base, apex) - 1, 0, max(0, int(n_slices) - 1)))
+		z1 = int(np.clip(max(base, apex) - 1, 0, max(0, int(n_slices) - 1)))
+		if z1 <= z0:
+			z1 = min(max(0, int(n_slices) - 1), z0 + 1)
+		return z0, z1
+
+	def _cine_crudo_cut_thickness_px(self) -> int:
+		if hasattr(self, "cine_crudo_cut_thickness_spin"):
+			return max(1, int(self.cine_crudo_cut_thickness_spin.value()))
+		return 1
+
+	def _thickened_sa_volume(self, volume: np.ndarray, z0: int, z1: int, thickness_px: int) -> np.ndarray:
+		vol = np.asarray(volume, dtype=np.float64)
+		if vol.ndim != 3:
+			raise ValueError(f"volume debe ser 3D; recibió {vol.shape}")
+		thick = max(1, int(thickness_px))
+		half_low = (thick - 1) // 2
+		half_high = thick // 2
+		slices = []
+		for z in range(int(z0), int(z1) + 1):
+			lo = max(0, z - half_low)
+			hi = min(vol.shape[0] - 1, z + half_high)
+			slices.append(vol[lo:hi + 1].mean(axis=0))
+		return np.stack(slices, axis=0)
+
+	def _thickened_sa_cube(self, cube: np.ndarray, z0: int, z1: int, thickness_px: int) -> np.ndarray:
+		arr = np.asarray(cube, dtype=np.float64)
+		if arr.ndim != 4:
+			raise ValueError(f"cube debe ser 4D; recibió {arr.shape}")
+		return np.stack([self._thickened_sa_volume(arr[g], z0, z1, thickness_px) for g in range(arr.shape[0])], axis=0)
+
+	def _write_cine_crudo_limits_qc(self, result, z0: int, z1: int, thickness_px: int, active_marker: str | None = None) -> tuple[str, dict]:
+		import matplotlib.pyplot as plt
+
+		ung = np.asarray(result.ungated_volume, dtype=np.float64)
+		mid_y = int(np.clip(ung.shape[1] // 2, 0, ung.shape[1] - 1))
+		mid_x = int(np.clip(ung.shape[2] // 2, 0, ung.shape[2] - 1))
+		mid_z = int(np.clip((int(z0) + int(z1)) // 2, 0, ung.shape[0] - 1))
+		sa_base = self._thickened_sa_volume(ung, int(z0), int(z0), thickness_px)[0]
+		sa_mid = self._thickened_sa_volume(ung, mid_z, mid_z, thickness_px)[0]
+		sa_apex = self._thickened_sa_volume(ung, int(z1), int(z1), thickness_px)[0]
+		long_y = ung[:, mid_y, :]
+		long_x = ung[:, :, mid_x]
+
+		def _norm(img2d: np.ndarray) -> np.ndarray:
+			arr = np.asarray(img2d, dtype=np.float64)
+			p99 = float(np.percentile(arr, 99.0)) if arr.size else 0.0
+			return np.clip(arr / max(p99, 1e-8), 0.0, 1.0)
+
+		fig, axes = plt.subplots(2, 3, figsize=(11.5, 7.2))
+		for ax in axes.ravel():
+			ax.axis("off")
+			ax.set_facecolor("#0b1220")
+
+		axes[0, 0].imshow(_norm(long_y), cmap="odyssey_cool", aspect="auto")
+		axes[0, 0].set_title("Vista longitudinal Y · límites", color="white", fontsize=9, fontweight="bold")
+		axes[0, 1].imshow(_norm(long_x), cmap="odyssey_cool", aspect="auto")
+		axes[0, 1].set_title("Vista longitudinal X · límites", color="white", fontsize=9, fontweight="bold")
+		for ax in (axes[0, 0], axes[0, 1]):
+			ax.axis("on")
+			ax.set_xticks([])
+			ax.set_yticks([])
+			col_base = "#ffd84d" if active_marker == "base" else "#ff4040"
+			col_apex = "#ffd84d" if active_marker == "apex" else "#ff4040"
+			lw_base = 2.4 if active_marker == "base" else 1.8
+			lw_apex = 2.4 if active_marker == "apex" else 1.8
+			ax.axhline(int(z0), color=col_base, linewidth=lw_base)
+			ax.axhline(int(z1), color=col_apex, linewidth=lw_apex)
+			ax.axhline(mid_z, color="#66ff66", linewidth=1.2, linestyle="--")
+			ax.text(0.02, 0.05, f"Base {z0 + 1}  Ápex {z1 + 1}  Esp {thickness_px}px", transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
+
+		for ax, title, img, z in [
+			(axes[1, 0], "SA Base", sa_base, z0),
+			(axes[1, 1], "SA medio", sa_mid, mid_z),
+			(axes[1, 2], "SA Ápex", sa_apex, z1),
+		]:
+			ax.imshow(_norm(img), cmap="odyssey_cool", vmin=0.0, vmax=1.0)
+			ax.set_title(title, color="white", fontsize=9, fontweight="bold")
+			ax.text(0.03, 0.05, f"SA {int(z) + 1}", transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
+
+		axes[0, 2].text(0.5, 0.5, "Ajustá Base / Ápex / Esp\ny mirá las líneas rojas\nantes de Generar cortes", ha="center", va="center", color="white", fontsize=10, fontweight="bold")
+		fig.patch.set_facecolor("#0b1220")
+		fig.suptitle("Selección de límites para cortes cardíacos", color="white", fontsize=11, fontweight="bold")
+		fig.tight_layout(rect=[0, 0, 1, 0.92])
+		# Metadatos geométricos exactos de los paneles interactivos (fila superior)
+		# en coordenadas normalizadas de la figura, para mapear mouse->slice.
+		p_left = axes[0, 0].get_position().bounds
+		p_mid = axes[0, 1].get_position().bounds
+		meta = {
+			"n_slices": int(ung.shape[0]),
+			"z0": int(z0),
+			"z1": int(z1),
+			"thickness": int(thickness_px),
+			"top_axes": {
+				"left": {"x0": float(p_left[0]), "y0": float(p_left[1]), "w": float(p_left[2]), "h": float(p_left[3])},
+				"mid": {"x0": float(p_mid[0]), "y0": float(p_mid[1]), "w": float(p_mid[2]), "h": float(p_mid[3])},
+			},
+		}
+		out_png = os.path.join(self.output_dir, "raw_cut_limits_qc.png")
+		# Importante: no usar bbox_inches='tight' porque recorta márgenes y rompe
+		# el mapeo lineal de coordenadas de mouse sobre la imagen renderizada.
+		fig.savefig(out_png, dpi=150, facecolor=fig.get_facecolor())
+		plt.close(fig)
+		return out_png, meta
+
+	def _preview_cine_crudo_cut_limits(self, active_marker: str | None = None):
+		if self.cine_crudo_recon_result is None:
+			self._cine_crudo_cut_limits_meta = None
+			return
+		try:
+			result = self.cine_crudo_recon_result
+			z0, z1 = self._cine_crudo_cut_bounds(int(np.asarray(result.gated_volume).shape[1]))
+			thickness = self._cine_crudo_cut_thickness_px()
+			out_png, meta = self._write_cine_crudo_limits_qc(result, z0, z1, thickness, active_marker=active_marker)
+			self._cine_crudo_cut_limits_meta = dict(meta)
+			self.cine_crudo_preview_mode = "cut_limits"
+			for tab_name in ("comparacion_ejes", "cine_crudo"):
+				if tab_name in self.preview_labels:
+					pix = QPixmap(out_png)
+					self.preview_pixmaps[tab_name] = pix
+					self.preview_base_sizes[tab_name] = pix.size()
+					self._apply_preview_zoom(tab_name)
+			self._select_tab_by_title("comparacion_ejes")
+		except Exception as exc:
+			self._cine_crudo_cut_limits_meta = None
+			self._log(f"[WARN] Preview límites falló: {exc}")
+
+	def _cine_crudo_cut_limits_event_to_slice(self, event, source_label=None):
+		"""Mapea click/drag en preview de límites a índice de slice (k).
+
+		Funciona sobre la imagen renderizada en `comparacion_ejes` / `cine_crudo`
+		durante `cine_crudo_preview_mode == 'cut_limits'`.
+		"""
+		meta = self._cine_crudo_cut_limits_meta
+		if not meta:
+			return None
+		label = source_label
+		if label is None:
+			label = event.widget() if hasattr(event, "widget") else None
+		if label is None:
+			return None
+		if label not in self.preview_labels.values():
+			return None
+		shown = label.pixmap() if hasattr(label, "pixmap") else None
+		if shown is None or shown.isNull():
+			return None
+		lw = max(1, int(label.width()))
+		lh = max(1, int(label.height()))
+		pw = int(shown.width())
+		ph = int(shown.height())
+		scale = min(lw / max(1, pw), lh / max(1, ph))
+		dw = pw * scale
+		dh = ph * scale
+		xo = (lw - dw) / 2.0
+		yo = (lh - dh) / 2.0
+		x_img = (float(event.pos().x()) - xo) / max(1e-6, scale)
+		y_img = (float(event.pos().y()) - yo) / max(1e-6, scale)
+		if not (0.0 <= x_img <= float(pw - 1) and 0.0 <= y_img <= float(ph - 1)):
+			return None
+		xn = x_img / max(1.0, float(pw - 1))
+		# yn_img: 0 arriba, 1 abajo (coords de imagen/QLabel)
+		yn_img = y_img / max(1.0, float(ph - 1))
+		# yb_fig: 0 abajo, 1 arriba (coords normalizadas de Matplotlib Figure)
+		yb_fig = 1.0 - yn_img
+		top = meta.get("top_axes", {})
+		in_top_axis = False
+		y0_match = 0.0
+		h_match = 1.0
+		for ax in ("left", "mid"):
+			r = top.get(ax, {})
+			x0 = float(r.get("x0", 0.0)); y0 = float(r.get("y0", 0.0))
+			w = float(r.get("w", 0.0)); h = float(r.get("h", 0.0))
+			# pequeño margen para que sea más fácil "agarrar" la línea
+			if (x0 - 0.01) <= xn <= (x0 + w + 0.01) and (y0 - 0.01) <= yb_fig <= (y0 + h + 0.01):
+				in_top_axis = True
+				y0_match = y0
+				h_match = h
+				break
+		if not in_top_axis:
+			return None
+		nz = int(meta.get("n_slices", 1))
+		# En figura Matplotlib, y crece hacia arriba; para filas de imagen (z),
+		# queremos 0 en el borde superior del eje y 1 en el inferior.
+		y_rel = ((y0_match + h_match) - yb_fig) / max(1e-6, h_match)
+		z = int(np.clip(round(y_rel * max(0, nz - 1)), 0, max(0, nz - 1)))
+		return z
+
+	def _cine_crudo_marker_at_limits_event(self, event, source_label=None) -> str | None:
+		"""Detecta si el puntero está cerca de la línea Base/Ápex en preview límites."""
+		meta = self._cine_crudo_cut_limits_meta
+		if not meta:
+			return None
+		z = self._cine_crudo_cut_limits_event_to_slice(event, source_label=source_label)
+		if z is None:
+			return None
+		z0 = int(meta.get("z0", 0))
+		z1 = int(meta.get("z1", 0))
+		if abs(z - z0) <= 2:
+			return "base"
+		if abs(z - z1) <= 2:
+			return "apex"
+		return None
+
+	def _update_cine_crudo_cut_spins_from_drag(self, marker: str, z: int):
+		if marker not in {"base", "apex"}:
+			return
+		if self.cine_crudo_recon_result is None:
+			return
+		nz = int(np.asarray(self.cine_crudo_recon_result.gated_volume).shape[1])
+		z = int(np.clip(z, 0, max(0, nz - 1)))
+		base_1 = int(self.cine_crudo_cut_base_spin.value()) if hasattr(self, "cine_crudo_cut_base_spin") else 1
+		apex_1 = int(self.cine_crudo_cut_apex_spin.value()) if hasattr(self, "cine_crudo_cut_apex_spin") else nz
+		if marker == "base":
+			base_1 = z + 1
+		else:
+			apex_1 = z + 1
+		# Mantener coherencia base<=ápex sin bloquear inversión del usuario.
+		if base_1 > apex_1:
+			if marker == "base":
+				apex_1 = base_1
+			else:
+				base_1 = apex_1
+		if hasattr(self, "cine_crudo_cut_base_spin") and hasattr(self, "cine_crudo_cut_apex_spin"):
+			self.cine_crudo_cut_base_spin.blockSignals(True)
+			self.cine_crudo_cut_apex_spin.blockSignals(True)
+			self.cine_crudo_cut_base_spin.setValue(int(np.clip(base_1, 1, max(1, nz))))
+			self.cine_crudo_cut_apex_spin.setValue(int(np.clip(apex_1, 1, max(1, nz))))
+			self.cine_crudo_cut_base_spin.blockSignals(False)
+			self.cine_crudo_cut_apex_spin.blockSignals(False)
+		self._preview_cine_crudo_cut_limits(active_marker=marker)
+
+	def _heart_crop_window(self, ung_full: np.ndarray, z0: int, z1: int) -> tuple[int, int, int, int]:
+		"""Centro y radio del corazón (y0,y1,x0,x1) desde el slab base→ápex."""
+		vol = np.asarray(ung_full, dtype=np.float64)
+		z0i = int(np.clip(z0, 0, vol.shape[0] - 1))
+		z1i = int(np.clip(z1, 0, vol.shape[0] - 1))
+		slab = vol[min(z0i, z1i):max(z0i, z1i) + 1].sum(axis=0)
+		H, W = slab.shape
+		mx = float(slab.max()) if slab.size else 0.0
+		if mx <= 0.0:
+			return 0, H - 1, 0, W - 1
+		mask = slab > 0.35 * mx
+		ys, xs = np.where(mask)
+		if ys.size < 4:
+			cy, cx = H // 2, W // 2
+			r = max(12, min(H, W) // 4)
+		else:
+			cy = int(round(float(ys.mean())))
+			cx = int(round(float(xs.mean())))
+			ry = int(np.ceil((ys.max() - ys.min()) / 2.0))
+			rx = int(np.ceil((xs.max() - xs.min()) / 2.0))
+			r = int(np.clip(max(ry, rx) + 6, 12, max(H, W) // 2))
+		y0 = int(np.clip(cy - r, 0, H - 1))
+		y1 = int(np.clip(cy + r, 0, H - 1))
+		x0 = int(np.clip(cx - r, 0, W - 1))
+		x1 = int(np.clip(cx + r, 0, W - 1))
+		return y0, y1, x0, x1
+
+	def _write_cine_crudo_cuts_qc(self, ung_full: np.ndarray, z0: int, z1: int) -> str:
+		import matplotlib.pyplot as plt
+
+		vol = np.asarray(ung_full, dtype=np.float64)
+		n_slices = int(vol.shape[0])
+		z0 = int(np.clip(z0, 0, n_slices - 1))
+		z1 = int(np.clip(z1, 0, n_slices - 1))
+		mid_slice = int(np.clip((z0 + z1) // 2, 0, n_slices - 1))
+		thickness = self._cine_crudo_cut_thickness_px()
+
+		try:
+			from scipy.ndimage import gaussian_filter
+		except Exception:
+			gaussian_filter = None
+
+		def _norm(img2d: np.ndarray) -> np.ndarray:
+			arr = np.asarray(img2d, dtype=np.float64)
+			if gaussian_filter is not None and arr.ndim == 2:
+				arr = gaussian_filter(arr, sigma=0.6)
+			p99 = float(np.percentile(arr, 99.5)) if arr.size else 0.0
+			p5 = float(np.percentile(arr, 5.0)) if arr.size else 0.0
+			return np.clip((arr - p5) / max(p99 - p5, 1e-8), 0.0, 1.0)
+
+		# El volumen recibido ya está SA-alineado (reorientado): axis 0 = k
+		# (base→ápex), axis 1 = j (vertical anat.), axis 2 = i (horizontal anat.).
+		# Se usan los extractores anatómicos (convención Xeleris/Odyssey) para
+		# que esta QC coincida EXACTAMENTE con los cortes generados y el diálogo.
+		from core.cardiac_reorientation import hla_slice, sa_slice, vla_slice
+
+		jmid = int(np.clip(vol.shape[1] // 2, 0, vol.shape[1] - 1))
+		imid = int(np.clip(vol.shape[2] // 2, 0, vol.shape[2] - 1))
+
+		# SA en el medio del slab base→ápex (orientación anatómica fija).
+		sa_crop = sa_slice(vol, mid_slice)
+		# Ejes largos completos (altura real base→ápex).
+		hla_view = hla_slice(vol, jmid)   # APEX↑ BASE↓, SEP← LAT→
+		vla_view = vla_slice(vol, imid)   # ANT↑ INF↓, BASE← APEX→
+		# Recortes base→ápex de los ejes largos (líneas de límite luego).
+		hla_cut = hla_view
+		vla_cut = vla_view
+
+		fig, axes = plt.subplots(2, 3, figsize=(12.2, 7.3), gridspec_kw={"height_ratios": [1.05, 1.0]})
+		for ax in axes.ravel():
+			ax.axis("off")
+			ax.set_facecolor("#020611")
+
+		# Fila superior: localización SA + límites en los ejes largos (líneas rojas base/ápex).
+		axes[0, 0].imshow(_norm(sa_crop), cmap="odyssey_cool", vmin=0.0, vmax=1.0, interpolation="bicubic")
+		axes[0, 0].set_title("Localización SA", color="white", fontsize=9, fontweight="bold")
+		axes[0, 0].axhline((sa_crop.shape[0] - 1) / 2.0, color="#40ff5a", linewidth=1.0)
+		axes[0, 0].axvline((sa_crop.shape[1] - 1) / 2.0, color="#40ff5a", linewidth=1.0)
+		axes[0, 0].text(0.03, 0.05, f"SA {mid_slice + 1}", transform=axes[0, 0].transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
+
+		nk = int(vol.shape[0])
+		# VLA: base→ápex en columnas (BASE izq / APEX der) → líneas verticales.
+		axes[0, 1].imshow(_norm(vla_view), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="auto", interpolation="bicubic")
+		axes[0, 1].set_title("VLA limits · ANT↑ BASE←", color="white", fontsize=9, fontweight="bold")
+		axes[0, 1].axvline(z0, color="#ff3333", linewidth=1.6)
+		axes[0, 1].axvline(z1, color="#ff3333", linewidth=1.6)
+		axes[0, 1].axvline(mid_slice, color="#40ff5a", linewidth=1.0, linestyle="--")
+		axes[0, 1].text(0.03, 0.05, f"Base {z0 + 1}  Ápex {z1 + 1}  Esp {thickness}px", transform=axes[0, 1].transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
+		# HLA: APEX arriba / BASE abajo (fila k invertida) → líneas horizontales
+		# en coordenada de fila invertida k' = (nk-1) - k.
+		axes[0, 2].imshow(_norm(hla_view), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="auto", interpolation="bicubic")
+		axes[0, 2].set_title("HLA limits · APEX↑ SEP←", color="white", fontsize=9, fontweight="bold")
+		axes[0, 2].axhline((nk - 1) - z0, color="#ff3333", linewidth=1.6)
+		axes[0, 2].axhline((nk - 1) - z1, color="#ff3333", linewidth=1.6)
+		axes[0, 2].axhline((nk - 1) - mid_slice, color="#40ff5a", linewidth=1.0, linestyle="--")
+		axes[0, 2].text(0.03, 0.05, f"Base {z0 + 1}  Ápex {z1 + 1}  Esp {thickness}px", transform=axes[0, 2].transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
+
+		# Fila inferior: cortes generados con convención anatómica Xeleris/Odyssey.
+		for ax, title, img, marker in [
+			(axes[1, 0], "VLA", vla_cut, "ANT↑ · BASE← APEX→"),
+			(axes[1, 1], "HLA", hla_cut, "APEX↑ · SEP← LAT→"),
+			(axes[1, 2], "SA", sa_crop, "ANT↑ · SEP← LAT→"),
+		]:
+			ax.imshow(_norm(img), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="auto" if title != "SA" else "equal", interpolation="bicubic")
+			ax.set_title(title, color="white", fontsize=10, fontweight="bold")
+			ax.text(0.03, 0.05, marker, transform=ax.transAxes, color="#e8f5e9", fontsize=8, fontweight="bold")
+		fig.patch.set_facecolor("#0b1220")
+		fig.suptitle(
+			f"Cortes generados · límites Base={z0 + 1} Ápex={z1 + 1} · Esp {thickness}px · "
+			f"fuente: {self.cine_crudo_cut_source_label or 'raw recon'}",
+			color="white", fontsize=11, fontweight="bold",
+		)
+		fig.tight_layout(rect=[0, 0, 1, 0.91], pad=1.0)
+		out_png = os.path.join(self.output_dir, "raw_generated_axes_qc.png")
+		fig.savefig(out_png, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+		plt.close(fig)
+		return out_png
+
+	def _open_cine_crudo_reorientation(self):
+		"""Abre el diálogo interactivo de reorientación oblicua (Rec/Ref estilo Xeleris)."""
+		if self.cine_crudo_recon_result is None:
+			QMessageBox.information(self, "SINCRO", "Primero reconstruí el crudo con Recon raw.")
+			return
+		try:
+			from ui.reorientation_dialog import CardiacReorientationDialog
+		except Exception as exc:
+			QMessageBox.warning(self, "SINCRO", f"No se pudo abrir la reorientación:\n{exc}")
+			return
+		result = self.cine_crudo_recon_result
+		ung_vol = np.asarray(result.ungated_volume, dtype=np.float64)
+		gated_vol = np.asarray(result.gated_volume, dtype=np.float64)
+		# Geometría de adquisición para las vistas de referencia anterior/lateral izq.
+		geometry = None
+		raw_study = self.cine_crudo_raw_study_for_recon or self.study
+		if raw_study is not None:
+			try:
+				from core.spect_geometry import SpectGeometry
+				geometry = SpectGeometry(
+					patient_position=str(getattr(raw_study, "patient_position", "") or ""),
+					start_angle=getattr(raw_study, "start_angle", None),
+					angular_step=getattr(raw_study, "angular_step", None),
+					rotation_direction=str(getattr(raw_study, "rotation_direction", "") or ""),
+					scan_arc=getattr(raw_study, "scan_arc", None),
+					n_angles=int(getattr(raw_study, "n_slices", 0) or 0),
+				)
+			except Exception as exc:
+				self._log(f"[WARN] No se pudo derivar geometría de adquisición: {exc}")
+				geometry = None
+		dlg = CardiacReorientationDialog(
+			ung_vol, gated_volume=gated_vol,
+			source_label=self.cine_crudo_cut_source_label or "raw recon",
+			geometry=geometry, parent=self,
+		)
+		if dlg.exec() != QDialog.DialogCode.Accepted or dlg.reoriented_gated is None:
+			return
+		self.cine_crudo_reoriented_gated = np.asarray(dlg.reoriented_gated, dtype=np.float64)
+		self.cine_crudo_reoriented_ungated = (
+			np.asarray(dlg.reoriented_ungated, dtype=np.float64)
+			if dlg.reoriented_ungated is not None else None
+		)
+		n = int(self.cine_crudo_reoriented_gated.shape[1])
+		base_1 = int(np.clip(dlg.base_k + 1, 1, n))
+		apex_1 = int(np.clip(dlg.apex_k + 1, 1, n))
+		if hasattr(self, "cine_crudo_cut_base_spin") and hasattr(self, "cine_crudo_cut_apex_spin"):
+			for sp in (self.cine_crudo_cut_base_spin, self.cine_crudo_cut_apex_spin):
+				sp.blockSignals(True)
+				sp.setEnabled(True)
+				sp.setRange(1, max(1, n))
+			self.cine_crudo_cut_base_spin.setValue(base_1)
+			self.cine_crudo_cut_apex_spin.setValue(apex_1)
+			for sp in (self.cine_crudo_cut_base_spin, self.cine_crudo_cut_apex_spin):
+				sp.blockSignals(False)
+		if hasattr(self, "cine_crudo_cut_thickness_spin"):
+			self.cine_crudo_cut_thickness_spin.setEnabled(True)
+			self.cine_crudo_cut_thickness_spin.setValue(int(getattr(dlg, "thickness", 1)))
+		self.cine_crudo_cut_source_label = (self.cine_crudo_cut_source_label or "raw recon") + " · reorientado"
+		self._log(
+			f"Reorientación aplicada: azimut/elevación oblicuos; volumen SA-alineado {self.cine_crudo_reoriented_gated.shape}; "
+			f"Base={base_1} Ápex={apex_1}. Generando cortes."
+		)
+		self._generate_cine_crudo_cardiac_cuts()
+
+	def _generate_cine_crudo_cardiac_cuts(self):
+		"""Genera los cortes cardíacos desde el volumen reconstruido; SA alimenta fase/FEVI."""
+		if self.cine_crudo_recon_result is None:
+			QMessageBox.information(self, "SINCRO", "Primero reconstruí el crudo con Recon raw.")
+			return
+		try:
+			result = self.cine_crudo_recon_result
+			raw_study = self.cine_crudo_raw_study_for_recon or self.study
+			gated_vol = np.asarray(result.gated_volume, dtype=np.float64)
+			ung_vol = np.asarray(result.ungated_volume, dtype=np.float64)
+			# Si hubo reorientación oblicua, usar el volumen SA-alineado.
+			if getattr(self, "cine_crudo_reoriented_gated", None) is not None:
+				gated_vol = np.asarray(self.cine_crudo_reoriented_gated, dtype=np.float64)
+				if getattr(self, "cine_crudo_reoriented_ungated", None) is not None:
+					ung_vol = np.asarray(self.cine_crudo_reoriented_ungated, dtype=np.float64)
+			z0, z1 = self._cine_crudo_cut_bounds(int(gated_vol.shape[1]))
+			thickness = self._cine_crudo_cut_thickness_px()
+			# Volumen SA-alineado recortado base→ápex, ejes (g, k, j, i).
+			reo_cube = self._thickened_sa_cube(gated_vol, z0, z1, thickness)
+			# Cortes anatómicos con convención Xeleris/Odyssey (única fuente de
+			# verdad de orientación; SA alimenta fase/FEVI).
+			from core.cardiac_reorientation import anatomical_cuts_gated
+			cuts = anatomical_cuts_gated(reo_cube)
+			sa_cube = np.ascontiguousarray(cuts["sa"])
+			hla_cube = np.ascontiguousarray(cuts["hla"])
+			vla_cube = np.ascontiguousarray(cuts["vla"])
+			if sa_cube.shape[1] < 2:
+				QMessageBox.information(self, "SINCRO", "Los límites deben dejar al menos 2 cortes SA.")
+				return
+			out_png = self._write_cine_crudo_cuts_qc(ung_vol, z0, z1)
+			self.cine_crudo_preview_mode = "generated_cuts"
+			for tab_name in ("comparacion_ejes", "cine_crudo"):
+				if tab_name in self.preview_labels:
+					pix = QPixmap(out_png)
+					self.preview_pixmaps[tab_name] = pix
+					self.preview_base_sizes[tab_name] = pix.size()
+					self._apply_preview_zoom(tab_name)
+			self._select_tab_by_title("comparacion_ejes")
+			src_z_mm = float(getattr(raw_study, "z_spacing_mm", None) or getattr(raw_study, "slice_thickness_mm", None) or 1.0)
+			cut_thickness_mm = src_z_mm * float(thickness)
+			self.cine_crudo_cut_study = dicom_loader.GatedStudy(
+				cube=sa_cube,
+				n_gates=int(sa_cube.shape[0]),
+				n_slices=int(sa_cube.shape[1]),
+				rows=int(sa_cube.shape[2]),
+				cols=int(sa_cube.shape[3]),
+				pixel_spacing=getattr(raw_study, "pixel_spacing", None),
+				source_path=str(getattr(raw_study, "source_path", "") or self.file_edit.text().strip()),
+				z_spacing_mm=src_z_mm,
+				slice_thickness_mm=cut_thickness_mm,
+				spacing_between_slices_mm=src_z_mm,
+				image_type=["DERIVED", "RECON", "GATED TOMO", "GAMMASYNC SA CUTS"],
+				series_description=(str(getattr(raw_study, "series_description", "") or "RAW") + " | GammaSync SA cuts"),
+				study_description=str(getattr(raw_study, "study_description", "") or ""),
+				patient_name=str(getattr(raw_study, "patient_name", "") or ""),
+				patient_id=str(getattr(raw_study, "patient_id", "") or ""),
+				patient_sex=str(getattr(raw_study, "patient_sex", "") or ""),
+				patient_birth_date=str(getattr(raw_study, "patient_birth_date", "") or ""),
+				study_date=str(getattr(raw_study, "study_date", "") or ""),
+				study_time=str(getattr(raw_study, "study_time", "") or ""),
+				accession_number=str(getattr(raw_study, "accession_number", "") or ""),
+				study_instance_uid=str(getattr(raw_study, "study_instance_uid", "") or ""),
+				reconstructed=True,
+				qc_first_harmonic=float(getattr(raw_study, "qc_first_harmonic", 0.0) or 0.0),
+				qc_passed=bool(getattr(raw_study, "qc_passed", False)),
+				gating_info=dict(getattr(raw_study, "gating_info", {}) or {}),
+				notes=list(getattr(raw_study, "notes", []) or []) + list(result.notes) + [
+					f"Recon raw fuente: {self.cine_crudo_cut_source_label}",
+					f"SA cuts limits: base={z0 + 1}, apex={z1 + 1}, thickness_px={thickness}",
+				],
+			)
+			self.cine_crudo_axes_for_export = {"SA": sa_cube, "HLA": hla_cube, "VLA": vla_cube}
+			if hasattr(self, "cine_crudo_process_recon_btn"):
+				self.cine_crudo_process_recon_btn.setEnabled(True)
+			if hasattr(self, "cine_crudo_save_axes_dcm_btn"):
+				self.cine_crudo_save_axes_dcm_btn.setEnabled(True)
+			self._log(f"Cortes generados: SA {z0 + 1}..{z1 + 1} ({sa_cube.shape[1]} cortes, espesor {thickness}px). HLA/VLA visibles en comparacion_ejes. Ahora podés Procesar recon o Guardar ejes DICOM.")
+			self._set_progress(100, "Cortes SA/HLA/VLA generados")
+		except Exception as exc:
+			self._log(f"[ERROR] Generar cortes falló: {exc}")
+			QMessageBox.warning(self, "SINCRO", f"No se pudieron generar los cortes:\n{exc}")
+
+	def _save_cine_crudo_axes_dicoms(self):
+		"""Guarda SA/HLA/VLA generados como tres DICOM gated multiframe."""
+		if not self.cine_crudo_axes_for_export:
+			QMessageBox.information(self, "SINCRO", "Primero generá los cortes SA/HLA/VLA.")
+			return
+		try:
+			from PyQt6.QtWidgets import QFileDialog
+			from core.dicom_export import save_cardiac_axes_dicoms
+
+			source = self.cine_crudo_cut_study or self.cine_crudo_raw_study_for_recon or self.study
+			base_patient = str(getattr(source, "patient_id", "") or getattr(source, "patient_name", "") or "study")
+			base_patient = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in base_patient)[:32] or "study"
+			folder = QFileDialog.getExistingDirectory(self, "Guardar ejes DICOM", self.output_dir)
+			if not folder:
+				return
+			paths = save_cardiac_axes_dicoms(
+				self.cine_crudo_axes_for_export,
+				folder,
+				source_study=source,
+				base_name=f"GammaSync_{base_patient}_axes",
+				slice_thickness_mm=float(self.cine_crudo_cut_study.slice_thickness_mm or self.cine_crudo_cut_study.z_spacing_mm or 1.0) if self.cine_crudo_cut_study is not None else None,
+				extra_description="SA/HLA/VLA",
+			)
+			self._log("Ejes DICOM guardados: " + "; ".join(f"{k}={os.path.basename(v)}" for k, v in paths.items()))
+			QMessageBox.information(
+				self,
+				"SINCRO",
+				"Ejes DICOM guardados:\n" + "\n".join(f"• {axis}: {path}" for axis, path in paths.items()),
+			)
+		except Exception as exc:
+			self._log(f"[ERROR] Guardar ejes DICOM falló: {exc}")
+			QMessageBox.warning(self, "SINCRO", f"No se pudieron guardar los ejes DICOM:\n{exc}")
+
+	def _process_cine_crudo_reconstruction(self):
+		"""Promueve los cortes SA generados a estudio activo y corre el pipeline normal."""
+		if self.cine_crudo_cut_study is None:
+			QMessageBox.information(self, "SINCRO", "Primero tocá Generar cortes y revisá SA/HLA/VLA en comparacion_ejes.")
+			return
+		path = self.file_edit.text().strip()
+		if not path or not os.path.exists(path):
+			QMessageBox.information(self, "SINCRO", "Para procesar fase/FEVI desde la reconstrucción necesitás un DICOM cargado con path válido.")
+			return
+		self.study = self.cine_crudo_cut_study
+		self._cache_study_sig = self._build_study_signature(path)
+		self._cache_seg_sig = ""
+		self._cache_phase_sig = ""
+		self._invalidate_output_cache()
+		self._log("Procesando sincronía/FEVI desde los cortes SA generados en cine_crudo.")
+		self.process_current()
+
 	def _show_cine_crudo_shift_curves(self):
 		"""Muestra curvas de shifts X/Y vs frame (estilo Xeleris) para depurar la corrección."""
 		if self.cine_crudo_motion_result is None:
@@ -7259,7 +8118,7 @@ class MainWindow(QMainWindow):
 				ax.set_facecolor("#0b1220")
 				if idx < n_slices:
 					img = vol[idx]
-					ax.imshow(img, cmap="hot", vmin=0, vmax=p99)
+					ax.imshow(img, cmap="odyssey_cool", vmin=0, vmax=p99)
 					mask = img > (thr * img.max()) if img.max() > 0 else np.zeros_like(img, dtype=bool)
 					# Contorno de la máscara solo si tiene píxeles (evita crash con máscara vacía).
 					if mask.any():
@@ -7338,14 +8197,51 @@ class MainWindow(QMainWindow):
 		else:
 			self._log("Selección de órgano: hacé CLICK en el corazón sobre la imagen de cine_crudo.")
 
-	def _on_cine_crudo_mouse_press_safe(self, event):
+	def _on_cine_crudo_mouse_press_safe(self, event, source_label=None):
+		if self.cine_crudo_preview_mode in {"recon_qc", "generated_cuts"}:
+			event.accept()
+			return
+		if self.cine_crudo_preview_mode == "cut_limits":
+			try:
+				mk = self._cine_crudo_marker_at_limits_event(event, source_label=source_label)
+				self._cine_crudo_drag_marker = mk
+				preview = source_label
+				if preview is None:
+					preview = event.widget() if hasattr(event, "widget") else None
+				if preview is not None:
+					preview.setCursor(QCursor(Qt.CursorShape.SizeVerCursor if mk else Qt.CursorShape.ArrowCursor))
+			except Exception:
+				self._cine_crudo_drag_marker = None
+			event.accept()
+			return
 		try:
 			self._on_cine_crudo_image_clicked(event)
 		except Exception as exc:
 			self._cine_crudo_drag_marker = None
 			self._log(f"[WARN] Evento mouse cine_crudo (press) falló: {exc}")
 
-	def _on_cine_crudo_mouse_move_safe(self, event):
+	def _on_cine_crudo_mouse_move_safe(self, event, source_label=None):
+		if self.cine_crudo_preview_mode in {"recon_qc", "generated_cuts"}:
+			event.accept()
+			return
+		if self.cine_crudo_preview_mode == "cut_limits":
+			try:
+				if self._cine_crudo_drag_marker in {"base", "apex"}:
+					z = self._cine_crudo_cut_limits_event_to_slice(event, source_label=source_label)
+					if z is not None:
+						self._update_cine_crudo_cut_spins_from_drag(self._cine_crudo_drag_marker, z)
+				else:
+					mk = self._cine_crudo_marker_at_limits_event(event, source_label=source_label)
+					preview = source_label
+					if preview is None:
+						preview = event.widget() if hasattr(event, "widget") else None
+					if preview is not None:
+						preview.setCursor(QCursor(Qt.CursorShape.SizeVerCursor if mk else Qt.CursorShape.ArrowCursor))
+			except Exception as exc:
+				self._cine_crudo_drag_marker = None
+				self._log(f"[WARN] Drag límites (move) falló: {exc}")
+			event.accept()
+			return
 		try:
 			self._on_cine_crudo_image_dragged(event)
 		except Exception as exc:
@@ -7353,7 +8249,19 @@ class MainWindow(QMainWindow):
 			self._cine_crudo_set_drag_status(None)
 			self._log(f"[WARN] Evento mouse cine_crudo (drag) falló: {exc}")
 
-	def _on_cine_crudo_mouse_release_safe(self, event):
+	def _on_cine_crudo_mouse_release_safe(self, event, source_label=None):
+		if self.cine_crudo_preview_mode in {"recon_qc", "generated_cuts"}:
+			event.accept()
+			return
+		if self.cine_crudo_preview_mode == "cut_limits":
+			self._cine_crudo_drag_marker = None
+			preview = source_label
+			if preview is None:
+				preview = event.widget() if hasattr(event, "widget") else None
+			if preview is not None:
+				preview.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+			event.accept()
+			return
 		try:
 			self._on_cine_crudo_image_released(event)
 		except Exception as exc:

@@ -25,6 +25,12 @@ class RawGatedProjections:
     cols: int
     angles_deg: np.ndarray           # ángulo de cada proyección (si se puede inferir)
     gating_info: dict = field(default_factory=dict)
+    # --- Geometría de adquisición (RotationInformationSequence) ---
+    patient_position: str = ""       # HFS/FFS/HFP/FFP (0018,5100)
+    start_angle: float | None = None       # StartAngle (0054,0200)
+    angular_step: float | None = None       # AngularStep (0018,1144)
+    rotation_direction: str = ""     # CW / CC (0018,1140)
+    scan_arc: float | None = None          # RadialPosition/ScanArc (0018,1143)
     source_path: str = ""
     patient_name: str = ""
     patient_id: str = ""
@@ -150,11 +156,55 @@ def load_raw_projections(path: str) -> RawGatedProjections:
             f"AngularViewVector={'sí' if ang_vec is not None else 'no'}, n_time={n_time}."
         )
 
-    # Ángulos en grados (inferir distribución uniforme 0-360 si no hay metadata)
-    start_angle = _get(ds, (0x0054, 0x0020), None)  # StartAngle (a veces)
-    angular_step = _get(ds, (0x0018, 0x1140), None)  # RotationDirection/AngularStep varía
+    # --- Geometría de adquisición ---
+    # La metadata angular fiable vive en RotationInformationSequence (0054,0052).
+    # StartAngle=(0054,0200), RotationDirection=(0018,1140) 'CW'/'CC',
+    # AngularStep=(0018,1144), ScanArc/RadialPosition=(0018,1143).
+    patient_position = str(_get(ds, (0x0018, 0x5100), "") or "").strip()
+    start_angle = None
+    angular_step = None
+    rotation_direction = ""
+    scan_arc = None
+    ris = _get(ds, (0x0054, 0x0052), None)  # RotationInformationSequence
+    if ris is not None and len(ris) > 0:
+        item = ris[0]
+        start_angle = _get(item, (0x0054, 0x0200), None)
+        rotation_direction = str(_get(item, (0x0018, 0x1140), "") or "").strip().upper()
+        angular_step = _get(item, (0x0018, 0x1144), None)
+        scan_arc = _get(item, (0x0018, 0x1143), None)
+    # Fallback: algunos equipos exponen los tags en el nivel raíz.
+    if start_angle is None:
+        start_angle = _get(ds, (0x0054, 0x0200), None)
+    if rotation_direction == "":
+        rotation_direction = str(_get(ds, (0x0018, 0x1140), "") or "").strip().upper()
+    if angular_step is None:
+        angular_step = _get(ds, (0x0018, 0x1144), None)
+    if scan_arc is None:
+        scan_arc = _get(ds, (0x0018, 0x1143), None)
+
+    start_angle = float(start_angle) if start_angle is not None else None
+    angular_step = float(angular_step) if angular_step not in (None, 0) else None
+    scan_arc = float(scan_arc) if scan_arc not in (None, 0) else None
+
+    # Ángulos en grados de cada proyección, respetando el sentido de giro.
+    # CW (clockwise) resta, CC/CCW (counter-clockwise) suma. Si no hay step pero
+    # sí un arco de barrido, se distribuye uniformemente sobre el arco.
     if start_angle is not None and angular_step is not None:
-        angles_deg = (float(start_angle) + np.arange(n_angles) * float(angular_step)) % 360.0
+        sign = -1.0 if rotation_direction.startswith("CW") else 1.0
+        angles_deg = (start_angle + sign * np.arange(n_angles) * angular_step) % 360.0
+        notes.append(
+            f"Geometría DICOM: PP={patient_position or '?'} start={start_angle:.1f}° "
+            f"dir={rotation_direction or '?'} step={angular_step:.3f}° arco={scan_arc}."
+        )
+    elif start_angle is not None and scan_arc is not None and n_angles > 1:
+        sign = -1.0 if rotation_direction.startswith("CW") else 1.0
+        step = scan_arc / float(n_angles)
+        angles_deg = (start_angle + sign * np.arange(n_angles) * step) % 360.0
+        angular_step = step
+        notes.append(
+            f"Geometría DICOM (step derivado de arco): PP={patient_position or '?'} "
+            f"start={start_angle:.1f}° dir={rotation_direction or '?'} arco={scan_arc}°."
+        )
     else:
         angles_deg = np.linspace(0.0, 360.0, n_angles, endpoint=False)
         notes.append("Ángulos inferidos como distribución uniforme 0-360° (sin metadata angular explícita).")
@@ -171,6 +221,11 @@ def load_raw_projections(path: str) -> RawGatedProjections:
         cols=int(W),
         angles_deg=angles_deg,
         gating_info=gating_info,
+        patient_position=patient_position,
+        start_angle=start_angle,
+        angular_step=angular_step,
+        rotation_direction=rotation_direction,
+        scan_arc=scan_arc,
         source_path=path,
         patient_name=str(_get(ds, (0x0010, 0x0010), "") or ""),
         patient_id=str(_get(ds, (0x0010, 0x0020), "") or ""),
