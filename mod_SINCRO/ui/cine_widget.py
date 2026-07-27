@@ -113,6 +113,154 @@ def _array_to_pixmap(
 	return QPixmap.fromImage(qimg.copy())
 
 
+class GateMontageLabel(QLabel):
+	"""Mosaico de todos los gates de un slice con ROIs superpuestos.
+
+	Muestra los N gates del slice actual en una grilla (p.ej. 2x4 para 8 gates),
+	con el ROI de cada gate dibujado. Click en una celda selecciona ese gate.
+	"""
+	gateSelected = pyqtSignal(int)
+
+	def __init__(self, parent=None):
+		super().__init__(parent)
+		self.setMinimumSize(360, 220)
+		self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+		self.setStyleSheet("background:#111; color:#ddd; border:1px solid #444;")
+		self.setCursor(Qt.CursorShape.PointingHandCursor)
+		self._cube = None
+		self._slice_index = 0
+		self._current_gate = 0
+		self._rois_by_gate: dict[tuple[int, int], tuple[float, float, float, float]] = {}
+		self._rois_common: dict[int, tuple[float, float, float, float]] = {}
+		self._per_gate_mode = False
+		self._cmap_name = "hot"
+		self._smooth_sigma = 0.0
+		self._invert_cmap = False
+		self._window_low = 0.0
+		self._window_high = 1.0
+		self._cell_rects: list[tuple[int, QRectF]] = []
+
+	def set_cube(self, cube: np.ndarray | None):
+		self._cube = cube
+		self.update()
+
+	def set_slice_index(self, slice_index: int):
+		self._slice_index = int(slice_index)
+		self.update()
+
+	def set_current_gate(self, gate_index: int):
+		self._current_gate = int(gate_index)
+		self.update()
+
+	def set_rois(self, rois_common: dict, rois_by_gate: dict, per_gate_mode: bool):
+		self._rois_common = {int(k): tuple(v) for k, v in (rois_common or {}).items()}
+		self._rois_by_gate = {tuple(k): tuple(v) for k, v in (rois_by_gate or {}).items()}
+		self._per_gate_mode = bool(per_gate_mode)
+		self.update()
+
+	def set_display_params(self, cmap_name: str, smooth_sigma: float, invert_cmap: bool, window_low: float, window_high: float):
+		self._cmap_name = str(cmap_name)
+		self._smooth_sigma = float(smooth_sigma)
+		self._invert_cmap = bool(invert_cmap)
+		self._window_low = float(window_low)
+		self._window_high = float(window_high)
+		self.update()
+
+	def _roi_for_gate(self, gate_index: int) -> tuple[float, float, float, float] | None:
+		key = (int(gate_index), self._slice_index)
+		if key in self._rois_by_gate:
+			return self._rois_by_gate[key]
+		return self._rois_common.get(self._slice_index)
+
+	def paintEvent(self, event):
+		painter = QPainter(self)
+		painter.fillRect(self.rect(), QColor("#111111"))
+		self._cell_rects = []
+		if self._cube is None or self._cube.ndim != 4:
+			painter.setPen(QColor("#dddddd"))
+			painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Sin datos gated")
+			return
+		n_gates = int(self._cube.shape[0])
+		n_slices = int(self._cube.shape[1])
+		if self._slice_index < 0 or self._slice_index >= n_slices:
+			painter.setPen(QColor("#dddddd"))
+			painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Slice fuera de rango")
+			return
+
+		cols = int(np.ceil(np.sqrt(n_gates)))
+		rows = int(np.ceil(n_gates / cols))
+		w = self.width()
+		h = self.height()
+		cell_w = w / cols
+		cell_h = h / rows
+
+		for g in range(n_gates):
+			row = g // cols
+			col = g % cols
+			x0 = col * cell_w
+			y0 = row * cell_h
+			cell_rect = QRectF(x0, y0, cell_w, cell_h)
+			self._cell_rects.append((g, cell_rect))
+
+			frame = np.asarray(self._cube[g, self._slice_index], dtype=np.float64)
+			pix = _array_to_pixmap(
+				frame,
+				cmap_name=self._cmap_name,
+				smooth_sigma=self._smooth_sigma,
+				invert_cmap=self._invert_cmap,
+				window_low=self._window_low,
+				window_high=self._window_high,
+			)
+			scaled = pix.scaled(
+				int(cell_w), int(cell_h),
+				Qt.AspectRatioMode.KeepAspectRatio,
+				Qt.TransformationMode.SmoothTransformation,
+			)
+			px = x0 + (cell_w - scaled.width()) / 2.0
+			py = y0 + (cell_h - scaled.height()) / 2.0
+			painter.drawPixmap(int(px), int(py), scaled)
+
+			# ROI del gate
+			roi = self._roi_for_gate(g)
+			if roi is not None:
+				cy, cx, r_inner, r_outer = roi
+				hf, wf = frame.shape[:2]
+				scale = min(scaled.width() / max(1, wf), scaled.height() / max(1, hf))
+				cx_p = px + cx * scale
+				cy_p = py + cy * scale
+				r_in_p = r_inner * scale
+				r_out_p = r_outer * scale
+				painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+				if r_out_p > 0:
+					painter.setPen(QPen(QColor("#ffcc00"), 1.5, Qt.PenStyle.DashLine))
+					painter.drawEllipse(QPointF(cx_p, cy_p), r_out_p, r_out_p)
+				if r_in_p > 0:
+					painter.setPen(QPen(QColor("#ff6666"), 1.5, Qt.PenStyle.DotLine))
+					painter.drawEllipse(QPointF(cx_p, cy_p), r_in_p, r_in_p)
+				painter.setPen(QPen(QColor("#00d1ff"), 1.5))
+				painter.drawEllipse(QPointF(cx_p, cy_p), 3, 3)
+
+			# Highlight del gate actual
+			if g == self._current_gate:
+				painter.setPen(QPen(QColor("#d61f1f"), 2.5))
+				painter.drawRect(cell_rect.adjusted(1, 1, -1, -1))
+
+			# Etiqueta
+			painter.setPen(QColor("#ffffff"))
+			painter.drawText(int(x0) + 6, int(y0) + 18, f"G{g + 1}")
+
+		painter.end()
+
+	def mousePressEvent(self, event):
+		if event.button() == Qt.MouseButton.LeftButton:
+			pos = event.position()
+			for g, rect in self._cell_rects:
+				if rect.contains(pos):
+					self.gateSelected.emit(int(g))
+					return
+		super().mousePressEvent(event)
+
+
 class RoiImageLabel(QLabel):
 	roiChanged = pyqtSignal(int, object)
 	zoomChanged = pyqtSignal(float)
@@ -465,6 +613,7 @@ class GateCurveWidget(QWidget):
 
 class CineWidget(QWidget):
 	roiEdited = pyqtSignal(int, object)
+	roiEditedGate = pyqtSignal(int, int, object)  # (gate, slice, roi)
 	playStateChanged = pyqtSignal(bool)
 	playbackSpeedChanged = pyqtSignal(int)
 	activated = pyqtSignal()
@@ -474,6 +623,11 @@ class CineWidget(QWidget):
 		self._cube = None
 		self._rois: dict[int, tuple[float, float, float, float]] = {}
 		self._roi_source: dict[int, str] = {}
+		# QC por gate: ROIs manuales por (gate, slice). Cuando el modo "ROI por
+		# gate" está activo, la edición afecta solo al gate actual, no a todos.
+		self._rois_by_gate: dict[tuple[int, int], tuple[float, float, float, float]] = {}
+		self._roi_by_gate_source: dict[tuple[int, int], str] = {}
+		self._per_gate_roi_mode = False
 		self._current_slice = 0
 		self._playing = False
 		self._smooth_sigma = 0.0
@@ -617,6 +771,16 @@ class CineWidget(QWidget):
 		self.show_auto_roi_check.setChecked(True)
 		self.show_auto_roi_check.setToolTip("Muestra u oculta los ROIs que fueron generados automáticamente.")
 		self.show_auto_roi_check.toggled.connect(self._update_view)
+		self.per_gate_roi_check = QCheckBox("ROI por gate")
+		self.per_gate_roi_check.setChecked(False)
+		self.per_gate_roi_check.setToolTip(
+			"QC por gate: si está activo, la edición de ROI afecta SOLO al gate actual "
+			"(cada gate puede tener su propio ROI). Si está apagado, el ROI es común a todos los gates."
+		)
+		self.per_gate_roi_check.toggled.connect(self._on_per_gate_roi_mode_toggled)
+		self.qc_gates_btn = QPushButton("QC gates")
+		self.qc_gates_btn.setToolTip("Abre la vista QC de todos los gates del slice actual para editar ROI por gate.")
+		self.qc_gates_btn.clicked.connect(self._open_gate_qc_dialog)
 
 		self.play_button = QPushButton("▶ Reproducir")
 		self.play_button.clicked.connect(self.toggle_playback)
@@ -683,6 +847,8 @@ class CineWidget(QWidget):
 		controls.addWidget(self.auto_roi_method_label, 0, 10)
 		controls.addWidget(self.auto_roi_empty_only_check, 0, 11)
 		controls.addWidget(self.show_auto_roi_check, 0, 12)
+		controls.addWidget(self.per_gate_roi_check, 0, 13)
+		controls.addWidget(self.qc_gates_btn, 0, 14)
 		controls.addWidget(self.intestinal_roi_toggle_btn, 1, 9)
 		controls.addWidget(self.intestinal_apply_btn, 1, 10)
 		controls.addWidget(self.intestinal_roi_clear_btn, 1, 11)
@@ -927,6 +1093,75 @@ class CineWidget(QWidget):
 	def roi_for_slice(self, slice_index: int):
 		return self._rois.get(int(slice_index))
 
+	def roi_for_gate_slice(self, gate_index: int, slice_index: int):
+		"""ROI efectivo para un gate/slice.
+
+		Prioridad: ROI manual por gate (si existe) > ROI común por slice.
+		"""
+		key = (int(gate_index), int(slice_index))
+		if key in self._rois_by_gate:
+			return self._rois_by_gate[key]
+		return self._rois.get(int(slice_index))
+
+	def per_gate_roi_mode_enabled(self) -> bool:
+		return bool(self._per_gate_roi_mode)
+
+	def set_per_gate_roi_mode(self, enabled: bool):
+		self._per_gate_roi_mode = bool(enabled)
+		if self.per_gate_roi_check.isChecked() != self._per_gate_roi_mode:
+			self.per_gate_roi_check.blockSignals(True)
+			self.per_gate_roi_check.setChecked(self._per_gate_roi_mode)
+			self.per_gate_roi_check.blockSignals(False)
+		self._update_view()
+
+	def _on_per_gate_roi_mode_toggled(self, checked: bool):
+		self.set_per_gate_roi_mode(bool(checked))
+		if self._per_gate_roi_mode:
+			self.help_label.setText(
+				"QC por gate activo: la edición de ROI afecta SOLO al gate actual. "
+				"clic = centro | Shift = radio externo | Ctrl = radio interno | clic der = borrar ROI del gate."
+			)
+		else:
+			self.help_label.setText(
+				"Mouse: clic izq = centro | Shift+clic = radio externo | Ctrl+clic = radio interno | clic der = borrar ROI | "
+				"apex/base sin cavidad: usar 'Borrar internos'"
+			)
+
+	def gate_roi_state(self) -> dict[str, object]:
+		"""Estado serializable de los ROIs manuales por gate."""
+		items = []
+		for (gate_index, slice_index), roi in sorted(self._rois_by_gate.items()):
+			items.append({
+				"gate": int(gate_index),
+				"slice": int(slice_index),
+				"roi": [float(v) for v in roi],
+				"source": str(self._roi_by_gate_source.get((gate_index, slice_index), "manual")),
+			})
+		return {
+			"per_gate_mode": bool(self._per_gate_roi_mode),
+			"gate_rois": items,
+		}
+
+	def set_gate_roi_state(self, state: dict | None):
+		"""Restaura ROIs por gate desde un preset."""
+		self._rois_by_gate = {}
+		self._roi_by_gate_source = {}
+		per_gate_mode = False
+		if isinstance(state, dict):
+			per_gate_mode = bool(state.get("per_gate_mode", False))
+			for item in state.get("gate_rois", []) or []:
+				try:
+					g = int(item.get("gate"))
+					s = int(item.get("slice"))
+					roi = tuple(float(v) for v in (item.get("roi") or [])[:4])
+				except Exception:
+					continue
+				if len(roi) == 4:
+					self._rois_by_gate[(g, s)] = roi
+					self._roi_by_gate_source[(g, s)] = str(item.get("source", "manual"))
+		self.set_per_gate_roi_mode(per_gate_mode)
+		self._update_view()
+
 	def estimate_auto_roi_for_slice(self, slice_index: int):
 		if self._cube is None:
 			return None
@@ -1126,9 +1361,15 @@ class CineWidget(QWidget):
 			window_low=self._window_low,
 			window_high=self._window_high,
 		)
-		roi = self._rois.get(sl)
-		if roi is not None and not self.show_auto_roi_check.isChecked() and self._roi_source.get(sl) == "auto":
-			roi = None
+		roi = None
+		if self._per_gate_roi_mode:
+			roi = self.roi_for_gate_slice(gate, sl)
+		else:
+			roi = self._rois.get(sl)
+		if roi is not None and not self.show_auto_roi_check.isChecked():
+			src = self._roi_by_gate_source.get((gate, sl)) if self._per_gate_roi_mode else self._roi_source.get(sl)
+			if src == "auto":
+				roi = None
 		self.preview.set_roi(roi)
 		self.preview.set_exclusion_polygon(self._intestinal_polygon_for_slice(sl, gate_index=gate))
 		self.gate_label.setText(f"Gate: {gate + 1}/{self._cube.shape[0]}")
@@ -1207,9 +1448,16 @@ class CineWidget(QWidget):
 		roi = self.estimate_auto_roi_for_slice(sl)
 		if roi is None:
 			return
-		self._rois[sl] = roi
-		self._roi_source[sl] = "auto"
-		self.roiEdited.emit(sl, roi)
+		if self._per_gate_roi_mode:
+			g = int(self.gate_slider.value())
+			key = (g, sl)
+			self._rois_by_gate[key] = roi
+			self._roi_by_gate_source[key] = "auto"
+			self.roiEditedGate.emit(g, sl, roi)
+		else:
+			self._rois[sl] = roi
+			self._roi_source[sl] = "auto"
+			self.roiEdited.emit(sl, roi)
 		self._update_view()
 
 	def _auto_roi_all_slices(self):
@@ -1217,19 +1465,35 @@ class CineWidget(QWidget):
 			return
 		empty_only = self.auto_roi_empty_only_check.isChecked()
 		n_slices = int(self._cube.shape[1])
-		for sl in range(n_slices):
-			existing_roi = self._rois.get(sl)
-			source = self._roi_source.get(sl)
-			# "solo vacíos" protege ROIs manuales, pero permite regenerar los automáticos
-			# para que un segundo click sobre "Auto ROI todos" siga funcionando.
-			if empty_only and existing_roi is not None and source != "auto":
-				continue
-			roi = self.estimate_auto_roi_for_slice(sl)
-			if roi is None:
-				continue
-			self._rois[sl] = roi
-			self._roi_source[sl] = "auto"
-			self.roiEdited.emit(sl, roi)
+		if self._per_gate_roi_mode:
+			g = int(self.gate_slider.value())
+			for sl in range(n_slices):
+				key = (g, sl)
+				existing_roi = self._rois_by_gate.get(key)
+				source = self._roi_by_gate_source.get(key)
+				# "solo vacíos" protege ROIs manuales del gate, pero permite regenerar auto.
+				if empty_only and existing_roi is not None and source != "auto":
+					continue
+				roi = self.estimate_auto_roi_for_slice(sl)
+				if roi is None:
+					continue
+				self._rois_by_gate[key] = roi
+				self._roi_by_gate_source[key] = "auto"
+				self.roiEditedGate.emit(g, sl, roi)
+		else:
+			for sl in range(n_slices):
+				existing_roi = self._rois.get(sl)
+				source = self._roi_source.get(sl)
+				# "solo vacíos" protege ROIs manuales, pero permite regenerar los automáticos
+				# para que un segundo click sobre "Auto ROI todos" siga funcionando.
+				if empty_only and existing_roi is not None and source != "auto":
+					continue
+				roi = self.estimate_auto_roi_for_slice(sl)
+				if roi is None:
+					continue
+				self._rois[sl] = roi
+				self._roi_source[sl] = "auto"
+				self.roiEdited.emit(sl, roi)
 		self._update_view()
 
 	def _open_auto_roi_config(self):
@@ -1252,7 +1516,8 @@ class CineWidget(QWidget):
 			"4) Hot bowel: variante robusta con penalización inferior para focos intestinales intensos.\n"
 			"5) Percentil central: umbral adaptativo por percentiles + prior central (útil en matrices bajas).\n"
 			"6) Consenso: combina varios métodos y sugiere el más estable.\n\n"
-			"7) Inferior superpuesto: suprime focos calientes periféricos inferiores (hígado/intestino) y luego detecta VI.\n\n"
+			"7) Inferior superpuesto: suprime focos calientes periféricos inferiores (hígado/intestino) y luego detecta VI.\n"
+			"8) Cavidad dominante: prioriza cavidad central hipocaptante para centrar mejor el ROI en FEVI/sincronía.\n\n"
 			"ROI intestino irregular:\n"
 			"• Activá 'ROI intestino' y dibujá polígono (doble clic para cerrar).\n"
 			"• Ajustá Atenuar % y Feather para bajar cuentas con borde suave.\n\n"
@@ -1262,7 +1527,7 @@ class CineWidget(QWidget):
 
 	def set_auto_roi_method(self, method: str):
 		key = str(method or "").strip().lower()
-		if key not in ("robusto", "clasico", "gradiente", "hotbowel", "percentil_central", "consenso", "inferior_overlap"):
+		if key not in ("robusto", "clasico", "gradiente", "hotbowel", "percentil_central", "consenso", "inferior_overlap", "cavidad_dominante"):
 			key = "robusto"
 		self._auto_roi_method = key
 		if key == "clasico":
@@ -1277,6 +1542,8 @@ class CineWidget(QWidget):
 			self.auto_roi_method_label.setText("Consenso")
 		elif key == "inferior_overlap":
 			self.auto_roi_method_label.setText("Inferior superpuesto")
+		elif key == "cavidad_dominante":
+			self.auto_roi_method_label.setText("Cavidad dominante")
 		else:
 			self.auto_roi_method_label.setText("Robusto")
 
@@ -1297,7 +1564,50 @@ class CineWidget(QWidget):
 			return "Consenso"
 		if m == "inferior_overlap":
 			return "Inferior superpuesto"
+		if m == "cavidad_dominante":
+			return "Cavidad dominante"
 		return "Robusto"
+
+	def _auto_roi_from_image_cavidad_dominante(self, img: np.ndarray, low_res: bool):
+		"""Prioriza casos con cavidad central hipocaptante (anillo intenso + centro frío)."""
+		img = np.asarray(img, dtype=np.float64)
+		base = self._auto_roi_from_image_robusto(img, low_res)
+		if base is None:
+			return None
+		cy, cx, ri, ro = (float(v) for v in base)
+		h, w = img.shape
+		ys, xs = np.ogrid[:h, :w]
+		d = np.sqrt((ys - cy) ** 2 + (xs - cx) ** 2)
+
+		# Buscar centro cavitario dentro de un disco limitado alrededor del VI.
+		inner_disk = d <= max(2.0, 0.74 * ro)
+		if int(np.count_nonzero(inner_disk)) < 12:
+			return base
+		finite = img[np.isfinite(img)]
+		if finite.size < 12:
+			return base
+		p70 = float(np.percentile(finite, 70.0 if low_res else 66.0))
+		inv = np.clip(p70 - img, 0.0, None)
+		# Prior gaussiano alrededor del centro previo para no irse al fondo negro.
+		sig = max(1.6, 0.34 * ro)
+		prior = np.exp(-0.5 * (d / max(1e-6, sig)) ** 2)
+		wgt = inv * prior
+		wgt = np.where(inner_disk, wgt, 0.0)
+		sw = float(np.sum(wgt))
+		if sw > 1e-8:
+			cy_c = float(np.sum(wgt * ys) / sw)
+			cx_c = float(np.sum(wgt * xs) / sw)
+			# Mezcla robusta: favorece cavidad pero no rompe continuidad entre slices.
+			cy = 0.35 * cy + 0.65 * cy_c
+			cx = 0.35 * cx + 0.65 * cx_c
+
+		# Ajuste leve de radios para anillo con cavidad bien marcada.
+		ro = max(ro, 3.0)
+		ri_target = 0.46 * ro
+		ri = max(0.0, 0.80 * ri + 0.20 * ri_target)
+		if ro <= ri:
+			ro = ri + 1.0
+		return (float(cy), float(cx), float(ri), float(ro))
 
 	def _build_inferior_hot_suppression_map(self, img: np.ndarray, low_res: bool) -> np.ndarray:
 		img = np.asarray(img, dtype=np.float64)
@@ -1546,6 +1856,8 @@ class CineWidget(QWidget):
 			return self._auto_roi_from_image_consenso(img, low_res)
 		if method_key == "inferior_overlap":
 			return self._auto_roi_from_image_inferior_overlap(img, low_res)
+		if method_key == "cavidad_dominante":
+			return self._auto_roi_from_image_cavidad_dominante(img, low_res)
 		return self._auto_roi_from_image_robusto(img, low_res)
 
 	def _score_auto_roi_candidate(self, img: np.ndarray, roi: tuple[float, float, float, float], slice_index: int) -> float:
@@ -1569,7 +1881,20 @@ class CineWidget(QWidget):
 		center_dist = float(math.hypot(cy - 0.5 * (h - 1), cx - 0.5 * (w - 1)))
 		center_pen = center_dist / max(1e-6, 0.55 * min(h, w))
 		area_pen = abs(float(np.count_nonzero(inside)) / max(1.0, float(h * w)) - 0.24)
-		score = 2.2 * contrast - 0.95 * center_pen - 0.55 * area_pen - 1.25 * inferior_hot_pen
+
+		# Nuevo término: premiar cavidad hipocaptante en el centro del anillo.
+		cavity = d <= max(0.6, float(ri))
+		if int(np.count_nonzero(cavity)) >= 6:
+			cavity_mean = float(np.mean(img[cavity]))
+		else:
+			cavity_mean = ring_mean
+		cavity_contrast = max(0.0, ring_mean - cavity_mean)
+
+		score = 2.2 * contrast - 0.95 * center_pen - 0.55 * area_pen - 1.25 * inferior_hot_pen + 1.15 * cavity_contrast
+
+		# Penalizar ROIs que se alejan demasiado cuando hay cavidad bien definida.
+		if cavity_contrast > 0.08 and center_pen > 0.62:
+			score -= 0.9
 		poly = self._intestinal_roi_polygons.get(int(slice_index))
 		if poly:
 			mask_int = self._polygon_to_mask(img.shape, poly)
@@ -1591,7 +1916,7 @@ class CineWidget(QWidget):
 		if not np.isfinite(img_s).any() or float(np.max(img_s)) <= 0.0:
 			return
 
-		method_order = ["robusto", "clasico", "gradiente", "hotbowel", "percentil_central", "consenso", "inferior_overlap"]
+		method_order = ["robusto", "clasico", "gradiente", "hotbowel", "percentil_central", "consenso", "inferior_overlap", "cavidad_dominante"]
 		options = []
 		by_label = {}
 		best_label = ""
@@ -1647,7 +1972,8 @@ class CineWidget(QWidget):
 				"Hot bowel: robusto + penalización inferior.\n"
 				"Percentil central: prior central + percentiles adaptativos.\n"
 				"Consenso: mediana entre métodos robustos.\n"
-				"Inferior superpuesto: reduce impacto de focos inferiores extracardíacos."
+				"Inferior superpuesto: reduce impacto de focos inferiores extracardíacos.\n"
+				"Cavidad dominante: empuja el centro hacia cavidad hipocaptante (útil cuando anillo rodea un centro frío)."
 			)
 			card_layout.addWidget(title)
 
@@ -1750,13 +2076,25 @@ class CineWidget(QWidget):
 		return canvas
 
 	def _on_roi_changed(self, slice_index: int, roi):
-		if roi is None:
-			self._rois.pop(int(slice_index), None)
-			self._roi_source.pop(int(slice_index), None)
+		sl = int(slice_index)
+		if self._per_gate_roi_mode:
+			g = int(self.gate_slider.value())
+			key = (g, sl)
+			if roi is None:
+				self._rois_by_gate.pop(key, None)
+				self._roi_by_gate_source.pop(key, None)
+			else:
+				self._rois_by_gate[key] = tuple(float(v) for v in roi)
+				self._roi_by_gate_source[key] = "manual"
+			self.roiEditedGate.emit(g, sl, roi)
 		else:
-			self._rois[int(slice_index)] = tuple(float(v) for v in roi)
-			self._roi_source[int(slice_index)] = "manual"
-		self.roiEdited.emit(int(slice_index), roi)
+			if roi is None:
+				self._rois.pop(sl, None)
+				self._roi_source.pop(sl, None)
+			else:
+				self._rois[sl] = tuple(float(v) for v in roi)
+				self._roi_source[sl] = "manual"
+			self.roiEdited.emit(sl, roi)
 
 	def _on_zoom_slider(self, value: int):
 		zoom = max(0.40, min(5.00, float(value) / 100.0))
@@ -1859,3 +2197,181 @@ class CineWidget(QWidget):
 	def resizeEvent(self, event):
 		super().resizeEvent(event)
 		self._update_view()
+
+	def _open_gate_qc_dialog(self):
+		"""Abre ventana modal con mosaico de todos los gates del slice actual para QC/ROI por gate."""
+		if self._cube is None or self._cube.ndim != 4:
+			QMessageBox.information(self, "QC gates", "Cargá un estudio gated primero.")
+			return
+		sl = int(self.slice_slider.value())
+		n_slices = int(self._cube.shape[1])
+		if sl < 0 or sl >= n_slices:
+			QMessageBox.information(self, "QC gates", "Slice actual fuera de rango.")
+			return
+		dlg = GateQcDialog(self, slice_index=sl)
+		dlg.exec()
+		# Al cerrar, refrescar la vista principal por si se editaron ROIs.
+		self._update_view()
+
+
+class GateQcDialog(QDialog):
+	"""Diálogo modal para QC/ROI por gate: muestra todos los gates del slice en mosaico."""
+
+	def __init__(self, cine_widget: CineWidget, slice_index: int, parent=None):
+		super().__init__(parent or cine_widget)
+		self._cine = cine_widget
+		self._slice_index = int(slice_index)
+		self.setWindowTitle(f"QC por gate — Slice {self._slice_index + 1}")
+		self.setModal(True)
+		self.resize(900, 600)
+
+		layout = QVBoxLayout(self)
+
+		# Info
+		info = QLabel(
+			f"Slice {self._slice_index + 1} | "
+			"Click en un gate para seleccionarlo | "
+			"Edición en el panel derecho afecta SOLO al gate seleccionado"
+		)
+		info.setStyleSheet("color:#666; font-size:10pt; padding:4px;")
+		info.setWordWrap(True)
+		layout.addWidget(info)
+
+		# Layout principal: mosaico + panel de edición
+		main_row = QHBoxLayout()
+
+		# Mosaico de gates (izquierda)
+		self.montage = GateMontageLabel()
+		self.montage.set_cube(self._cine._cube)
+		self.montage.set_slice_index(self._slice_index)
+		self.montage.set_current_gate(self._cine.current_gate_index())
+		self.montage.set_rois(
+			self._cine._rois,
+			self._cine._rois_by_gate,
+			self._cine._per_gate_roi_mode,
+		)
+		self.montage.set_display_params(
+			self._cine.cmap_combo.currentText(),
+			self._cine._smooth_sigma,
+			self._cine.invert_cmap_check.isChecked(),
+			self._cine._window_low,
+			self._cine._window_high,
+		)
+		self.montage.gateSelected.connect(self._on_gate_selected)
+		main_row.addWidget(self.montage, 2)
+
+		# Panel de edición (derecha): preview grande + controles
+		edit_panel = QWidget()
+		edit_layout = QVBoxLayout(edit_panel)
+
+		self.edit_preview = RoiImageLabel()
+		self.edit_preview.setMinimumSize(280, 280)
+		self.edit_preview.roiChanged.connect(self._on_edit_roi_changed)
+		edit_layout.addWidget(QLabel("Gate seleccionado:"))
+		self.gate_label = QLabel("Gate 1")
+		self.gate_label.setStyleSheet("font-weight:bold; font-size:12pt; color:#d61f1f;")
+		edit_layout.addWidget(self.gate_label)
+		edit_layout.addWidget(self.edit_preview)
+
+		# Botones
+		btn_row = QHBoxLayout()
+		self.apply_all_btn = QPushButton("Aplicar a todos gates")
+		self.apply_all_btn.setToolTip("Copia el ROI del gate actual a todos los gates de este slice.")
+		self.apply_all_btn.clicked.connect(self._apply_roi_to_all_gates)
+		self.clear_btn = QPushButton("Borrar ROI gate")
+		self.clear_btn.clicked.connect(self._clear_current_gate_roi)
+		btn_row.addWidget(self.apply_all_btn)
+		btn_row.addWidget(self.clear_btn)
+		edit_layout.addLayout(btn_row)
+
+		main_row.addWidget(edit_panel, 1)
+		layout.addLayout(main_row)
+
+		# Botón cerrar
+		close_btn = QPushButton("Cerrar")
+		close_btn.clicked.connect(self.accept)
+		layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+		# Inicializar con gate actual del cine
+		self._selected_gate = self._cine.current_gate_index()
+		self._refresh_edit_preview()
+
+	def _on_gate_selected(self, gate_index: int):
+		self._selected_gate = int(gate_index)
+		self.montage.set_current_gate(self._selected_gate)
+		self._refresh_edit_preview()
+
+	def _refresh_edit_preview(self):
+		if self._cine._cube is None:
+			return
+		frame = np.asarray(self._cine._cube[self._selected_gate, self._slice_index], dtype=np.float64)
+		if self._cine._intestinal_apply_enabled:
+			frame = self._cine._attenuate_image_with_intestinal_roi(frame, self._slice_index)
+		self.edit_preview.set_slice_index(self._slice_index)
+		self.edit_preview.set_frame(
+			frame,
+			cmap_name=str(self._cine.cmap_combo.currentText()),
+			smooth_sigma=self._cine._smooth_sigma,
+			invert_cmap=self._cine.invert_cmap_check.isChecked(),
+			window_low=self._cine._window_low,
+			window_high=self._cine._window_high,
+		)
+		roi = self._cine.roi_for_gate_slice(self._selected_gate, self._slice_index)
+		self.edit_preview.set_roi(roi)
+		self.gate_label.setText(f"Gate {self._selected_gate + 1}")
+		# Log temporal para depuración
+		print(f"[QC-DEBUG] Refresh preview: gate={self._selected_gate + 1}, roi={roi}")
+
+	def _on_edit_roi_changed(self, slice_index: int, roi):
+		"""Edita el ROI del gate seleccionado."""
+		key = (self._selected_gate, self._slice_index)
+		if roi is None:
+			self._cine._rois_by_gate.pop(key, None)
+			self._cine._roi_by_gate_source.pop(key, None)
+		else:
+			self._cine._rois_by_gate[key] = tuple(float(v) for v in roi)
+			self._cine._roi_by_gate_source[key] = "manual"
+		# Activar modo por gate si no estaba
+		if not self._cine._per_gate_roi_mode:
+			self._cine.set_per_gate_roi_mode(True)
+		self._cine.roiEditedGate.emit(self._selected_gate, self._slice_index, roi)
+		# Refrescar mosaico y preview
+		self.montage.set_rois(
+			self._cine._rois,
+			self._cine._rois_by_gate,
+			self._cine._per_gate_roi_mode,
+		)
+		self.montage.update()
+		self.edit_preview.update()
+		# Log temporal para depuración
+		print(f"[QC-DEBUG] Gate {self._selected_gate + 1} slice {self._slice_index + 1}: roi={roi}")
+
+	def _apply_roi_to_all_gates(self):
+		roi = self._cine.roi_for_gate_slice(self._selected_gate, self._slice_index)
+		if roi is None:
+			return
+		n_gates = int(self._cine._cube.shape[0]) if self._cine._cube is not None else 0
+		for g in range(n_gates):
+			key = (g, self._slice_index)
+			self._cine._rois_by_gate[key] = tuple(roi)
+			self._cine._roi_by_gate_source[key] = "manual"
+			self._cine.roiEditedGate.emit(g, self._slice_index, roi)
+		self.montage.set_rois(
+			self._cine._rois,
+			self._cine._rois_by_gate,
+			self._cine._per_gate_roi_mode,
+		)
+		self.montage.update()
+
+	def _clear_current_gate_roi(self):
+		key = (self._selected_gate, self._slice_index)
+		self._cine._rois_by_gate.pop(key, None)
+		self._cine._roi_by_gate_source.pop(key, None)
+		self._cine.roiEditedGate.emit(self._selected_gate, self._slice_index, None)
+		self.edit_preview.set_roi(None)
+		self.montage.set_rois(
+			self._cine._rois,
+			self._cine._rois_by_gate,
+			self._cine._per_gate_roi_mode,
+		)
+		self.montage.update()

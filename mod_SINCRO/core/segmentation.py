@@ -215,6 +215,83 @@ def _stabilize_auto_roi_series(
     return centers_out, inner_out, outer_out
 
 
+def _reconstruct_annular_mask(
+    shape: tuple[int, int, int],
+    centers: np.ndarray,
+    inner: np.ndarray,
+    outer: np.ndarray,
+) -> np.ndarray:
+    """Reconstruye una máscara anular suave y continua a partir de geometría regularizada.
+
+    Idea: en lugar de quedarnos con la máscara binaria "dura" de umbral por
+    slice, re-renderizamos un modelo anular por corte usando los centros y radios
+    ya regularizados. Esto baja el diente de sierra y evita saltos bruscos entre
+    cortes, parecido al efecto visual de superficies modeladas tipo Xeleris.
+    """
+    n_slices, h, w = shape
+    out = np.zeros((n_slices, h, w), dtype=bool)
+    ys, xs = np.ogrid[:h, :w]
+    for s in range(n_slices):
+        cy = float(centers[s, 0]) if s < centers.shape[0] else np.nan
+        cx = float(centers[s, 1]) if s < centers.shape[0] else np.nan
+        ro = float(outer[s]) if s < outer.shape[0] else np.nan
+        ri = float(inner[s]) if s < inner.shape[0] else np.nan
+        if not (np.isfinite(cy) and np.isfinite(cx) and np.isfinite(ro) and ro > 0.0):
+            continue
+        if not np.isfinite(ri) or ri < 0.0:
+            ri = 0.0
+        d = np.sqrt((ys - cy) ** 2 + (xs - cx) ** 2)
+        out[s] = (d <= ro) & (d >= ri)
+    return out
+
+
+def _regularize_segmentation_model(
+    mean_img: np.ndarray,
+    mask: np.ndarray,
+    centers: np.ndarray,
+    inner: np.ndarray,
+    outer: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Aplica una regularización 3D anatómica simple sobre la segmentación automática.
+
+    Objetivo: pasar de una máscara binaria ruidosa a un modelo anular suave,
+    estable en 3D, sin reescribir todo el pipeline. Se apoya en:
+    - estabilización axial de centros/radios,
+    - reconstrucción anular regularizada,
+    - fusión suave con la máscara original para no perder evidencia real.
+    """
+    n_slices, h, w = mean_img.shape
+    centers_r, inner_r, outer_r = _stabilize_auto_roi_series(centers, inner, outer, mask)
+
+    valid = np.isfinite(outer_r)
+    if int(np.count_nonzero(valid)) >= 3:
+        # Segunda pasada un poco más anatómica: el perfil axial de radios y centros
+        # debe variar de forma suave base→ápex.
+        idx = np.where(valid)[0]
+        centers_r[idx, 0] = gaussian_filter(centers_r[idx, 0], sigma=0.55, mode="nearest")
+        centers_r[idx, 1] = gaussian_filter(centers_r[idx, 1], sigma=0.55, mode="nearest")
+        outer_r[idx] = gaussian_filter(outer_r[idx], sigma=0.55, mode="nearest")
+        inner_r[idx] = gaussian_filter(inner_r[idx], sigma=0.55, mode="nearest")
+        inner_r[idx] = np.clip(inner_r[idx], 0.0, np.maximum(0.0, outer_r[idx] - 0.5))
+
+    model_mask = _reconstruct_annular_mask(mask.shape, centers_r, inner_r, outer_r)
+
+    # Fusión suave: si el modelo anular difiere mucho del threshold original,
+    # priorizamos el modelo para forma global, pero sin inventar región en
+    # slices donde originalmente no había soporte.
+    model_soft = gaussian_filter(model_mask.astype(np.float32), sigma=(0.55, 0.65, 0.65))
+    orig_soft = gaussian_filter(mask.astype(np.float32), sigma=(0.55, 0.65, 0.65))
+    fused = np.clip(0.72 * model_soft + 0.28 * orig_soft, 0.0, 1.0)
+    new_mask = fused >= 0.50
+
+    # Limpieza mínima para evitar fragmentos espúreos tras fusionar.
+    st = np.ones((2, 2, 2), dtype=bool)
+    new_mask = binary_opening(new_mask, structure=st)
+    new_mask = binary_closing(new_mask, structure=st)
+
+    return new_mask, centers_r, inner_r, outer_r
+
+
 def _segment_auto_or_threshold(
     mean_img: np.ndarray,
     threshold_frac: float,
@@ -273,6 +350,15 @@ def _segment_auto_or_threshold(
 
     if with_cleanup:
         centers, inner, outer = _stabilize_auto_roi_series(centers, inner, outer, mask)
+        # Regularización 3D/modelo anatómico: mejora estabilidad visual y reduce
+        # dependencia del voxel en baja resolución. Se aplica solo en modo "auto".
+        mask, centers, inner, outer = _regularize_segmentation_model(
+            mean_img=mean_img,
+            mask=mask,
+            centers=centers,
+            inner=inner,
+            outer=outer,
+        )
 
     return SegmentationResult(
         mask=mask,

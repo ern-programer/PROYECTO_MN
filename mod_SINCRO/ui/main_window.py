@@ -108,6 +108,11 @@ class MainWindow(QMainWindow):
 		self.study = None
 		self.axis_companions: dict[str, object] = {}
 		self.seg = None
+		# Diagnóstico de calibración FEVI/volumen (barridos [DIAG-*] en el log).
+		# Poner en True para reactivar los logs de calibración al evaluar estudios
+		# nuevos (sweep de cavity_frac, radios ED/ES, epicardio por gate, FWHM
+		# subpíxel, upsampling). Off por defecto en uso clínico normal.
+		self.fevi_diag_enabled = False
 		self.phase_result_raw = None
 		self.phase_result = None
 		self.metrics_raw = None
@@ -170,6 +175,37 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_cut_study = None
 		self.cine_crudo_cut_source_label = ""
 		self.cine_crudo_axes_for_export: dict[str, np.ndarray] = {}
+		# Segundo set (reposo) para montaje comparativo stress/rest.
+		self.cine_crudo_axes_for_export_rest: dict[str, np.ndarray] = {}
+		self.cine_crudo_rest_source_label = ""
+		self.cine_crudo_cut_thickness_mm = 0.0
+		self.cine_crudo_cut_thickness_mm_rest = 0.0
+		# Recorte del montaje: "limits" (markers base/ápex) o "voi" (elipse VOI).
+		self.cine_crudo_montage_crop_mode = "limits"
+		# Plantillas de presentación del montaje.
+		self.cine_crudo_montage_template = "denso"
+		self.cine_crudo_montage_cut_zoom = 1.0
+		# Ventanas por tira/eje (1-based): inicio y cantidad visible.
+		self.cine_crudo_stripe_start = {"SA": 1, "VLA": 1, "HLA": 1}
+		self.cine_crudo_stripe_count = {"SA": 999, "VLA": 999, "HLA": 999}
+		# Offsets de alineación de reposo respecto de esfuerzo (px de corte).
+		self.cine_crudo_rest_offset = {"SA": 0, "VLA": 0, "HLA": 0}
+		# Rango de frames/gates para visualizar cada corte en el montaje (1-based).
+		self.cine_crudo_gate_from = 1
+		self.cine_crudo_gate_to = 1
+		self._montage_drag_axis: str | None = None
+		self._montage_drag_mode: str | None = None
+		self._montage_drag_start_x: float | None = None
+		self._montage_drag_start_off: int = 0
+		self._montage_drag_start_gate: int = 1
+		self._montage_render_meta: dict = {}
+		self.cine_crudo_selected_stripe: str = "SA"
+		self._montage_refresh_timer = QTimer(self)
+		self._montage_refresh_timer.setSingleShot(True)
+		self._montage_refresh_timer.timeout.connect(self._show_cine_crudo_sa_montage)
+		self._preview_scrollers: dict[str, QScrollArea] = {}
+		self._preview_pan_active = False
+		self._preview_pan_anchor = None
 		self.cine_crudo_preview_mode: str | None = None
 		self._cine_crudo_cut_limits_meta: dict | None = None
 		self._tooltips_cache_main: dict[QWidget, str] = {}
@@ -194,6 +230,9 @@ class MainWindow(QMainWindow):
 		self._deferred_hq_timer = QTimer(self)
 		self._deferred_hq_timer.setSingleShot(True)
 		self._deferred_hq_timer.timeout.connect(self._run_deferred_hq_render)
+		self._gate_roi_recalc_timer = QTimer(self)
+		self._gate_roi_recalc_timer.setSingleShot(True)
+		self._gate_roi_recalc_timer.timeout.connect(self._on_gate_roi_recalc_timeout)
 		self._lazy_render_pending_tabs: set[str] = set()
 		self._cache_study_sig = ""
 		self._cache_seg_sig = ""
@@ -1479,6 +1518,98 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_process_recon_btn.setEnabled(False)
 				toolbar6.addWidget(self.cine_crudo_process_recon_btn)
 				toolbar6.addStretch(1)
+
+				# --- Fila 7 (montaje clínico de cortes SA/VLA/HLA) ---
+				toolbar7 = QHBoxLayout()
+				toolbar7.addWidget(QLabel("Recorte"))
+				self.cine_crudo_crop_combo = QComboBox()
+				self.cine_crudo_crop_combo.addItems(["Límites (markers)", "Elipse VOI"])
+				self.cine_crudo_crop_combo.setToolTip("Rango de cortes del montaje: por líneas Base/Ápex (markers) o por la elipse VOI de la reorientación.")
+				self.cine_crudo_crop_combo.currentIndexChanged.connect(self._on_montage_crop_mode_changed)
+				toolbar7.addWidget(self.cine_crudo_crop_combo)
+				toolbar7.addWidget(QLabel("Template"))
+				self.cine_crudo_montage_template_combo = QComboBox()
+				self.cine_crudo_montage_template_combo.addItems(["Denso", "Grande", "Cuadrante"])
+				self.cine_crudo_montage_template_combo.setCurrentText("Denso")
+				self.cine_crudo_montage_template_combo.setToolTip("Distribución del montaje: Denso (más cortes), Grande (hasta 16 cortes por tira), Cuadrante (bloques por eje).")
+				self.cine_crudo_montage_template_combo.currentIndexChanged.connect(self._on_montage_template_changed)
+				toolbar7.addWidget(self.cine_crudo_montage_template_combo)
+				self.cine_crudo_tips_btn = QToolButton()
+				self.cine_crudo_tips_btn.setText("Tips")
+				self.cine_crudo_tips_btn.setToolTip("Guía rápida de atajos y controles del montaje (click, rueda, flechas, zoom y pan).")
+				self.cine_crudo_tips_btn.clicked.connect(self._show_cine_crudo_montage_tips)
+				toolbar7.addWidget(self.cine_crudo_tips_btn)
+				toolbar7.addWidget(QLabel("Zoom corte"))
+				self.cine_crudo_cut_zoom_spin = QDoubleSpinBox()
+				self.cine_crudo_cut_zoom_spin.setRange(1.00, 2.50)
+				self.cine_crudo_cut_zoom_spin.setSingleStep(0.05)
+				self.cine_crudo_cut_zoom_spin.setDecimals(2)
+				self.cine_crudo_cut_zoom_spin.setValue(1.00)
+				self.cine_crudo_cut_zoom_spin.setMaximumWidth(70)
+				self.cine_crudo_cut_zoom_spin.setToolTip("Agrandar interno de cada corte (mismo factor para todos los paneles). 1.00 = original.")
+				self.cine_crudo_cut_zoom_spin.valueChanged.connect(self._on_montage_cut_zoom_changed)
+				toolbar7.addWidget(self.cine_crudo_cut_zoom_spin)
+				self.cine_crudo_montage_btn = QToolButton()
+				self.cine_crudo_montage_btn.setText("Ver montaje")
+				self.cine_crudo_montage_btn.setToolTip("Montaje clínico SA/VLA/HLA (estilo Xeleris). En vivo: click selecciona tira, rueda mueve tira activa, Ctrl+rueda zoom parejo, Alt+drag o botón medio para pan, doble click resetea tira.")
+				self.cine_crudo_montage_btn.clicked.connect(self._show_cine_crudo_sa_montage)
+				self.cine_crudo_montage_btn.setEnabled(False)
+				toolbar7.addWidget(self.cine_crudo_montage_btn)
+				self.cine_crudo_mark_rest_btn = QToolButton()
+				self.cine_crudo_mark_rest_btn.setText("Marcar como reposo")
+				self.cine_crudo_mark_rest_btn.setToolTip("Guarda los cortes actuales como estudio de REPOSO para el montaje comparativo stress/rest. Luego generá el esfuerzo y volvé a Ver montaje.")
+				self.cine_crudo_mark_rest_btn.clicked.connect(self._mark_cine_crudo_as_rest)
+				self.cine_crudo_mark_rest_btn.setEnabled(False)
+				toolbar7.addWidget(self.cine_crudo_mark_rest_btn)
+				toolbar7.addWidget(QLabel("Offset SA"))
+				self.cine_crudo_rest_off_sa_spin = QSpinBox()
+				self.cine_crudo_rest_off_sa_spin.setRange(-40, 40)
+				self.cine_crudo_rest_off_sa_spin.setValue(0)
+				self.cine_crudo_rest_off_sa_spin.setMaximumWidth(52)
+				self.cine_crudo_rest_off_sa_spin.setToolTip("Desplaza los cortes SA de reposo para alinearlos con esfuerzo.")
+				self.cine_crudo_rest_off_sa_spin.valueChanged.connect(lambda v: self._on_rest_offset_changed("SA", int(v)))
+				toolbar7.addWidget(self.cine_crudo_rest_off_sa_spin)
+				toolbar7.addWidget(QLabel("VLA"))
+				self.cine_crudo_rest_off_vla_spin = QSpinBox()
+				self.cine_crudo_rest_off_vla_spin.setRange(-40, 40)
+				self.cine_crudo_rest_off_vla_spin.setValue(0)
+				self.cine_crudo_rest_off_vla_spin.setMaximumWidth(52)
+				self.cine_crudo_rest_off_vla_spin.setToolTip("Desplaza los cortes VLA de reposo para alinearlos con esfuerzo.")
+				self.cine_crudo_rest_off_vla_spin.valueChanged.connect(lambda v: self._on_rest_offset_changed("VLA", int(v)))
+				toolbar7.addWidget(self.cine_crudo_rest_off_vla_spin)
+				toolbar7.addWidget(QLabel("HLA"))
+				self.cine_crudo_rest_off_hla_spin = QSpinBox()
+				self.cine_crudo_rest_off_hla_spin.setRange(-40, 40)
+				self.cine_crudo_rest_off_hla_spin.setValue(0)
+				self.cine_crudo_rest_off_hla_spin.setMaximumWidth(52)
+				self.cine_crudo_rest_off_hla_spin.setToolTip("Desplaza los cortes HLA de reposo para alinearlos con esfuerzo.")
+				self.cine_crudo_rest_off_hla_spin.valueChanged.connect(lambda v: self._on_rest_offset_changed("HLA", int(v)))
+				toolbar7.addWidget(self.cine_crudo_rest_off_hla_spin)
+				toolbar7.addWidget(QLabel("Frames"))
+				self.cine_crudo_gate_from_spin = QSpinBox()
+				self.cine_crudo_gate_from_spin.setRange(1, 1)
+				self.cine_crudo_gate_from_spin.setValue(1)
+				self.cine_crudo_gate_from_spin.setMaximumWidth(56)
+				self.cine_crudo_gate_from_spin.setEnabled(False)
+				self.cine_crudo_gate_from_spin.setToolTip("Gate inicial (1-based) para el montaje. Se aplica en vivo. También podés arrastrar/cambiar con rueda en el panel.")
+				self.cine_crudo_gate_from_spin.valueChanged.connect(self._on_montage_gate_range_changed)
+				toolbar7.addWidget(self.cine_crudo_gate_from_spin)
+				toolbar7.addWidget(QLabel("→"))
+				self.cine_crudo_gate_to_spin = QSpinBox()
+				self.cine_crudo_gate_to_spin.setRange(1, 1)
+				self.cine_crudo_gate_to_spin.setValue(1)
+				self.cine_crudo_gate_to_spin.setMaximumWidth(56)
+				self.cine_crudo_gate_to_spin.setEnabled(False)
+				self.cine_crudo_gate_to_spin.setToolTip("Gate final (1-based) para el montaje. Se aplica en vivo. También podés arrastrar/cambiar con rueda en el panel.")
+				self.cine_crudo_gate_to_spin.valueChanged.connect(self._on_montage_gate_range_changed)
+				toolbar7.addWidget(self.cine_crudo_gate_to_spin)
+				self.cine_crudo_gate_all_btn = QToolButton()
+				self.cine_crudo_gate_all_btn.setText("Todo")
+				self.cine_crudo_gate_all_btn.setEnabled(False)
+				self.cine_crudo_gate_all_btn.setToolTip("Usa todos los gates para el montaje (click rápido).")
+				self.cine_crudo_gate_all_btn.clicked.connect(self._set_montage_gate_full_range)
+				toolbar7.addWidget(self.cine_crudo_gate_all_btn)
+				toolbar7.addStretch(1)
 			toolbar.addStretch(1)
 			tab_layout.addLayout(toolbar)
 			if name == "cine_crudo":
@@ -1487,6 +1618,7 @@ class MainWindow(QMainWindow):
 				tab_layout.addLayout(toolbar4)
 				tab_layout.addLayout(toolbar5)
 				tab_layout.addLayout(toolbar6)
+				tab_layout.addLayout(toolbar7)
 
 			label = QLabel("Sin procesar")
 			label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -1500,11 +1632,13 @@ class MainWindow(QMainWindow):
 			else:
 				label.setToolTip("Zoom con los botones +/- o 100% arriba de cada panel.")
 			self.preview_labels[name] = label
-			self.preview_zoom[name] = 1.0
+			self.preview_zoom[name] = 0.5
 			if name == "cine_crudo":
 				label.mousePressEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_press_safe(e, lbl))
 				label.mouseMoveEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_move_safe(e, lbl))
 				label.mouseReleaseEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_release_safe(e, lbl))
+				label.wheelEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_wheel_safe(e, lbl))
+				label.mouseDoubleClickEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_double_click_safe(e, lbl))
 			if name == "comparacion_ejes":
 				# Durante preview de límites (cut_limits) también se permite drag
 				# desde esta pestaña para Base/Ápex.
@@ -1514,6 +1648,7 @@ class MainWindow(QMainWindow):
 			scroller = QScrollArea()
 			scroller.setWidgetResizable(False)
 			scroller.setWidget(label)
+			self._preview_scrollers[name] = scroller
 			tab_layout.addWidget(scroller)
 			self._tab_widgets[name] = tab
 			self._tab_titles[name] = preview_titles.get(name, name)
@@ -1522,12 +1657,14 @@ class MainWindow(QMainWindow):
 		self._rebuild_tabs_for_mode()
 		self.cine = CineWidget()
 		self.cine.roiEdited.connect(self._on_cine_roi_changed)
+		self.cine.roiEditedGate.connect(self._on_cine_roi_changed_gate)
 		self.cine.playStateChanged.connect(self._on_play_state_changed)
 		self.cine.activated.connect(lambda: self._on_cine_panel_activated("main"))
 		self.cine.setToolTip("Reproducí el cine, hacé zoom y dibujá ROIs sobre la imagen.")
 		self.cine_secondary_source: str | None = None
 		self.cine_compare = CineWidget()
 		self.cine_compare.roiEdited.connect(self._on_cine_compare_roi_changed)
+		self.cine_compare.roiEditedGate.connect(self._on_cine_compare_roi_changed_gate)
 		self.cine_compare.playStateChanged.connect(self._on_play_state_changed)
 		self.cine_compare.activated.connect(lambda: self._on_cine_panel_activated("secondary"))
 		self.cine_compare.setToolTip("Segundo visor (otro estudio): editable para ajustar ROI esfuerzo/reposo en paralelo.")
@@ -1799,12 +1936,14 @@ class MainWindow(QMainWindow):
 		intestinal_scope = self.cine.intestinal_scope()
 		intestinal_apply_enabled = self.cine.intestinal_apply_enabled()
 		intestinal_roi_state = self.cine.intestinal_roi_state()
+		gate_roi_state = self.cine.gate_roi_state()
 		if self.active_cine_source == "compare":
 			active_auto_roi_method = self.cine_compare.auto_roi_method()
 			atten_pct, feather_px = self.cine_compare.intestinal_params()
 			intestinal_scope = self.cine_compare.intestinal_scope()
 			intestinal_apply_enabled = self.cine_compare.intestinal_apply_enabled()
 			intestinal_roi_state = self.cine_compare.intestinal_roi_state()
+			gate_roi_state = self.cine_compare.gate_roi_state()
 		return {
 			"seg_method": str(self.seg_method.currentText()),
 			"threshold": float(self.threshold_spin.value()),
@@ -1861,6 +2000,7 @@ class MainWindow(QMainWindow):
 			"intestinal_scope": str(intestinal_scope),
 			"intestinal_apply_enabled": bool(intestinal_apply_enabled),
 			"intestinal_roi_state": intestinal_roi_state,
+			"gate_roi_state": gate_roi_state,
 			"ui_show_helpers": bool(self._ui_show_helpers),
 			"ui_enable_tooltips": bool(self._ui_enable_tooltips),
 			"ui_compact_controls": bool(self._ui_compact_controls),
@@ -2001,6 +2141,10 @@ class MainWindow(QMainWindow):
 			state = params.get("intestinal_roi_state")
 			self.cine.set_intestinal_roi_state(state if isinstance(state, dict) else None)
 			self.cine_compare.set_intestinal_roi_state(state if isinstance(state, dict) else None)
+		if "gate_roi_state" in params:
+			state = params.get("gate_roi_state")
+			self.cine.set_gate_roi_state(state if isinstance(state, dict) else None)
+			self.cine_compare.set_gate_roi_state(state if isinstance(state, dict) else None)
 		if "ui_show_helpers" in params:
 			self._ui_show_helpers = bool(params["ui_show_helpers"])
 		if "ui_enable_tooltips" in params:
@@ -2995,6 +3139,55 @@ class MainWindow(QMainWindow):
 			self._log("ROI detectada: se activó Segmentación=manual.")
 		self.statusBar().showMessage(f"ROI actualizada en slice {slice_index + 1}. Reprocesá para aplicar cambios.")
 
+	def _on_cine_roi_changed_gate(self, gate_index: int, slice_index: int, roi):
+		"""QC por gate: ROI manual específica de un gate. No altera el ROI común por slice."""
+		self._invalidate_output_cache()
+		self._schedule_gate_roi_recalc()
+		msg = (
+			f"ROI (gate {int(gate_index) + 1}) actualizada en slice {int(slice_index) + 1}. "
+			"FEVI se actualizará con QC por gate."
+			if roi is not None
+			else f"ROI (gate {int(gate_index) + 1}) borrada en slice {int(slice_index) + 1}."
+		)
+		self._log(msg)
+		self.statusBar().showMessage(msg)
+
+	def _on_cine_compare_roi_changed_gate(self, gate_index: int, slice_index: int, roi):
+		self._invalidate_output_cache()
+		self._schedule_gate_roi_recalc()
+		msg = (
+			f"ROI comparativa (gate {int(gate_index) + 1}) actualizada en slice {int(slice_index) + 1}."
+			if roi is not None
+			else f"ROI comparativa (gate {int(gate_index) + 1}) borrada en slice {int(slice_index) + 1}."
+		)
+		self._log(msg)
+		self.statusBar().showMessage(msg)
+
+	def _schedule_gate_roi_recalc(self):
+		"""Agrupa ediciones ROI por gate y refresca FEVI/salidas sin reproceso completo."""
+		if self.study is None or self.seg is None or self.phase_result is None:
+			return
+		self._gate_roi_recalc_timer.start(220)
+
+	def _on_gate_roi_recalc_timeout(self):
+		if self.study is None or self.seg is None or self.phase_result is None:
+			return
+		try:
+			self._refresh_summary()
+			target_tabs = {"curva_fevi", "panel_funcional_gated", "bullseye_directo"}
+			self._write_outputs(target_tabs=target_tabs)
+			if self.compare_bundle is not None:
+				left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
+				right_label = self.compare_label or "Comparación"
+				self._compose_dual_tab_images(left_label, right_label, target_tabs=target_tabs)
+			self._load_previews_selected(target_tabs)
+			visual_payload = self._collect_visual_signature_payload()
+			visual_payload["phase"] = self._cache_phase_sig
+			self._cache_output_sig = self._hash_payload(visual_payload)
+			self.statusBar().showMessage("FEVI/QC por gate actualizados.")
+		except Exception as exc:
+			self._log(f"[WARN] No se pudo refrescar FEVI tras editar ROI por gate: {exc}")
+
 	def _on_cine_compare_roi_changed(self, slice_index: int, roi):
 		source = self.cine_secondary_source
 		if source not in ("primary", "compare"):
@@ -3216,11 +3409,11 @@ class MainWindow(QMainWindow):
 		self.preview_movies.clear()
 		self.preview_pixmaps.clear()
 		for name, label in self.preview_labels.items():
-			self.preview_zoom[name] = 1.0
+			self.preview_zoom[name] = 0.5
 			label.clear()
 			label.setText("Sin procesar")
 			if name in self.preview_zoom_labels:
-				self.preview_zoom_labels[name].setText("100%")
+				self.preview_zoom_labels[name].setText("50%")
 		self.cine.set_cube(None)
 		self._refresh_cine_source_selector()
 		self._progress_bar.setValue(0)
@@ -3297,6 +3490,28 @@ class MainWindow(QMainWindow):
 			"poly_g": self._hash_payload({"items": poly_g_items}) if poly_g_items else "none",
 		}
 
+	def _gate_roi_signature_for_widget(self, cine_widget: CineWidget | None) -> dict:
+		if cine_widget is None:
+			return {"per_gate_mode": False, "items": "none"}
+		state = cine_widget.gate_roi_state() if hasattr(cine_widget, "gate_roi_state") else {}
+		per_gate_mode = bool(state.get("per_gate_mode", False)) if isinstance(state, dict) else False
+		items = state.get("gate_rois", []) if isinstance(state, dict) else []
+		norm_items = []
+		for item in items or []:
+			try:
+				g = int(item.get("gate"))
+				s = int(item.get("slice"))
+				roi = [float(v) for v in (item.get("roi") or [])[:4]]
+			except Exception:
+				continue
+			if len(roi) == 4:
+				norm_items.append((g, s, roi[0], roi[1], roi[2], roi[3]))
+		norm_items.sort()
+		return {
+			"per_gate_mode": per_gate_mode,
+			"items": self._hash_payload({"items": norm_items}) if norm_items else "none",
+		}
+
 	def _collect_visual_signature_payload(self) -> dict:
 		return {
 			"visual_style": str(self.visual_style_combo.currentText()),
@@ -3324,6 +3539,8 @@ class MainWindow(QMainWindow):
 			"global_intestinal_render": bool(self.global_intestinal_render_check.isChecked()),
 			"intestinal_primary": self._intestinal_signature_for_widget(self.cine),
 			"intestinal_compare": self._intestinal_signature_for_widget(self.cine_compare),
+			"gate_roi_primary": self._gate_roi_signature_for_widget(self.cine),
+			"gate_roi_compare": self._gate_roi_signature_for_widget(self.cine_compare),
 		}
 
 	def _apply_intestinal_mask_to_cube(self, cube: np.ndarray, cine_widget: CineWidget | None, *, require_global_visual: bool = True) -> np.ndarray:
@@ -3854,7 +4071,28 @@ class MainWindow(QMainWindow):
 				"cavity_to_myo_ratio": None,
 			}
 
-		myocardial_ml = float(np.count_nonzero(self.seg.mask)) * voxel_ml
+		# --- Volumen miocárdico (fix bug ~647 mL) --------------------------------
+		# ANTES: se contaba TODA la máscara de segmentación (self.seg.mask), que con
+		# umbral 0.35 capta un anillo grueso + arrastre de fondo (~2469 voxels →
+		# ~647 mL, físicamente imposible: el miocardio del VI son ~85-250 mL).
+		# AHORA: se prefiere la máscara CLÍNICA filtrada por amplitud (la misma que
+		# usa el análisis de fase, phase_result.amplitude_map > 0, ~386 voxels), que
+		# representa el miocardio con señal cardíaca real. Fallback a seg.mask solo
+		# si no hay phase_result. Se marca fuera de rango fisiológico como guardrail.
+		myo_voxels_clin = 0
+		amp_map = getattr(getattr(self, "phase_result", None), "amplitude_map", None)
+		if amp_map is not None:
+			amp_arr = np.asarray(amp_map, dtype=np.float64)
+			myo_voxels_clin = int(np.count_nonzero(amp_arr > 0.0))
+		if myo_voxels_clin > 0:
+			myocardial_voxels = myo_voxels_clin
+			myo_source = "clinical_amp"
+		else:
+			myocardial_voxels = int(np.count_nonzero(self.seg.mask))
+			myo_source = "seg_mask"
+		myocardial_ml = float(myocardial_voxels) * voxel_ml
+		# Guardrail físico: el miocardio del VI raramente excede ~250 mL.
+		myo_physiologic = bool(40.0 <= myocardial_ml <= 260.0)
 
 		cavity_ml = None
 		centers = np.asarray(getattr(self.seg, "center_per_slice", np.empty((0, 2))), dtype=np.float64)
@@ -3885,6 +4123,9 @@ class MainWindow(QMainWindow):
 		return {
 			"voxel_ml": float(voxel_ml),
 			"myocardial_ml": float(myocardial_ml),
+			"myocardial_voxels": int(myocardial_voxels),
+			"myo_source": str(myo_source),
+			"myo_physiologic": bool(myo_physiologic),
 			"cavity_ml": float(cavity_ml) if cavity_ml is not None else None,
 			"lv_total_ml": float(lv_total_ml) if lv_total_ml is not None else None,
 			"cavity_to_myo_ratio": float(cavity_to_myo_ratio) if cavity_to_myo_ratio is not None else None,
@@ -3934,6 +4175,17 @@ class MainWindow(QMainWindow):
 		basal_pad = 0.30
 		n_ang = 48
 
+		# QC por gate: si el usuario editó ROIs manuales por gate en el cine, usar
+		# ese centro/radio externo como geometría base del slice/gate en vez de la
+		# segmentación automática común. Así la edición manual por gate afecta la
+		# FEVI (p.ej. bajar FEVI agrandando el ROI de sístole).
+		per_gate_rois = {}
+		try:
+			if hasattr(self, "cine") and self.cine is not None and self.cine.per_gate_roi_mode_enabled():
+				per_gate_rois = dict(getattr(self.cine, "_rois_by_gate", {}) or {})
+		except Exception:
+			per_gate_rois = {}
+
 		# Slices válidos: donde el anillo miocárdico es sustancial (evita base
 		# abierta y apex sin cavidad, que inflan el volumen y matan el EF).
 		if mask_all.shape[0] == n_slices:
@@ -3956,42 +4208,65 @@ class MainWindow(QMainWindow):
 		sin_a = np.sin(angles)
 		cos_a = np.cos(angles)
 		dtheta = 2.0 * np.pi / n_ang
-		gate_cavity_area = np.zeros((n_gates,), dtype=np.float64)
 
-		for s in valid_s:
-			cy0 = float(centers[s, 0])
-			cx0 = float(centers[s, 1])
-			ro0 = float(outer[s])
-			r_line = np.linspace(0.0, ro0 * 1.1, int(ro0 * 2) + 4)
-			for g in range(n_gates):
-				img = cube[g, s]
-				d0 = np.sqrt((ys - cy0) ** 2 + (xs - cx0) ** 2)
-				ring = (d0 >= ro0 * 0.5) & (d0 <= ro0)
-				peak = float(np.percentile(img[ring], 80)) if np.any(ring) else 0.0
-				if peak <= 0.0:
-					continue
-				thr = cavity_frac * peak
-				# Recentrado por gate: centroide de baja actividad cerca del centro.
-				low = (d0 <= ro0 * 0.7) & (img < thr)
-				if np.count_nonzero(low) >= 3:
-					yy_l, xx_l = np.nonzero(low)
-					cyg = float(yy_l.mean())
-					cxg = float(xx_l.mean())
-				else:
-					cyg, cxg = cy0, cx0
-				# Radio endocárdico por ángulo.
-				r_endo = np.zeros((n_ang,), dtype=np.float64)
-				for ai in range(n_ang):
-					sy = cyg + r_line * sin_a[ai]
-					sx = cxg + r_line * cos_a[ai]
-					iy = np.clip(np.round(sy).astype(np.int32), 0, h - 1)
-					ix = np.clip(np.round(sx).astype(np.int32), 0, w - 1)
-					line_vals = img[iy, ix]
-					above = np.where(line_vals >= thr)[0]
-					r_endo[ai] = r_line[above[0]] if above.size else 0.0
-				if basal_pad > 0.0:
-					r_endo = r_endo * (1.0 + basal_pad)
-				gate_cavity_area[g] += float(0.5 * np.sum(r_endo ** 2) * dtheta)
+		def _cavity_area_per_gate(frac: float) -> np.ndarray:
+			"""Área endocárdica por gate (px²) para un cavity_frac dado.
+
+			Parametrizado para poder barrer distintos umbrales de borde en
+			diagnóstico sin duplicar el bucle. El resto de la geometría
+			(centros, outer, recentrado por gate, basal_pad) es idéntica.
+			"""
+			area = np.zeros((n_gates,), dtype=np.float64)
+			for s in valid_s:
+				cy0 = float(centers[s, 0])
+				cx0 = float(centers[s, 1])
+				ro0 = float(outer[s])
+				for g in range(n_gates):
+					# QC por gate: si hay ROI manual para este (gate, slice), usar
+					# su centro y radio externo como geometría base.
+					cy_g, cx_g, ro_g = cy0, cx0, ro0
+					if per_gate_rois:
+						roi_g = per_gate_rois.get((g, s))
+						if roi_g is not None and len(roi_g) >= 4:
+							try:
+								cy_g = float(roi_g[0])
+								cx_g = float(roi_g[1])
+								if np.isfinite(roi_g[3]) and roi_g[3] > 0.0:
+									ro_g = float(roi_g[3])
+							except Exception:
+								pass
+					r_line = np.linspace(0.0, ro_g * 1.1, int(ro_g * 2) + 4)
+					img = cube[g, s]
+					d0 = np.sqrt((ys - cy_g) ** 2 + (xs - cx_g) ** 2)
+					ring = (d0 >= ro_g * 0.5) & (d0 <= ro_g)
+					peak = float(np.percentile(img[ring], 80)) if np.any(ring) else 0.0
+					if peak <= 0.0:
+						continue
+					thr = frac * peak
+					# Recentrado por gate: centroide de baja actividad cerca del centro.
+					low = (d0 <= ro_g * 0.7) & (img < thr)
+					if np.count_nonzero(low) >= 3:
+						yy_l, xx_l = np.nonzero(low)
+						cyg = float(yy_l.mean())
+						cxg = float(xx_l.mean())
+					else:
+						cyg, cxg = cy_g, cx_g
+					# Radio endocárdico por ángulo.
+					r_endo = np.zeros((n_ang,), dtype=np.float64)
+					for ai in range(n_ang):
+						sy = cyg + r_line * sin_a[ai]
+						sx = cxg + r_line * cos_a[ai]
+						iy = np.clip(np.round(sy).astype(np.int32), 0, h - 1)
+						ix = np.clip(np.round(sx).astype(np.int32), 0, w - 1)
+						line_vals = img[iy, ix]
+						above = np.where(line_vals >= thr)[0]
+						r_endo[ai] = r_line[above[0]] if above.size else 0.0
+					if basal_pad > 0.0:
+						r_endo = r_endo * (1.0 + basal_pad)
+					area[g] += float(0.5 * np.sum(r_endo ** 2) * dtheta)
+			return area
+
+		gate_cavity_area = _cavity_area_per_gate(cavity_frac)
 
 		gate_volumes_ml = gate_cavity_area * float(voxel_ml)
 		if gate_volumes_ml.size < 2 or not np.isfinite(gate_volumes_ml).all():
@@ -4017,6 +4292,390 @@ class MainWindow(QMainWindow):
 
 		ef = float((edv - esv) / edv * 100.0)
 		sv = float(edv - esv)
+
+		# En uso clínico normal se omiten los diagnósticos [DIAG-*] para evitar
+		# costo de cómputo extra. Se reactivan poniendo self.fevi_diag_enabled=True.
+		if not bool(getattr(self, "fevi_diag_enabled", False)):
+			return {
+				"available": True,
+				"method": "preliminar_endo_angular_gate",
+				"valid_slices": int(len(valid_s)),
+				"cavity_frac": float(cavity_frac),
+				"basal_pad": float(basal_pad),
+				"edv_ml": edv,
+				"esv_ml": esv,
+				"sv_ml": sv,
+				"ef_pct": ef,
+				"ed_gate": int(ed_idx + 1),
+				"es_gate": int(es_idx + 1),
+				"gate_volumes_ml": gate_volumes_ml,
+			}
+
+		# --- DIAGNÓSTICO TEMPORAL (Fase 1: calibración volumen/FEVI) ---------------
+		# Vuelca los números crudos para separar "voxel mal calibrado" de "polígono
+		# de cavidad demasiado chico". Quitar tras validar contra Xeleris.
+		try:
+			px = getattr(self.study, "pixel_spacing", None)
+			z_mm = getattr(self.study, "z_spacing_mm", None)
+			px_txt = f"{float(px[0]):.3f}x{float(px[1]):.3f}" if px else "None"
+			area_ed = float(gate_cavity_area[ed_idx])
+			area_es = float(gate_cavity_area[es_idx])
+			vols_txt = ", ".join(f"{v:.1f}" for v in gate_volumes_ml)
+			self._log(
+				"[DIAG-VOL] "
+				f"voxel_ml={voxel_ml:.5f} | pixel_spacing={px_txt} mm | z_spacing={z_mm} mm | "
+				f"n_slices={n_slices} valid_slices={len(valid_s)} n_gates={n_gates} | "
+				f"cavity_frac={cavity_frac} basal_pad={basal_pad} n_ang={n_ang} | "
+				f"area_ED(px²)={area_ed:.1f} area_ES(px²)={area_es:.1f} | "
+				f"EDV={edv:.1f} ESV={esv:.1f} SV={sv:.1f} mL EF={ef:.1f}% "
+				f"(ed_gate={ed_idx + 1} es_gate={es_idx + 1}) | "
+				f"gate_volumes_ml=[{vols_txt}]"
+			)
+		except Exception as _diag_err:  # pragma: no cover - solo diagnóstico
+			self._log(f"[DIAG-VOL] error al loggear diagnóstico: {_diag_err}")
+
+		# --- BARRIDO cavity_frac (Fase 3: calibrar borde endocárdico / ESV) -------
+		# La FEVI alta viene del ESV bajo: en sístole el umbral fijo "cierra" la
+		# cavidad de más. Se recalcula EDV/ESV/EF para varios umbrales SIN alterar
+		# el resultado real (solo diagnóstico) para elegir con datos el que
+		# reproduzca Xeleris (EDV~110, ESV~51, EF~53%). Quitar tras calibrar.
+		try:
+			sweep_rows = []
+			for frac in (0.30, 0.35, 0.40, 0.45, 0.50):
+				area_sw = _cavity_area_per_gate(float(frac))
+				vols_sw = _smooth_cyclic(area_sw * float(voxel_ml))
+				if vols_sw.size < 2 or not np.isfinite(vols_sw).all():
+					continue
+				edv_sw = float(vols_sw.max())
+				esv_sw = float(vols_sw.min())
+				if edv_sw <= 0.0:
+					continue
+				ef_sw = float((edv_sw - esv_sw) / edv_sw * 100.0)
+				sweep_rows.append(
+					f"frac={frac:.2f}: EDV={edv_sw:.1f} ESV={esv_sw:.1f} EF={ef_sw:.1f}%"
+				)
+			if sweep_rows:
+				self._log("[DIAG-SWEEP] " + " | ".join(sweep_rows) + " (ref Xeleris: EDV~110 ESV~51 EF~53%)")
+		except Exception as _sweep_err:  # pragma: no cover - solo diagnóstico
+			self._log(f"[DIAG-SWEEP] error en barrido: {_sweep_err}")
+
+		# --- RADIOS y GROSOR DE PARED ED vs ES (Fase 3: confirmar volumen parcial) -
+		# Si en ES el radio endocárdico se subestima MIENTRAS la pared engrosa
+		# mucho, es efecto de volumen parcial (miocardio brillante invade la
+		# cavidad chica) → ESV artificialmente bajo → FEVI alta. Mide radio endo
+		# medio (px) y grosor de pared (outer - endo) promediados sobre slices
+		# válidos, en el gate ED y ES. Solo diagnóstico. Quitar tras decidir.
+		try:
+			def _radii_stats(g: int) -> tuple[float, float, float]:
+				r_endo_acc = []
+				r_outer_acc = []
+				for s in valid_s:
+					cy0 = float(centers[s, 0])
+					cx0 = float(centers[s, 1])
+					ro0 = float(outer[s])
+					r_line = np.linspace(0.0, ro0 * 1.1, int(ro0 * 2) + 4)
+					img = cube[g, s]
+					d0 = np.sqrt((ys - cy0) ** 2 + (xs - cx0) ** 2)
+					ring = (d0 >= ro0 * 0.5) & (d0 <= ro0)
+					peak = float(np.percentile(img[ring], 80)) if np.any(ring) else 0.0
+					if peak <= 0.0:
+						continue
+					thr = cavity_frac * peak
+					low = (d0 <= ro0 * 0.7) & (img < thr)
+					if np.count_nonzero(low) >= 3:
+						yy_l, xx_l = np.nonzero(low)
+						cyg = float(yy_l.mean())
+						cxg = float(xx_l.mean())
+					else:
+						cyg, cxg = cy0, cx0
+					r_endo = np.zeros((n_ang,), dtype=np.float64)
+					for ai in range(n_ang):
+						sy = cyg + r_line * sin_a[ai]
+						sx = cxg + r_line * cos_a[ai]
+						iy = np.clip(np.round(sy).astype(np.int32), 0, h - 1)
+						ix = np.clip(np.round(sx).astype(np.int32), 0, w - 1)
+						line_vals = img[iy, ix]
+						above = np.where(line_vals >= thr)[0]
+						r_endo[ai] = r_line[above[0]] if above.size else 0.0
+					r_endo_acc.append(float(np.mean(r_endo)))
+					r_outer_acc.append(ro0)
+				if not r_endo_acc:
+					return (np.nan, np.nan, np.nan)
+				endo_m = float(np.mean(r_endo_acc))
+				outer_m = float(np.mean(r_outer_acc))
+				return (endo_m, outer_m, outer_m - endo_m)
+
+			endo_ed, outer_ed, wall_ed = _radii_stats(ed_idx)
+			endo_es, outer_es, wall_es = _radii_stats(es_idx)
+			# Ratio de contracción radial: cuánto se achica el radio endo ED→ES.
+			# Si es muy bajo (<0.6) hay sobre-contracción aparente (volumen parcial).
+			endo_ratio = float(endo_es / endo_ed) if endo_ed > 0 else np.nan
+			wall_thicken = float(wall_es / wall_ed) if wall_ed > 0 else np.nan
+			self._log(
+				"[DIAG-RADII] "
+				f"ED(gate{ed_idx + 1}): r_endo={endo_ed:.2f}px r_outer={outer_ed:.2f}px pared={wall_ed:.2f}px | "
+				f"ES(gate{es_idx + 1}): r_endo={endo_es:.2f}px r_outer={outer_es:.2f}px pared={wall_es:.2f}px | "
+				f"contracción_radial(ES/ED)={endo_ratio:.2f} engrosamiento_pared(ES/ED)={wall_thicken:.2f} "
+				"(volumen parcial probable si contracción<0.6 y engrosamiento>1.4)"
+			)
+		except Exception as _radii_err:  # pragma: no cover - solo diagnóstico
+			self._log(f"[DIAG-RADII] error en radios: {_radii_err}")
+
+		# --- UMBRAL ADAPTATIVO EN ES (Fase 3, Opción A) ---------------------------
+		# Prueba: reducir cavity_frac SOLO en el gate de menor volumen (sístole)
+		# para compensar el volumen parcial que "cierra" la cavidad de más.
+		# Recalcula el área del gate ES con fracción reducida y ve si el ESV sube
+		# hacia ~51 sin tocar el EDV. Solo diagnóstico (no altera el resultado).
+		try:
+			base_area = _cavity_area_per_gate(cavity_frac)  # área por gate con frac base
+			es_g = int(np.argmin(_smooth_cyclic(base_area * float(voxel_ml))))
+			adapt_rows = []
+			for es_frac in (0.45, 0.40, 0.35, 0.30, 0.25, 0.20):
+				# Área de todos los gates con frac base, pero el gate ES recalculado
+				# con es_frac (más bajo → borde endo más afuera → cavidad ES mayor).
+				area_es_only = _cavity_area_per_gate(float(es_frac))
+				mixed = base_area.copy()
+				mixed[es_g] = area_es_only[es_g]
+				vols_mixed = _smooth_cyclic(mixed * float(voxel_ml))
+				if vols_mixed.size < 2 or not np.isfinite(vols_mixed).all():
+					continue
+				edv_m = float(vols_mixed.max())
+				esv_m = float(vols_mixed.min())
+				if edv_m <= 0.0:
+					continue
+				ef_m = float((edv_m - esv_m) / edv_m * 100.0)
+				adapt_rows.append(f"es_frac={es_frac:.2f}: EDV={edv_m:.1f} ESV={esv_m:.1f} EF={ef_m:.1f}%")
+			if adapt_rows:
+				self._log(
+					f"[DIAG-ADAPT-ES] gate_ES={es_g + 1} (frac base={cavity_frac}) | "
+					+ " | ".join(adapt_rows)
+					+ " (objetivo Xeleris: ESV~51 EF~53%)"
+				)
+		except Exception as _adapt_err:  # pragma: no cover - solo diagnóstico
+			self._log(f"[DIAG-ADAPT-ES] error: {_adapt_err}")
+
+		# --- EPICARDIO CONGELADO vs POR-GATE (Fase 3: raíz del problema) ----------
+		# La segmentación se calcula sobre cube.mean(axis=0) → outer[s] (epicardio)
+		# es ÚNICO para los 8 gates. Aquí se mide el radio EPICÁRDICO recalculado
+		# POR GATE (umbral relativo al pico de cada gate) para cuantificar cuánto
+		# se está perdiendo al congelarlo. Si el outer real cambia entre ED y ES,
+		# confirma que hay que segmentar por gate (como QGS/Xeleris). Solo diag.
+		try:
+			def _outer_mean_per_gate(g: int) -> float:
+				acc = []
+				for s in valid_s:
+					cy0 = float(centers[s, 0])
+					cx0 = float(centers[s, 1])
+					ro0 = float(outer[s])
+					img = cube[g, s]
+					d0 = np.sqrt((ys - cy0) ** 2 + (xs - cx0) ** 2)
+					ring = (d0 >= ro0 * 0.5) & (d0 <= ro0)
+					peak = float(np.percentile(img[ring], 80)) if np.any(ring) else 0.0
+					if peak <= 0.0:
+						continue
+					# Epicardio ≈ radio donde la actividad cae por debajo del 50% del
+					# pico yendo hacia afuera (borde externo del anillo).
+					thr_epi = 0.50 * peak
+					r_line = np.linspace(0.0, ro0 * 1.6, int(ro0 * 3) + 6)
+					r_out_ang = []
+					for ai in range(0, n_ang, 4):  # submuestreo angular para velocidad
+						sy = cy0 + r_line * sin_a[ai]
+						sx = cx0 + r_line * cos_a[ai]
+						iy = np.clip(np.round(sy).astype(np.int32), 0, h - 1)
+						ix = np.clip(np.round(sx).astype(np.int32), 0, w - 1)
+						vals = img[iy, ix]
+						above = np.where(vals >= thr_epi)[0]
+						r_out_ang.append(r_line[above[-1]] if above.size else ro0)
+					if r_out_ang:
+						acc.append(float(np.mean(r_out_ang)))
+				return float(np.mean(acc)) if acc else np.nan
+
+			outer_ed_g = _outer_mean_per_gate(ed_idx)
+			outer_es_g = _outer_mean_per_gate(es_idx)
+			outer_frozen = float(np.nanmean(outer[valid_s])) if len(valid_s) else np.nan
+			epi_ratio = float(outer_es_g / outer_ed_g) if outer_ed_g and np.isfinite(outer_ed_g) else np.nan
+			self._log(
+				"[DIAG-EPI] "
+				f"outer_CONGELADO(prom)={outer_frozen:.2f}px | "
+				f"outer_POR-GATE ED(gate{ed_idx + 1})={outer_ed_g:.2f}px ES(gate{es_idx + 1})={outer_es_g:.2f}px | "
+				f"epi_contracción(ES/ED)={epi_ratio:.2f} "
+				"(si epi_contracción<0.9 el epicardio SÍ se mueve → segmentar por gate mejoraría)"
+			)
+		except Exception as _epi_err:  # pragma: no cover - solo diagnóstico
+			self._log(f"[DIAG-EPI] error: {_epi_err}")
+
+		# --- FWHM SUBPÍXEL (Fase 3, Opción 2: raíz de la FEVI alta) ---------------
+		# El método actual toma "primer punto ≥ frac·pico" → radios endo de 1-2 px
+		# (subestimados) y al elevar al cuadrado dispara la FEVI. Aquí se define el
+		# borde endocárdico por FWHM: donde el perfil radial cruza el 50% del PICO
+		# LOCAL del miocardio, interpolando linealmente entre píxeles vecinos
+		# (precisión subpíxel). Da radios más grandes y un ratio ES/ED más
+		# fisiológico. Recalcula EDV/ESV/EF con este criterio (solo diagnóstico).
+		try:
+			def _endo_area_fwhm_per_gate(fwhm_frac: float) -> np.ndarray:
+				"""Área endocárdica por gate usando cruce FWHM subpíxel del perfil."""
+				area = np.zeros((n_gates,), dtype=np.float64)
+				for s in valid_s:
+					cy0 = float(centers[s, 0])
+					cx0 = float(centers[s, 1])
+					ro0 = float(outer[s])
+					# Perfil fino: 4 muestras por píxel para resolver subpíxel.
+					r_line = np.linspace(0.0, ro0 * 1.2, int(ro0 * 4) + 8)
+					for g in range(n_gates):
+						img = cube[g, s]
+						d0 = np.sqrt((ys - cy0) ** 2 + (xs - cx0) ** 2)
+						ring = (d0 >= ro0 * 0.5) & (d0 <= ro0)
+						peak_ring = float(np.percentile(img[ring], 80)) if np.any(ring) else 0.0
+						if peak_ring <= 0.0:
+							continue
+						# Recentrado por gate (igual criterio que el método actual).
+						thr_lo = 0.45 * peak_ring
+						low = (d0 <= ro0 * 0.7) & (img < thr_lo)
+						if np.count_nonzero(low) >= 3:
+							yy_l, xx_l = np.nonzero(low)
+							cyg = float(yy_l.mean())
+							cxg = float(xx_l.mean())
+						else:
+							cyg, cxg = cy0, cx0
+						r_endo = np.zeros((n_ang,), dtype=np.float64)
+						for ai in range(n_ang):
+							sy = cyg + r_line * sin_a[ai]
+							sx = cxg + r_line * cos_a[ai]
+							iy = np.clip(np.round(sy).astype(np.int32), 0, h - 1)
+							ix = np.clip(np.round(sx).astype(np.int32), 0, w - 1)
+							prof = img[iy, ix].astype(np.float64)
+							# Pico LOCAL del miocardio a lo largo de este rayo.
+							pk_i = int(np.argmax(prof))
+							pk_val = float(prof[pk_i])
+							if pk_val <= 0.0 or pk_i == 0:
+								r_endo[ai] = 0.0
+								continue
+							target = fwhm_frac * pk_val
+							# Buscar el cruce del 50% del pico SUBIENDO (endocardio):
+							# el último índice antes del pico donde prof < target.
+							r_cross = 0.0
+							for k in range(pk_i, 0, -1):
+								if prof[k - 1] < target <= prof[k]:
+									# Interpolación lineal subpíxel entre k-1 y k.
+									denom = prof[k] - prof[k - 1]
+									frac_k = (target - prof[k - 1]) / denom if denom > 0 else 0.0
+									r_cross = r_line[k - 1] + frac_k * (r_line[k] - r_line[k - 1])
+									break
+							r_endo[ai] = r_cross
+						if basal_pad > 0.0:
+							r_endo = r_endo * (1.0 + basal_pad)
+						area[g] += float(0.5 * np.sum(r_endo ** 2) * dtheta)
+				return area
+
+			fwhm_rows = []
+			r_endo_dbg = {}
+			for ff in (0.50,):
+				area_fw = _endo_area_fwhm_per_gate(float(ff))
+				vols_fw = _smooth_cyclic(area_fw * float(voxel_ml))
+				if vols_fw.size < 2 or not np.isfinite(vols_fw).all():
+					continue
+				edv_fw = float(vols_fw.max())
+				esv_fw = float(vols_fw.min())
+				if edv_fw <= 0.0:
+					continue
+				ef_fw = float((edv_fw - esv_fw) / edv_fw * 100.0)
+				vols_txt_fw = ", ".join(f"{v:.1f}" for v in vols_fw)
+				fwhm_rows.append(
+					f"fwhm={ff:.2f}: EDV={edv_fw:.1f} ESV={esv_fw:.1f} EF={ef_fw:.1f}% "
+					f"vols=[{vols_txt_fw}]"
+				)
+			if fwhm_rows:
+				self._log(
+					"[DIAG-FWHM] " + " | ".join(fwhm_rows)
+					+ f" || ACTUAL: EDV={edv:.1f} ESV={esv:.1f} EF={ef:.1f}% "
+					+ "(ref Xeleris: EDV~110 ESV~51 EF~53%)"
+				)
+		except Exception as _fwhm_err:  # pragma: no cover - solo diagnóstico
+			self._log(f"[DIAG-FWHM] error: {_fwhm_err}")
+
+		# --- UPSAMPLING antes de medir (Fase 3, Opción A: resolución en ES) --------
+		# A 28×28 la cavidad en ES ocupa ~1 px de radio → sin señal para medir ESV.
+		# Se interpola el cubo (H,W) a mayor resolución ANTES de trazar los rayos,
+		# dando al algoritmo de borde píxeles subvoxel reales (como el modelo 3D de
+		# Xeleris). El voxel_ml se divide por el factor² (mismo volumen físico). Se
+		# prueban factores hacia 56 (×2) y 64 y se mide la DEFORMACIÓN de aspecto
+		# (rows/cols) para descartar distorsión. Solo diagnóstico.
+		try:
+			from scipy.ndimage import zoom as _diag_zoom
+
+			def _ef_on_upsampled(target_hw: int) -> tuple:
+				fy = float(target_hw) / float(h)
+				fx = float(target_hw) / float(w)
+				# Deformación: cuánto difieren los factores de escala en cada eje.
+				deform_pct = abs(fy - fx) / max(fy, fx) * 100.0
+				# Reescala solo el plano (H,W) de cada gate/slice (order=3 cúbico).
+				big = np.zeros((n_gates, n_slices, target_hw, target_hw), dtype=np.float64)
+				for g in range(n_gates):
+					for s in range(n_slices):
+						big[g, s] = _diag_zoom(cube[g, s], (fy, fx), order=3, mode="nearest")
+				big = np.clip(big, 0.0, None)
+				# Centros y radios escalados al nuevo grid.
+				centers_b = centers.copy()
+				centers_b[:, 0] = centers[:, 0] * fy
+				centers_b[:, 1] = centers[:, 1] * fx
+				outer_b = outer * ((fy + fx) / 2.0)
+				hb = wb = int(target_hw)
+				ysb, xsb = np.ogrid[:hb, :wb]
+				# voxel_ml corregido: mismo volumen físico repartido en más voxels.
+				voxel_ml_b = float(voxel_ml) / (fy * fx)
+				area_b = np.zeros((n_gates,), dtype=np.float64)
+				for s in valid_s:
+					cy0 = float(centers_b[s, 0]); cx0 = float(centers_b[s, 1])
+					ro0 = float(outer_b[s])
+					r_line = np.linspace(0.0, ro0 * 1.1, int(ro0 * 2) + 4)
+					for g in range(n_gates):
+						img = big[g, s]
+						d0 = np.sqrt((ysb - cy0) ** 2 + (xsb - cx0) ** 2)
+						ring = (d0 >= ro0 * 0.5) & (d0 <= ro0)
+						peak = float(np.percentile(img[ring], 80)) if np.any(ring) else 0.0
+						if peak <= 0.0:
+							continue
+						thr = cavity_frac * peak
+						low = (d0 <= ro0 * 0.7) & (img < thr)
+						if np.count_nonzero(low) >= 3:
+							yy_l, xx_l = np.nonzero(low)
+							cyg = float(yy_l.mean()); cxg = float(xx_l.mean())
+						else:
+							cyg, cxg = cy0, cx0
+						r_endo = np.zeros((n_ang,), dtype=np.float64)
+						for ai in range(n_ang):
+							sy = cyg + r_line * sin_a[ai]
+							sx = cxg + r_line * cos_a[ai]
+							iy = np.clip(np.round(sy).astype(np.int32), 0, hb - 1)
+							ix = np.clip(np.round(sx).astype(np.int32), 0, wb - 1)
+							line_vals = img[iy, ix]
+							above = np.where(line_vals >= thr)[0]
+							r_endo[ai] = r_line[above[0]] if above.size else 0.0
+						if basal_pad > 0.0:
+							r_endo = r_endo * (1.0 + basal_pad)
+						area_b[g] += float(0.5 * np.sum(r_endo ** 2) * dtheta)
+				vols_b = _smooth_cyclic(area_b * voxel_ml_b)
+				edv_b = float(vols_b.max()); esv_b = float(vols_b.min())
+				ef_b = float((edv_b - esv_b) / edv_b * 100.0) if edv_b > 0 else np.nan
+				# Radio endo medio ED/ES en el grid grande (para ver si ya hay señal).
+				return edv_b, esv_b, ef_b, deform_pct
+
+			up_rows = []
+			for target in (56, 64):
+				edv_b, esv_b, ef_b, deform = _ef_on_upsampled(int(target))
+				up_rows.append(
+					f"{target}x{target}: EDV={edv_b:.1f} ESV={esv_b:.1f} EF={ef_b:.1f}% "
+					f"deform={deform:.1f}%"
+				)
+			if up_rows:
+				self._log(
+					"[DIAG-UPSAMPLE] " + " | ".join(up_rows)
+					+ f" || ACTUAL(28x28): EDV={edv:.1f} ESV={esv:.1f} EF={ef:.1f}% "
+					+ "(ref Xeleris: EDV~110 ESV~51 EF~53%; deform<3% = sin distorsión)"
+				)
+		except Exception as _up_err:  # pragma: no cover - solo diagnóstico
+			self._log(f"[DIAG-UPSAMPLE] error: {_up_err}")
+
 		return {
 			"available": True,
 			"method": "preliminar_endo_angular_gate",
@@ -4031,6 +4690,39 @@ class MainWindow(QMainWindow):
 			"es_gate": int(es_idx + 1),
 			"gate_volumes_ml": gate_volumes_ml,
 		}
+
+	def _harmonize_volumes_with_ef(self, vol: dict[str, float | None], ef: dict[str, object | None]) -> dict[str, float | None]:
+		"""Unifica la cavidad reportada con EDV cuando FEVI está disponible.
+
+		Evita inconsistencias entre:
+		- "Cavidad" calculada por inner_radius estático (puede sobre/infra-estimar), y
+		- EDV/ESV dinámicos por gate del motor FEVI.
+
+		Regla: si hay FEVI disponible, usar EDV (gate de volumen máximo) como
+		volumen de cavidad de referencia para el resumen/informe.
+		"""
+		out = dict(vol or {})
+		if not ef or not bool(ef.get("available")):
+			return out
+		try:
+			edv = float(ef.get("edv_ml", np.nan))
+		except Exception:
+			edv = np.nan
+		if not np.isfinite(edv) or edv <= 0.0:
+			return out
+
+		out["cavity_ml"] = float(edv)
+		myo = out.get("myocardial_ml", None)
+		if myo is not None:
+			try:
+				myo_f = float(myo)
+			except Exception:
+				myo_f = np.nan
+			if np.isfinite(myo_f) and myo_f > 0.0:
+				out["lv_total_ml"] = float(myo_f + edv)
+				out["cavity_to_myo_ratio"] = float(edv / myo_f)
+		out["cavity_source"] = "edv_gate_max"
+		return out
 
 	def _polar_compare_operation_text(self) -> str:
 		op_name = str(self.polar_compare_math_combo.currentText())
@@ -4269,6 +4961,7 @@ class MainWindow(QMainWindow):
 
 		vol = self._compute_volumes_ml()
 		ef = self._estimate_lv_ef_preliminary()
+		vol = self._harmonize_volumes_with_ef(vol, ef)
 		ctx = self._study_context(
 			path_override=str(getattr(self, "_output_study_path_override", "") or self.file_edit.text().strip()),
 			study_obj=self.study,
@@ -4335,9 +5028,18 @@ class MainWindow(QMainWindow):
 		clinical.append("")
 		clinical.append("Volúmenes")
 		if vol["myocardial_ml"] is not None:
-			clinical.append(f"  Miocardio: {vol['myocardial_ml']:.2f} mL")
+			myo_src = str(vol.get("myo_source", ""))
+			src_txt = " (máscara clínica por amplitud)" if myo_src == "clinical_amp" else " (máscara de segmentación)"
+			clinical.append(f"  Miocardio: {vol['myocardial_ml']:.2f} mL{src_txt}")
+			if not vol.get("myo_physiologic", True):
+				clinical.append(
+					"  ⚠ Volumen miocárdico fuera de rango fisiológico esperado (~85–250 mL): "
+					"revisar máscara/umbral de segmentación antes de interpretar."
+				)
 		if vol["cavity_ml"] is not None:
-			clinical.append(f"  Cavidad: {vol['cavity_ml']:.2f} mL")
+			cav_src = str(vol.get("cavity_source", ""))
+			cav_txt = " (referencia EDV, gate de volumen máximo)" if cav_src == "edv_gate_max" else ""
+			clinical.append(f"  Cavidad: {vol['cavity_ml']:.2f} mL{cav_txt}")
 		if vol["lv_total_ml"] is not None:
 			clinical.append(f"  Total VI: {vol['lv_total_ml']:.2f} mL")
 		if vol["cavity_to_myo_ratio"] is not None:
@@ -4369,6 +5071,36 @@ class MainWindow(QMainWindow):
 			clinical.append(f"  SV: {float(ef['sv_ml']):.2f} mL")
 			clinical.append(f"  FEVI: {float(ef['ef_pct']):.1f}%")
 			clinical.append("  Nota: estimación preliminar de investigación.")
+			# Aviso base/ápex: la elección del límite basal afecta MUCHO EDV/ESV/FEVI.
+			# Un corte basal más bajo incluye más volumen (FEVI más baja) pero puede
+			# contaminar la fase con actividad valvular. Se informa el límite usado.
+			try:
+				n_sa = int(getattr(self.study, "cube", np.empty((0,))).shape[1]) if self.study is not None else 0
+				base_v = int(self.cine_crudo_cut_base_spin.value()) if hasattr(self, "cine_crudo_cut_base_spin") else None
+				apex_v = int(self.cine_crudo_cut_apex_spin.value()) if hasattr(self, "cine_crudo_cut_apex_spin") else None
+				if base_v is not None and apex_v is not None:
+					clinical.append(
+						f"  Límite SA usado: base={base_v} ápex={apex_v} ({n_sa} cortes válidos)."
+					)
+				clinical.append(
+					"  Sensibilidad base/ápex: el límite basal afecta fuertemente EDV/ESV/FEVI; "
+					"bajarlo incluye más volumen basal (FEVI menor) pero puede añadir ruido de fase valvular. "
+					"Ajustar base/ápex y reprocesar si la FEVI no es plausible."
+				)
+			except Exception:
+				pass
+			# Aviso QC por gate: si el usuario editó ROIs manuales por gate, la FEVI
+			# usa esa geometría manual en esos gates (en vez de la automática).
+			try:
+				if hasattr(self, "cine") and self.cine is not None and self.cine.per_gate_roi_mode_enabled():
+					n_gate_rois = len(getattr(self.cine, "_rois_by_gate", {}) or {})
+					if n_gate_rois > 0:
+						clinical.append(
+							f"  QC por gate: activo ({n_gate_rois} ROIs manuales por gate). "
+							"La FEVI usa la geometría manual editada en esos gates."
+						)
+			except Exception:
+				pass
 		else:
 			clinical.append("  No disponible (segmentación/metadata insuficiente).")
 
@@ -4849,6 +5581,7 @@ class MainWindow(QMainWindow):
 			return
 
 		def _oriented_axes_views(gate_index: int):
+			from core.cardiac_reorientation import hla_slice as _hla_slice, vla_slice as _vla_slice
 			vol_gate = np.asarray(study_cube_render[int(gate_index)], dtype=np.float64)
 			sa_local = vol_gate[mid_slice]
 
@@ -4869,11 +5602,15 @@ class MainWindow(QMainWindow):
 			hla_local, hla_original = _axis_plane("HLA", prefer_original=True)
 			vla_local, vla_original = _axis_plane("VLA", prefer_original=True)
 
-			# Convención visual clínica solicitada:
-			# - HLA vertical con cara inferior hacia la izquierda.
-			# - VLA con cara inferior hacia abajo.
-			hla_view_local = np.fliplr(np.rot90(_norm(hla_local), k=1))
-			vla_view_local = np.flipud(np.rot90(_norm(vla_local), k=-1))
+			# Si no hay companions HLA/VLA originales, derivar desde SA con la
+			# convención anatómica canónica del motor (cardiac_reorientation).
+			if not hla_original:
+				hla_local = _hla_slice(vol_gate, int(vol_gate.shape[1] // 2))
+			if not vla_original:
+				vla_local = _vla_slice(vol_gate, int(vol_gate.shape[2] // 2))
+
+			hla_view_local = _norm(hla_local)
+			vla_view_local = _norm(vla_local)
 			return _norm(sa_local), hla_view_local, vla_view_local, hla_original, vla_original
 
 		def _annotate_axis(ax, top: str, bottom: str, left: str, right: str):
@@ -4951,10 +5688,10 @@ class MainWindow(QMainWindow):
 			axes2[0].axhline(y_cmp, color="#7cf29a", linestyle="--", linewidth=1.2)
 			axes2[0].axvline(x_cmp, color="#7cf29a", linestyle="--", linewidth=1.2)
 			axes2[0].text(0.03, 0.05, f"Corte cmp {int(round(cmp_frac_sa * 100.0))}%", transform=axes2[0].transAxes, fontsize=8, color="#7cf29a", fontweight="bold")
-			axes2[1].imshow(hla_view, cmap=cmap_axes, aspect="auto")
+			axes2[1].imshow(hla_view, cmap=cmap_axes, aspect="equal")
 			axes2[1].set_title("HLA (horizontal long axis)")
 			_annotate_axis(axes2[1], "BASE", "APEX", "ANT", "INF")
-			axes2[2].imshow(vla_view, cmap=cmap_axes, aspect="auto")
+			axes2[2].imshow(vla_view, cmap=cmap_axes, aspect="equal")
 			axes2[2].set_title("VLA (vertical long axis)")
 			_annotate_axis(axes2[2], "BASE", "APEX", "SEP", "LAT")
 			if hla_original_mid:
@@ -5032,20 +5769,20 @@ class MainWindow(QMainWindow):
 		axes4[0, 0].imshow(sa_ed, cmap=cmap_panel_axes)
 		axes4[0, 0].set_title(f"A) ED - SHORT AXIS (Gate {ed_gate + 1})", fontsize=10)
 		_annotate_axis(axes4[0, 0], "ANT", "INF", "SEP", "LAT")
-		axes4[0, 1].imshow(hla_ed, cmap=cmap_panel_axes, aspect="auto")
+		axes4[0, 1].imshow(hla_ed, cmap=cmap_panel_axes, aspect="equal")
 		axes4[0, 1].set_title("A) ED - HORIZONTAL AXIS (HLA)", fontsize=10)
 		_annotate_axis(axes4[0, 1], "BASE", "APEX", "ANT", "INF")
-		axes4[0, 2].imshow(vla_ed, cmap=cmap_panel_axes, aspect="auto")
+		axes4[0, 2].imshow(vla_ed, cmap=cmap_panel_axes, aspect="equal")
 		axes4[0, 2].set_title("A) ED - VERTICAL AXIS (VLA)", fontsize=10)
 		_annotate_axis(axes4[0, 2], "BASE", "APEX", "SEP", "LAT")
 
 		axes4[1, 0].imshow(sa_es, cmap=cmap_panel_axes)
 		axes4[1, 0].set_title(f"B) ES - SHORT AXIS (Gate {es_gate + 1})", fontsize=10)
 		_annotate_axis(axes4[1, 0], "ANT", "INF", "SEP", "LAT")
-		axes4[1, 1].imshow(hla_es, cmap=cmap_panel_axes, aspect="auto")
+		axes4[1, 1].imshow(hla_es, cmap=cmap_panel_axes, aspect="equal")
 		axes4[1, 1].set_title("B) ES - HORIZONTAL AXIS (HLA)", fontsize=10)
 		_annotate_axis(axes4[1, 1], "BASE", "APEX", "ANT", "INF")
-		axes4[1, 2].imshow(vla_es, cmap=cmap_panel_axes, aspect="auto")
+		axes4[1, 2].imshow(vla_es, cmap=cmap_panel_axes, aspect="equal")
 		axes4[1, 2].set_title("B) ES - VERTICAL AXIS (VLA)", fontsize=10)
 		_annotate_axis(axes4[1, 2], "BASE", "APEX", "SEP", "LAT")
 
@@ -5157,9 +5894,9 @@ class MainWindow(QMainWindow):
 		ax_ed_sa.set_title(f"ED SA (gate {ed_gate + 1})", color=style["fg"], fontsize=9)
 		ax_es_sa.imshow(sa_es, cmap=cmap_panel_axes, interpolation="lanczos", resample=True)
 		ax_es_sa.set_title(f"ES SA (gate {es_gate + 1})", color=style["fg"], fontsize=9)
-		ax_ed_hla.imshow(hla_ed, cmap=cmap_panel_axes, aspect="auto", interpolation="lanczos", resample=True)
+		ax_ed_hla.imshow(hla_ed, cmap=cmap_panel_axes, aspect="equal", interpolation="lanczos", resample=True)
 		ax_ed_hla.set_title("ED HLA", color=style["fg"], fontsize=9)
-		ax_es_hla.imshow(hla_es, cmap=cmap_panel_axes, aspect="auto", interpolation="lanczos", resample=True)
+		ax_es_hla.imshow(hla_es, cmap=cmap_panel_axes, aspect="equal", interpolation="lanczos", resample=True)
 		ax_es_hla.set_title("ES HLA", color=style["fg"], fontsize=9)
 
 		from viz.colormaps import phase_to_rgb
@@ -5250,6 +5987,7 @@ class MainWindow(QMainWindow):
 			])
 		else:
 			result_items.append(("FEVI", "no disponible"))
+		fevi_value_txt = "no disponible"
 		for idx, (label, value) in enumerate(result_items):
 			col = idx % 2
 			row = idx // 2
@@ -5257,6 +5995,25 @@ class MainWindow(QMainWindow):
 			y = 0.62 - row * 0.24
 			ax_results.text(x, y + 0.11, label, transform=ax_results.transAxes, va="bottom", ha="left", color=style["subtle"], fontsize=7.8, fontweight="bold")
 			ax_results.text(x, y, value, transform=ax_results.transAxes, va="bottom", ha="left", color=style["fg"], fontsize=11.5, fontweight="bold")
+			if str(label).upper() == "FEVI":
+				fevi_value_txt = str(value)
+
+		# FEVI destacado (grande) en el panel derecho, para lectura rápida clínica.
+		ax_results.text(
+			0.82, 0.58, "FEVI",
+			transform=ax_results.transAxes,
+			ha="center", va="center",
+			color=style["subtle"],
+			fontsize=10.5, fontweight="bold",
+		)
+		ax_results.text(
+			0.82, 0.45, fevi_value_txt,
+			transform=ax_results.transAxes,
+			ha="center", va="center",
+			color=style["fg"],
+			fontsize=24, fontweight="bold",
+			bbox=dict(boxstyle="round,pad=0.28", facecolor=style["ax_bg"], edgecolor=style["grid"], linewidth=1.1, alpha=0.95),
+		)
 
 		fig_v.suptitle(
 			f"Panel funcional gated — {study_context_label} (estilo clínico: {self.visual_style_combo.currentText()})",
@@ -6120,6 +6877,7 @@ class MainWindow(QMainWindow):
 		}
 		vol = self._compute_volumes_ml()
 		ef = self._estimate_lv_ef_preliminary()
+		vol = self._harmonize_volumes_with_ef(vol, ef)
 		report_metrics = dict(self.metrics)
 		try:
 			dataset, sex, protocol, nd = self._normal_db_context()
@@ -6156,6 +6914,13 @@ class MainWindow(QMainWindow):
 
 	def _apply_preview_zoom(self, name: str):
 		label = self.preview_labels[name]
+		scroller = self._preview_scrollers.get(name)
+		anchor = None
+		if scroller is not None:
+			hb = scroller.horizontalScrollBar()
+			vb = scroller.verticalScrollBar()
+			if hb is not None and vb is not None:
+				anchor = (hb.value(), vb.value())
 		movie = self.preview_movies.get(name)
 		if movie is not None and movie.isValid():
 			base_size = self.preview_base_sizes.get(name)
@@ -6174,6 +6939,7 @@ class MainWindow(QMainWindow):
 			label.resize(w, h)
 			if name in self.preview_zoom_labels:
 				self.preview_zoom_labels[name].setText(f"{int(zoom * 100)}%")
+			self._restore_preview_anchor(name, anchor)
 			return
 		pix = self.preview_pixmaps.get(name)
 		if pix is None or pix.isNull():
@@ -6192,6 +6958,20 @@ class MainWindow(QMainWindow):
 		label.resize(scaled.size())
 		if name in self.preview_zoom_labels:
 			self.preview_zoom_labels[name].setText(f"{int(zoom * 100)}%")
+		self._restore_preview_anchor(name, anchor)
+
+	def _restore_preview_anchor(self, name: str, anchor):
+		if anchor is None:
+			return
+		scroller = self._preview_scrollers.get(name)
+		if scroller is None:
+			return
+		hb = scroller.horizontalScrollBar()
+		vb = scroller.verticalScrollBar()
+		if hb is not None:
+			hb.setValue(int(anchor[0]))
+		if vb is not None:
+			vb.setValue(int(anchor[1]))
 
 	def _zoom_preview(self, name: str, delta: float):
 		current = self.preview_zoom.get(name, 1.0)
@@ -7411,6 +8191,15 @@ class MainWindow(QMainWindow):
 					pix = QPixmap(out_png)
 					self.preview_pixmaps[tab_name] = pix
 					self.preview_base_sizes[tab_name] = pix.size()
+					self.preview_labels[tab_name].setToolTip(
+						"Montaje interactivo:\n"
+						"• Click: selecciona tira activa (roja).\n"
+						"• Rueda: desplaza tira activa.\n"
+						"• Ctrl+rueda: zoom parejo global.\n"
+						"• Botón medio o Alt+drag: pan/recentrar.\n"
+						"• Doble click: reset de tira activa.\n"
+						"• Flechas: navegación de tiras (↑/↓ cambia eje, ←/→ desplaza)."
+					)
 					self._apply_preview_zoom(tab_name)
 			self._select_tab_by_title("comparacion_ejes")
 		except Exception as exc:
@@ -7696,6 +8485,14 @@ class MainWindow(QMainWindow):
 		if hasattr(self, "cine_crudo_cut_thickness_spin"):
 			self.cine_crudo_cut_thickness_spin.setEnabled(True)
 			self.cine_crudo_cut_thickness_spin.setValue(int(getattr(dlg, "thickness", 1)))
+		# Guardar VOI elíptica de la reorientación (para recorte "Elipse VOI").
+		try:
+			self.cine_crudo_reoriented_voi = {
+				"cz": float(getattr(dlg, "_voi_cz", 0.0)),
+				"rz": float(getattr(dlg, "_voi_rz", 0.0)),
+			}
+		except Exception:
+			self.cine_crudo_reoriented_voi = None
 		self.cine_crudo_cut_source_label = (self.cine_crudo_cut_source_label or "raw recon") + " · reorientado"
 		self._log(
 			f"Reorientación aplicada: azimut/elevación oblicuos; volumen SA-alineado {self.cine_crudo_reoriented_gated.shape}; "
@@ -7741,7 +8538,22 @@ class MainWindow(QMainWindow):
 					self.preview_base_sizes[tab_name] = pix.size()
 					self._apply_preview_zoom(tab_name)
 			self._select_tab_by_title("comparacion_ejes")
-			src_z_mm = float(getattr(raw_study, "z_spacing_mm", None) or getattr(raw_study, "slice_thickness_mm", None) or 1.0)
+			# Espesor de corte físico. En un SPECT reconstruido desde proyecciones el
+			# volumen es ISOTRÓPICO: el espesor Z = pixel spacing en plano. Si el
+			# estudio crudo no trae z_spacing/slice_thickness DICOM (lo normal en
+			# proyecciones), NO hay que caer a 1.0 mm (placeholder que aplasta los
+			# volúmenes ~6× y da EDV/ESV irreales). Se usa el pixel spacing como
+			# fallback físico correcto. Validado contra Xeleris (EDV/ESV coherentes).
+			raw_px = getattr(raw_study, "pixel_spacing", None)
+			try:
+				iso_px_mm = float(raw_px[0]) if raw_px else 0.0
+			except Exception:
+				iso_px_mm = 0.0
+			src_z_mm = float(
+				getattr(raw_study, "z_spacing_mm", None)
+				or getattr(raw_study, "slice_thickness_mm", None)
+				or (iso_px_mm if iso_px_mm > 0.0 else 1.0)
+			)
 			cut_thickness_mm = src_z_mm * float(thickness)
 			self.cine_crudo_cut_study = dicom_loader.GatedStudy(
 				cube=sa_cube,
@@ -7775,15 +8587,356 @@ class MainWindow(QMainWindow):
 				],
 			)
 			self.cine_crudo_axes_for_export = {"SA": sa_cube, "HLA": hla_cube, "VLA": vla_cube}
+			# Escala física: mm por corte SA (para montaje a escala real).
+			px = getattr(raw_study, "pixel_spacing", None)
+			try:
+				px_mm = float(px[0]) if px is not None and len(px) else 0.0
+			except Exception:
+				px_mm = 0.0
+			self.cine_crudo_axes_pixel_mm = px_mm
+			self.cine_crudo_cut_thickness_mm = cut_thickness_mm
+			self.cine_crudo_montage_bounds = (int(z0), int(z1))
+			# Inicializar rango de gates para montaje (todo el ciclo por defecto).
+			n_gates_out = int(sa_cube.shape[0])
+			self.cine_crudo_gate_from = 1
+			self.cine_crudo_gate_to = max(1, n_gates_out)
+			if hasattr(self, "cine_crudo_gate_from_spin") and hasattr(self, "cine_crudo_gate_to_spin"):
+				self.cine_crudo_gate_from_spin.blockSignals(True)
+				self.cine_crudo_gate_to_spin.blockSignals(True)
+				self.cine_crudo_gate_from_spin.setRange(1, max(1, n_gates_out))
+				self.cine_crudo_gate_to_spin.setRange(1, max(1, n_gates_out))
+				self.cine_crudo_gate_from_spin.setValue(1)
+				self.cine_crudo_gate_to_spin.setValue(max(1, n_gates_out))
+				self.cine_crudo_gate_from_spin.setEnabled(True)
+				self.cine_crudo_gate_to_spin.setEnabled(True)
+				self.cine_crudo_gate_from_spin.blockSignals(False)
+				self.cine_crudo_gate_to_spin.blockSignals(False)
+			if hasattr(self, "cine_crudo_gate_all_btn"):
+				self.cine_crudo_gate_all_btn.setEnabled(True)
 			if hasattr(self, "cine_crudo_process_recon_btn"):
 				self.cine_crudo_process_recon_btn.setEnabled(True)
 			if hasattr(self, "cine_crudo_save_axes_dcm_btn"):
 				self.cine_crudo_save_axes_dcm_btn.setEnabled(True)
-			self._log(f"Cortes generados: SA {z0 + 1}..{z1 + 1} ({sa_cube.shape[1]} cortes, espesor {thickness}px). HLA/VLA visibles en comparacion_ejes. Ahora podés Procesar recon o Guardar ejes DICOM.")
+			if hasattr(self, "cine_crudo_montage_btn"):
+				self.cine_crudo_montage_btn.setEnabled(True)
+			if hasattr(self, "cine_crudo_mark_rest_btn"):
+				self.cine_crudo_mark_rest_btn.setEnabled(True)
+			self._log(f"Cortes generados: SA {z0 + 1}..{z1 + 1} ({sa_cube.shape[1]} cortes, espesor {thickness}px = {cut_thickness_mm:.2f}mm). HLA/VLA visibles en comparacion_ejes. Ahora podés Procesar recon o Guardar ejes DICOM.")
 			self._set_progress(100, "Cortes SA/HLA/VLA generados")
 		except Exception as exc:
 			self._log(f"[ERROR] Generar cortes falló: {exc}")
 			QMessageBox.warning(self, "SINCRO", f"No se pudieron generar los cortes:\n{exc}")
+
+	def _show_cine_crudo_sa_montage(self):
+		"""Montaje clínico de TODOS los cortes SA/VLA/HLA (estilo MyoVation/Xeleris).
+
+		Usa los cubos ya orientados anatómicamente por `anatomical_cuts_gated`
+		(misma fuente que "cortes generados", así coincide la rotación). Filas:
+		SA (ápex→base), VLA (sep→lat) y HLA (inf→ant), paneles grandes cuadrados.
+		"""
+		if not self.cine_crudo_axes_for_export:
+			QMessageBox.information(self, "SINCRO", "Primero generá los cortes con 'Generar cortes'.")
+			return
+		try:
+			import matplotlib.pyplot as plt
+
+			# Rango de gates activo (1-based en UI).
+			gate_from = int(getattr(self, "cine_crudo_gate_from", 1) or 1)
+			gate_to = int(getattr(self, "cine_crudo_gate_to", 1) or 1)
+			template_mode = str(getattr(self, "cine_crudo_montage_template", "denso") or "denso")
+			cut_zoom = float(getattr(self, "cine_crudo_montage_cut_zoom", 1.0) or 1.0)
+
+			def _template_defaults(total: int) -> int:
+				if template_mode == "grande":
+					return max(1, min(16, int(total)))
+				if template_mode == "cuadrante":
+					return max(1, min(8, int(total)))
+				return max(1, int(total))
+
+			def _zoom_cut(img2d: np.ndarray, factor: float) -> np.ndarray:
+				arr = np.asarray(img2d, dtype=np.float64)
+				if arr.ndim != 2 or factor <= 1.001:
+					return arr
+				h, w = arr.shape
+				ch = max(4, int(round(h / factor)))
+				cw = max(4, int(round(w / factor)))
+				y0 = max(0, (h - ch) // 2)
+				x0 = max(0, (w - cw) // 2)
+				crop = arr[y0:y0 + ch, x0:x0 + cw]
+				if crop.size == 0:
+					return arr
+				try:
+					from scipy.ndimage import zoom as _ndi_zoom
+					up = _ndi_zoom(crop, (float(h) / max(1, ch), float(w) / max(1, cw)), order=3, mode="nearest", prefilter=True)
+				except Exception:
+					zy = max(1, int(np.ceil(h / max(1, ch))))
+					zx = max(1, int(np.ceil(w / max(1, cw))))
+					up = np.repeat(np.repeat(crop, zy, axis=0), zx, axis=1)
+				if up.shape[0] < h or up.shape[1] < w:
+					up = np.pad(up, ((0, max(0, h - up.shape[0])), (0, max(0, w - up.shape[1]))), mode="edge")
+				return np.asarray(up[:h, :w], dtype=np.float64)
+
+			def _norm_vol(cube4d):
+				arr4 = np.asarray(cube4d, dtype=np.float64)
+				if arr4.ndim != 4 or arr4.shape[0] <= 0:
+					return np.zeros((1, 1, 1), dtype=np.float64)
+				g0 = int(np.clip(min(gate_from, gate_to) - 1, 0, arr4.shape[0] - 1))
+				g1 = int(np.clip(max(gate_from, gate_to) - 1, 0, arr4.shape[0] - 1))
+				v = np.asarray(arr4[g0:g1 + 1], dtype=np.float64).sum(axis=0)
+				p99 = float(np.percentile(v, 99.5)) if v.size else 1.0
+				p2 = float(np.percentile(v, 2.0)) if v.size else 0.0
+				return np.clip((v - p2) / max(p99 - p2, 1e-8), 0.0, 1.0)
+
+			def _voi_bounds(nk):
+				"""Rango base→ápex (k0,k1) según modo de recorte."""
+				if self.cine_crudo_montage_crop_mode == "voi" and getattr(self, "cine_crudo_reoriented_voi", None):
+					voi = self.cine_crudo_reoriented_voi
+					cz = float(voi.get("cz", nk / 2.0))
+					rz = float(voi.get("rz", nk / 2.0))
+					k0 = int(np.clip(round(cz - rz), 0, nk - 1))
+					k1 = int(np.clip(round(cz + rz), 0, nk - 1))
+					if k1 <= k0:
+						k1 = min(nk - 1, k0 + 1)
+					return k0, k1
+				return 0, nk - 1  # el cubo SA ya viene recortado a límites
+
+			def _build_rows(ax_cubes, rest_offsets=None):
+				sa_cube = np.asarray(ax_cubes.get("SA", []), dtype=np.float64)
+				sa_v = _norm_vol(sa_cube)
+				vla_v = _norm_vol(np.asarray(ax_cubes.get("VLA", sa_cube)))
+				hla_v = _norm_vol(np.asarray(ax_cubes.get("HLA", sa_cube)))
+				# Rango base→ápex coherente para los tres ejes.
+				k0, k1 = _voi_bounds(int(sa_v.shape[0]))
+				# VLA/HLA recorren el eje largo → mapear el mismo % de rango.
+				def _range_map(nsrc):
+					if nsrc <= 1:
+						return [0]
+					lo = int(round(k0 / max(1, sa_v.shape[0] - 1) * (nsrc - 1)))
+					hi = int(round(k1 / max(1, sa_v.shape[0] - 1) * (nsrc - 1)))
+					lo, hi = sorted((lo, hi))
+					return list(range(lo, hi + 1))
+				sa_idx = list(range(k0, k1 + 1))[::-1]  # ápex primero
+				vla_idx = _range_map(int(vla_v.shape[0]))
+				hla_idx = _range_map(int(hla_v.shape[0]))
+				off = rest_offsets or {"SA": 0, "VLA": 0, "HLA": 0}
+				sa_idx = [int(np.clip(k + off["SA"], 0, sa_v.shape[0] - 1)) for k in sa_idx]
+				vla_idx = [int(np.clip(k + off["VLA"], 0, vla_v.shape[0] - 1)) for k in vla_idx]
+				hla_idx = [int(np.clip(k + off["HLA"], 0, hla_v.shape[0] - 1)) for k in hla_idx]
+
+				def _window(axis_name: str, idxs: list[int]) -> list[int]:
+					if not idxs:
+						return idxs
+					start_1 = int(getattr(self, "cine_crudo_stripe_start", {}).get(axis_name, 1) or 1)
+					count_cfg = int(getattr(self, "cine_crudo_stripe_count", {}).get(axis_name, 999) or 999)
+					count = _template_defaults(len(idxs)) if count_cfg >= 999 else max(1, min(count_cfg, len(idxs)))
+					start = int(np.clip(start_1 - 1, 0, max(0, len(idxs) - 1)))
+					if start + count > len(idxs):
+						start = max(0, len(idxs) - count)
+					# Persistir start efectivo para drag continuo.
+					self.cine_crudo_stripe_start[axis_name] = start + 1
+					return idxs[start:start + count]
+
+				sa_idx = _window("SA", sa_idx)
+				vla_idx = _window("VLA", vla_idx)
+				hla_idx = _window("HLA", hla_idx)
+				return [(sa_v, sa_idx, "SA"), (vla_v, vla_idx, "VLA"), (hla_v, hla_idx, "HLA")]
+
+			stress_rows = _build_rows(self.cine_crudo_axes_for_export)
+			has_rest = bool(self.cine_crudo_axes_for_export_rest)
+			rest_rows = _build_rows(self.cine_crudo_axes_for_export_rest, self.cine_crudo_rest_offset) if has_rest else None
+
+			thickness = self._cine_crudo_cut_thickness_px()
+			th_mm = float(getattr(self, "cine_crudo_cut_thickness_mm", 0.0) or 0.0)
+			px_mm = float(getattr(self, "cine_crudo_axes_pixel_mm", 0.0) or 0.0)
+			bounds = getattr(self, "cine_crudo_montage_bounds", None)
+
+			# Columnas = máximo de cortes en cualquier fila (ventana seleccionada por tira).
+			all_rows = list(stress_rows) + (list(rest_rows) if rest_rows else [])
+			cols = max((len(idxs) for _, idxs, _ in all_rows), default=1)
+			cols = max(cols, 1)
+			block_rows = 3
+			n_blocks = 2 if has_rest else 1
+			rows = block_rows * n_blocks
+
+			# Escala real por SA Pixel Size: ancho de panel ∝ matriz*px_mm.
+			mat = int(stress_rows[0][0].shape[1]) if stress_rows[0][0].ndim == 3 else 32
+			panel_in = 1.4 if template_mode == "denso" else (2.15 if template_mode == "grande" else 1.7)
+			fig, axes = plt.subplots(rows, cols, figsize=(cols * panel_in, rows * (panel_in * 1.12)), squeeze=False)
+			fig.patch.set_facecolor("#000000")
+			for r in range(rows):
+				for c in range(cols):
+					axes[r][c].axis("off")
+					axes[r][c].set_facecolor("#000000")
+
+			corner_map = {
+				"SA": [(0.32, 0.90, "ANT"), (0.02, 0.45, "SEP"), (0.80, 0.45, "LAT"), (0.32, 0.03, "INF")],
+				"VLA": [(0.32, 0.90, "ANT"), (0.02, 0.45, "BASE"), (0.76, 0.45, "APEX"), (0.32, 0.03, "INF")],
+				"HLA": [(0.32, 0.90, "APEX"), (0.02, 0.45, "SEP"), (0.80, 0.45, "LAT"), (0.32, 0.03, "BASE")],
+			}
+
+			def _fill(base_row, rows_data, tag):
+				for ri, (vol, idxs, prefix) in enumerate(rows_data):
+					r = base_row + ri
+					# Etiqueta del eje alineada en las 3 tiras (sin corrimientos distintos).
+					selected = (str(prefix) == str(getattr(self, "cine_crudo_selected_stripe", "SA")))
+					lab_color = "#ff4040" if selected else "#7cf29a"
+					lab_size = 8.0
+					axes[r][0].text(-0.26, 0.5, f"{tag} {prefix}", color=lab_color, fontsize=lab_size,
+					                fontweight="bold", rotation=90, va="center", ha="center", transform=axes[r][0].transAxes)
+					if selected:
+						# Recuadro rojo de 1px alrededor de TODA la tira activa.
+						from matplotlib.patches import Rectangle
+						stripe_rect = Rectangle((0.0, 0.0), 1.0, 1.0, transform=axes[r][0].transAxes,
+						                       fill=False, edgecolor="#ff4040", linewidth=1.0)
+						# Dibujar el rectángulo en coordenadas de figura para cubrir todas las columnas.
+						p0 = axes[r][0].get_position()
+						p1 = axes[r][max(0, min(cols - 1, max(0, len(idxs) - 1)))].get_position()
+						fig.add_artist(Rectangle((p0.x0, p0.y0), max(1e-6, p1.x1 - p0.x0), p0.y1 - p0.y0,
+						                         transform=fig.transFigure, fill=False, edgecolor="#ff4040", linewidth=1.0))
+					for c in range(cols):
+						ax = axes[r][c]
+						if c >= len(idxs):
+							continue
+						k = idxs[c]
+						img = vol[int(np.clip(k, 0, vol.shape[0] - 1))]
+						img = _zoom_cut(img, cut_zoom)
+						ax.imshow(img, cmap="odyssey_cool", vmin=0.0, vmax=1.0,
+						          interpolation="bicubic", aspect="equal")
+						ax.set_title(f"{prefix} {k + 1}", color="white", fontsize=7, fontweight="bold", pad=1.2)
+						if c == 0:
+							for (tx, ty, txt) in corner_map[prefix]:
+								ax.text(tx, ty, txt, color="#9cdcff", fontsize=5.5, fontweight="bold", transform=ax.transAxes)
+
+			_fill(0, stress_rows, "ESFUERZO" if has_rest else "")
+			if rest_rows:
+				_fill(block_rows, rest_rows, "REPOSO")
+
+			# Metadatos para drag en vivo de tiras por eje.
+			self._montage_render_meta = {
+				"rows_total": int(rows),
+				"cols": int(cols),
+				"has_rest": bool(has_rest),
+				"template": template_mode,
+			}
+
+			th_txt = f"{thickness}px" + (f" = {th_mm:.2f}mm" if th_mm > 0 else "")
+			scale_txt = f" · pixel {px_mm:.2f}mm" if px_mm > 0 else ""
+			bnd_txt = f" · Base {bounds[0] + 1}→Ápex {bounds[1] + 1}" if bounds else ""
+			crop_txt = "Elipse VOI" if self.cine_crudo_montage_crop_mode == "voi" else "Límites"
+			gate_txt = f" · gates {min(gate_from, gate_to)}→{max(gate_from, gate_to)}"
+			tpl_txt = f" · template {template_mode}"
+			zoom_txt = f" · zoom corte x{cut_zoom:.2f}"
+			n_sa_stress = len(stress_rows[0][1])
+			fig.suptitle(
+				f"Montaje clínico{bnd_txt} · Esp {th_txt}{scale_txt} · recorte {crop_txt}{gate_txt}{tpl_txt}{zoom_txt} · "
+				f"SA {n_sa_stress} cortes" + (" · ESFUERZO/REPOSO" if has_rest else ""),
+				color="white", fontsize=11, fontweight="bold",
+			)
+			fig.tight_layout(rect=[0.03, 0, 1, 0.95], w_pad=0.15, h_pad=0.45)
+			out_png = os.path.join(self.output_dir, "sa_montage.png")
+			fig.savefig(out_png, dpi=150, facecolor=fig.get_facecolor())
+			plt.close(fig)
+			self.cine_crudo_preview_mode = "sa_montage"
+			for tab_name in ("comparacion_ejes", "cine_crudo"):
+				if tab_name in self.preview_labels:
+					pix = QPixmap(out_png)
+					self.preview_pixmaps[tab_name] = pix
+					self.preview_base_sizes[tab_name] = pix.size()
+					self._apply_preview_zoom(tab_name)
+			self._select_tab_by_title("comparacion_ejes")
+			self._log(
+				f"Montaje generado: SA {n_sa_stress} cortes · Esp {th_txt} · recorte {crop_txt} · gates {min(gate_from, gate_to)}→{max(gate_from, gate_to)} · template {template_mode}"
+				+ (" · doble fila ESFUERZO/REPOSO" if has_rest else "")
+			)
+		except Exception as exc:
+			self._log(f"[ERROR] Montaje falló: {exc}")
+			QMessageBox.warning(self, "SINCRO", f"No se pudo generar el montaje:\n{exc}")
+
+	def _on_montage_crop_mode_changed(self, idx):
+		self.cine_crudo_montage_crop_mode = "voi" if int(idx) == 1 else "limits"
+		if self.cine_crudo_preview_mode == "sa_montage":
+			self._schedule_montage_refresh(0)
+
+	def _on_montage_template_changed(self, _idx):
+		if hasattr(self, "cine_crudo_montage_template_combo"):
+			txt = str(self.cine_crudo_montage_template_combo.currentText()).strip().lower()
+			if txt.startswith("gran"):
+				self.cine_crudo_montage_template = "grande"
+			elif txt.startswith("cuad"):
+				self.cine_crudo_montage_template = "cuadrante"
+			else:
+				self.cine_crudo_montage_template = "denso"
+		if self.cine_crudo_preview_mode == "sa_montage":
+			self._schedule_montage_refresh(0)
+
+	def _on_montage_cut_zoom_changed(self, value):
+		self.cine_crudo_montage_cut_zoom = float(max(1.0, min(2.5, float(value))))
+		if self.cine_crudo_preview_mode == "sa_montage":
+			self._schedule_montage_refresh(0)
+
+	def _on_montage_gate_range_changed(self, _value):
+		"""Actualiza rango de gates del montaje en vivo (click-only friendly)."""
+		if not (hasattr(self, "cine_crudo_gate_from_spin") and hasattr(self, "cine_crudo_gate_to_spin")):
+			return
+		g0 = int(self.cine_crudo_gate_from_spin.value())
+		g1 = int(self.cine_crudo_gate_to_spin.value())
+		if g0 > g1:
+			# Mantener rango válido sin fricción: mover el extremo opuesto según cuál cambió.
+			sender = self.sender()
+			if sender is self.cine_crudo_gate_from_spin:
+				self.cine_crudo_gate_to_spin.blockSignals(True)
+				self.cine_crudo_gate_to_spin.setValue(g0)
+				self.cine_crudo_gate_to_spin.blockSignals(False)
+				g1 = g0
+			else:
+				self.cine_crudo_gate_from_spin.blockSignals(True)
+				self.cine_crudo_gate_from_spin.setValue(g1)
+				self.cine_crudo_gate_from_spin.blockSignals(False)
+				g0 = g1
+		self.cine_crudo_gate_from = int(g0)
+		self.cine_crudo_gate_to = int(g1)
+		if self.cine_crudo_preview_mode == "sa_montage":
+			self._schedule_montage_refresh(8)
+
+	def _set_montage_gate_full_range(self):
+		"""Acceso rápido: usar todos los gates disponibles en el montaje."""
+		if not self.cine_crudo_axes_for_export:
+			return
+		sa = np.asarray(self.cine_crudo_axes_for_export.get("SA", []), dtype=np.float64)
+		n = int(sa.shape[0]) if sa.ndim == 4 else 1
+		if hasattr(self, "cine_crudo_gate_from_spin") and hasattr(self, "cine_crudo_gate_to_spin"):
+			self.cine_crudo_gate_from_spin.blockSignals(True)
+			self.cine_crudo_gate_to_spin.blockSignals(True)
+			self.cine_crudo_gate_from_spin.setRange(1, max(1, n))
+			self.cine_crudo_gate_to_spin.setRange(1, max(1, n))
+			self.cine_crudo_gate_from_spin.setValue(1)
+			self.cine_crudo_gate_to_spin.setValue(max(1, n))
+			self.cine_crudo_gate_from_spin.blockSignals(False)
+			self.cine_crudo_gate_to_spin.blockSignals(False)
+		self.cine_crudo_gate_from = 1
+		self.cine_crudo_gate_to = max(1, n)
+		if self.cine_crudo_preview_mode == "sa_montage":
+			self._schedule_montage_refresh(0)
+
+	def _on_rest_offset_changed(self, axis, value):
+		if axis in self.cine_crudo_rest_offset:
+			self.cine_crudo_rest_offset[axis] = int(value)
+		if self.cine_crudo_preview_mode == "sa_montage" and self.cine_crudo_axes_for_export_rest:
+			self._schedule_montage_refresh(8)
+
+	def _mark_cine_crudo_as_rest(self):
+		"""Guarda los cortes actuales como estudio de REPOSO para el montaje comparativo."""
+		if not self.cine_crudo_axes_for_export:
+			QMessageBox.information(self, "SINCRO", "Primero generá los cortes con 'Generar cortes'.")
+			return
+		self.cine_crudo_axes_for_export_rest = {k: np.array(v, copy=True) for k, v in self.cine_crudo_axes_for_export.items()}
+		self.cine_crudo_rest_source_label = self.cine_crudo_cut_source_label or "raw recon"
+		self.cine_crudo_cut_thickness_mm_rest = float(getattr(self, "cine_crudo_cut_thickness_mm", 0.0) or 0.0)
+		self._log(
+			f"Cortes actuales marcados como REPOSO ({self.cine_crudo_rest_source_label}). "
+			"Ahora generá/reorientá el ESFUERZO y tocá 'Ver montaje' para la comparación doble fila."
+		)
+		QMessageBox.information(self, "SINCRO", "Cortes guardados como REPOSO.\n\nAhora generá el ESFUERZO y volvé a 'Ver montaje'.")
 
 	def _save_cine_crudo_axes_dicoms(self):
 		"""Guarda SA/HLA/VLA generados como tres DICOM gated multiframe."""
@@ -7885,6 +9038,14 @@ class MainWindow(QMainWindow):
 			self._log(f"[WARN] Curvas de shift fallaron: {exc}")
 
 	def _refresh_cine_crudo_view(self):
+		# Al refrescar el cine crudo (máscara/pick/linea ref/corrección), volver al
+		# modo interactivo de proyecciones y limpiar estados de previews especiales
+		# (cut_limits/sa_montage/generated), que bloquean handlers de mouse.
+		self.cine_crudo_preview_mode = None
+		self._cine_crudo_drag_marker = None
+		self._montage_drag_axis = None
+		self._montage_drag_mode = None
+		self._montage_drag_start_x = None
 		source = str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
 		self._load_cine_crudo_frames(source)
 
@@ -8198,7 +9359,96 @@ class MainWindow(QMainWindow):
 			self._log("Selección de órgano: hacé CLICK en el corazón sobre la imagen de cine_crudo.")
 
 	def _on_cine_crudo_mouse_press_safe(self, event, source_label=None):
+		# Pan de imagen con botón medio o Alt+arrastre (fluido, sin rerender).
+		if getattr(event, "button", lambda: None)() == Qt.MouseButton.MiddleButton or (
+			getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton and
+			bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+		):
+			lbl = source_label or (event.widget() if hasattr(event, "widget") else None)
+			name = None
+			if lbl is self.preview_labels.get("cine_crudo"):
+				name = "cine_crudo"
+			elif lbl is self.preview_labels.get("comparacion_ejes"):
+				name = "comparacion_ejes"
+			if name is not None:
+				s = self._preview_scrollers.get(name)
+				if s is not None:
+					hb = s.horizontalScrollBar(); vb = s.verticalScrollBar()
+					self._preview_pan_active = True
+					self._preview_pan_anchor = (name, int(event.pos().x()), int(event.pos().y()), hb.value() if hb else 0, vb.value() if vb else 0)
+					event.accept(); return
 		if self.cine_crudo_preview_mode in {"recon_qc", "generated_cuts"}:
+			event.accept()
+			return
+		if self.cine_crudo_preview_mode == "sa_montage":
+			# 1) Click en el panel selecciona tira (SA/VLA/HLA) y habilita drag vivo
+			# para desplazar su ventana de cortes (start).
+			try:
+				lbl = source_label or (event.widget() if hasattr(event, "widget") else None)
+				yfrac = float(event.pos().y()) / max(1, (lbl.height() if lbl else 1))
+				has_rest = bool(self.cine_crudo_axes_for_export_rest)
+				if has_rest:
+					local = yfrac if yfrac < 0.5 else (yfrac - 0.5)
+					local = local / 0.5
+				else:
+					local = yfrac
+				axis_click = "SA" if local < 1.0 / 3.0 else ("VLA" if local < 2.0 / 3.0 else "HLA")
+				self._montage_drag_axis = axis_click
+				self.cine_crudo_selected_stripe = axis_click
+				self._montage_drag_start_x = float(event.pos().x())
+				self._montage_drag_start_off = int(self.cine_crudo_stripe_start.get(axis_click, 1))
+				# Click simple: refresca para mostrar highlight de tira seleccionada.
+				self._schedule_montage_refresh(0)
+			except Exception:
+				pass
+
+			# Drag horizontal en montaje:
+			# - Mitad superior: rango de gates (inicio/fin)
+			# - Mitad inferior (si hay reposo): offsets SA/VLA/HLA de reposo
+			if self.cine_crudo_axes_for_export_rest:
+				try:
+					lbl = source_label or (event.widget() if hasattr(event, "widget") else None)
+					yfrac = float(event.pos().y()) / max(1, (lbl.height() if lbl else 1))
+					if yfrac < 0.5:
+						# Bloque esfuerzo: drag de rango de gates con click cercano a borde.
+						self._montage_drag_mode = "gate_to"
+						if hasattr(self, "cine_crudo_gate_from_spin") and hasattr(self, "cine_crudo_gate_to_spin"):
+							g_from = int(self.cine_crudo_gate_from_spin.value())
+							g_to = int(self.cine_crudo_gate_to_spin.value())
+							self._montage_drag_start_x = float(event.pos().x())
+							# Si clic más cerca del inicio, mover inicio; si no, mover fin.
+							if abs(float(event.pos().x()) - 0.15 * float(lbl.width() if lbl else 1)) < abs(float(event.pos().x()) - 0.85 * float(lbl.width() if lbl else 1)):
+								self._montage_drag_mode = "gate_from"
+								self._montage_drag_start_gate = g_from
+							else:
+								self._montage_drag_mode = "gate_to"
+								self._montage_drag_start_gate = g_to
+					elif yfrac >= 0.5:
+						sub = (yfrac - 0.5) / 0.5  # 0..1 dentro del bloque reposo
+						axis = "SA" if sub < 1 / 3 else ("VLA" if sub < 2 / 3 else "HLA")
+						self._montage_drag_axis = axis
+						self._montage_drag_mode = "rest_offset"
+						self._montage_drag_start_x = float(event.pos().x())
+						self._montage_drag_start_off = int(self.cine_crudo_rest_offset.get(axis, 0))
+				except Exception:
+					self._montage_drag_axis = None
+					self._montage_drag_mode = None
+			else:
+				# Sin reposo: usar bloque único para drag de rango de gates.
+				try:
+					lbl = source_label or (event.widget() if hasattr(event, "widget") else None)
+					if hasattr(self, "cine_crudo_gate_from_spin") and hasattr(self, "cine_crudo_gate_to_spin"):
+						g_from = int(self.cine_crudo_gate_from_spin.value())
+						g_to = int(self.cine_crudo_gate_to_spin.value())
+						self._montage_drag_start_x = float(event.pos().x())
+						if abs(float(event.pos().x()) - 0.15 * float(lbl.width() if lbl else 1)) < abs(float(event.pos().x()) - 0.85 * float(lbl.width() if lbl else 1)):
+							self._montage_drag_mode = "gate_from"
+							self._montage_drag_start_gate = g_from
+						else:
+							self._montage_drag_mode = "gate_to"
+							self._montage_drag_start_gate = g_to
+				except Exception:
+					self._montage_drag_mode = None
 			event.accept()
 			return
 		if self.cine_crudo_preview_mode == "cut_limits":
@@ -8221,7 +9471,70 @@ class MainWindow(QMainWindow):
 			self._log(f"[WARN] Evento mouse cine_crudo (press) falló: {exc}")
 
 	def _on_cine_crudo_mouse_move_safe(self, event, source_label=None):
+		if self._preview_pan_active and self._preview_pan_anchor is not None:
+			try:
+				name, x0, y0, hx0, vy0 = self._preview_pan_anchor
+				s = self._preview_scrollers.get(name)
+				if s is not None:
+					hb = s.horizontalScrollBar(); vb = s.verticalScrollBar()
+					dx = int(event.pos().x()) - int(x0)
+					dy = int(event.pos().y()) - int(y0)
+					if hb is not None:
+						hb.setValue(int(hx0 - dx))
+					if vb is not None:
+						vb.setValue(int(vy0 - dy))
+			except Exception:
+				pass
+			event.accept(); return
 		if self.cine_crudo_preview_mode in {"recon_qc", "generated_cuts"}:
+			event.accept()
+			return
+		if self.cine_crudo_preview_mode == "sa_montage":
+			if self._montage_drag_mode in {"gate_from", "gate_to"} and self._montage_drag_start_x is not None:
+				try:
+					lbl = source_label or (event.widget() if hasattr(event, "widget") else None)
+					w = float(lbl.width() if lbl else 1)
+					sa = np.asarray(self.cine_crudo_axes_for_export.get("SA", []), dtype=np.float64)
+					n_gates = int(sa.shape[0]) if sa.ndim == 4 else 1
+					px_per_gate = max(1.0, w / max(1, n_gates))
+					dg = int(round((float(event.pos().x()) - self._montage_drag_start_x) / px_per_gate))
+					new_gate = int(np.clip(self._montage_drag_start_gate + dg, 1, max(1, n_gates)))
+					if self._montage_drag_mode == "gate_from" and hasattr(self, "cine_crudo_gate_from_spin"):
+						self.cine_crudo_gate_from_spin.setValue(new_gate)
+					elif self._montage_drag_mode == "gate_to" and hasattr(self, "cine_crudo_gate_to_spin"):
+						self.cine_crudo_gate_to_spin.setValue(new_gate)
+				except Exception:
+					pass
+			elif self._montage_drag_mode == "rest_offset" and self._montage_drag_axis and self._montage_drag_start_x is not None:
+				try:
+					lbl = source_label or (event.widget() if hasattr(event, "widget") else None)
+					w = float(lbl.width() if lbl else 1)
+					sa_idx = self.cine_crudo_axes_for_export_rest.get("SA")
+					ncols = int(np.asarray(sa_idx).shape[1]) if sa_idx is not None else 12
+					px_per_col = max(1.0, w / max(1, ncols))
+					dcols = int(round((float(event.pos().x()) - self._montage_drag_start_x) / px_per_col))
+					new_off = self._montage_drag_start_off + dcols
+					spin = {"SA": self.cine_crudo_rest_off_sa_spin, "VLA": self.cine_crudo_rest_off_vla_spin, "HLA": self.cine_crudo_rest_off_hla_spin}[self._montage_drag_axis]
+					spin.setValue(int(np.clip(new_off, -40, 40)))
+				except Exception:
+					pass
+			elif self._montage_drag_axis and self._montage_drag_start_x is not None:
+				# Drag de la tira seleccionada: desplaza ventana start por eje.
+				try:
+					lbl = source_label or (event.widget() if hasattr(event, "widget") else None)
+					w = float(lbl.width() if lbl else 1)
+					# Aproximar número de columnas visibles del render actual.
+					cols = int(getattr(self, "_montage_render_meta", {}).get("cols", 1) or 1)
+					px_per_col = max(1.0, w / max(1, cols))
+					dcols = int(round((float(event.pos().x()) - self._montage_drag_start_x) / px_per_col))
+					axis_name = str(self._montage_drag_axis)
+					cur = int(self._montage_drag_start_off)
+					new_start = max(1, cur - dcols)
+					if axis_name in self.cine_crudo_stripe_start:
+						self.cine_crudo_stripe_start[axis_name] = int(new_start)
+					self._schedule_montage_refresh(8)
+				except Exception:
+					pass
 			event.accept()
 			return
 		if self.cine_crudo_preview_mode == "cut_limits":
@@ -8250,7 +9563,17 @@ class MainWindow(QMainWindow):
 			self._log(f"[WARN] Evento mouse cine_crudo (drag) falló: {exc}")
 
 	def _on_cine_crudo_mouse_release_safe(self, event, source_label=None):
+		if self._preview_pan_active:
+			self._preview_pan_active = False
+			self._preview_pan_anchor = None
+			event.accept(); return
 		if self.cine_crudo_preview_mode in {"recon_qc", "generated_cuts"}:
+			event.accept()
+			return
+		if self.cine_crudo_preview_mode == "sa_montage":
+			self._montage_drag_axis = None
+			self._montage_drag_mode = None
+			self._montage_drag_start_x = None
 			event.accept()
 			return
 		if self.cine_crudo_preview_mode == "cut_limits":
@@ -8268,6 +9591,110 @@ class MainWindow(QMainWindow):
 			self._cine_crudo_drag_marker = None
 			self._cine_crudo_set_drag_status(None)
 			self._log(f"[WARN] Evento mouse cine_crudo (release) falló: {exc}")
+
+	def _on_cine_crudo_mouse_wheel_safe(self, event, source_label=None):
+		# Ctrl+rueda = zoom parejo en toda la pestaña (sin rerender).
+		mods = event.modifiers() if hasattr(event, "modifiers") else Qt.KeyboardModifier.NoModifier
+		if bool(mods & Qt.KeyboardModifier.ControlModifier):
+			delta = int(event.angleDelta().y()) if hasattr(event, "angleDelta") else 0
+			step = 0.08 if delta > 0 else (-0.08 if delta < 0 else 0.0)
+			if step != 0.0:
+				lbl = source_label or (event.widget() if hasattr(event, "widget") else None)
+				name = "cine_crudo" if lbl is self.preview_labels.get("cine_crudo") else "comparacion_ejes"
+				self._set_preview_zoom(name, self.preview_zoom.get(name, 0.5) + step)
+				event.accept()
+			return
+		if self.cine_crudo_preview_mode != "sa_montage":
+			return
+		try:
+			delta = int(event.angleDelta().y()) if hasattr(event, "angleDelta") else 0
+			step = 1 if delta > 0 else (-1 if delta < 0 else 0)
+			if step == 0:
+				return
+			axis = str(getattr(self, "cine_crudo_selected_stripe", "SA") or "SA")
+			cur = int(self.cine_crudo_stripe_start.get(axis, 1) or 1)
+			self.cine_crudo_stripe_start[axis] = max(1, cur - step)
+			self._schedule_montage_refresh(10)
+			event.accept()
+		except Exception as exc:
+			self._log(f"[WARN] Rueda en montaje falló: {exc}")
+
+	def keyPressEvent(self, event):
+		# Atajos de teclado para manejo fino de tiras en montaje.
+		if self.cine_crudo_preview_mode == "sa_montage":
+			key = event.key()
+			mods = event.modifiers()
+			axis = str(getattr(self, "cine_crudo_selected_stripe", "SA") or "SA")
+			step = 3 if bool(mods & Qt.KeyboardModifier.ShiftModifier) else 1
+			if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+				cur = int(self.cine_crudo_stripe_start.get(axis, 1) or 1)
+				if key == Qt.Key.Key_Left:
+					self.cine_crudo_stripe_start[axis] = max(1, cur + step)
+				else:
+					self.cine_crudo_stripe_start[axis] = max(1, cur - step)
+				self._schedule_montage_refresh(8)
+				self.statusBar().showMessage(f"Montaje: tira {axis} start={self.cine_crudo_stripe_start.get(axis, 1)}", 1200)
+				event.accept()
+				return
+			if key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+				order = ["SA", "VLA", "HLA"]
+				idx = order.index(axis) if axis in order else 0
+				idx = (idx - 1) % 3 if key == Qt.Key.Key_Up else (idx + 1) % 3
+				self.cine_crudo_selected_stripe = order[idx]
+				self._schedule_montage_refresh(0)
+				self.statusBar().showMessage(f"Montaje: tira activa {self.cine_crudo_selected_stripe}", 1200)
+				event.accept()
+				return
+			if key in (Qt.Key.Key_R, Qt.Key.Key_Home):
+				self.cine_crudo_stripe_start[axis] = 1
+				self._schedule_montage_refresh(0)
+				event.accept()
+				return
+		super().keyPressEvent(event)
+
+	def _on_cine_crudo_mouse_double_click_safe(self, event, source_label=None):
+		if self.cine_crudo_preview_mode != "sa_montage":
+			return
+		try:
+			self.statusBar().showMessage("Montaje: doble click = reset tira activa", 1800)
+			# Reset de la tira seleccionada al inicio de ventana.
+			axis = str(getattr(self, "cine_crudo_selected_stripe", "SA") or "SA")
+			self.cine_crudo_stripe_start[axis] = 1
+			self._schedule_montage_refresh(0)
+			self._log(f"Montaje: reset de tira {axis} (start=1).")
+			event.accept()
+		except Exception as exc:
+			self._log(f"[WARN] Doble click en montaje falló: {exc}")
+
+	def _schedule_montage_refresh(self, delay_ms: int = 20):
+		if self.cine_crudo_preview_mode != "sa_montage":
+			return
+		if hasattr(self, "_montage_refresh_timer"):
+			self._montage_refresh_timer.start(max(0, int(delay_ms)))
+		else:
+			self._show_cine_crudo_sa_montage()
+
+	def _show_cine_crudo_montage_tips(self):
+		msg = (
+			"Montaje SA/VLA/HLA — Tips rápidos\n\n"
+			"Mouse en la imagen:\n"
+			"• Click simple: selecciona la tira activa (SA/VLA/HLA).\n"
+			"• Rueda: mueve solo la tira activa (desplaza cortes visibles).\n"
+			"• Doble click: resetea la tira activa (vuelve al inicio).\n"
+			"• Ctrl + rueda: zoom parejo en toda la vista (mismo zoom para todos los cortes).\n"
+			"• Botón medio arrastrar (o Alt + arrastre): pan para recentrar sin rerender.\n\n"
+			"Teclado (montaje activo):\n"
+			"• Flecha izquierda/derecha: mueve tira activa.\n"
+			"• Shift + izquierda/derecha: paso rápido.\n"
+			"• Flecha arriba/abajo: cambia tira activa.\n"
+			"• R o Home: reset tira activa.\n\n"
+			"Controles de barra:\n"
+			"• Template Denso/Grande/Cuadrante: cambia distribución.\n"
+			"• Grande: hasta 16 cortes por tira.\n"
+			"• Frames desde→hasta: rango de gates para sumar/mostrar.\n"
+			"• Offsets SA/VLA/HLA: alinea reposo contra esfuerzo.\n"
+		)
+		QMessageBox.information(self, "SINCRO - Tips de montaje", msg)
 
 	def _on_cine_crudo_image_clicked(self, event):
 		"""Captura el click del usuario sobre la imagen de cine_crudo para elegir el órgano (corazón)."""
@@ -8358,6 +9785,13 @@ class MainWindow(QMainWindow):
 		self._refresh_cine_crudo_view()
 
 	def _on_cine_crudo_source_changed(self, source: str):
+		# Cambiar fuente debe devolver siempre la interacción completa de motion
+		# correction (máscara, elegir corazón, banda y línea de referencia).
+		self.cine_crudo_preview_mode = None
+		self._cine_crudo_drag_marker = None
+		self._montage_drag_axis = None
+		self._montage_drag_mode = None
+		self._montage_drag_start_x = None
 		self._load_cine_crudo_frames(str(source))
 		self._log(f"Cine crudo: fuente {source} ({len(self.cine_crudo_frames)} frames).")
 

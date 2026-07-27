@@ -634,6 +634,7 @@ class CardiacReorientationDialog(QDialog):
         self.canvas.mpl_connect("button_press_event", self._on_press)
         self.canvas.mpl_connect("motion_notify_event", self._on_motion)
         self.canvas.mpl_connect("button_release_event", self._on_release)
+        self.canvas.mpl_connect("scroll_event", self._on_scroll)
 
         # Evita expansión horizontal por textos largos en status (ops acumuladas).
         try:
@@ -1052,6 +1053,59 @@ class CardiacReorientationDialog(QDialog):
     def _on_release(self, event):
         self._drag = None
         self._fine_drag_start = None
+
+    def _on_scroll(self, event):
+        """Rueda del mouse para reorientación rápida en vivo.
+
+        - SA/HLA/VLA: ajuste fino por plano.
+        - HLA/VLA sobre líneas: mueve base/ápex.
+        - AP/LL: escala VOI (Shift = ajuste más fino).
+        """
+        if event.inaxes is None:
+            return
+        step = int(getattr(event, "step", 0) or 0)
+        if step == 0 and hasattr(event, "button"):
+            step = 1 if str(getattr(event, "button", "")).lower() == "up" else -1
+        if step == 0:
+            return
+        fine = 1 if event.key != "shift" else 0.5
+
+        if event.inaxes is self.ax_sa:
+            self._set_fine_rot_values(int(round(self._fine_rot_sa + step * fine)), self._fine_rot_hla, self._fine_rot_vla, recompute=True)
+            return
+        if event.inaxes is self.ax_hla:
+            if event.ydata is not None:
+                base_row = self._k_to_hla_row(self._base_k)
+                apex_row = self._k_to_hla_row(self._apex_k)
+                if abs(float(event.ydata) - base_row) <= abs(float(event.ydata) - apex_row):
+                    self._base_k = int(np.clip(self._base_k - step, 0, self._N - 1))
+                    self.spin_base.blockSignals(True); self.spin_base.setValue(self._base_k); self.spin_base.blockSignals(False)
+                    self._draw_previews(); self.canvas.draw_idle(); return
+                else:
+                    self._apex_k = int(np.clip(self._apex_k - step, 0, self._N - 1))
+                    self.spin_apex.blockSignals(True); self.spin_apex.setValue(self._apex_k); self.spin_apex.blockSignals(False)
+                    self._draw_previews(); self.canvas.draw_idle(); return
+            self._set_fine_rot_values(self._fine_rot_sa, int(round(self._fine_rot_hla + step * fine)), self._fine_rot_vla, recompute=True)
+            return
+        if event.inaxes is self.ax_vla:
+            if event.xdata is not None:
+                if abs(float(event.xdata) - float(self._base_k)) <= abs(float(event.xdata) - float(self._apex_k)):
+                    self._base_k = int(np.clip(self._base_k + step, 0, self._N - 1))
+                    self.spin_base.blockSignals(True); self.spin_base.setValue(self._base_k); self.spin_base.blockSignals(False)
+                    self._draw_previews(); self.canvas.draw_idle(); return
+                else:
+                    self._apex_k = int(np.clip(self._apex_k + step, 0, self._N - 1))
+                    self.spin_apex.blockSignals(True); self.spin_apex.setValue(self._apex_k); self.spin_apex.blockSignals(False)
+                    self._draw_previews(); self.canvas.draw_idle(); return
+            self._set_fine_rot_values(self._fine_rot_sa, self._fine_rot_hla, int(round(self._fine_rot_vla + step * fine)), recompute=True)
+            return
+
+        if event.inaxes in (self.ax_tra, self.ax_cor):
+            scale = (1.0 + (0.04 if event.key != "shift" else 0.02) * step)
+            self._voi_rz = max(3.0, float(self._voi_rz) * scale)
+            self._voi_ry = max(3.0, float(self._voi_ry) * scale)
+            self._voi_rx = max(3.0, float(self._voi_rx) * scale)
+            self._recompute_and_draw()
 
     def _on_base_spin(self, v):
         self._base_k = int(v)
