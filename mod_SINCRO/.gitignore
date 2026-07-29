@@ -8,6 +8,7 @@ data_test/
 
 # --- Salidas ---
 output/
+output_demo/
 *.pdf
 *.png
 *.jpg
@@ -15,6 +16,14 @@ output/
 *.csv
 *.xlsx
 !README*.png
+
+# PDFs de referencia clinica (Emory) que SÍ se versionan
+docs/MANUALES EMORY/*.pdf
+docs/MANUALES EMORY/*.txt
+
+# Videos muy grandes para git
+docs/MANUALES EMORY/*.mp4
+docs/MANUALES EMORY/*.avi
 
 # --- Python ---
 __pycache__/
