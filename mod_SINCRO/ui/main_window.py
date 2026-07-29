@@ -5305,6 +5305,8 @@ class MainWindow(QMainWindow):
 			"myocardial_volume_ml": float(res.myocardial_volume_ml),
 			"myocardial_mass_g": float(res.myocardial_mass_g),
 			"thickening_pct": float(res.thickening_pct),
+			"wall_thickness_ed_mm": float(res.wall_thickness_ed_mm),
+			"wall_thickness_es_mm": float(res.wall_thickness_es_mm),
 			"ed_wall_thickness_mm": float(res.config.ed_wall_thickness_mm),
 			"valve_plane": bool(res.config.use_valve_plane),
 			"valve_offset_mm": float(res.config.valve_septal_offset_mm),
@@ -5743,7 +5745,29 @@ class MainWindow(QMainWindow):
 			if ef.get("myocardial_mass_g") is not None:
 				clinical.append(f"  Masa miocárdica: {float(ef['myocardial_mass_g']):.1f} g")
 			if ef.get("thickening_pct") is not None:
-				clinical.append(f"  Engrosamiento sistólico: {float(ef['thickening_pct']):+.1f}%")
+				thk_ed = ef.get("wall_thickness_ed_mm")
+				thk_es = ef.get("wall_thickness_es_mm")
+				if thk_ed is not None and thk_es is not None:
+					clinical.append(
+						f"  Engrosamiento sistólico (ED→ES): {float(ef['thickening_pct']):+.1f}% "
+						f"({float(thk_ed):.1f} → {float(thk_es):.1f} mm)"
+					)
+				else:
+					clinical.append(f"  Engrosamiento sistólico: {float(ef['thickening_pct']):+.1f}%")
+				compare_ef = getattr(self, "compare_ef", None)
+				if compare_ef and compare_ef.get("available") and compare_ef.get("thickening_pct") is not None:
+					d_thick = float(ef["thickening_pct"]) - float(compare_ef["thickening_pct"])
+					cur_lbl = ctx.get("phase", "Actual")
+					cmp_lbl = self.compare_label or "Comparación"
+					clinical.append(
+						f"  Engrosamiento {cur_lbl} vs {cmp_lbl}: {float(ef['thickening_pct']):+.1f}% vs "
+						f"{float(compare_ef['thickening_pct']):+.1f}%   (Δ {d_thick:+.1f} puntos)"
+					)
+					if d_thick < -10.0:
+						clinical.append(
+							"    → El engrosamiento cayó marcadamente respecto de la otra etapa: "
+							"correlacionar con perfusión regional (posible isquemia/stunning)."
+						)
 			if ef.get("shape_index_ed") is not None:
 				clinical.append(
 					f"  Índice de esfericidad ED/ES: {float(ef['shape_index_ed']):.2f} / "
@@ -7569,6 +7593,12 @@ class MainWindow(QMainWindow):
 		vol = self._compute_volumes_ml()
 		ef = self._estimate_lv_ef()
 		vol = self._harmonize_volumes_with_ef(vol, ef)
+		if ef.get("available") and ef.get("thickening_pct") is not None:
+			compare_ef = getattr(self, "compare_ef", None)
+			if compare_ef and compare_ef.get("available") and compare_ef.get("thickening_pct") is not None:
+				ef = dict(ef)
+				ef["compare_thickening_pct"] = float(compare_ef["thickening_pct"])
+				ef["compare_label"] = self.compare_label or "Comparación"
 		report_metrics = dict(self.metrics)
 		try:
 			dataset, sex, protocol, nd = self._normal_db_context()

@@ -230,6 +230,7 @@ class ECTbWindow(QDialog):
 		layout.addWidget(self._build_valve_section())
 		layout.addWidget(self._build_ruler_section())
 		layout.addWidget(self._build_results_box())
+		layout.addWidget(self._build_thickening_compare_box())
 		layout.addWidget(self._build_conversion_section())
 		layout.addWidget(self._build_curve_box())
 		layout.addWidget(self._build_compare_box())
@@ -710,6 +711,25 @@ class ECTbWindow(QDialog):
 		grid.addWidget(self.notes_label, len(rows), 0, 1, 2)
 		return box
 
+	def _build_thickening_compare_box(self) -> QGroupBox:
+		box = QGroupBox("Engrosamiento — reposo vs esfuerzo")
+		box_layout = QVBoxLayout(box)
+		box_layout.setContentsMargins(8, 8, 8, 8)
+		box_layout.setSpacing(4)
+		hint = QLabel(
+			"Se completa solo cuando hay un segundo estudio cargado como comparación (botón "
+			"\"Cargar comparación\" o \"Cargar uno o dos estudios\" del panel principal). Recalcula en "
+			"vivo con los mismos parámetros de arriba, sobre la segmentación ya cargada de cada estudio."
+		)
+		hint.setWordWrap(True)
+		hint.setStyleSheet("color:#6b7280;")
+		box_layout.addWidget(hint)
+		self.thickening_compare_label = QLabel("Sin estudio de comparación cargado.")
+		self.thickening_compare_label.setWordWrap(True)
+		self.thickening_compare_label.setStyleSheet("color:#1f3b5b;")
+		box_layout.addWidget(self.thickening_compare_label)
+		return box
+
 	def _build_curve_box(self) -> QGroupBox:
 		box = QGroupBox("Curva de volumen por gate")
 		box_layout = QVBoxLayout(box)
@@ -1127,6 +1147,7 @@ class ECTbWindow(QDialog):
 		self.conversion_detail.setText("")
 		self.valve_readout.setText("—")
 		self.curve.set_curve(np.zeros(0), 0, 0)
+		self.thickening_compare_label.setText("Sin estudio de comparación cargado.")
 		self.status_label.setText(message)
 		self.status_label.setStyleSheet("color:#a06000;")
 
@@ -1138,7 +1159,9 @@ class ECTbWindow(QDialog):
 		self._value_labels["mass"].setText(
 			f"{result.myocardial_mass_g:.1f} g  ({result.myocardial_volume_ml:.1f} mL de pared)"
 		)
-		self._value_labels["thick"].setText(f"{result.thickening_pct:+.1f} %")
+		self._value_labels["thick"].setText(
+			f"{result.thickening_pct:+.1f} %   ({result.wall_thickness_ed_mm:.1f} → {result.wall_thickness_es_mm:.1f} mm)"
+		)
 		self._value_labels["shape"].setText(
 			f"{result.shape_index_ed:.2f} / {result.shape_index_es:.2f}"
 			f"   (eje corto {result.short_axis_ed_mm:.0f} mm, eje largo {result.long_axis_mm:.0f} mm)"
@@ -1158,6 +1181,7 @@ class ECTbWindow(QDialog):
 		self._update_ruler_readout()
 		self._update_valve_readout(result)
 		self._render_conversion()
+		self._render_thickening_compare(result)
 		self._render_comparison(result)
 
 	def _sync_ruler_range(self, result: ECTbLVResult):
@@ -1173,6 +1197,61 @@ class ECTbWindow(QDialog):
 			# de la pared y el que menos sufre el efecto de borde de base y ápex.
 			self.ruler_slice_spin.setValue(int(result.valid_slices[len(result.valid_slices) // 2]))
 		self.ruler_slice_spin.blockSignals(False)
+
+	def _render_thickening_compare(self, result: ECTbLVResult):
+		"""Engrosamiento del estudio actual vs el estudio de comparación (reposo/esfuerzo).
+
+		Se recalcula sobre la segmentación ya cargada de cada estudio (no vuelve a
+		segmentar ni a correr el análisis de fase), así que es barato y sigue en
+		vivo a los parámetros de arriba: cambiar el espesor ED o el plano valvular
+		actualiza los dos lados al toque.
+		"""
+		main = self._main
+		bundle = getattr(main, "compare_bundle", None)
+		if not bundle or bundle.get("study") is None or bundle.get("seg") is None:
+			self.thickening_compare_label.setText("Sin estudio de comparación cargado.")
+			return
+		if not hasattr(main, "_estimate_ef_for"):
+			self.thickening_compare_label.setText("No se pudo acceder al comparador de la ventana principal.")
+			return
+		try:
+			compare_ef = main._estimate_ef_for(bundle["study"], bundle["seg"])
+		except Exception as err:
+			self.thickening_compare_label.setText(f"No se pudo recalcular la comparación: {err}")
+			return
+		if not compare_ef or not compare_ef.get("available") or compare_ef.get("thickening_pct") is None:
+			self.thickening_compare_label.setText(
+				"El método actual no informa engrosamiento para el estudio de comparación."
+			)
+			return
+
+		cur_label = "Actual"
+		try:
+			path_text = main.file_edit.text().strip() if getattr(main, "file_edit", None) else ""
+			cur_label = main._phase_label_from_path(path_text, "Actual")
+		except Exception:
+			pass
+		cmp_label = str(getattr(main, "compare_label", None) or "Comparación")
+		cur_thick = float(result.thickening_pct)
+		cmp_thick = float(compare_ef["thickening_pct"])
+		delta = cur_thick - cmp_thick
+
+		lines = [
+			f"{cur_label}: {cur_thick:+.1f}%   ({result.wall_thickness_ed_mm:.1f} → {result.wall_thickness_es_mm:.1f} mm)",
+		]
+		cmp_ed = compare_ef.get("wall_thickness_ed_mm")
+		cmp_es = compare_ef.get("wall_thickness_es_mm")
+		if cmp_ed is not None and cmp_es is not None:
+			lines.append(f"{cmp_label}: {cmp_thick:+.1f}%   ({float(cmp_ed):.1f} → {float(cmp_es):.1f} mm)")
+		else:
+			lines.append(f"{cmp_label}: {cmp_thick:+.1f}%")
+		lines.append(f"Δ ({cur_label} − {cmp_label}): {delta:+.1f} puntos")
+		if delta < -10.0:
+			lines.append(
+				"→ El engrosamiento cayó marcadamente respecto de la otra etapa: correlacionar con "
+				"perfusión regional (posible isquemia/stunning)."
+			)
+		self.thickening_compare_label.setText("\n".join(lines))
 
 	def _render_comparison(self, result: ECTbLVResult):
 		"""Muestra el resultado del método actual al lado del de ECTb."""

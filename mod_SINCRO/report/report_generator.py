@@ -225,6 +225,27 @@ def generate_report(
 			["ESV preliminar", f"{_safe_float(ef.get('esv_ml'), 2)} mL"],
 			["FEVI preliminar", f"{_safe_float(ef.get('ef_pct'), 1)}%"],
 		])
+		if ef.get("myocardial_mass_g") is not None:
+			metrics_rows.append(["Masa miocárdica", f"{_safe_float(ef.get('myocardial_mass_g'), 1)} g"])
+		if ef.get("thickening_pct") is not None:
+			thk_ed = ef.get("wall_thickness_ed_mm")
+			thk_es = ef.get("wall_thickness_es_mm")
+			if thk_ed is not None and thk_es is not None:
+				thick_txt = (
+					f"{_safe_float(ef.get('thickening_pct'), 1)}% "
+					f"({_safe_float(thk_ed, 1)} → {_safe_float(thk_es, 1)} mm)"
+				)
+			else:
+				thick_txt = f"{_safe_float(ef.get('thickening_pct'), 1)}%"
+			metrics_rows.append(["Engrosamiento sistólico (ED→ES)", thick_txt])
+		if ef.get("compare_thickening_pct") is not None:
+			cur_thk = float(ef.get("thickening_pct") or 0.0)
+			cmp_thk = float(ef.get("compare_thickening_pct"))
+			cmp_lbl = str(ef.get("compare_label") or "comparación")
+			metrics_rows.append([
+				f"Engrosamiento vs {cmp_lbl}",
+				f"actual {cur_thk:+.1f}%  |  {cmp_lbl} {cmp_thk:+.1f}%  |  Δ {cur_thk - cmp_thk:+.1f} puntos",
+			])
 	else:
 		metrics_rows.append(["FEVI preliminar", "No disponible"]) 
 	met_table = Table(metrics_rows, colWidths=[62 * mm, 104 * mm])

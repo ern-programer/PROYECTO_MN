@@ -184,6 +184,10 @@ class ECTbLVResult:
     myocardial_mass_g: float = 0.0
     mean_wall_thickness_mm: np.ndarray = field(default_factory=lambda: np.zeros(0))
     thickening_pct: float = 0.0
+    #: Espesor medio de pared en el gate ED y en el gate ES (mm), para mostrar el
+    #: valor absoluto del engrosamiento y no solo el porcentaje.
+    wall_thickness_ed_mm: float = 0.0
+    wall_thickness_es_mm: float = 0.0
     #: Índice de esfericidad = diámetro de eje corto / longitud de eje largo.
     #: 0-1: el VI normal es un elipsoide alargado (valores bajos); cuanto más se
     #: acerca a 1, más esférico y por lo tanto más remodelado.
@@ -550,7 +554,6 @@ def analyze_lv_ectb(
     thk_ed = float(mean_thickness[ed_idx])
     thk_es = float(mean_thickness[es_idx])
     thickening = float((thk_es - thk_ed) / thk_ed * 100.0) if thk_ed > 0.0 else 0.0
-
     # --- Índice de esfericidad -----------------------------------------------
     # Diámetro de eje corto: se promedia el radio endocárdico sobre los ángulos
     # (así una espiga aislada no define el diámetro) y se toma el corte más ancho,
@@ -572,6 +575,8 @@ def analyze_lv_ectb(
     res.myocardial_mass_g = float(myo_volume_ml * float(cfg.myocardial_density_g_ml))
     res.mean_wall_thickness_mm = mean_thickness
     res.thickening_pct = thickening
+    res.wall_thickness_ed_mm = thk_ed
+    res.wall_thickness_es_mm = thk_es
     res.long_axis_mm = long_axis_mm
     res.short_axis_ed_mm = float(short_axis_mm[ed_idx])
     res.short_axis_es_mm = float(short_axis_mm[es_idx])

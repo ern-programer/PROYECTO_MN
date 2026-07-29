@@ -157,6 +157,24 @@ def test_engrosamiento_positivo():
     print(f"[OK] engrosamiento sistólico: {res.thickening_pct:.1f}%")
 
 
+def test_espesor_ed_es_mm_consistente_con_engrosamiento():
+    """wall_thickness_ed_mm/es_mm deben ser positivos y derivar el mismo % informado."""
+    cube, seg = _make_phantom(ef_target=0.55, seed=5)
+    res = analyze_lv_ectb(cube, seg, (PIXEL_MM, PIXEL_MM), SLICE_MM)
+
+    assert res.wall_thickness_ed_mm > 0.0
+    assert res.wall_thickness_es_mm > 0.0
+    esperado = (res.wall_thickness_es_mm - res.wall_thickness_ed_mm) / res.wall_thickness_ed_mm * 100.0
+    assert np.isclose(res.thickening_pct, esperado, atol=0.5), (
+        f"engrosamiento {res.thickening_pct:.1f}% no coincide con mm "
+        f"({res.wall_thickness_ed_mm:.1f}->{res.wall_thickness_es_mm:.1f})"
+    )
+    print(
+        f"[OK] espesor ED={res.wall_thickness_ed_mm:.1f} mm -> ES={res.wall_thickness_es_mm:.1f} mm "
+        f"consistente con engrosamiento {res.thickening_pct:.1f}%"
+    )
+
+
 def test_rechaza_entradas_invalidas():
     """Cubos no gatillados o segmentación incoherente devuelven available=False."""
     cube, seg = _make_phantom(seed=6)
@@ -373,6 +391,7 @@ if __name__ == "__main__":
     test_espesor_ed_escala_los_volumenes()
     test_masa_miocardica_usa_densidad()
     test_engrosamiento_positivo()
+    test_espesor_ed_es_mm_consistente_con_engrosamiento()
     test_rechaza_entradas_invalidas()
     test_regresion_qgs()
     test_convert_ef_pct_maneja_unidades()
