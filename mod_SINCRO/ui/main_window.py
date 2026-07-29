@@ -57,6 +57,8 @@ from core.aha_segments import (
 	territory_analysis,
 )
 from core.export_manager import export_all
+from core.gate_dropout import analyze_gate_dropout, correct_last_gate_dropout
+from core.ectb_lv import EF_REGRESSIONS, ECTbLVConfig, analyze_lv_ectb, convert_ef_pct
 from core.logging_config import get_logger
 from core.metrics import calculate_phase_metrics
 from core.phase_analysis import phase_analysis
@@ -76,6 +78,7 @@ from viz.polar_map import (
 )
 
 from ui.cine_widget import CineWidget
+from ui.collapsible import CollapsibleSection, slugify_section_key
 from ui.managers import (
 	CineManager,
 	CompareManager,
@@ -316,6 +319,32 @@ class MainWindow(QMainWindow):
 
 		self.normalize_check = QCheckBox("Normalizar referencia de fase")
 		self.normalize_check.setChecked(False)
+
+		# --- Corrección de dropout del último gate (ECTb 22.8) ---
+		# Por la variabilidad del R-R, el último gate acumula menos cuentas. Se
+		# escala para igualar al primero antes de segmentar y de calcular fase.
+		self.gate_dropout_check = QCheckBox("Corregir dropout del último gate")
+		self.gate_dropout_check.setChecked(True)
+		self.gate_dropout_check.toggled.connect(self._on_gate_dropout_toggled)
+		self.gate_dropout_status = QLabel("Sin estudio cargado.")
+		self.gate_dropout_status.setWordWrap(True)
+		self.gate_dropout_status.setStyleSheet("color:#35506a;")
+		self.gate_dropout_help_btn = QToolButton()
+		self.gate_dropout_help_btn.setText("?")
+		self.gate_dropout_help_btn.setToolTip("Explica qué es el dropout del último gate y cuándo conviene corregirlo.")
+		self.gate_dropout_help_btn.clicked.connect(self.show_gate_dropout_help)
+		gate_dropout_widget = QWidget()
+		gate_dropout_layout = QVBoxLayout(gate_dropout_widget)
+		gate_dropout_layout.setContentsMargins(0, 0, 0, 0)
+		gate_dropout_layout.setSpacing(2)
+		gate_dropout_row = QHBoxLayout()
+		gate_dropout_row.setContentsMargins(0, 0, 0, 0)
+		gate_dropout_row.setSpacing(4)
+		gate_dropout_row.addWidget(self.gate_dropout_check, 1)
+		gate_dropout_row.addWidget(self.gate_dropout_help_btn)
+		gate_dropout_layout.addLayout(gate_dropout_row)
+		gate_dropout_layout.addWidget(self.gate_dropout_status)
+
 		self.global_intestinal_render_check = QCheckBox("Atenuación intestinal visual global")
 		self.global_intestinal_render_check.setChecked(True)
 		self.global_intestinal_render_check.toggled.connect(self._on_global_intestinal_render_toggled)
@@ -419,6 +448,7 @@ class MainWindow(QMainWindow):
 		controls_form.addRow(self.profile_timing_check)
 		controls_form.addRow(self.realtime_deferred_render_check)
 		controls_form.addRow(self.normalize_check)
+		controls_form.addRow(gate_dropout_widget)
 		controls_form.addRow(self.global_intestinal_render_check)
 		controls_form.addRow("Sexo (DB normal)", self.normal_sex_combo)
 		controls_form.addRow("Protocolo (DB normal)", self.normal_protocol_combo)
@@ -443,6 +473,14 @@ class MainWindow(QMainWindow):
 		self.profile_timing_check.setToolTip("Registra en el log solo etapas que superan 0.5 s.")
 		self.realtime_deferred_render_check.setToolTip("Muestra resultados rápidos primero y completa en alta calidad unos instantes después.")
 		self.normalize_check.setToolTip("Resta una referencia global de fase para comparar estudios.")
+		self.gate_dropout_check.setToolTip(
+			"Escala el último gate para que sume las mismas cuentas que el primero (Emory Cardiac Toolbox 4.0, secc. 22.8).\n"
+			"Por la variabilidad del R-R, el último gate siempre queda con menos cuentas: eso es artefacto de adquisición,\n"
+			"no fisiología, y sesga tanto la FEVI como la fase (PSD/BW salen más altos de lo real).\n"
+			"Es una corrección de ganancia global: no deforma el miocardio ni mueve bordes.\n"
+			"Dejalo activo salvo que la consola ya lo haya corregido (en ese caso el dropout medido da ~0%)."
+		)
+		self.gate_dropout_status.setToolTip("Déficit medido en el último gate y factor aplicado. Se actualiza al cargar o reprocesar el estudio.")
 		self.global_intestinal_render_check.setToolTip("Si está activo, muestra la atenuación intestinal en las salidas visuales. Fase, métricas y FEVI se calculan sobre el estudio bruto.")
 		self.normal_sex_combo.setToolTip("Sexo del paciente: los valores normales de PSD/BW difieren por sexo (Mukherjee 2016).")
 		self.normal_protocol_combo.setToolTip("Protocolo del estudio: stress da PSD/BW mayores que rest.")
@@ -694,6 +732,26 @@ class MainWindow(QMainWindow):
 		self.export_ungated_btn = QPushButton("Ungated DCM")
 		self.export_ungated_btn.clicked.connect(self._export_ungated_dicom)
 		self.export_ungated_btn.setToolTip("Exporta el desgatillado (suma de gates = perfusión total) como DICOM NM no-gated para compartir o releer.")
+		self.ectb_window_btn = QPushButton("Cuantificación ECTb")
+		self.ectb_window_btn.clicked.connect(self.open_ectb_window)
+		self.ectb_window_btn.setToolTip(
+			"Abre la ventana de cuantificación del Emory Cardiac Toolbox: FEVI por máximo de cuentas, "
+			"volúmenes, masa miocárdica y engrosamiento.\n"
+			"Es el método que usa el informe por defecto. Desde ahí también se puede volver al método "
+			"anterior (umbral endocárdico), que queda disponible para comparar.\n"
+			"Los parámetros recalculan en vivo y los dos métodos se muestran lado a lado.\n"
+			"Es no modal: se puede dejar abierta al costado mientras se trabaja acá."
+		)
+		self.gqc_window_btn = QPushButton("Control de calidad del gating")
+		self.gqc_window_btn.clicked.connect(self.open_gqc_window)
+		self.gqc_window_btn.setToolTip(
+			"Abre el panel GQC: cuentas de cada proyección con una curva por gate.\n"
+			"Es la forma clásica de detectar dropout del último gate, arritmia o rechazo de latidos y "
+			"movimiento del paciente durante la rotación.\n"
+			"Con proyecciones crudas el análisis es completo; con un estudio ya reconstruido cae a un "
+			"sustituto por cortes, que no permite ver el movimiento.\n"
+			"Es no modal y se recalcula en vivo."
+		)
 		button_row.addWidget(self.restart_btn, 0, 0, 1, 2)
 		button_row.addWidget(self.process_btn, 1, 0)
 		button_row.addWidget(self.auto_btn, 1, 1)
@@ -705,6 +763,8 @@ class MainWindow(QMainWindow):
 		button_row.addWidget(self.advanced_toggle_btn, 6, 0, 1, 2)
 		button_row.addWidget(self.export_ungated_btn, 7, 0)
 		button_row.addWidget(self.ui_config_btn, 7, 1)
+		button_row.addWidget(self.ectb_window_btn, 8, 0, 1, 2)
+		button_row.addWidget(self.gqc_window_btn, 9, 0, 1, 2)
 		# Ubicar Acciones arriba de Procesamiento para tener comandos a la vista.
 		self._sidebar_layout.insertWidget(1, button_box)
 
@@ -1025,6 +1085,11 @@ class MainWindow(QMainWindow):
 		log_layout.addWidget(self.log_box)
 		self._sidebar_layout.addWidget(log_box)
 		self._sidebar_layout.addStretch(1)
+
+		# Cada caja de opciones del sidebar pasa a ser una sección colapsable:
+		# el título se convierte en botón. Se hace acá, al final, para no tener
+		# que tocar la construcción de cada caja.
+		self._install_collapsible_sidebar_sections()
 
 		right = QWidget()
 		right_layout = QVBoxLayout(right)
@@ -1693,6 +1758,8 @@ class MainWindow(QMainWindow):
 		self._ui_settings = QSettings("Gammasys", "GammaSync")
 		self._load_global_ui_preferences()
 		self._restore_window_layout()
+		self._restore_sidebar_sections_state()
+		self._restore_fevi_settings()
 
 		layout = QVBoxLayout(central)
 		layout.addWidget(splitter)
@@ -1813,10 +1880,203 @@ class MainWindow(QMainWindow):
 		if right_state is not None:
 			self.right_splitter.restoreState(right_state)
 
+	# ---------------------------------------------------------------------
+	# Sidebar colapsable
+	# ---------------------------------------------------------------------
+	#
+	# El sidebar se construye con una lista de QGroupBox. En vez de reescribir
+	# esa construcción, al final se recorre el layout y cada QGroupBox se
+	# reemplaza in-place por un CollapsibleSection que lo envuelve. Así el
+	# título de cada caja pasa a ser un botón expandir/colapsar y no hace falta
+	# tocar ninguna de las cajas existentes ni las futuras.
+
+	#: Secciones que arrancan abiertas la primera vez (flujo de trabajo básico).
+	#: El resto arranca colapsado para bajar el ruido visual. Después de la
+	#: primera vez manda lo que el usuario haya dejado guardado en QSettings.
+	SIDEBAR_DEFAULT_EXPANDED = ("estudio", "acciones", "resumen")
+
+	def _install_collapsible_sidebar_sections(self):
+		"""Convierte cada QGroupBox del sidebar en una sección colapsable.
+
+		Reemplaza cada caja por un `CollapsibleSection` en la misma posición y
+		agrega arriba de todo una fila con "Expandir todo" / "Colapsar todo".
+		Guarda el mapa `clave -> sección` en `self._sidebar_sections` para poder
+		abrir/cerrar por código y para persistir el estado.
+		"""
+		self._sidebar_sections: dict[str, CollapsibleSection] = {}
+		self._sidebar_section_by_content: dict[QWidget, CollapsibleSection] = {}
+		layout = self._sidebar_layout
+
+		boxes = []
+		for i in range(layout.count()):
+			item = layout.itemAt(i)
+			widget = item.widget() if item is not None else None
+			if isinstance(widget, QGroupBox) and widget.title().strip():
+				boxes.append(widget)
+		if not boxes:
+			return
+
+		first_index = layout.indexOf(boxes[0])
+		for box in boxes:
+			index = layout.indexOf(box)
+			if index < 0:
+				continue
+			key = slugify_section_key(box.title())
+			expanded = key in self.SIDEBAR_DEFAULT_EXPANDED
+			# takeAt saca la caja del layout sin destruirla; el constructor de
+			# CollapsibleSection la reparenta dentro de la sección.
+			layout.takeAt(index)
+			section = CollapsibleSection.from_group_box(box, key=key, expanded=expanded)
+			section.toggled.connect(
+				lambda checked, k=key: self._on_sidebar_section_toggled(k, checked)
+			)
+			layout.insertWidget(index, section)
+			self._sidebar_sections[key] = section
+			self._sidebar_section_by_content[box] = section
+
+		layout.insertWidget(first_index, self._build_sidebar_sections_toolbar())
+
+	def _build_sidebar_sections_toolbar(self) -> QWidget:
+		"""Fila de atajos para abrir/cerrar todas las secciones del sidebar."""
+		bar = QWidget()
+		row = QHBoxLayout(bar)
+		row.setContentsMargins(0, 2, 0, 2)
+		row.setSpacing(4)
+		hint = QLabel("Secciones")
+		hint.setStyleSheet("color:#4b5563; font-weight:600;")
+		hint.setToolTip(
+			"Cada título de abajo es un botón: click para expandir o colapsar esa sección.\n"
+			"El estado se recuerda entre sesiones."
+		)
+		row.addWidget(hint)
+		row.addStretch(1)
+		self.expand_all_sections_btn = QToolButton()
+		self.expand_all_sections_btn.setText("Expandir todo")
+		self.expand_all_sections_btn.setToolTip("Abre todas las secciones del panel lateral.")
+		self.expand_all_sections_btn.clicked.connect(lambda: self._set_all_sidebar_sections(True))
+		row.addWidget(self.expand_all_sections_btn)
+		self.collapse_all_sections_btn = QToolButton()
+		self.collapse_all_sections_btn.setText("Colapsar todo")
+		self.collapse_all_sections_btn.setToolTip(
+			"Cierra todas las secciones y deja solo los títulos. Útil para trabajar con el visor a pantalla ancha."
+		)
+		self.collapse_all_sections_btn.clicked.connect(lambda: self._set_all_sidebar_sections(False))
+		row.addWidget(self.collapse_all_sections_btn)
+		return bar
+
+	def _set_all_sidebar_sections(self, expanded: bool):
+		"""Expande o colapsa todas las secciones de una sola pasada.
+
+		Se desactivan los updates del sidebar durante el bucle para que Qt haga
+		un solo relayout/repintado en vez de uno por sección.
+		"""
+		sections = getattr(self, "_sidebar_sections", {})
+		if not sections:
+			return
+		container = self._sidebar_layout.parentWidget()
+		if container is not None:
+			container.setUpdatesEnabled(False)
+		try:
+			for section in sections.values():
+				section.set_expanded(bool(expanded))
+		finally:
+			if container is not None:
+				container.setUpdatesEnabled(True)
+
+	def _sidebar_section(self, key_or_widget) -> CollapsibleSection | None:
+		"""Devuelve la sección por clave (`"log"`) o por su widget de contenido."""
+		if isinstance(key_or_widget, QWidget):
+			return getattr(self, "_sidebar_section_by_content", {}).get(key_or_widget)
+		return getattr(self, "_sidebar_sections", {}).get(str(key_or_widget))
+
+	def _on_sidebar_section_toggled(self, key: str, expanded: bool):
+		"""Persiste el estado de una sección apenas el usuario la abre/cierra."""
+		settings = getattr(self, "_ui_settings", None)
+		if settings is None:
+			return
+		settings.setValue(f"sidebar/section_{key}", bool(expanded))
+
+	def _restore_sidebar_sections_state(self):
+		"""Restaura desde QSettings qué secciones quedaron abiertas o cerradas."""
+		settings = getattr(self, "_ui_settings", None)
+		sections = getattr(self, "_sidebar_sections", {})
+		if settings is None or not sections:
+			return
+		container = self._sidebar_layout.parentWidget()
+		if container is not None:
+			container.setUpdatesEnabled(False)
+		try:
+			for key, section in sections.items():
+				stored = settings.value(f"sidebar/section_{key}", None)
+				if stored is None:
+					continue
+				section.set_expanded(bool(stored in (True, "true", "True", 1, "1")))
+		finally:
+			if container is not None:
+				container.setUpdatesEnabled(True)
+
+	def _save_sidebar_sections_state(self):
+		"""Vuelca el estado actual de todas las secciones a QSettings."""
+		settings = getattr(self, "_ui_settings", None)
+		sections = getattr(self, "_sidebar_sections", {})
+		if settings is None or not sections:
+			return
+		for key, section in sections.items():
+			settings.setValue(f"sidebar/section_{key}", bool(section.is_expanded()))
+
+	def _restore_fevi_settings(self):
+		"""Recupera el método de FEVI y los parámetros ECTb de la sesión anterior."""
+		settings = getattr(self, "_ui_settings", None)
+		self._fevi_method = self.FEVI_METHOD_ECTB
+		self._ectb_config = ECTbLVConfig()
+		self._fevi_regression = None
+		if settings is None:
+			return
+		method = str(settings.value("fevi/method", self.FEVI_METHOD_ECTB) or self.FEVI_METHOD_ECTB)
+		if method in self.FEVI_METHOD_LABELS:
+			self._fevi_method = method
+		regression = str(settings.value("fevi/regression", "") or "")
+		self._fevi_regression = regression if regression in EF_REGRESSIONS else None
+		defaults = ECTbLVConfig()
+		try:
+			self._ectb_config = ECTbLVConfig(
+				ed_wall_thickness_mm=float(settings.value("fevi/ectb_wall_mm", defaults.ed_wall_thickness_mm)),
+				n_angles=int(settings.value("fevi/ectb_angles", defaults.n_angles)),
+				radial_oversample=float(settings.value("fevi/ectb_oversample", defaults.radial_oversample)),
+				median_kernel_large=int(settings.value("fevi/ectb_median_large", defaults.median_kernel_large)),
+				median_kernel_small=int(settings.value("fevi/ectb_median_small", defaults.median_kernel_small)),
+				use_thickening=str(settings.value("fevi/ectb_thickening", "true")).lower() in ("true", "1"),
+				use_valve_plane=str(settings.value("fevi/ectb_valve_plane", "true")).lower() in ("true", "1"),
+				valve_septal_offset_mm=float(settings.value("fevi/ectb_valve_offset_mm", defaults.valve_septal_offset_mm)),
+				septal_angle_deg=float(settings.value("fevi/ectb_septal_angle", defaults.septal_angle_deg)),
+			)
+		except Exception:
+			self._ectb_config = defaults
+
+	def _save_fevi_settings(self):
+		"""Persiste método de FEVI y parámetros ECTb."""
+		settings = getattr(self, "_ui_settings", None)
+		if settings is None:
+			return
+		cfg = self.ectb_config()
+		settings.setValue("fevi/method", self.fevi_method())
+		settings.setValue("fevi/regression", self.fevi_regression() or "")
+		settings.setValue("fevi/ectb_wall_mm", float(cfg.ed_wall_thickness_mm))
+		settings.setValue("fevi/ectb_angles", int(cfg.n_angles))
+		settings.setValue("fevi/ectb_oversample", float(cfg.radial_oversample))
+		settings.setValue("fevi/ectb_median_large", int(cfg.median_kernel_large))
+		settings.setValue("fevi/ectb_median_small", int(cfg.median_kernel_small))
+		settings.setValue("fevi/ectb_thickening", bool(cfg.use_thickening))
+		settings.setValue("fevi/ectb_valve_plane", bool(cfg.use_valve_plane))
+		settings.setValue("fevi/ectb_valve_offset_mm", float(cfg.valve_septal_offset_mm))
+		settings.setValue("fevi/ectb_septal_angle", float(cfg.septal_angle_deg))
+
 	def _save_window_layout(self):
 		self._ui_settings.setValue("window_geometry", self.saveGeometry())
 		self._ui_settings.setValue("main_splitter_state", self.main_splitter.saveState())
 		self._ui_settings.setValue("right_splitter_state", self.right_splitter.saveState())
+		self._save_sidebar_sections_state()
+		self._save_fevi_settings()
 		self._ui_settings.sync()
 
 	def _load_global_ui_preferences(self):
@@ -1849,7 +2109,10 @@ class MainWindow(QMainWindow):
 
 	def _apply_global_ui_preferences(self):
 		if hasattr(self, "helper_box"):
-			self.helper_box.setVisible(bool(self._ui_show_helpers))
+			# Si la caja quedó envuelta en una sección colapsable hay que ocultar
+			# la sección entera; si no, quedaría el encabezado suelto sin contenido.
+			target = self._sidebar_section(self.helper_box) or self.helper_box
+			target.setVisible(bool(self._ui_show_helpers))
 		self.cine.set_ui_preferences(
 			show_helpers=bool(self._ui_show_helpers),
 			enable_tooltips=bool(self._ui_enable_tooltips),
@@ -1861,6 +2124,55 @@ class MainWindow(QMainWindow):
 			compact_controls=bool(self._ui_compact_controls),
 		)
 		self._apply_global_tooltips()
+
+	def open_ectb_window(self):
+		"""Abre (o trae al frente) la ventana de cuantificación ECTb.
+
+		La ventana se crea una sola vez y se reutiliza, así conserva los
+		parámetros que el usuario haya ajustado. El import es diferido para no
+		pagar el costo de construirla en el arranque de la aplicación.
+		"""
+		window = getattr(self, "_ectb_window", None)
+		if window is None:
+			from ui.ectb_window import ECTbWindow
+
+			window = ECTbWindow(self)
+			self._ectb_window = window
+		window.show()
+		window.raise_()
+		window.activateWindow()
+		window.recompute()
+
+	def _refresh_ectb_window(self):
+		"""Recalcula la ventana ECTb si está abierta (tras reprocesar el estudio)."""
+		window = getattr(self, "_ectb_window", None)
+		if window is not None and window.isVisible():
+			window.recompute()
+
+	def _sync_ectb_window_controls(self):
+		"""Vuelca la configuración vigente a los controles de la ventana ECTb."""
+		window = getattr(self, "_ectb_window", None)
+		if window is not None:
+			window.sync_from_main()
+
+	def open_gqc_window(self):
+		"""Abre (o trae al frente) el panel de control de calidad del gating."""
+		window = getattr(self, "_gqc_window", None)
+		if window is None:
+			from ui.gqc_window import GQCWindow
+
+			window = GQCWindow(self)
+			self._gqc_window = window
+		window.show()
+		window.raise_()
+		window.activateWindow()
+		window.recompute()
+
+	def _refresh_gqc_window(self):
+		"""Recalcula el panel GQC si está abierto (tras cargar o reprocesar)."""
+		window = getattr(self, "_gqc_window", None)
+		if window is not None and window.isVisible():
+			window.recompute()
 
 	def open_ui_preferences_dialog(self):
 		dlg = QDialog(self)
@@ -1951,6 +2263,11 @@ class MainWindow(QMainWindow):
 			"harmonics": int(self.harmonics_spin.value()),
 			"amp_filter": float(self.phase_threshold_spin.value()),
 			"normalize_reference": bool(self.normalize_check.isChecked()),
+			"gate_dropout_correction": bool(self.gate_dropout_check.isChecked()),
+			"fevi_method": str(self.fevi_method()),
+			"ectb_wall_mm": float(self.ectb_config().ed_wall_thickness_mm),
+			"ectb_valve_plane": bool(self.ectb_config().use_valve_plane),
+			"ectb_valve_offset_mm": float(self.ectb_config().valve_septal_offset_mm),
 			"phase_cmap": str(self.cmap_combo.currentText()),
 			"visual_style": str(self.visual_style_combo.currentText()),
 			"polar_rotation_deg": int(self.polar_rotation_spin.value()),
@@ -2031,6 +2348,29 @@ class MainWindow(QMainWindow):
 			self.phase_threshold_spin.setValue(float(params["amp_filter"]))
 		if "normalize_reference" in params:
 			self.normalize_check.setChecked(bool(params["normalize_reference"]))
+		if "gate_dropout_correction" in params:
+			# blockSignals: al cargar un preset no queremos disparar un reproceso
+			# extra; process_current() ya corre después con todos los parámetros.
+			self.gate_dropout_check.blockSignals(True)
+			self.gate_dropout_check.setChecked(bool(params["gate_dropout_correction"]))
+			self.gate_dropout_check.blockSignals(False)
+			self._refresh_gate_dropout_status()
+		if "fevi_method" in params:
+			# reprocess=False: process_current() ya corre después de aplicar el preset.
+			self.set_fevi_method(str(params["fevi_method"]), reprocess=False)
+		if "ectb_wall_mm" in params:
+			cfg = self.ectb_config()
+			cfg.ed_wall_thickness_mm = float(params["ectb_wall_mm"])
+			self.set_ectb_config(cfg)
+			self._sync_ectb_window_controls()
+		if "ectb_valve_plane" in params or "ectb_valve_offset_mm" in params:
+			cfg = self.ectb_config()
+			if "ectb_valve_plane" in params:
+				cfg.use_valve_plane = bool(params["ectb_valve_plane"])
+			if "ectb_valve_offset_mm" in params:
+				cfg.valve_septal_offset_mm = float(params["ectb_valve_offset_mm"])
+			self.set_ectb_config(cfg)
+			self._sync_ectb_window_controls()
 		if "phase_cmap" in params:
 			self.cmap_combo.setCurrentText(str(params["phase_cmap"]))
 		if "visual_style" in params:
@@ -2249,6 +2589,15 @@ class MainWindow(QMainWindow):
 			"#sincroSidebar { background: #f7f8fb; border-right: 1px solid #d7dce5; }"
 			"QGroupBox { font-weight: 600; border: 1px solid #d7dce5; border-radius: 7px; margin-top: 6px; background: white; }"
 			"QGroupBox::title { subcontrol-origin: margin; left: 7px; padding: 0 2px; color: #1f3b5b; }"
+			# El contenido de una seccion colapsable no lleva marco propio: el marco
+			# y el titulo los aporta el encabezado clickeable (QToolButton).
+			"QGroupBox#collapsibleContent { font-weight: 400; border: 1px solid #d7dce5; border-top: none;"
+			" border-top-left-radius: 0; border-top-right-radius: 0; margin-top: 0; background: white; }"
+			"QToolButton#collapsibleHeader { text-align: left; padding: 5px 8px; font-weight: 600; font-size: 11px;"
+			" color: #1f3b5b; background: #eaeff7; border: 1px solid #d7dce5; border-radius: 7px; margin-top: 6px; }"
+			"QToolButton#collapsibleHeader:hover { background: #dde6f4; }"
+			"QToolButton#collapsibleHeader:checked { background: #e3ebf7; border-bottom-left-radius: 0;"
+			" border-bottom-right-radius: 0; }"
 			"QPushButton { padding: 4px 7px; font-size: 11px; }"
 			"QLabel { font-size: 11px; }"
 			"QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox { background: white; }"
@@ -2971,6 +3320,131 @@ class MainWindow(QMainWindow):
 			self._set_progress(100, "Procesamiento completo")
 		state = "ON" if bool(checked) else "OFF"
 		self.statusBar().showMessage(f"Atenuación intestinal visual global: {state}")
+
+	# ------------------------------------------------------------------
+	# Dropout de cuentas del último gate (ECTb 4.0, Technical Overview 22.8)
+	# ------------------------------------------------------------------
+
+	def gate_dropout_enabled(self) -> bool:
+		"""True si el usuario dejó activa la corrección de dropout del último gate."""
+		return bool(getattr(self, "gate_dropout_check", None) is not None and self.gate_dropout_check.isChecked())
+
+	def _apply_gate_dropout_correction(self, cube, label: str = "", log: bool = True):
+		"""Devuelve el cubo con el último gate escalado según ECTb 22.8.
+
+		Se llama justo antes de segmentar y de analizar fase. Si la opción está
+		apagada o el déficit es despreciable, devuelve el cubo tal cual (sin
+		copiarlo) para no pagar memoria ni tiempo de más.
+
+		Returns
+		-------
+		(cube, info) — `info` es el dict de `analyze_gate_dropout` (o None si
+		el cubo no era 4D / la opción estaba apagada).
+		"""
+		arr = np.asarray(cube, dtype=np.float64)
+		if arr.ndim != 4 or not self.gate_dropout_enabled():
+			return arr, None
+		try:
+			corrected, info = correct_last_gate_dropout(arr)
+		except ValueError:
+			return arr, None
+		suffix = f" [{label}]" if label else ""
+		if info.get("applied"):
+			if log:
+				self._log(f"Dropout último gate{suffix}: {info['message']}")
+			return corrected, info
+		return arr, info
+
+	def _refresh_gate_dropout_status(self, info: dict | None = None):
+		"""Actualiza el cartel de estado del dropout en el sidebar.
+
+		Si no se pasa `info`, lo recalcula sobre el estudio actual. La medición
+		es un `sum` sobre el cubo: barata, se puede llamar en cada refresco.
+		"""
+		label = getattr(self, "gate_dropout_status", None)
+		if label is None:
+			return
+		if info is None:
+			cube = getattr(self.study, "cube", None) if self.study is not None else None
+			if cube is None or np.asarray(cube).ndim != 4:
+				label.setText("Sin estudio gated cargado.")
+				label.setStyleSheet("color:#7a7a7a;")
+				return
+			try:
+				info = analyze_gate_dropout(cube)
+			except ValueError:
+				label.setText("El estudio actual no es un gated 4D.")
+				label.setStyleSheet("color:#7a7a7a;")
+				return
+
+		enabled = self.gate_dropout_enabled()
+		prefix = "" if enabled else "[corrección OFF] "
+		label.setText(prefix + str(info.get("message", "")))
+		if info.get("clipped"):
+			color = "#b03030"
+		elif info.get("significant"):
+			color = "#1f3b5b" if enabled else "#a06000"
+		else:
+			color = "#4b7a4b"
+		label.setStyleSheet(f"color:{color};")
+
+	def _on_gate_dropout_toggled(self, checked: bool):
+		"""Reprocesa en vivo al prender/apagar la corrección.
+
+		El cambio invalida segmentación y fase (el cubo de entrada cambió), así
+		que hay que rehacer el pipeline. Se hace con un disparo diferido para
+		que la UI pinte el checkbox antes de arrancar el cálculo.
+		"""
+		self._refresh_gate_dropout_status()
+		state = "ON" if bool(checked) else "OFF"
+		self.statusBar().showMessage(f"Corrección de dropout del último gate: {state}")
+		if self.study is None or not bool(getattr(self.study, "reconstructed", True)):
+			return
+		self._cache_seg_sig = ""
+		self._cache_phase_sig = ""
+		self._invalidate_output_cache()
+		QTimer.singleShot(0, self.process_current)
+
+	def show_gate_dropout_help(self):
+		"""Ventana de ayuda del control de dropout del último gate."""
+		QMessageBox.information(
+			self,
+			"Dropout del último gate",
+			"QUÉ ES\n"
+			"En un gated SPECT el ciclo R-R se divide en 8 o 16 gates. Como el R-R no es constante "
+			"latido a latido, los latidos más cortos terminan antes de llenar el último gate. "
+			"Resultado: el último gate acumula sistemáticamente menos cuentas que los demás.\n\n"
+			"POR QUÉ IMPORTA\n"
+			"• FEVI: la curva de volumen no cierra el ciclo y el volumen telediastólico final "
+			"queda subestimado.\n"
+			"• Fase: la caída artificial del último punto de la curva de actividad mete un escalón "
+			"que corre la fase estimada y ensancha la distribución, así que PSD y Bandwidth salen "
+			"más altos de lo real (falso positivo de disincronía).\n\n"
+			"QUÉ HACE LA CORRECCIÓN\n"
+			"Escala todas las muestras del último gate por un único factor, de forma que su suma "
+			"total iguale la del primer gate:\n\n"
+			"    factor = cuentas(gate 1) / cuentas(último gate)\n\n"
+			"Es una corrección de ganancia global: NO deforma el miocardio, NO mueve bordes, NO "
+			"cambia la forma espacial. Solo restituye la estadística perdida.\n\n"
+			"ORIGEN\n"
+			"Emory Cardiac Toolbox 4.0 — Technical Overview, sección 22.8. Es el mismo paso que "
+			"aplica el ECTb antes de calcular volúmenes y fase.\n\n"
+			"EL SUPUESTO\n"
+			"Se asume que el primer y el último gate son adyacentes en el ciclo (ambos en "
+			"telediastole) y que por lo tanto deberían tener cuentas comparables. Es razonable en un "
+			"gated normal, pero no exacto: si el último gate tuviera legítimamente algo menos de "
+			"cuentas, la corrección mete un error pequeño en sentido contrario. Ese residuo es mucho "
+			"menor que el dropout que corrige (10-20% de déficit por R-R vs pocos % de diferencia "
+			"fisiológica), por eso el ECTb lo aplica por defecto.\n\n"
+			"CUÁNDO APAGARLA\n"
+			"• Si el estudio ya viene corregido por la consola: el cartel del sidebar va a mostrar "
+			"un dropout de ~0% y la corrección no se aplica sola.\n"
+			"• Si querés comparar A/B el efecto de la corrección sobre PSD/BW/FEVI.\n\n"
+			"SEGURIDAD\n"
+			"Si el último gate quedó con menos de la mitad de las cuentas, el factor se recorta a "
+			"2.0 y aparece un aviso en rojo: amplificar más allá de eso solo amplifica ruido, y "
+			"conviene revisar la ventana de aceptación del R-R de la adquisición.",
+		)
 
 	def _apply_compare_axes_clinical_quick_preset(self):
 		self.compare_axes_zoom_slider.setValue(140)
@@ -3733,8 +4207,12 @@ class MainWindow(QMainWindow):
 				QMessageBox.warning(self, "SINCRO", "Modo manual activo pero no hay ROIs definidos. Dibujá ROI o cambiá a auto/threshold.")
 				return
 			manual_rois = parsed_rois if seg_method == "manual" else None
-			cube_for_segmentation = self._apply_intestinal_mask_to_cube(self.study.cube, self.cine, require_global_visual=False)
-			cube_for_analysis = np.asarray(self.study.cube, dtype=np.float64)
+			# Corrección de dropout del último gate ANTES de segmentar y de analizar
+			# fase: si no, el déficit del último gate contamina la máscara y la FFT.
+			cube_corrected, dropout_info = self._apply_gate_dropout_correction(self.study.cube, "principal")
+			self._refresh_gate_dropout_status(dropout_info)
+			cube_for_segmentation = self._apply_intestinal_mask_to_cube(cube_corrected, self.cine, require_global_visual=False)
+			cube_for_analysis = cube_corrected
 			intestinal_sig_primary = self._intestinal_signature_for_widget(self.cine)
 			intestinal_sig_primary["global_render"] = "ignored_for_segmentation"
 			seg_payload = {
@@ -3742,6 +4220,7 @@ class MainWindow(QMainWindow):
 				"method": seg_method,
 				"threshold": round(float(self.threshold_spin.value()), 5),
 				"sigma": round(float(self.sigma_spin.value()), 5),
+				"gate_dropout": bool(self.gate_dropout_enabled()),
 				"intestinal": intestinal_sig_primary,
 				"manual_rois": self._serialize_manual_rois(manual_rois or {}),
 			}
@@ -3770,6 +4249,7 @@ class MainWindow(QMainWindow):
 				"harmonics": int(self.harmonics_spin.value()),
 				"raw_amp_filter": round(float(RAW_PHASE_QC_AMP_FILTER), 5),
 				"clinical_amp_filter": round(clinical_amp_filter, 5),
+				"gate_dropout": bool(self.gate_dropout_enabled()),
 				"normalize_reference": bool(self.normalize_check.isChecked()),
 			}
 			phase_sig = self._hash_payload(phase_payload)
@@ -3925,6 +4405,17 @@ class MainWindow(QMainWindow):
 				self._write_ungated_output()
 			except Exception as exc:
 				self._log(f"[WARN] Desgatillado falló: {exc}")
+
+			# La ventana de cuantificación ECTb, si está abierta, muestra datos
+			# del estudio anterior hasta que se le avisa.
+			try:
+				self._refresh_ectb_window()
+			except Exception as exc:
+				self._log(f"[WARN] Refresco de la ventana ECTb falló: {exc}")
+			try:
+				self._refresh_gqc_window()
+			except Exception as exc:
+				self._log(f"[WARN] Refresco del panel GQC falló: {exc}")
 		except Exception as exc:
 			self._set_progress(0, "Error")
 			self.statusBar().showMessage("Error")
@@ -4139,7 +4630,10 @@ class MainWindow(QMainWindow):
 		if voxel_ml is None:
 			return {"available": False}
 
-		cube = np.asarray(self.study.cube, dtype=np.float64)
+		# El mismo cubo corregido que usó fase/segmentación: si el último gate
+		# arrastra el dropout de R-R, la curva de volumen no cierra y la FEVI sale
+		# sesgada (ECTb 22.8).
+		cube, _ = self._apply_gate_dropout_correction(self.study.cube, log=False)
 		if cube.ndim != 4 or cube.shape[0] < 2:
 			return {"available": False}
 
@@ -4691,6 +5185,167 @@ class MainWindow(QMainWindow):
 			"gate_volumes_ml": gate_volumes_ml,
 		}
 
+	# ------------------------------------------------------------------
+	# Selección del método de cuantificación de FEVI
+	# ------------------------------------------------------------------
+
+	#: Método por máximo de cuentas del Emory Cardiac Toolbox. Es el que usa el
+	#: informe: sobreestima bastante menos que el de umbral.
+	FEVI_METHOD_ECTB = "ectb"
+	#: Método original por umbral de actividad + factor de corrección basal.
+	#: Se conserva seleccionable para poder comparar.
+	FEVI_METHOD_THRESHOLD = "umbral"
+
+	FEVI_METHOD_LABELS = {
+		FEVI_METHOD_ECTB: "ECTb (máximo de cuentas)",
+		FEVI_METHOD_THRESHOLD: "Anterior (umbral endocárdico)",
+	}
+
+	def fevi_method(self) -> str:
+		"""Método de FEVI que alimenta resumen, gráficos e informe."""
+		method = str(getattr(self, "_fevi_method", self.FEVI_METHOD_ECTB))
+		return method if method in self.FEVI_METHOD_LABELS else self.FEVI_METHOD_ECTB
+
+	def fevi_method_label(self) -> str:
+		return self.FEVI_METHOD_LABELS[self.fevi_method()]
+
+	def set_fevi_method(self, method: str, *, reprocess: bool = True):
+		"""Cambia el método de FEVI del informe y regenera las salidas.
+
+		Los gráficos y el PDF ya emitidos quedan con el método anterior, así que
+		se invalida la caché de salidas y se reprocesa.
+		"""
+		method = method if method in self.FEVI_METHOD_LABELS else self.FEVI_METHOD_ECTB
+		if method == getattr(self, "_fevi_method", None):
+			return
+		self._fevi_method = method
+		self._log(f"[FEVI] Método del informe: {self.fevi_method_label()}")
+		self.statusBar().showMessage(f"FEVI del informe: {self.fevi_method_label()}")
+		self._invalidate_output_cache()
+		if reprocess and self.study is not None and self.seg is not None:
+			QTimer.singleShot(0, self.process_current)
+
+	def ectb_config(self) -> ECTbLVConfig:
+		"""Parámetros ECTb vigentes (los que se ajustan en la ventana ECTb)."""
+		cfg = getattr(self, "_ectb_config", None)
+		return cfg if isinstance(cfg, ECTbLVConfig) else ECTbLVConfig()
+
+	def set_ectb_config(self, config: ECTbLVConfig):
+		self._ectb_config = config
+
+	def fevi_regression(self) -> str | None:
+		"""Regresión de conversión activa, o None si se informa en escala ECTb."""
+		key = getattr(self, "_fevi_regression", None)
+		return key if key in EF_REGRESSIONS else None
+
+	def set_fevi_regression(self, key: str | None):
+		"""Elige contra qué software se expresa la FEVI equivalente.
+
+		No cambia la FEVI del informe: solo agrega el valor convertido, para poder
+		compararlo con un estudio previo hecho en otro equipo.
+		"""
+		key = key if key in EF_REGRESSIONS else None
+		if key == getattr(self, "_fevi_regression", None):
+			return
+		self._fevi_regression = key
+		if key:
+			self._log(f"[FEVI] Equivalencia informada en escala: {EF_REGRESSIONS[key].label}")
+		else:
+			self._log("[FEVI] Equivalencia con otro software desactivada.")
+		self._invalidate_output_cache()
+		if self.study is not None and self.metrics is not None:
+			self._refresh_summary()
+
+	def _estimate_lv_ef_ectb(self) -> dict[str, object | None]:
+		"""FEVI por el método ECTb, en el mismo formato que el estimador anterior.
+
+		Devolver el mismo diccionario permite que resumen, gráficos, exportación
+		y PDF funcionen igual con cualquiera de los dos métodos.
+		"""
+		def unavailable(reason: str) -> dict[str, object | None]:
+			return {"available": False, "method": "ectb_max_counts", "reason": reason}
+
+		if self.study is None or self.seg is None:
+			return unavailable("Falta estudio o segmentación.")
+		pixel_spacing = getattr(self.study, "pixel_spacing", None)
+		slice_mm = getattr(self.study, "z_spacing_mm", None)
+		if not pixel_spacing or slice_mm is None:
+			return unavailable("El estudio no trae spacing válido.")
+		cube = getattr(self.study, "cube", None)
+		if cube is None:
+			return unavailable("El estudio no tiene cubo gated.")
+
+		try:
+			cube, _ = self._apply_gate_dropout_correction(cube, log=False)
+			res = analyze_lv_ectb(
+				cube,
+				self.seg,
+				(float(pixel_spacing[0]), float(pixel_spacing[1])),
+				float(slice_mm),
+				self.ectb_config(),
+			)
+		except Exception as exc:
+			self._log(f"[WARN] FEVI ECTb falló: {exc}")
+			return unavailable(str(exc))
+
+		if not res.available:
+			return unavailable(res.reason)
+
+		payload: dict[str, object | None] = {
+			"available": True,
+			"method": "ectb_max_counts",
+			"valid_slices": int(len(res.valid_slices)),
+			"edv_ml": float(res.edv_ml),
+			"esv_ml": float(res.esv_ml),
+			"sv_ml": float(res.sv_ml),
+			"ef_pct": float(res.ef_pct),
+			"ed_gate": int(res.ed_gate),
+			"es_gate": int(res.es_gate),
+			"gate_volumes_ml": [float(v) for v in res.gate_volumes_ml],
+			"myocardial_volume_ml": float(res.myocardial_volume_ml),
+			"myocardial_mass_g": float(res.myocardial_mass_g),
+			"thickening_pct": float(res.thickening_pct),
+			"ed_wall_thickness_mm": float(res.config.ed_wall_thickness_mm),
+			"valve_plane": bool(res.config.use_valve_plane),
+			"valve_offset_mm": float(res.config.valve_septal_offset_mm),
+			"valve_removed_ml": float(res.valve_removed_ml),
+			"shape_index_ed": float(res.shape_index_ed),
+			"shape_index_es": float(res.shape_index_es),
+			"long_axis_mm": float(res.long_axis_mm),
+			"short_axis_ed_mm": float(res.short_axis_ed_mm),
+			"short_axis_es_mm": float(res.short_axis_es_mm),
+			"notes": list(res.notes),
+		}
+		regression = self.fevi_regression()
+		if regression:
+			reg = EF_REGRESSIONS[regression]
+			payload["regression_key"] = regression
+			payload["regression_label"] = reg.label
+			payload["ef_pct_converted"] = float(convert_ef_pct(res.ef_pct, reg))
+		return payload
+		return payload
+
+	def _estimate_lv_ef(self) -> dict[str, object | None]:
+		"""Punto único de entrada para la FEVI del informe.
+
+		Si el método ECTb no puede resolver (segmentación pobre, spacing raro),
+		cae al método anterior en vez de dejar el informe sin FEVI.
+		"""
+		if self.fevi_method() == self.FEVI_METHOD_THRESHOLD:
+			return self._estimate_lv_ef_preliminary()
+		result = self._estimate_lv_ef_ectb()
+		if result.get("available"):
+			return result
+		fallback = self._estimate_lv_ef_preliminary()
+		if fallback.get("available"):
+			fallback["fallback_from"] = "ectb_max_counts"
+			fallback["fallback_reason"] = str(result.get("reason") or "")
+			self._log(
+				"[FEVI] ECTb no pudo cuantificar "
+				f"({fallback['fallback_reason']}); se usó el método anterior."
+			)
+		return fallback
+
 	def _harmonize_volumes_with_ef(self, vol: dict[str, float | None], ef: dict[str, object | None]) -> dict[str, float | None]:
 		"""Unifica la cavidad reportada con EDV cuando FEVI está disponible.
 
@@ -4960,7 +5615,7 @@ class MainWindow(QMainWindow):
 			return
 
 		vol = self._compute_volumes_ml()
-		ef = self._estimate_lv_ef_preliminary()
+		ef = self._estimate_lv_ef()
 		vol = self._harmonize_volumes_with_ef(vol, ef)
 		ctx = self._study_context(
 			path_override=str(getattr(self, "_output_study_path_override", "") or self.file_edit.text().strip()),
@@ -5064,12 +5719,44 @@ class MainWindow(QMainWindow):
 				clinical.append("  → Diferencia intermedia: correlacionar con clínica.")
 
 		clinical.append("")
-		clinical.append("FEVI preliminar")
+		clinical.append(f"FEVI — método: {self.fevi_method_label()}")
 		if ef.get("available"):
 			clinical.append(f"  EDV: {float(ef['edv_ml']):.2f} mL (gate {int(ef['ed_gate'])})")
 			clinical.append(f"  ESV: {float(ef['esv_ml']):.2f} mL (gate {int(ef['es_gate'])})")
 			clinical.append(f"  SV: {float(ef['sv_ml']):.2f} mL")
 			clinical.append(f"  FEVI: {float(ef['ef_pct']):.1f}%")
+			if ef.get("ef_pct_converted") is not None:
+				clinical.append(
+					f"  Equivalente en escala {ef.get('regression_label')}: "
+					f"{float(ef['ef_pct_converted']):.1f}% "
+					"(solo para comparar con informes de ese equipo)"
+				)
+			if ef.get("ed_wall_thickness_mm") is not None:
+				clinical.append(f"  Espesor de pared en ED usado: {float(ef['ed_wall_thickness_mm']):.1f} mm")
+			if ef.get("valve_removed_ml"):
+				clinical.append(
+					f"  Plano valvular de 2 piezas ({float(ef.get('valve_offset_mm', 0.0)):.1f} mm septal): "
+					f"-{float(ef['valve_removed_ml']):.1f} mL de base"
+				)
+			elif ef.get("valve_plane") is False:
+				clinical.append("  Plano valvular desactivado: base cortada con plano perpendicular")
+			if ef.get("myocardial_mass_g") is not None:
+				clinical.append(f"  Masa miocárdica: {float(ef['myocardial_mass_g']):.1f} g")
+			if ef.get("thickening_pct") is not None:
+				clinical.append(f"  Engrosamiento sistólico: {float(ef['thickening_pct']):+.1f}%")
+			if ef.get("shape_index_ed") is not None:
+				clinical.append(
+					f"  Índice de esfericidad ED/ES: {float(ef['shape_index_ed']):.2f} / "
+					f"{float(ef['shape_index_es']):.2f} "
+					f"(eje corto {float(ef.get('short_axis_ed_mm', 0.0)):.0f} mm / "
+					f"eje largo {float(ef.get('long_axis_mm', 0.0)):.0f} mm). "
+					"Más cerca de 1 = ventrículo más esférico (remodelado)."
+				)
+			if ef.get("fallback_from"):
+				clinical.append(
+					f"  Aviso: el método ECTb no pudo cuantificar ({ef.get('fallback_reason')}); "
+					"se usó el método anterior."
+				)
 			clinical.append("  Nota: estimación preliminar de investigación.")
 			# Aviso base/ápex: la elección del límite basal afecta MUCHO EDV/ESV/FEVI.
 			# Un corte basal más bajo incluye más volumen (FEVI más baja) pero puede
@@ -5709,7 +6396,7 @@ class MainWindow(QMainWindow):
 		else:
 			self._log("Cache tab: comparacion_ejes sin cambios, se omite regeneración.")
 
-		ef = self._estimate_lv_ef_preliminary()
+		ef = self._estimate_lv_ef()
 		n_gates = int(study_cube_render.shape[0])
 		if ef.get("available"):
 			ed_gate = max(0, min(n_gates - 1, int(ef["ed_gate"]) - 1))
@@ -5831,7 +6518,11 @@ class MainWindow(QMainWindow):
 				ax_ef.axvline(es_gate, color=style["es"], linestyle="--", linewidth=1.2)
 				ax_ef.text(ed_gate, float(np.nanmax(gate_volumes)) * 1.01, "ED", color=style["ed"], ha="center", va="bottom", fontsize=9, fontweight="bold")
 				ax_ef.text(es_gate, float(np.nanmax(gate_volumes)) * 1.01, "ES", color=style["es"], ha="center", va="bottom", fontsize=9, fontweight="bold")
-				ax_ef.set_title(f"Curva FEVI preliminar por gate — FEVI {float(ef.get('ef_pct', 0.0)):.1f}%", color=style["fg"], fontsize=12, fontweight="bold")
+				ax_ef.set_title(
+					f"Curva de volumen por gate — FEVI {float(ef.get('ef_pct', 0.0)):.1f}% "
+					f"({self.fevi_method_label()})",
+					color=style["fg"], fontsize=12, fontweight="bold",
+				)
 				ax_ef.set_ylabel("Volumen estimado (mL)", color=style["fg"])
 				ax_ef.tick_params(axis="x", colors=style["subtle"])
 				ax_ef.tick_params(axis="y", colors=style["vol"])
@@ -6876,7 +7567,7 @@ class MainWindow(QMainWindow):
 			"report_cmap_polar_perf": str(self.report_cmap_polar_perf.currentText()),
 		}
 		vol = self._compute_volumes_ml()
-		ef = self._estimate_lv_ef_preliminary()
+		ef = self._estimate_lv_ef()
 		vol = self._harmonize_volumes_with_ef(vol, ef)
 		report_metrics = dict(self.metrics)
 		try:
@@ -10017,8 +10708,9 @@ class MainWindow(QMainWindow):
 	def _process_secondary_bundle(self, path: str) -> dict:
 		comp_study = dicom_loader.load(path, verbose=False)
 		comp_axis = self._load_axis_companions(path)
-		comp_cube_for_segmentation = self._apply_intestinal_mask_to_cube(comp_study.cube, self.cine_compare, require_global_visual=False)
-		comp_cube_for_analysis = np.asarray(comp_study.cube, dtype=np.float64)
+		comp_cube_corrected, _ = self._apply_gate_dropout_correction(comp_study.cube, "comparación")
+		comp_cube_for_segmentation = self._apply_intestinal_mask_to_cube(comp_cube_corrected, self.cine_compare, require_global_visual=False)
+		comp_cube_for_analysis = comp_cube_corrected
 		seg_method = "auto"
 		manual_rois = None
 		parsed_compare_rois = self._parse_manual_rois_text(self.compare_manual_rois_text)
@@ -10314,7 +11006,7 @@ class MainWindow(QMainWindow):
 		saved_study, saved_seg = self.study, self.seg
 		try:
 			self.study, self.seg = study, seg
-			return self._estimate_lv_ef_preliminary()
+			return self._estimate_lv_ef()
 		finally:
 			self.study, self.seg = saved_study, saved_seg
 

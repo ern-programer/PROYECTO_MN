@@ -6,7 +6,7 @@ Métricas de asincronía a partir de la distribución de fase (grados 0-360°).
 
 Métricas (Emory / literatura):
 - Phase SD (desviación estándar CIRCULAR)
-- Bandwidth (P95 - P5 sobre distribución centrada)
+- Bandwidth (banda más angosta que contiene el 95% de los elementos, definición ECTb)
 - Skewness, Kurtosis (forma de la distribución)
 - Entropy Shannon (bits) e Entropy normalizada (%)
 - Asynchrony Index (% voxels a >2σ de la media)
@@ -17,6 +17,14 @@ Métricas (Emory / literatura):
 NOTA sobre circularidad: la fase es angular (0°=360°). La media y el SD se calculan
 de forma CIRCULAR para no romperse en el wrap. Para bandwidth/skew/kurt/entropy se
 "descentra" la distribución alrededor de su media circular y se opera en lineal.
+
+NOTA sobre el BANDWIDTH: el Emory Cardiac Toolbox lo define como **la banda que
+contiene el 95% de los elementos** de la distribución de fase. Acá se calculó
+durante mucho tiempo como P95 − P5, que es el 90% y da un número sistemáticamente
+MÁS CHICO. Eso importa porque las bases de normalidad publicadas (core.normal_db)
+están en la escala del 95%: compararlas contra un bandwidth del 90% subestima la
+disincronía. Desde ahora `bandwidth` usa la definición del ECTb y el valor viejo
+queda expuesto como `bandwidth_p5_p95` para poder comparar con informes previos.
 """
 from __future__ import annotations
 
@@ -26,6 +34,10 @@ from scipy import stats
 # Umbrales técnicos históricos por Phase SD (grados). La interpretación clínica
 # final debe compararse contra una DB normal/software específica (core.normal_db).
 CLASS_THRESHOLDS = {"NORMAL": 20.0, "MILD": 40.0, "MODERATE": 60.0}  # >60 = SEVERE
+
+#: Fracción de la distribución de fase que debe contener el bandwidth. El ECTb
+#: usa 95%; el P95−P5 histórico usaba 90% y por eso daba más angosto.
+BANDWIDTH_COVERAGE = 0.95
 
 
 def circular_mean_deg(phases_deg: np.ndarray, weights: np.ndarray | None = None) -> float:
@@ -60,6 +72,47 @@ def _center_around_mean(phases_deg: np.ndarray, mean_deg: float) -> np.ndarray:
     return d
 
 
+def narrowest_band_deg(
+    centered_deg: np.ndarray, coverage: float = BANDWIDTH_COVERAGE
+) -> tuple[float, float, float]:
+    """Banda MÁS ANGOSTA que contiene `coverage` de los elementos.
+
+    Es la definición del bandwidth del Emory Cardiac Toolbox: "la banda que
+    contiene el 95% de los elementos de la distribución de fase".
+
+    No es lo mismo que P97.5 − P2.5. Los percentiles simétricos recortan la misma
+    proporción de cada cola, pero la distribución de fase es asimétrica (tiene
+    cola derecha por los segmentos de activación tardía), así que la banda
+    simétrica sale más ancha de lo necesario. Buscando la ventana más angosta se
+    obtiene el intervalo de máxima densidad, que es lo que representa "dónde está
+    concentrada la contracción" y lo que reportan los paquetes clínicos.
+
+    Se resuelve ordenando y deslizando una ventana de k elementos: O(n log n),
+    exacto, sin depender del binning de un histograma.
+
+    Returns
+    -------
+    (ancho, borde_inferior, borde_superior) en grados, relativos a la media circular.
+    """
+    values = np.sort(np.asarray(centered_deg, dtype=np.float64))
+    n = values.size
+    if n == 0:
+        return 0.0, 0.0, 0.0
+    if n == 1:
+        return 0.0, float(values[0]), float(values[0])
+
+    k = int(np.ceil(float(coverage) * n))
+    k = max(2, min(k, n))
+    if k == n:
+        return float(values[-1] - values[0]), float(values[0]), float(values[-1])
+
+    lows = values[: n - k + 1]
+    highs = values[k - 1 :]
+    widths = highs - lows
+    i = int(np.argmin(widths))
+    return float(widths[i]), float(lows[i]), float(highs[i])
+
+
 def calculate_phase_metrics(phases_deg: np.ndarray, hist_bins: int = 360) -> dict:
     """
     Calcula todas las métricas de asincronía sobre las fases (grados 0-360).
@@ -85,7 +138,11 @@ def calculate_phase_metrics(phases_deg: np.ndarray, hist_bins: int = 360) -> dic
 
     # Distribución centrada (lineal) para BW/skew/kurt
     centered = _center_around_mean(phases_deg, mean_deg)
-    bandwidth = float(np.percentile(centered, 95) - np.percentile(centered, 5))
+    # Bandwidth con la definición del ECTb (banda que contiene el 95%). Se
+    # conserva el P95−P5 histórico para poder comparar con informes anteriores
+    # nuestros, que salían con ese criterio.
+    bandwidth, bw_low, bw_high = narrowest_band_deg(centered, BANDWIDTH_COVERAGE)
+    bandwidth_p5_p95 = float(np.percentile(centered, 95) - np.percentile(centered, 5))
     skewness = float(stats.skew(centered)) if n > 2 else 0.0
     kurtosis = float(stats.kurtosis(centered)) if n > 3 else 0.0
 
@@ -116,6 +173,11 @@ def calculate_phase_metrics(phases_deg: np.ndarray, hist_bins: int = 360) -> dic
         "mean_phase": round(mean_deg, 2),
         "phase_sd": round(phase_sd, 2),
         "bandwidth": round(bandwidth, 2),
+        "bandwidth_coverage_pct": round(BANDWIDTH_COVERAGE * 100.0, 1),
+        "bandwidth_definition": "banda mas angosta que contiene el 95% de los elementos (ECTb)",
+        "bandwidth_low_phase": round(float((mean_deg + bw_low) % 360.0), 2),
+        "bandwidth_high_phase": round(float((mean_deg + bw_high) % 360.0), 2),
+        "bandwidth_p5_p95": round(bandwidth_p5_p95, 2),
         "skewness": round(skewness, 3),
         "kurtosis": round(kurtosis, 3),
         "entropy": round(entropy_shannon, 3),
