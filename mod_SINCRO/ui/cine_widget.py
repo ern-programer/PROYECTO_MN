@@ -23,9 +23,13 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.path import Path as MplPath
 from PyQt6.QtCore import QTimer, QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
-from PyQt6.QtWidgets import QCheckBox, QComboBox, QDialog, QGridLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget, QHBoxLayout, QMessageBox
+from PyQt6.QtWidgets import (
+	QCheckBox, QComboBox, QDialog, QGridLayout, QLabel, QPushButton, QSlider,
+	QToolButton, QVBoxLayout, QWidget, QHBoxLayout, QMessageBox,
+)
 
 from core.col_registry import register_all_colormaps, available_colormaps
+from ui.floating_toolbar import FloatingToolbar
 
 
 _FRENCH_CMAP = LinearSegmentedColormap.from_list(
@@ -697,7 +701,8 @@ class CineWidget(QWidget):
 		self.zoom_slider.setRange(40, 500)
 		self.zoom_slider.setValue(100)
 		self.zoom_slider.setMaximumHeight(20)
-		self.zoom_slider.setMaximumWidth(280)
+		self.zoom_slider.setMinimumWidth(320)
+		self.zoom_slider.setMaximumWidth(520)
 		self.zoom_slider.valueChanged.connect(self._on_zoom_slider)
 		self.zoom_prev_btn = QPushButton("<")
 		self.zoom_next_btn = QPushButton(">")
@@ -789,7 +794,8 @@ class CineWidget(QWidget):
 		self.speed_slider.setRange(50, 600)
 		self.speed_slider.setValue(250)
 		self.speed_slider.setMaximumHeight(20)
-		self.speed_slider.setMaximumWidth(280)
+		self.speed_slider.setMinimumWidth(320)
+		self.speed_slider.setMaximumWidth(520)
 		self.speed_slider.valueChanged.connect(self._on_speed_change)
 		self.speed_label = QLabel("250 ms")
 		self.speed_slider.setToolTip("Tiempo por frame: más bajo = más rápido.")
@@ -798,7 +804,8 @@ class CineWidget(QWidget):
 		self.smooth_slider.setRange(0, 30)
 		self.smooth_slider.setValue(0)
 		self.smooth_slider.setMaximumHeight(20)
-		self.smooth_slider.setMaximumWidth(280)
+		self.smooth_slider.setMinimumWidth(320)
+		self.smooth_slider.setMaximumWidth(520)
 		self.smooth_slider.valueChanged.connect(self._on_smooth_change)
 		self.smooth_prev_btn = QPushButton("<")
 		self.smooth_next_btn = QPushButton(">")
@@ -831,64 +838,92 @@ class CineWidget(QWidget):
 		self.window_high_slider.valueChanged.connect(self._on_window_high_change)
 		self.window_high_label = QLabel("100%")
 
-		controls = QGridLayout()
-		controls.setHorizontalSpacing(8)
-		controls.setVerticalSpacing(2)
-		controls.addWidget(QLabel("Colormap"), 0, 0)
-		controls.addWidget(self.cmap_combo, 0, 1)
-		controls.addWidget(self.invert_cmap_check, 0, 2)
-		controls.addWidget(self.play_button, 0, 3)
-		controls.addWidget(self.zoom_reset, 0, 4)
-		controls.addWidget(self.auto_window_btn, 0, 5)
-		controls.addWidget(self.auto_roi_btn, 0, 6)
-		controls.addWidget(self.auto_roi_all_btn, 0, 7)
-		controls.addWidget(self.auto_roi_config_btn, 0, 8)
-		controls.addWidget(self.auto_roi_help_btn, 0, 9)
-		controls.addWidget(self.auto_roi_method_label, 0, 10)
-		controls.addWidget(self.auto_roi_empty_only_check, 0, 11)
-		controls.addWidget(self.show_auto_roi_check, 0, 12)
-		controls.addWidget(self.per_gate_roi_check, 0, 13)
-		controls.addWidget(self.qc_gates_btn, 0, 14)
-		controls.addWidget(self.intestinal_roi_toggle_btn, 1, 9)
-		controls.addWidget(self.intestinal_apply_btn, 1, 10)
-		controls.addWidget(self.intestinal_roi_clear_btn, 1, 11)
-		controls.addWidget(QLabel("Atenuar int."), 1, 12)
-		controls.addWidget(self.intestinal_atten_slider, 1, 13)
-		controls.addWidget(QLabel("Feather"), 2, 8)
-		controls.addWidget(self.intestinal_feather_slider, 2, 9)
-		controls.addWidget(self.intestinal_feather_label, 2, 10)
-		controls.addWidget(self.intestinal_atten_label, 2, 11)
-		controls.addWidget(QLabel("Alcance int."), 2, 12)
-		controls.addWidget(self.intestinal_scope_combo, 2, 13)
+		# --- Grupo esencial (siempre visible): colormap, play, navegación de
+		# gate/slice, zoom, velocidad y smooth. Son los controles que se usan
+		# todo el tiempo mientras se mira el cine.
+		nav_grid = QGridLayout()
+		nav_grid.setHorizontalSpacing(8)
+		nav_grid.setVerticalSpacing(2)
+		nav_grid.addWidget(QLabel("Colormap"), 0, 0)
+		nav_grid.addWidget(self.cmap_combo, 0, 1)
+		nav_grid.addWidget(self.invert_cmap_check, 0, 2)
+		nav_grid.addWidget(self.play_button, 0, 3)
+		nav_grid.addWidget(self.zoom_reset, 0, 4)
 
-		controls.addWidget(self.gate_label, 1, 0)
-		controls.addWidget(self.gate_prev_btn, 1, 1)
-		controls.addWidget(self.gate_slider, 1, 2)
-		controls.addWidget(self.gate_next_btn, 1, 3)
-		controls.addWidget(self.slice_label, 1, 4)
-		controls.addWidget(self.slice_prev_btn, 1, 5)
-		controls.addWidget(self.slice_slider, 1, 6)
-		controls.addWidget(self.slice_next_btn, 1, 7)
-		controls.addWidget(self.matrix_label, 1, 8)
+		# Grupos secundarios (ROI automático / ROI intestinal): en vez de un
+		# panel que se despliega y empuja el layout (cambiando el tamaño de la
+		# imagen), se agrupan en un menú desplegable. El botón ocupa el mismo
+		# lugar siempre; el menú flota por encima sin afectar el layout.
+		auto_roi_grid = QGridLayout()
+		auto_roi_grid.setHorizontalSpacing(8)
+		auto_roi_grid.setVerticalSpacing(2)
+		auto_roi_grid.addWidget(self.auto_window_btn, 0, 0)
+		auto_roi_grid.addWidget(self.auto_roi_btn, 0, 1)
+		auto_roi_grid.addWidget(self.auto_roi_all_btn, 0, 2)
+		auto_roi_grid.addWidget(self.auto_roi_config_btn, 0, 3)
+		auto_roi_grid.addWidget(self.auto_roi_help_btn, 0, 4)
+		auto_roi_grid.addWidget(self.auto_roi_method_label, 0, 5)
+		auto_roi_grid.addWidget(self.auto_roi_empty_only_check, 0, 6)
+		auto_roi_grid.addWidget(self.show_auto_roi_check, 0, 7)
+		auto_roi_grid.addWidget(self.per_gate_roi_check, 0, 8)
+		auto_roi_grid.addWidget(self.qc_gates_btn, 0, 9)
+		auto_roi_btn_menu = self._build_toolbar_button(
+			"ROI automático ▾", [auto_roi_grid], key="roi_panel_auto_roi",
+			tooltip="Detección automática del corazón por slice/gate, config y ayuda del método.",
+		)
+		nav_grid.addWidget(auto_roi_btn_menu, 0, 5)
 
-		controls.addWidget(QLabel("Zoom"), 2, 0)
-		controls.addWidget(self.zoom_prev_btn, 2, 1)
-		controls.addWidget(self.zoom_slider, 2, 2)
-		controls.addWidget(self.zoom_next_btn, 2, 3)
-		controls.addWidget(self.zoom_label, 2, 4)
-		controls.addWidget(QLabel("Speed"), 2, 5)
-		controls.addWidget(self.speed_slider, 2, 6)
-		controls.addWidget(self.speed_label, 2, 7)
+		intestinal_grid = QGridLayout()
+		intestinal_grid.setHorizontalSpacing(8)
+		intestinal_grid.setVerticalSpacing(2)
+		intestinal_grid.addWidget(self.intestinal_roi_toggle_btn, 0, 0)
+		intestinal_grid.addWidget(self.intestinal_apply_btn, 0, 1)
+		intestinal_grid.addWidget(self.intestinal_roi_clear_btn, 0, 2)
+		intestinal_grid.addWidget(QLabel("Atenuar int."), 0, 3)
+		intestinal_grid.addWidget(self.intestinal_atten_slider, 0, 4)
+		intestinal_grid.addWidget(self.intestinal_atten_label, 0, 5)
+		intestinal_grid.addWidget(QLabel("Feather"), 1, 0)
+		intestinal_grid.addWidget(self.intestinal_feather_slider, 1, 1)
+		intestinal_grid.addWidget(self.intestinal_feather_label, 1, 2)
+		intestinal_grid.addWidget(QLabel("Alcance int."), 1, 3)
+		intestinal_grid.addWidget(self.intestinal_scope_combo, 1, 4)
+		intestinal_btn_menu = self._build_toolbar_button(
+			"ROI intestinal ▾", [intestinal_grid], key="roi_panel_intestinal",
+			tooltip="Dibujo y atenuación manual del intestino, para no contaminar el Auto ROI del corazón.",
+		)
+		nav_grid.addWidget(intestinal_btn_menu, 0, 6)
 
-		controls.addWidget(QLabel("Smooth"), 3, 0)
-		controls.addWidget(self.smooth_prev_btn, 3, 1)
-		controls.addWidget(self.smooth_slider, 3, 2)
-		controls.addWidget(self.smooth_next_btn, 3, 3)
-		controls.addWidget(self.smooth_label, 3, 4)
+		nav_grid.addWidget(self.gate_label, 1, 0)
+		nav_grid.addWidget(self.gate_prev_btn, 1, 1)
+		nav_grid.addWidget(self.gate_slider, 1, 2)
+		nav_grid.addWidget(self.gate_next_btn, 1, 3)
+		nav_grid.addWidget(self.slice_label, 1, 4)
+		nav_grid.addWidget(self.slice_prev_btn, 1, 5)
+		nav_grid.addWidget(self.slice_slider, 1, 6)
+		nav_grid.addWidget(self.slice_next_btn, 1, 7)
+		nav_grid.addWidget(self.matrix_label, 1, 8)
+
+		nav_grid.addWidget(QLabel("Zoom"), 2, 0)
+		nav_grid.addWidget(self.zoom_prev_btn, 2, 1)
+		nav_grid.addWidget(self.zoom_slider, 2, 2)
+		nav_grid.addWidget(self.zoom_next_btn, 2, 3)
+		nav_grid.addWidget(self.zoom_label, 2, 4)
+		nav_grid.addWidget(QLabel("Speed"), 2, 5)
+		nav_grid.addWidget(self.speed_slider, 2, 6)
+		nav_grid.addWidget(self.speed_label, 2, 7)
+
+		nav_grid.addWidget(QLabel("Smooth"), 3, 0)
+		nav_grid.addWidget(self.smooth_prev_btn, 3, 1)
+		nav_grid.addWidget(self.smooth_slider, 3, 2)
+		nav_grid.addWidget(self.smooth_next_btn, 3, 3)
+		nav_grid.addWidget(self.smooth_label, 3, 4)
+
 		self.window_low_slider.setOrientation(Qt.Orientation.Vertical)
 		self.window_high_slider.setOrientation(Qt.Orientation.Vertical)
-		self.window_low_slider.setMaximumHeight(130)
-		self.window_high_slider.setMaximumHeight(130)
+		self.window_low_slider.setMinimumHeight(180)
+		self.window_high_slider.setMinimumHeight(180)
+		self.window_low_slider.setMaximumHeight(240)
+		self.window_high_slider.setMaximumHeight(240)
 		self.window_low_slider.setMaximumWidth(18)
 		self.window_high_slider.setMaximumWidth(18)
 
@@ -909,7 +944,11 @@ class CineWidget(QWidget):
 		preview_row.addWidget(self.window_panel_widget)
 
 		self.controls_panel = QWidget()
-		self.controls_panel.setLayout(controls)
+		controls_layout = QVBoxLayout()
+		controls_layout.setContentsMargins(0, 0, 0, 0)
+		controls_layout.setSpacing(2)
+		controls_layout.addLayout(nav_grid)
+		self.controls_panel.setLayout(controls_layout)
 
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(4, 4, 4, 4)
@@ -927,6 +966,26 @@ class CineWidget(QWidget):
 		self.set_active_highlight(False)
 		self._refresh_intestinal_apply_button_text()
 		self._capture_tooltips()
+
+	def _build_toolbar_button(self, title: str, grids: list, key: str, tooltip: str = "") -> QToolButton:
+		"""Agrupa una o más QGridLayout de controles secundarios en una
+		`FloatingToolbar` (barra flotante movible, horizontal o vertical) en
+		vez de un panel colapsable o un menú.
+
+		El botón ocupa siempre el mismo lugar en el layout; la barra flotante
+		es una ventana propia que el usuario puede arrastrar donde le quede
+		cómoda, así que abrirla/cerrarla NUNCA cambia el tamaño de la imagen
+		(a diferencia de un panel que se expande empujando el resto del
+		layout)."""
+		toolbar = FloatingToolbar(title, key=key, parent=self)
+		for grid in grids:
+			toolbar.add_layout(grid)
+		btn = QToolButton()
+		btn.setText(title)
+		btn.clicked.connect(lambda: toolbar.toggle_near(btn))
+		if tooltip:
+			btn.setToolTip(tooltip)
+		return btn
 
 	def set_controls_visible(self, visible: bool):
 		self._controls_visible = bool(visible)

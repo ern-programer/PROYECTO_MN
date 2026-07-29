@@ -1230,6 +1230,129 @@ def _tracking_sinusoid(
     }
 
 
+def _subpixel_peak_2d(corr: np.ndarray, py: int, px: int) -> tuple[float, float]:
+    """Refinamiento subpíxel del pico de correlación por interpolación parabólica.
+
+    Ajusta una parábola 1D en cada eje usando los 3 valores centrados en el pico
+    entero (py, px), con wrap circular (la correlación de fase es periódica).
+    Devuelve el corrimiento fraccionario (dy, dx) a sumar al pico entero.
+    """
+    h, w = corr.shape
+    c = float(corr[py, px])
+    ym1 = float(corr[(py - 1) % h, px])
+    yp1 = float(corr[(py + 1) % h, px])
+    xm1 = float(corr[py, (px - 1) % w])
+    xp1 = float(corr[py, (px + 1) % w])
+    dy_denom = ym1 - 2.0 * c + yp1
+    dx_denom = xm1 - 2.0 * c + xp1
+    dy_sub = 0.5 * (ym1 - yp1) / dy_denom if abs(dy_denom) > 1e-12 else 0.0
+    dx_sub = 0.5 * (xm1 - xp1) / dx_denom if abs(dx_denom) > 1e-12 else 0.0
+    return dy_sub, dx_sub
+
+
+def _tracking_xcorr(
+    projections: np.ndarray,
+    axis: str,
+    threshold_frac: float,
+    seed: tuple[float, float] | None = None,
+    roi_radius: float = 0.0,
+    roi_mode: str = "box",
+    ref_index: int | None = None,
+) -> dict:
+    """
+    Tracking por correlación de fase 2D (registro imagen a imagen completo).
+
+    Los demás métodos (com/gammasync/stasis/hopkins/threshold/sinusoid) reducen
+    cada proyección a UN punto (centro de masa o bounding box de una máscara por
+    threshold) y corrigen esa coordenada. Son sensibles a que el umbral aísle
+    bien el corazón: si el hígado queda pegado o tiene más cuentas, el centro se
+    corre hacia el hígado y el tracking se engancha con el órgano equivocado.
+
+    La correlación de fase (phase correlation, Kuglin & Hines 1975) no depende
+    de umbral ni de aislar el órgano: compara la proyección completa contra una
+    proyección de referencia fija (`ref_index`, por defecto la del medio de la
+    rotación) usando la fase del espectro cruzado de Fourier. El pico de esa
+    correlación da directamente el desplazamiento (dy, dx) que mejor alinea
+    ambas imágenes, considerando TODA la estructura (corazón + fondo), no un
+    centroide de máscara. Es el mismo principio que usan los registradores de
+    imagen médica para alinear frames de un mismo sujeto.
+
+    Con `seed`/`roi_radius` > 0 se restringe la correlación a una ventana local
+    (igual que Radio ROI en los otros métodos), para no dejar que estructuras
+    lejanas (hígado, intestino, vejiga) dominen el registro.
+
+    Limitación: si la anatomía cambia de FORMA entre frames (no solo se
+    desplaza, p.ej. por llenado vesical), la correlación de fase puede
+    confundir cambio de forma con movimiento. Por eso conviene validar con
+    "Curvas shift" igual que con los demás métodos.
+    """
+    proj = np.asarray(projections, dtype=np.float64)
+    summed = proj.sum(axis=0)  # (n_angles, H, W): máxima estadística por ángulo
+    n_angles, h, w = summed.shape
+    threshold_frac = min(max(float(threshold_frac), 0.01), 0.90)
+
+    idx_ref = int(ref_index) if ref_index is not None else n_angles // 2
+    idx_ref = max(0, min(n_angles - 1, idx_ref))
+
+    if seed is not None and np.isfinite(seed[0]) and np.isfinite(seed[1]) and float(roi_radius) > 0:
+        cy, cx = float(seed[0]), float(seed[1])
+        r = max(4, int(round(float(roi_radius) * 2)))
+        y0, y1 = max(0, int(round(cy - r))), min(h, int(round(cy + r)))
+        x0, x1 = max(0, int(round(cx - r))), min(w, int(round(cx + r)))
+    else:
+        y0, y1, x0, x1 = 0, h, 0, w
+
+    ref_win = summed[idx_ref][y0:y1, x0:x1]
+    win_h, win_w = ref_win.shape
+    shifts_y = np.zeros((n_angles,), dtype=np.float64)
+    shifts_x = np.zeros((n_angles,), dtype=np.float64)
+    if win_h < 8 or win_w < 8 or float(ref_win.max()) <= 0:
+        zeros = np.zeros((n_angles,), dtype=np.float64)
+        return {
+            "axis": axis, "com_series": zeros, "method": "xcorr", "threshold_frac": threshold_frac,
+            "_xcorr_shifts_y": shifts_y, "_xcorr_shifts_x": shifts_x,
+        }
+
+    # Ventana de Hann: reduce el efecto de borde (wrap-around) del FFT, que si no
+    # se atenúa genera picos espurios en los bordes de la ROI/proyección.
+    wy = np.hanning(win_h) if win_h > 1 else np.ones(1)
+    wx = np.hanning(win_w) if win_w > 1 else np.ones(1)
+    window2d = np.outer(wy, wx)
+
+    f_ref = np.fft.fft2((ref_win - ref_win.mean()) * window2d)
+    for a in range(n_angles):
+        mov_win = summed[a][y0:y1, x0:x1]
+        if float(mov_win.max()) <= 0:
+            continue
+        f_mov = np.fft.fft2((mov_win - mov_win.mean()) * window2d)
+        cross = f_ref * np.conj(f_mov)
+        denom = np.abs(cross)
+        denom[denom < 1e-12] = 1e-12
+        r_spectrum = cross / denom
+        corr = np.fft.ifft2(r_spectrum).real
+        peak = np.unravel_index(int(np.argmax(corr)), corr.shape)
+        py, px = int(peak[0]), int(peak[1])
+        dy_sub, dx_sub = _subpixel_peak_2d(corr, py, px)
+        dy = py if py <= win_h // 2 else py - win_h
+        dx = px if px <= win_w // 2 else px - win_w
+        shifts_y[a] = float(dy) + dy_sub
+        shifts_x[a] = float(dx) + dx_sub
+
+    return {
+        "axis": axis,
+        # com_series se informa solo para graficar (curva de posición estimada);
+        # el shift que realmente se aplica es el que se saca por
+        # '_xcorr_shifts_y'/'_xcorr_shifts_x' (evita re-derivarlo con la mediana,
+        # que es el criterio de los métodos basados en centroide, no en registro).
+        "com_series": (shifts_y if axis == "y" else shifts_x),
+        "method": "xcorr",
+        "threshold_frac": threshold_frac,
+        "xcorr_reference_index": idx_ref,
+        "_xcorr_shifts_y": shifts_y,
+        "_xcorr_shifts_x": shifts_x,
+    }
+
+
 def _finalize_tracking(tracking: dict) -> dict:
     """Calcula outliers, shifts y flag de movimiento para un tracking dado."""
     com_series = np.asarray(tracking.get("com_series", []), dtype=np.float64)
@@ -1284,6 +1407,7 @@ def motion_correct_projections(
 
     Methods:
       - sinusoid: ajusta la sinusoide esperada de rotación y corrige solo el residuo (movimiento real). Correcto geométricamente para SPECT. Recomendado.
+      - xcorr: correlación de fase 2D contra una proyección de referencia fija. No depende de threshold ni de aislar el órgano: usa toda la estructura de la imagen. Alternativa cuando el hígado queda pegado al corazón y engancha a los métodos basados en centroide.
       - gammasync: threshold + selección de componente del órgano (corazón), automática o por seed (click).
       - stasis: referencia estática (moda) del centro del órgano, como Xeleris Stasis.
       - hopkins: referencia del frame más estable temporalmente, como Xeleris Hopkins.
@@ -1296,8 +1420,8 @@ def motion_correct_projections(
         raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibió {proj.shape}")
 
     method = str(method or "gammasync").strip().lower()
-    if method not in ("sinusoid", "gammasync", "stasis", "hopkins", "com", "threshold", "odyssey"):
-        raise ValueError("method debe ser 'sinusoid', 'gammasync', 'stasis', 'hopkins', 'com', 'threshold' u 'odyssey'")
+    if method not in ("sinusoid", "xcorr", "gammasync", "stasis", "hopkins", "com", "threshold", "odyssey"):
+        raise ValueError("method debe ser 'sinusoid', 'xcorr', 'gammasync', 'stasis', 'hopkins', 'com', 'threshold' u 'odyssey'")
 
     axes_to_correct = ["y", "x"] if axis == "xy" else [axis]
     tracking = {}
@@ -1311,6 +1435,16 @@ def motion_correct_projections(
             trk = _finalize_tracking(trk)
             trk["suggested_shifts_px"] = sin_shifts
             trk["max_shift_px"] = round(float(np.abs(sin_shifts).max()) if sin_shifts.size else 0.0, 2)
+            trk["motion_suspected"] = bool(trk["max_shift_px"] > 1.5 or trk.get("n_outliers", 0) >= 2)
+        elif method == "xcorr":
+            trk = _tracking_xcorr(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode, ref_index=ref_index)
+            xcorr_key = "_xcorr_shifts_y" if ax == "y" else "_xcorr_shifts_x"
+            xcorr_shifts = np.asarray(trk.pop(xcorr_key, np.zeros((proj.shape[1],))), dtype=np.float64)
+            trk.pop("_xcorr_shifts_y", None)
+            trk.pop("_xcorr_shifts_x", None)
+            trk = _finalize_tracking(trk)
+            trk["suggested_shifts_px"] = xcorr_shifts
+            trk["max_shift_px"] = round(float(np.abs(xcorr_shifts).max()) if xcorr_shifts.size else 0.0, 2)
             trk["motion_suspected"] = bool(trk["max_shift_px"] > 1.5 or trk.get("n_outliers", 0) >= 2)
         elif method == "gammasync":
             trk = _finalize_tracking(_tracking_gammasync(proj, axis=ax, threshold_frac=threshold_frac, seed=seed, roi_radius=roi_radius, roi_mode=roi_mode, liver_suppression_frac=liver_suppression_frac, liver_suppression_feather=liver_suppression_feather))

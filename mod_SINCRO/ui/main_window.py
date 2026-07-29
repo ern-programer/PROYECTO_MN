@@ -79,6 +79,7 @@ from viz.polar_map import (
 
 from ui.cine_widget import CineWidget
 from ui.collapsible import CollapsibleSection, slugify_section_key
+from ui.floating_toolbar import FloatingToolbar
 from ui.managers import (
 	CineManager,
 	CompareManager,
@@ -1160,7 +1161,7 @@ class MainWindow(QMainWindow):
 			zoom_reset = QToolButton()
 			zoom_reset.setText("100%")
 			zoom_reset.clicked.connect(lambda _=False, n=name: self._set_preview_zoom(n, 1.0))
-			zoom_label = QLabel("100%")
+			zoom_label = QLabel(f"{int(self._default_preview_zoom(name) * 100)}%")
 			zoom_label.setStyleSheet("color:#444;")
 			self.preview_zoom_labels[name] = zoom_label
 			toolbar.addWidget(QLabel("Zoom"))
@@ -1211,7 +1212,7 @@ class MainWindow(QMainWindow):
 				toolbar.addWidget(QLabel("Modo"))
 				self.cine_crudo_mode_combo = QComboBox()
 				self.cine_crudo_mode_combo.addItems(["Continuo", "Rebote"])
-				self.cine_crudo_mode_combo.setCurrentText("Continuo")
+				self.cine_crudo_mode_combo.setCurrentText("Rebote")
 				self.cine_crudo_mode_combo.setToolTip("Continuo: loop 1→N→1. Rebote: 1→N→1→N (ping-pong).")
 				toolbar.addWidget(self.cine_crudo_mode_combo)
 				self.cine_crudo_frame_label = QLabel("--/--")
@@ -1227,9 +1228,9 @@ class MainWindow(QMainWindow):
 				toolbar2 = QHBoxLayout()
 				toolbar2.addWidget(QLabel("Método"))
 				self.cine_crudo_method_combo = QComboBox()
-				self.cine_crudo_method_combo.addItems(["Auto", "Sinusoide", "GammaSync", "Stasis", "Hopkins", "Odyssey", "COM", "Threshold"])
+				self.cine_crudo_method_combo.addItems(["Auto", "Sinusoide", "XCorr", "GammaSync", "Stasis", "Hopkins", "Odyssey", "COM", "Threshold"])
 				self.cine_crudo_method_combo.setCurrentText("Sinusoide")
-				self.cine_crudo_method_combo.setToolTip("Sinusoide: ajusta la sinusoide de rotación esperada y corrige solo el residuo (movimiento real). Correcto geométricamente para SPECT. GammaSync: selección de órgano automática/click. Stasis: referencia estática (moda, Xeleris). Hopkins: frame más estable (Xeleris). Odyssey: re-proyección iterativa. COM: centro de masa. Threshold: bounding box.")
+				self.cine_crudo_method_combo.setToolTip("Sinusoide: ajusta la sinusoide de rotación esperada y corrige solo el residuo (movimiento real). Correcto geométricamente para SPECT (default). XCorr: correlación de fase 2D contra una proyección de referencia; usa toda la estructura de la imagen, no depende de threshold ni de aislar el corazón (alternativa cuando el hígado se pega al corazón). GammaSync: selección de órgano automática/click. Stasis: referencia estática (moda, Xeleris). Hopkins: frame más estable (Xeleris). Odyssey: re-proyección iterativa. COM: centro de masa. Threshold: bounding box.")
 				toolbar2.addWidget(self.cine_crudo_method_combo)
 				toolbar2.addWidget(QLabel("Eje"))
 				self.cine_crudo_axis_combo = QComboBox()
@@ -1678,12 +1679,35 @@ class MainWindow(QMainWindow):
 			toolbar.addStretch(1)
 			tab_layout.addLayout(toolbar)
 			if name == "cine_crudo":
-				tab_layout.addLayout(toolbar2)
-				tab_layout.addLayout(toolbar3)
-				tab_layout.addLayout(toolbar4)
-				tab_layout.addLayout(toolbar5)
-				tab_layout.addLayout(toolbar6)
-				tab_layout.addLayout(toolbar7)
+				# Filas 2-7 agrupadas en menús desplegables: la fila 1 (arriba)
+				# tiene los controles esenciales de reproducción y queda siempre
+				# visible; el resto (corrección de movimiento, ajuste manual,
+				# reconstrucción, montaje) vive en un botón con menú. A
+				# diferencia de un panel colapsable, el menú es un popup que
+				# flota por encima y NUNCA cambia el tamaño de la imagen.
+				groups_row = QHBoxLayout()
+				groups_row.addWidget(self._build_toolbar_group_menu(
+					"Corrección de movimiento ▾", [toolbar2, toolbar3],
+					key="cine_crudo_correccion_movimiento",
+					tooltip="Método de corrección (Sinusoide/XCorr/GammaSync/...), eje, threshold, selección de órgano/ROI y atenuación de hígado.",
+				))
+				groups_row.addWidget(self._build_toolbar_group_menu(
+					"Ajuste manual y exportación ▾", [toolbar4, toolbar5],
+					key="cine_crudo_ajuste_manual_export",
+					tooltip="Nudge manual, comparación visual, offsets, curvas de shift y exportar/importar/grabar DICOM.",
+				))
+				groups_row.addWidget(self._build_toolbar_group_menu(
+					"Reconstrucción desde crudo ▾", [toolbar6],
+					key="cine_crudo_reconstruccion",
+					tooltip="Reconstrucción FBP/MLEM/OSEM, filtros de ungated/gated, reorientación y generación de cortes de eje.",
+				))
+				groups_row.addWidget(self._build_toolbar_group_menu(
+					"Montaje clínico SA/VLA/HLA ▾", [toolbar7],
+					key="cine_crudo_montaje",
+					tooltip="Recorte, template de montaje, marcar reposo/esfuerzo y rango de gates para el montaje.",
+				))
+				groups_row.addStretch(1)
+				tab_layout.addLayout(groups_row)
 
 			label = QLabel("Sin procesar")
 			label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -1697,7 +1721,7 @@ class MainWindow(QMainWindow):
 			else:
 				label.setToolTip("Zoom con los botones +/- o 100% arriba de cada panel.")
 			self.preview_labels[name] = label
-			self.preview_zoom[name] = 0.5
+			self.preview_zoom[name] = self._default_preview_zoom(name)
 			if name == "cine_crudo":
 				label.mousePressEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_press_safe(e, lbl))
 				label.mouseMoveEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_move_safe(e, lbl))
@@ -1735,12 +1759,37 @@ class MainWindow(QMainWindow):
 		self.cine_compare.setToolTip("Segundo visor (otro estudio): editable para ajustar ROI esfuerzo/reposo en paralelo.")
 		self.cine.set_controls_visible(True)
 		self.cine_compare.set_controls_visible(False)
+
+		# Panel inferior con QSplitter (en vez de QHBoxLayout fijo): el usuario
+		# puede arrastrar el borde para agrandar/achicar el visor de esfuerzo,
+		# o achicarlo de un clic con el botón cuando trabaja a una sola etapa.
+		self.cine_compare_collapse_btn = QToolButton()
+		self.cine_compare_collapse_btn.setText("◀ Esfuerzo")
+		self.cine_compare_collapse_btn.setCheckable(True)
+		self.cine_compare_collapse_btn.setToolTip(
+			"Achica/agranda el visor de esfuerzo (segundo estudio) de un clic. "
+			"También se puede arrastrar el borde entre los dos visores para ajustar el ancho libremente."
+		)
+		self.cine_compare_collapse_btn.toggled.connect(self._on_cine_compare_collapse_toggled)
+		lower_header = QHBoxLayout()
+		lower_header.setContentsMargins(0, 0, 0, 0)
+		lower_header.addStretch(1)
+		lower_header.addWidget(self.cine_compare_collapse_btn)
+
+		self.cine_lower_splitter = QSplitter(Qt.Orientation.Horizontal)
+		self.cine_lower_splitter.setChildrenCollapsible(True)
+		self.cine_lower_splitter.setHandleWidth(6)
+		self.cine_lower_splitter.addWidget(self.cine)
+		self.cine_lower_splitter.addWidget(self.cine_compare)
+		self.cine_lower_splitter.setStretchFactor(0, 1)
+		self.cine_lower_splitter.setStretchFactor(1, 1)
+
 		lower_cine_panel = QWidget()
-		lower_cine_layout = QHBoxLayout(lower_cine_panel)
+		lower_cine_layout = QVBoxLayout(lower_cine_panel)
 		lower_cine_layout.setContentsMargins(0, 0, 0, 0)
-		lower_cine_layout.setSpacing(6)
-		lower_cine_layout.addWidget(self.cine, 1)
-		lower_cine_layout.addWidget(self.cine_compare, 1)
+		lower_cine_layout.setSpacing(2)
+		lower_cine_layout.addLayout(lower_header)
+		lower_cine_layout.addWidget(self.cine_lower_splitter)
 		right_splitter.addWidget(self.tabs)
 		right_splitter.addWidget(lower_cine_panel)
 		right_splitter.setStretchFactor(0, 3)
@@ -1879,6 +1928,56 @@ class MainWindow(QMainWindow):
 		right_state = self._ui_settings.value("right_splitter_state", None)
 		if right_state is not None:
 			self.right_splitter.restoreState(right_state)
+		lower_state = self._ui_settings.value("cine_lower_splitter_state", None)
+		if lower_state is not None:
+			self.cine_lower_splitter.restoreState(lower_state)
+
+	def _on_cine_compare_collapse_toggled(self, checked: bool):
+		"""Achica/agranda el visor de esfuerzo (segundo estudio) de un clic,
+		para trabajar cómodo cuando el protocolo es de una sola etapa."""
+		splitter = self.cine_lower_splitter
+		sizes = splitter.sizes()
+		total = sum(sizes) or 1
+		if checked:
+			if sizes and sizes[-1] > 60:
+				self._cine_compare_prev_sizes = list(sizes)
+			splitter.setSizes([total - 40, 40])
+			self.cine_compare_collapse_btn.setText("▶ Esfuerzo")
+		else:
+			prev = getattr(self, "_cine_compare_prev_sizes", None)
+			if prev and len(prev) == 2 and prev[1] > 60:
+				splitter.setSizes(prev)
+			else:
+				splitter.setSizes([total // 2, total - total // 2])
+			self.cine_compare_collapse_btn.setText("◀ Esfuerzo")
+
+	# ---------------------------------------------------------------------
+	# Grupos de controles en menú desplegable dentro de pestañas (cine_crudo)
+	# ---------------------------------------------------------------------
+	#
+	# Se probó envolver las filas de toolbar en CollapsibleSection, pero al
+	# expandir/colapsar cambiaba el tamaño de la imagen (empujaba el layout).
+	# También se probó un menú desplegable (QMenu), pero no se podía mover ni
+	# reacomodar. En su lugar, se agrupan en una `FloatingToolbar`: una barra
+	# propia, movible con el mouse y con orientación horizontal/vertical
+	# configurable, que el usuario deja donde le resulte más cómoda. El botón
+	# que la abre ocupa siempre el mismo lugar, así que nunca cambia el
+	# tamaño del resto de la pestaña.
+
+	def _build_toolbar_group_menu(self, title: str, hlayouts: list, key: str, tooltip: str = "") -> QToolButton:
+		"""Agrupa una o más QHBoxLayout de filas de controles en una
+		`FloatingToolbar`, para bajar el ruido visual de paneles con muchas
+		filas de toolbar (p.ej. la pestaña cine_crudo) sin mover el resto del
+		layout."""
+		toolbar = FloatingToolbar(title, key=key, parent=self)
+		for hl in hlayouts:
+			toolbar.add_layout(hl)
+		btn = QToolButton()
+		btn.setText(title)
+		btn.clicked.connect(lambda: toolbar.toggle_near(btn))
+		if tooltip:
+			btn.setToolTip(tooltip)
+		return btn
 
 	# ---------------------------------------------------------------------
 	# Sidebar colapsable
@@ -2075,6 +2174,7 @@ class MainWindow(QMainWindow):
 		self._ui_settings.setValue("window_geometry", self.saveGeometry())
 		self._ui_settings.setValue("main_splitter_state", self.main_splitter.saveState())
 		self._ui_settings.setValue("right_splitter_state", self.right_splitter.saveState())
+		self._ui_settings.setValue("cine_lower_splitter_state", self.cine_lower_splitter.saveState())
 		self._save_sidebar_sections_state()
 		self._save_fevi_settings()
 		self._ui_settings.sync()
@@ -3883,11 +3983,11 @@ class MainWindow(QMainWindow):
 		self.preview_movies.clear()
 		self.preview_pixmaps.clear()
 		for name, label in self.preview_labels.items():
-			self.preview_zoom[name] = 0.5
+			self.preview_zoom[name] = self._default_preview_zoom(name)
 			label.clear()
 			label.setText("Sin procesar")
 			if name in self.preview_zoom_labels:
-				self.preview_zoom_labels[name].setText("50%")
+				self.preview_zoom_labels[name].setText(f"{int(self.preview_zoom[name] * 100)}%")
 		self.cine.set_cube(None)
 		self._refresh_cine_source_selector()
 		self._progress_bar.setValue(0)
@@ -6552,6 +6652,8 @@ class MainWindow(QMainWindow):
 				ax_ef.tick_params(axis="y", colors=style["vol"])
 				ax_ef.grid(True, color=style["grid"], alpha=0.45)
 				ax_ef.set_xlabel("Gate", color=style["subtle"])
+				vol_max_ef = float(np.nanmax(gate_volumes)) if gate_volumes.size and np.isfinite(gate_volumes).any() else 1.0
+				ax_ef.set_ylim(0.0, vol_max_ef * 1.15)
 				ax_top = ax_ef.twiny()
 				ax_top.set_xlim(ax_ef.get_xlim())
 				ax_top.set_xticks(gate_axis)
@@ -6638,6 +6740,8 @@ class MainWindow(QMainWindow):
 			ax_curve_2.set_ylabel("dV/dgate", color=style["deriv"])
 			ax_curve.axvline(ed_gate + 1, color=style["ed"], linestyle="--", linewidth=1.2)
 			ax_curve.axvline(es_gate + 1, color=style["es"], linestyle="--", linewidth=1.2)
+			vol_max_curve = float(np.nanmax(v)) if v.size and np.isfinite(v).any() else 1.0
+			ax_curve.set_ylim(0.0, vol_max_curve * 1.15)
 		else:
 			ax_curve.plot([], [])
 			ax_curve.text(0.5, 0.5, "Sin FEVI preliminar", transform=ax_curve.transAxes, ha="center", va="center", color=style["fg"])
@@ -6698,11 +6802,10 @@ class MainWindow(QMainWindow):
 			result_items.extend([
 				("EDV", f"{float(ef.get('edv_ml', np.nan)):.1f} mL"),
 				("ESV", f"{float(ef.get('esv_ml', np.nan)):.1f} mL"),
-				("FEVI", f"{float(ef.get('ef_pct', np.nan)):.1f}%"),
 			])
+			fevi_value_txt = f"{float(ef.get('ef_pct', np.nan)):.1f}%"
 		else:
-			result_items.append(("FEVI", "no disponible"))
-		fevi_value_txt = "no disponible"
+			fevi_value_txt = "no disponible"
 		for idx, (label, value) in enumerate(result_items):
 			col = idx % 2
 			row = idx // 2
@@ -6710,8 +6813,6 @@ class MainWindow(QMainWindow):
 			y = 0.62 - row * 0.24
 			ax_results.text(x, y + 0.11, label, transform=ax_results.transAxes, va="bottom", ha="left", color=style["subtle"], fontsize=7.8, fontweight="bold")
 			ax_results.text(x, y, value, transform=ax_results.transAxes, va="bottom", ha="left", color=style["fg"], fontsize=11.5, fontweight="bold")
-			if str(label).upper() == "FEVI":
-				fevi_value_txt = str(value)
 
 		# FEVI destacado (grande) en el panel derecho, para lectura rápida clínica.
 		ax_results.text(
@@ -7694,6 +7795,13 @@ class MainWindow(QMainWindow):
 		if vb is not None:
 			vb.setValue(int(anchor[1]))
 
+	def _default_preview_zoom(self, name: str) -> float:
+		"""Zoom inicial por pestaña: cine_crudo arranca en 300% (se usa para
+		ver bien el movimiento del paciente cuadro a cuadro); el resto de las
+		pestañas arranca en 50% (vista general). Siempre se puede cambiar en
+		vivo con los botones +/- o el slider correspondiente."""
+		return 3.0 if name == "cine_crudo" else 0.5
+
 	def _zoom_preview(self, name: str, delta: float):
 		current = self.preview_zoom.get(name, 1.0)
 		self._set_preview_zoom(name, current + delta)
@@ -8174,7 +8282,7 @@ class MainWindow(QMainWindow):
 
 				jy0 = _jitter(projections, "y")
 				jx0 = _jitter(projections, "x")
-				candidates = ["sinusoid", "com", "odyssey", "stasis", "hopkins", "gammasync", "threshold"]
+				candidates = ["sinusoid", "xcorr", "com", "odyssey", "stasis", "hopkins", "gammasync", "threshold"]
 				best_result = None
 				best_method = None
 				best_score = 1e18

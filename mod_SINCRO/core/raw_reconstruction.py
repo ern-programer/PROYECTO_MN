@@ -184,8 +184,15 @@ def reconstruct_projection_volume(
     fbp_filter_name: str = "ramp",
     iterations: int = 4,
     subsets: int = 4,
+    sensitivity_cache: dict[int, np.ndarray] | None = None,
 ) -> np.ndarray:
-    """Reconstruye volumen desde proyecciones 3D con FBP/MLEM/OSEM."""
+    """Reconstruye volumen desde proyecciones 3D con FBP/MLEM/OSEM.
+
+    ``sensitivity_cache`` (opcional): si se pasa (ver `_build_sensitivity_cache`),
+    se reutiliza tal cual en vez de recalcularla. Sirve para compartir las
+    imágenes de sensibilidad entre gates cuando se reconstruye un estudio
+    gated completo (mismos ángulos/geometría en todos los gates).
+    """
     method_key = str(method or "fbp").strip().lower()
     if method_key == "fbp":
         return reconstruct_fbp_volume(
@@ -203,6 +210,20 @@ def reconstruct_projection_volume(
     theta = np.linspace(0.0, 360.0, n_angles, endpoint=False) if angles_deg is None else np.asarray(angles_deg, dtype=np.float64)
     if theta.size != n_angles:
         raise ValueError(f"angles_deg debe tener {n_angles} valores; recibio {theta.size}")
+    effective_subsets = int(subsets) if method_key == "osem" else 1
+    # La imagen de "sensibilidad" (retroproyección de un sinograma de unos) NO
+    # depende de los datos medidos ni de la iteración actual: solo depende de
+    # la geometría (ángulos del subset + tamaño de detector/salida), que es
+    # IDÉNTICA para todos los cortes axiales y todas las iteraciones. Antes se
+    # recalculaba `height * iterations * subsets` veces (p.ej. 64*4*4=1024
+    # retroproyecciones redundantes); acá se calcula una sola vez por subset
+    # (a lo sumo `subsets` veces) y se reutiliza para todos los cortes e
+    # iteraciones. Es una optimización exacta (no una aproximación): el
+    # resultado numérico es idéntico, solo se evita repetir el mismo cálculo.
+    if sensitivity_cache is None:
+        sensitivity_cache = _build_sensitivity_cache(
+            theta, subsets=effective_subsets, detector_size=width, output_size=width
+        )
     out = np.zeros((height, width, width), dtype=np.float64)
     for slice_idx in range(height):
         sinogram = proj[:, slice_idx, :].T
@@ -211,9 +232,30 @@ def reconstruct_projection_volume(
             theta,
             output_size=width,
             iterations=int(iterations),
-            subsets=(int(subsets) if method_key == "osem" else 1),
+            subsets=effective_subsets,
+            sensitivity_cache=sensitivity_cache,
         )
     return out
+
+
+def _build_sensitivity_cache(
+    theta: np.ndarray, *, subsets: int, detector_size: int, output_size: int
+) -> dict[int, np.ndarray]:
+    """Precalcula, una sola vez, la imagen de sensibilidad de cada subset de
+    ángulos (retroproyección de un sinograma de unos). Se reutiliza para
+    todos los cortes axiales y todas las iteraciones de MLEM/OSEM."""
+    subset_count = max(1, min(int(subsets), int(theta.size)))
+    angle_indices = np.arange(theta.size)
+    cache: dict[int, np.ndarray] = {}
+    for subset_id in range(subset_count):
+        idx = angle_indices[subset_id::subset_count]
+        if idx.size == 0:
+            continue
+        theta_sub = theta[idx]
+        ones_sub = np.ones((int(detector_size), theta_sub.size), dtype=np.float64)
+        cache[subset_id] = _backproject_slice(ones_sub, theta_sub, output_size=output_size)
+    return cache
+
 
 
 def _iradon_or_fallback(sinogram: np.ndarray, theta: np.ndarray, *, filter_name: str, output_size: int) -> np.ndarray:
@@ -291,11 +333,19 @@ def _iterative_reconstruct_slice(
     output_size: int,
     iterations: int,
     subsets: int,
+    sensitivity_cache: dict[int, np.ndarray] | None = None,
 ) -> np.ndarray:
     """MLEM/OSEM paralela simple por slice.
 
     subsets=1 equivale a MLEM; subsets>1 a OSEM. Implementacion CPU de referencia,
     pensada para validar el flujo y ser reemplazable por ASTRA para produccion.
+
+    ``sensitivity_cache`` (opcional): imágenes de sensibilidad precalculadas por
+    subset (ver `_build_sensitivity_cache`). Si no se pasa, se calculan igual
+    que antes (por compatibilidad con llamadas directas a esta función, p.ej.
+    en tests), pero el caller de producción (`reconstruct_projection_volume`)
+    siempre las precalcula una vez para evitar recomputarlas por cada corte e
+    iteración.
     """
     measured = np.clip(np.asarray(sinogram, dtype=np.float64), 0.0, None)
     theta = np.asarray(theta, dtype=np.float64)
@@ -320,7 +370,10 @@ def _iterative_reconstruct_slice(
             estimated_sub = _forward_project_slice(image, theta_sub, detector_size=detector_size)
             ratio = measured_sub / np.maximum(estimated_sub, eps)
             correction = _backproject_slice(ratio, theta_sub, output_size=out_size)
-            sensitivity = _backproject_slice(np.ones_like(measured_sub), theta_sub, output_size=out_size)
+            if sensitivity_cache is not None and subset_id in sensitivity_cache:
+                sensitivity = sensitivity_cache[subset_id]
+            else:
+                sensitivity = _backproject_slice(np.ones_like(measured_sub), theta_sub, output_size=out_size)
             image *= correction / np.maximum(sensitivity, eps)
             image = np.clip(image, 0.0, None)
     return image
@@ -358,6 +411,20 @@ def reconstruct_gated_projection_volume(
     proj = np.asarray(projections, dtype=np.float64)
     if proj.ndim != 4:
         raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibio {proj.shape}")
+    method_key = str(method or "fbp").strip().lower()
+    sensitivity_cache: dict[int, np.ndarray] | None = None
+    if method_key in {"mlem", "osem"} and proj.shape[0] > 0:
+        # Todos los gates comparten la misma geometría (ángulos + tamaño de
+        # detector/salida), así que la sensibilidad se calcula UNA sola vez
+        # para el estudio completo y se reutiliza en todos los gates (antes
+        # se recalculaba, de forma redundante, gate por gate).
+        n_angles = proj.shape[1]
+        width = proj.shape[3]
+        theta = np.linspace(0.0, 360.0, n_angles, endpoint=False) if angles_deg is None else np.asarray(angles_deg, dtype=np.float64)
+        effective_subsets = int(subsets) if method_key == "osem" else 1
+        sensitivity_cache = _build_sensitivity_cache(
+            theta, subsets=effective_subsets, detector_size=width, output_size=width
+        )
     volumes = [
         reconstruct_projection_volume(
             proj[gate],
@@ -367,6 +434,7 @@ def reconstruct_gated_projection_volume(
             fbp_filter_name=fbp_filter_name,
             iterations=iterations,
             subsets=subsets,
+            sensitivity_cache=sensitivity_cache,
         )
         for gate in range(proj.shape[0])
     ]
