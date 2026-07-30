@@ -58,7 +58,19 @@ from core.aha_segments import (
 )
 from core.export_manager import export_all
 from core.gate_dropout import analyze_gate_dropout, correct_last_gate_dropout
-from core.ectb_lv import EF_REGRESSIONS, ECTbLVConfig, analyze_lv_ectb, convert_ef_pct
+from core.perfusion_texture import (
+	combine_perfusion_phase,
+	perfusion_texture_by_segment,
+)
+from core.stress_rest import compare_stress_rest
+from core.intestinal_subtraction import apply_intestinal_subtraction
+from core.ectb_lv import (
+	EF_REGRESSIONS,
+	ECTbLVConfig,
+	analyze_lv_ectb,
+	convert_ef_pct,
+	wall_segmentation_from_ectb,
+)
 from core.logging_config import get_logger
 from core.metrics import calculate_phase_metrics
 from core.phase_analysis import phase_analysis
@@ -112,6 +124,12 @@ class MainWindow(QMainWindow):
 		self.study = None
 		self.axis_companions: dict[str, object] = {}
 		self.seg = None
+		# Copia de la segmentación ANULAR, intacta aunque `self.seg` se reemplace por
+		# la pared ECTb. El ECTb necesita un anillo con cavidad para tirar sus rayos:
+		# si se le pasa su propia salida irregular como semilla, deja de encontrar
+		# contornos. Toda recalculación de ECTb debe partir de acá.
+		self.seg_ring_base = None
+		self.intestinal_subtraction_info = None
 		# Diagnóstico de calibración FEVI/volumen (barridos [DIAG-*] en el log).
 		# Poner en True para reactivar los logs de calibración al evaluar estudios
 		# nuevos (sweep de cavity_frac, radios ED/ES, epicardio por gate, FWHM
@@ -299,6 +317,20 @@ class MainWindow(QMainWindow):
 		self.seg_method = QComboBox()
 		self.seg_method.addItems(["auto", "threshold", "manual"])
 
+		# Qué geometría de ROI alimenta la fase: el anillo circular de siempre o la
+		# pared irregular que traza el ECTb siguiendo el máximo de cuentas.
+		self.roi_source_combo = QComboBox()
+		self.roi_source_combo.addItem("Anillo (ROI clásica)", "ring")
+		self.roi_source_combo.addItem("Pared ECTb (contornos irregulares)", "ectb_wall")
+
+		# El centro del VI se venía tomando como centroide de la máscara de
+		# miocardio, que se corre hacia el sector de mayor captación. Esta opción
+		# lo recalcula sobre la cavidad. Apagada por defecto porque cambia todos
+		# los números derivados (fase, AHA, territorios).
+		self.cavity_center_check = QCheckBox("Centrar ROI en la cavidad")
+		self.cavity_center_check.setChecked(False)
+		self.cavity_center_check.toggled.connect(self._on_cavity_center_toggled)
+
 		self.threshold_spin = QDoubleSpinBox()
 		self.threshold_spin.setRange(0.01, 0.90)
 		self.threshold_spin.setSingleStep(0.01)
@@ -434,6 +466,8 @@ class MainWindow(QMainWindow):
 		self.manual_rois.textChanged.connect(self._on_manual_rois_text_changed)
 
 		controls_form.addRow("Segmentación", self.seg_method)
+		controls_form.addRow("ROI de análisis", self.roi_source_combo)
+		controls_form.addRow(self.cavity_center_check)
 		controls_form.addRow("Threshold", self.threshold_spin)
 		controls_form.addRow("Smooth sigma", self.sigma_spin)
 		controls_form.addRow("Harmonics", self.harmonics_spin)
@@ -457,6 +491,21 @@ class MainWindow(QMainWindow):
 		controls_form.addRow(self.auto_run_check)
 
 		self.seg_method.setToolTip("auto: segmentación automática; threshold: umbral simple; manual: usa los ROIs que dibujes o pegues.")
+		self.roi_source_combo.setToolTip(
+			"Geometría que alimenta el análisis de fase.\n"
+			"Anillo: ROI circular clásica (centro + radio interno/externo).\n"
+			"Pared ECTb: contornos irregulares endo/epi por ángulo, con espesor variable.\n"
+			"Podés comparar ambas en 'Vista asincronía' antes de decidir."
+		)
+		self.cavity_center_check.setToolTip(
+			"Corrige el centro del VI.\n"
+			"Apagado: el centro es el centroide de la máscara de miocardio, que se corre "
+			"hacia el sector que más capta (pared lateral caliente, defecto, intestino pegado).\n"
+			"Encendido: el centro se recalcula sobre la cavidad (hueco del anillo o zona "
+			"hipocaptante interna).\n"
+			"Afecta radios, contornos ECTb y la asignación angular a segmentos AHA, "
+			"así que cambia los valores de fase. Reprocesa para verlo."
+		)
 		self.threshold_spin.setToolTip("Porcentaje del máximo usado para separar miocardio del fondo.")
 		self.sigma_spin.setToolTip("Suavizado espacial aplicado antes del threshold en segmentación.")
 		self.harmonics_spin.setToolTip("Cantidad de armónicos usados para estabilizar la fase.")
@@ -753,6 +802,12 @@ class MainWindow(QMainWindow):
 			"sustituto por cortes, que no permite ver el movimiento.\n"
 			"Es no modal y se recalcula en vivo."
 		)
+		self.asynchrony_review_btn = QPushButton("Vista asincronía")
+		self.asynchrony_review_btn.clicked.connect(self.open_asynchrony_review_window)
+		self.asynchrony_review_btn.setToolTip(
+			"Abre una vista separada para inspección visual de imagen, ROIs y bordes en modo asincrónico.\n"
+			"No reemplaza el flujo actual: conserva la ventana principal y añade una vista de revisión independiente."
+		)
 		button_row.addWidget(self.restart_btn, 0, 0, 1, 2)
 		button_row.addWidget(self.process_btn, 1, 0)
 		button_row.addWidget(self.auto_btn, 1, 1)
@@ -766,6 +821,7 @@ class MainWindow(QMainWindow):
 		button_row.addWidget(self.ui_config_btn, 7, 1)
 		button_row.addWidget(self.ectb_window_btn, 8, 0, 1, 2)
 		button_row.addWidget(self.gqc_window_btn, 9, 0, 1, 2)
+		button_row.addWidget(self.asynchrony_review_btn, 10, 0, 1, 2)
 		# Ubicar Acciones arriba de Procesamiento para tener comandos a la vista.
 		self._sidebar_layout.insertWidget(1, button_box)
 
@@ -1456,22 +1512,25 @@ class MainWindow(QMainWindow):
 				toolbar5.addWidget(self.cine_crudo_save_dcm_btn)
 				toolbar5.addStretch(1)
 
-				# --- Fila 6 (reconstrucción raw): método + filtros separados UngGat/gated + QC ---
-				toolbar6 = QHBoxLayout()
-				toolbar6.addWidget(QLabel("Recon"))
+				# --- Fila 6 (reconstrucción raw): separada en 3 filas para
+				# legibilidad y mejor adaptación en barra flotante.
+				toolbar6_r1 = QHBoxLayout()
+				toolbar6_r2 = QHBoxLayout()
+				toolbar6_r3 = QHBoxLayout()
+				toolbar6_r1.addWidget(QLabel("Recon"))
 				self.cine_crudo_recon_method_combo = QComboBox()
 				self.cine_crudo_recon_method_combo.addItems(["FBP", "MLEM", "OSEM"])
 				self.cine_crudo_recon_method_combo.setCurrentText("FBP")
 				self.cine_crudo_recon_method_combo.setMaximumWidth(74)
 				self.cine_crudo_recon_method_combo.setToolTip("Método de reconstrucción desde crudo corregido. MLEM/OSEM son CPU de referencia para validar el flujo.")
-				toolbar6.addWidget(self.cine_crudo_recon_method_combo)
-				toolbar6.addWidget(QLabel("Ung"))
+				toolbar6_r1.addWidget(self.cine_crudo_recon_method_combo)
+				toolbar6_r1.addWidget(QLabel("Ung"))
 				self.cine_crudo_ung_filter_combo = QComboBox()
 				self.cine_crudo_ung_filter_combo.addItems(["none", "lowpass", "butterworth", "wiener"])
 				self.cine_crudo_ung_filter_combo.setCurrentText("butterworth")
 				self.cine_crudo_ung_filter_combo.setMaximumWidth(104)
 				self.cine_crudo_ung_filter_combo.setToolTip("Filtro de proyecciones para la rama UngGat/perfusión total.")
-				toolbar6.addWidget(self.cine_crudo_ung_filter_combo)
+				toolbar6_r1.addWidget(self.cine_crudo_ung_filter_combo)
 				self.cine_crudo_ung_cutoff_spin = QDoubleSpinBox()
 				self.cine_crudo_ung_cutoff_spin.setRange(0.01, 1.00)
 				self.cine_crudo_ung_cutoff_spin.setSingleStep(0.01)
@@ -1479,20 +1538,20 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_ung_cutoff_spin.setValue(0.52)
 				self.cine_crudo_ung_cutoff_spin.setMaximumWidth(60)
 				self.cine_crudo_ung_cutoff_spin.setToolTip("Cutoff normalizado (fracción de Nyquist) del filtro UngGat. Xeleris FBP: 0.52.")
-				toolbar6.addWidget(self.cine_crudo_ung_cutoff_spin)
+				toolbar6_r1.addWidget(self.cine_crudo_ung_cutoff_spin)
 				self.cine_crudo_ung_order_spin = QSpinBox()
 				self.cine_crudo_ung_order_spin.setRange(1, 20)
 				self.cine_crudo_ung_order_spin.setValue(5)
 				self.cine_crudo_ung_order_spin.setMaximumWidth(50)
 				self.cine_crudo_ung_order_spin.setToolTip("Orden del filtro UngGat.")
-				toolbar6.addWidget(self.cine_crudo_ung_order_spin)
-				toolbar6.addWidget(QLabel("Gated"))
+				toolbar6_r1.addWidget(self.cine_crudo_ung_order_spin)
+				toolbar6_r1.addWidget(QLabel("Gated"))
 				self.cine_crudo_gated_filter_combo = QComboBox()
 				self.cine_crudo_gated_filter_combo.addItems(["none", "lowpass", "butterworth", "wiener"])
 				self.cine_crudo_gated_filter_combo.setCurrentText("butterworth")
 				self.cine_crudo_gated_filter_combo.setMaximumWidth(104)
 				self.cine_crudo_gated_filter_combo.setToolTip("Filtro de proyecciones para reconstrucción gate-by-gate.")
-				toolbar6.addWidget(self.cine_crudo_gated_filter_combo)
+				toolbar6_r1.addWidget(self.cine_crudo_gated_filter_combo)
 				self.cine_crudo_gated_cutoff_spin = QDoubleSpinBox()
 				self.cine_crudo_gated_cutoff_spin.setRange(0.01, 1.00)
 				self.cine_crudo_gated_cutoff_spin.setSingleStep(0.01)
@@ -1500,39 +1559,41 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_gated_cutoff_spin.setValue(0.40)
 				self.cine_crudo_gated_cutoff_spin.setMaximumWidth(60)
 				self.cine_crudo_gated_cutoff_spin.setToolTip("Cutoff normalizado (fracción de Nyquist) del filtro gated. Xeleris FBP: 0.40.")
-				toolbar6.addWidget(self.cine_crudo_gated_cutoff_spin)
+				toolbar6_r1.addWidget(self.cine_crudo_gated_cutoff_spin)
 				self.cine_crudo_gated_order_spin = QSpinBox()
 				self.cine_crudo_gated_order_spin.setRange(1, 20)
 				self.cine_crudo_gated_order_spin.setValue(10)
 				self.cine_crudo_gated_order_spin.setMaximumWidth(50)
 				self.cine_crudo_gated_order_spin.setToolTip("Orden del filtro gated. Xeleris FBP: 10.")
-				toolbar6.addWidget(self.cine_crudo_gated_order_spin)
-				toolbar6.addWidget(QLabel("Iter"))
+				toolbar6_r1.addWidget(self.cine_crudo_gated_order_spin)
+				toolbar6_r1.addStretch(1)
+
+				toolbar6_r2.addWidget(QLabel("Iter"))
 				self.cine_crudo_iter_spin = QSpinBox()
 				self.cine_crudo_iter_spin.setRange(1, 20)
 				self.cine_crudo_iter_spin.setValue(2)
 				self.cine_crudo_iter_spin.setMaximumWidth(50)
 				self.cine_crudo_iter_spin.setToolTip("Iteraciones para MLEM/OSEM. Para prueba UI usá 1–2; en matriz real puede tardar.")
-				toolbar6.addWidget(self.cine_crudo_iter_spin)
-				toolbar6.addWidget(QLabel("Sub"))
+				toolbar6_r2.addWidget(self.cine_crudo_iter_spin)
+				toolbar6_r2.addWidget(QLabel("Sub"))
 				self.cine_crudo_osem_subsets_spin = QSpinBox()
 				self.cine_crudo_osem_subsets_spin.setRange(1, 16)
 				self.cine_crudo_osem_subsets_spin.setValue(4)
 				self.cine_crudo_osem_subsets_spin.setMaximumWidth(50)
 				self.cine_crudo_osem_subsets_spin.setToolTip("Subsets para OSEM. En FBP/MLEM se ignora.")
-				toolbar6.addWidget(self.cine_crudo_osem_subsets_spin)
+				toolbar6_r2.addWidget(self.cine_crudo_osem_subsets_spin)
 				self.cine_crudo_recon_btn = QToolButton()
 				self.cine_crudo_recon_btn.setText("Recon raw")
 				self.cine_crudo_recon_btn.setToolTip("Reconstruye desde crudo gated con la corrección actual y muestra QC: UngGat + gates. No altera el procesamiento clínico principal todavía.")
 				self.cine_crudo_recon_btn.clicked.connect(self._reconstruct_cine_crudo_raw)
-				toolbar6.addWidget(self.cine_crudo_recon_btn)
+				toolbar6_r2.addWidget(self.cine_crudo_recon_btn)
 				self.cine_crudo_reorient_btn = QToolButton()
 				self.cine_crudo_reorient_btn.setText("Reorientar")
 				self.cine_crudo_reorient_btn.setToolTip("Abre la reorientación oblicua interactiva (Rec/Ref estilo Xeleris): definí eje largo del VI en vistas anterior/lateral, ROI y límites Base/Ápex, con preview SA/HLA/VLA en vivo.")
 				self.cine_crudo_reorient_btn.clicked.connect(self._open_cine_crudo_reorientation)
 				self.cine_crudo_reorient_btn.setEnabled(False)
-				toolbar6.addWidget(self.cine_crudo_reorient_btn)
-				toolbar6.addWidget(QLabel("Base"))
+				toolbar6_r2.addWidget(self.cine_crudo_reorient_btn)
+				toolbar6_r2.addWidget(QLabel("Base"))
 				self.cine_crudo_cut_base_spin = QSpinBox()
 				self.cine_crudo_cut_base_spin.setRange(1, 1)
 				self.cine_crudo_cut_base_spin.setValue(1)
@@ -1540,8 +1601,8 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_cut_base_spin.setEnabled(False)
 				self.cine_crudo_cut_base_spin.setToolTip("Primer corte SA a conservar (límite basal). Ajuste tipo líneas de límite Odyssey/Xeleris.")
 				self.cine_crudo_cut_base_spin.valueChanged.connect(self._preview_cine_crudo_cut_limits)
-				toolbar6.addWidget(self.cine_crudo_cut_base_spin)
-				toolbar6.addWidget(QLabel("Ápex"))
+				toolbar6_r2.addWidget(self.cine_crudo_cut_base_spin)
+				toolbar6_r2.addWidget(QLabel("Ápex"))
 				self.cine_crudo_cut_apex_spin = QSpinBox()
 				self.cine_crudo_cut_apex_spin.setRange(1, 1)
 				self.cine_crudo_cut_apex_spin.setValue(1)
@@ -1549,8 +1610,8 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_cut_apex_spin.setEnabled(False)
 				self.cine_crudo_cut_apex_spin.setToolTip("Último corte SA a conservar (límite apical). El cubo SA generado baja a sincronía/FEVI.")
 				self.cine_crudo_cut_apex_spin.valueChanged.connect(self._preview_cine_crudo_cut_limits)
-				toolbar6.addWidget(self.cine_crudo_cut_apex_spin)
-				toolbar6.addWidget(QLabel("Esp"))
+				toolbar6_r2.addWidget(self.cine_crudo_cut_apex_spin)
+				toolbar6_r2.addWidget(QLabel("Esp"))
 				self.cine_crudo_cut_thickness_spin = QSpinBox()
 				self.cine_crudo_cut_thickness_spin.setRange(1, 9)
 				self.cine_crudo_cut_thickness_spin.setValue(1)
@@ -1558,54 +1619,58 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_cut_thickness_spin.setEnabled(False)
 				self.cine_crudo_cut_thickness_spin.setToolTip("Espesor de corte en píxeles. Cada SA se genera promediando este espesor alrededor del plano seleccionado.")
 				self.cine_crudo_cut_thickness_spin.valueChanged.connect(self._preview_cine_crudo_cut_limits)
-				toolbar6.addWidget(self.cine_crudo_cut_thickness_spin)
+				toolbar6_r2.addWidget(self.cine_crudo_cut_thickness_spin)
+				toolbar6_r2.addStretch(1)
+
 				self.cine_crudo_preview_limits_btn = QToolButton()
 				self.cine_crudo_preview_limits_btn.setText("Ver límites")
 				self.cine_crudo_preview_limits_btn.setToolTip("Muestra líneas Base/Ápex sobre el volumen reconstruido y cortes SA de referencia antes de generar ejes.")
 				self.cine_crudo_preview_limits_btn.clicked.connect(self._preview_cine_crudo_cut_limits)
 				self.cine_crudo_preview_limits_btn.setEnabled(False)
-				toolbar6.addWidget(self.cine_crudo_preview_limits_btn)
+				toolbar6_r3.addWidget(self.cine_crudo_preview_limits_btn)
 				self.cine_crudo_generate_cuts_btn = QToolButton()
 				self.cine_crudo_generate_cuts_btn.setText("Generar cortes")
 				self.cine_crudo_generate_cuts_btn.setToolTip("Genera los cortes cardíacos SA/HLA/VLA desde el volumen reconstruido y los muestra en comparacion_ejes.")
 				self.cine_crudo_generate_cuts_btn.clicked.connect(self._generate_cine_crudo_cardiac_cuts)
 				self.cine_crudo_generate_cuts_btn.setEnabled(False)
-				toolbar6.addWidget(self.cine_crudo_generate_cuts_btn)
+				toolbar6_r3.addWidget(self.cine_crudo_generate_cuts_btn)
 				self.cine_crudo_save_axes_dcm_btn = QToolButton()
 				self.cine_crudo_save_axes_dcm_btn.setText("Guardar ejes DICOM")
 				self.cine_crudo_save_axes_dcm_btn.setToolTip("Guarda SA, HLA y VLA generados como DICOM NM gated multiframe para reutilizar en SINCRO u otro software DICOM.")
 				self.cine_crudo_save_axes_dcm_btn.clicked.connect(self._save_cine_crudo_axes_dicoms)
 				self.cine_crudo_save_axes_dcm_btn.setEnabled(False)
-				toolbar6.addWidget(self.cine_crudo_save_axes_dcm_btn)
+				toolbar6_r3.addWidget(self.cine_crudo_save_axes_dcm_btn)
 				self.cine_crudo_process_recon_btn = QToolButton()
 				self.cine_crudo_process_recon_btn.setText("Procesar recon")
 				self.cine_crudo_process_recon_btn.setToolTip("Usa los cortes SA generados como estudio activo y corre fase/FEVI. Requiere Generar cortes primero.")
 				self.cine_crudo_process_recon_btn.clicked.connect(self._process_cine_crudo_reconstruction)
 				self.cine_crudo_process_recon_btn.setEnabled(False)
-				toolbar6.addWidget(self.cine_crudo_process_recon_btn)
-				toolbar6.addStretch(1)
+				toolbar6_r3.addWidget(self.cine_crudo_process_recon_btn)
+				toolbar6_r3.addStretch(1)
 
-				# --- Fila 7 (montaje clínico de cortes SA/VLA/HLA) ---
-				toolbar7 = QHBoxLayout()
-				toolbar7.addWidget(QLabel("Recorte"))
+				# --- Fila 7 (montaje clínico SA/VLA/HLA): separada en 3 filas ---
+				toolbar7_r1 = QHBoxLayout()
+				toolbar7_r2 = QHBoxLayout()
+				toolbar7_r3 = QHBoxLayout()
+				toolbar7_r1.addWidget(QLabel("Recorte"))
 				self.cine_crudo_crop_combo = QComboBox()
 				self.cine_crudo_crop_combo.addItems(["Límites (markers)", "Elipse VOI"])
 				self.cine_crudo_crop_combo.setToolTip("Rango de cortes del montaje: por líneas Base/Ápex (markers) o por la elipse VOI de la reorientación.")
 				self.cine_crudo_crop_combo.currentIndexChanged.connect(self._on_montage_crop_mode_changed)
-				toolbar7.addWidget(self.cine_crudo_crop_combo)
-				toolbar7.addWidget(QLabel("Template"))
+				toolbar7_r1.addWidget(self.cine_crudo_crop_combo)
+				toolbar7_r1.addWidget(QLabel("Template"))
 				self.cine_crudo_montage_template_combo = QComboBox()
 				self.cine_crudo_montage_template_combo.addItems(["Denso", "Grande", "Cuadrante"])
 				self.cine_crudo_montage_template_combo.setCurrentText("Denso")
 				self.cine_crudo_montage_template_combo.setToolTip("Distribución del montaje: Denso (más cortes), Grande (hasta 16 cortes por tira), Cuadrante (bloques por eje).")
 				self.cine_crudo_montage_template_combo.currentIndexChanged.connect(self._on_montage_template_changed)
-				toolbar7.addWidget(self.cine_crudo_montage_template_combo)
+				toolbar7_r1.addWidget(self.cine_crudo_montage_template_combo)
 				self.cine_crudo_tips_btn = QToolButton()
 				self.cine_crudo_tips_btn.setText("Tips")
 				self.cine_crudo_tips_btn.setToolTip("Guía rápida de atajos y controles del montaje (click, rueda, flechas, zoom y pan).")
 				self.cine_crudo_tips_btn.clicked.connect(self._show_cine_crudo_montage_tips)
-				toolbar7.addWidget(self.cine_crudo_tips_btn)
-				toolbar7.addWidget(QLabel("Zoom corte"))
+				toolbar7_r1.addWidget(self.cine_crudo_tips_btn)
+				toolbar7_r1.addWidget(QLabel("Zoom corte"))
 				self.cine_crudo_cut_zoom_spin = QDoubleSpinBox()
 				self.cine_crudo_cut_zoom_spin.setRange(1.00, 2.50)
 				self.cine_crudo_cut_zoom_spin.setSingleStep(0.05)
@@ -1614,44 +1679,48 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_cut_zoom_spin.setMaximumWidth(70)
 				self.cine_crudo_cut_zoom_spin.setToolTip("Agrandar interno de cada corte (mismo factor para todos los paneles). 1.00 = original.")
 				self.cine_crudo_cut_zoom_spin.valueChanged.connect(self._on_montage_cut_zoom_changed)
-				toolbar7.addWidget(self.cine_crudo_cut_zoom_spin)
+				toolbar7_r1.addWidget(self.cine_crudo_cut_zoom_spin)
 				self.cine_crudo_montage_btn = QToolButton()
 				self.cine_crudo_montage_btn.setText("Ver montaje")
 				self.cine_crudo_montage_btn.setToolTip("Montaje clínico SA/VLA/HLA (estilo Xeleris). En vivo: click selecciona tira, rueda mueve tira activa, Ctrl+rueda zoom parejo, Alt+drag o botón medio para pan, doble click resetea tira.")
 				self.cine_crudo_montage_btn.clicked.connect(self._show_cine_crudo_sa_montage)
 				self.cine_crudo_montage_btn.setEnabled(False)
-				toolbar7.addWidget(self.cine_crudo_montage_btn)
+				toolbar7_r1.addWidget(self.cine_crudo_montage_btn)
+				toolbar7_r1.addStretch(1)
+
 				self.cine_crudo_mark_rest_btn = QToolButton()
 				self.cine_crudo_mark_rest_btn.setText("Marcar como reposo")
 				self.cine_crudo_mark_rest_btn.setToolTip("Guarda los cortes actuales como estudio de REPOSO para el montaje comparativo stress/rest. Luego generá el esfuerzo y volvé a Ver montaje.")
 				self.cine_crudo_mark_rest_btn.clicked.connect(self._mark_cine_crudo_as_rest)
 				self.cine_crudo_mark_rest_btn.setEnabled(False)
-				toolbar7.addWidget(self.cine_crudo_mark_rest_btn)
-				toolbar7.addWidget(QLabel("Offset SA"))
+				toolbar7_r2.addWidget(self.cine_crudo_mark_rest_btn)
+				toolbar7_r2.addWidget(QLabel("Offset SA"))
 				self.cine_crudo_rest_off_sa_spin = QSpinBox()
 				self.cine_crudo_rest_off_sa_spin.setRange(-40, 40)
 				self.cine_crudo_rest_off_sa_spin.setValue(0)
 				self.cine_crudo_rest_off_sa_spin.setMaximumWidth(52)
 				self.cine_crudo_rest_off_sa_spin.setToolTip("Desplaza los cortes SA de reposo para alinearlos con esfuerzo.")
 				self.cine_crudo_rest_off_sa_spin.valueChanged.connect(lambda v: self._on_rest_offset_changed("SA", int(v)))
-				toolbar7.addWidget(self.cine_crudo_rest_off_sa_spin)
-				toolbar7.addWidget(QLabel("VLA"))
+				toolbar7_r2.addWidget(self.cine_crudo_rest_off_sa_spin)
+				toolbar7_r2.addWidget(QLabel("VLA"))
 				self.cine_crudo_rest_off_vla_spin = QSpinBox()
 				self.cine_crudo_rest_off_vla_spin.setRange(-40, 40)
 				self.cine_crudo_rest_off_vla_spin.setValue(0)
 				self.cine_crudo_rest_off_vla_spin.setMaximumWidth(52)
 				self.cine_crudo_rest_off_vla_spin.setToolTip("Desplaza los cortes VLA de reposo para alinearlos con esfuerzo.")
 				self.cine_crudo_rest_off_vla_spin.valueChanged.connect(lambda v: self._on_rest_offset_changed("VLA", int(v)))
-				toolbar7.addWidget(self.cine_crudo_rest_off_vla_spin)
-				toolbar7.addWidget(QLabel("HLA"))
+				toolbar7_r2.addWidget(self.cine_crudo_rest_off_vla_spin)
+				toolbar7_r2.addWidget(QLabel("HLA"))
 				self.cine_crudo_rest_off_hla_spin = QSpinBox()
 				self.cine_crudo_rest_off_hla_spin.setRange(-40, 40)
 				self.cine_crudo_rest_off_hla_spin.setValue(0)
 				self.cine_crudo_rest_off_hla_spin.setMaximumWidth(52)
 				self.cine_crudo_rest_off_hla_spin.setToolTip("Desplaza los cortes HLA de reposo para alinearlos con esfuerzo.")
 				self.cine_crudo_rest_off_hla_spin.valueChanged.connect(lambda v: self._on_rest_offset_changed("HLA", int(v)))
-				toolbar7.addWidget(self.cine_crudo_rest_off_hla_spin)
-				toolbar7.addWidget(QLabel("Frames"))
+				toolbar7_r2.addWidget(self.cine_crudo_rest_off_hla_spin)
+				toolbar7_r2.addStretch(1)
+
+				toolbar7_r3.addWidget(QLabel("Frames"))
 				self.cine_crudo_gate_from_spin = QSpinBox()
 				self.cine_crudo_gate_from_spin.setRange(1, 1)
 				self.cine_crudo_gate_from_spin.setValue(1)
@@ -1659,8 +1728,8 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_gate_from_spin.setEnabled(False)
 				self.cine_crudo_gate_from_spin.setToolTip("Gate inicial (1-based) para el montaje. Se aplica en vivo. También podés arrastrar/cambiar con rueda en el panel.")
 				self.cine_crudo_gate_from_spin.valueChanged.connect(self._on_montage_gate_range_changed)
-				toolbar7.addWidget(self.cine_crudo_gate_from_spin)
-				toolbar7.addWidget(QLabel("→"))
+				toolbar7_r3.addWidget(self.cine_crudo_gate_from_spin)
+				toolbar7_r3.addWidget(QLabel("→"))
 				self.cine_crudo_gate_to_spin = QSpinBox()
 				self.cine_crudo_gate_to_spin.setRange(1, 1)
 				self.cine_crudo_gate_to_spin.setValue(1)
@@ -1668,14 +1737,14 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_gate_to_spin.setEnabled(False)
 				self.cine_crudo_gate_to_spin.setToolTip("Gate final (1-based) para el montaje. Se aplica en vivo. También podés arrastrar/cambiar con rueda en el panel.")
 				self.cine_crudo_gate_to_spin.valueChanged.connect(self._on_montage_gate_range_changed)
-				toolbar7.addWidget(self.cine_crudo_gate_to_spin)
+				toolbar7_r3.addWidget(self.cine_crudo_gate_to_spin)
 				self.cine_crudo_gate_all_btn = QToolButton()
 				self.cine_crudo_gate_all_btn.setText("Todo")
 				self.cine_crudo_gate_all_btn.setEnabled(False)
 				self.cine_crudo_gate_all_btn.setToolTip("Usa todos los gates para el montaje (click rápido).")
 				self.cine_crudo_gate_all_btn.clicked.connect(self._set_montage_gate_full_range)
-				toolbar7.addWidget(self.cine_crudo_gate_all_btn)
-				toolbar7.addStretch(1)
+				toolbar7_r3.addWidget(self.cine_crudo_gate_all_btn)
+				toolbar7_r3.addStretch(1)
 			toolbar.addStretch(1)
 			tab_layout.addLayout(toolbar)
 			if name == "cine_crudo":
@@ -1697,12 +1766,12 @@ class MainWindow(QMainWindow):
 					tooltip="Nudge manual, comparación visual, offsets, curvas de shift y exportar/importar/grabar DICOM.",
 				))
 				groups_row.addWidget(self._build_toolbar_group_menu(
-					"Reconstrucción desde crudo ▾", [toolbar6],
+					"Reconstrucción desde crudo ▾", [toolbar6_r1, toolbar6_r2, toolbar6_r3],
 					key="cine_crudo_reconstruccion",
 					tooltip="Reconstrucción FBP/MLEM/OSEM, filtros de ungated/gated, reorientación y generación de cortes de eje.",
 				))
 				groups_row.addWidget(self._build_toolbar_group_menu(
-					"Montaje clínico SA/VLA/HLA ▾", [toolbar7],
+					"Montaje clínico SA/VLA/HLA ▾", [toolbar7_r1, toolbar7_r2, toolbar7_r3],
 					key="cine_crudo_montaje",
 					tooltip="Recorte, template de montaje, marcar reposo/esfuerzo y rango de gates para el montaje.",
 				))
@@ -2268,11 +2337,31 @@ class MainWindow(QMainWindow):
 		window.activateWindow()
 		window.recompute()
 
+	def open_asynchrony_review_window(self):
+		"""Abre una vista separada de inspección visual de ROIs y bordes."""
+		window = getattr(self, "_asynchrony_review_window", None)
+		if window is None:
+			from ui.asynchrony_review_window import AsynchronyReviewWindow
+
+			window = AsynchronyReviewWindow(self)
+			self._asynchrony_review_window = window
+		window.show()
+		window.raise_()
+		window.activateWindow()
+		window.sync_from_main()
+		return window
+
 	def _refresh_gqc_window(self):
 		"""Recalcula el panel GQC si está abierto (tras cargar o reprocesar)."""
 		window = getattr(self, "_gqc_window", None)
 		if window is not None and window.isVisible():
 			window.recompute()
+
+	def _refresh_asynchrony_review_window(self):
+		"""Sincroniza la vista de inspección si está abierta."""
+		window = getattr(self, "_asynchrony_review_window", None)
+		if window is not None and window.isVisible():
+			window.sync_from_main()
 
 	def open_ui_preferences_dialog(self):
 		dlg = QDialog(self)
@@ -2358,6 +2447,8 @@ class MainWindow(QMainWindow):
 			gate_roi_state = self.cine_compare.gate_roi_state()
 		return {
 			"seg_method": str(self.seg_method.currentText()),
+			"roi_source": self.roi_source(),
+			"cavity_center": bool(self.cavity_center_enabled()),
 			"threshold": float(self.threshold_spin.value()),
 			"smooth_sigma": float(self.sigma_spin.value()),
 			"harmonics": int(self.harmonics_spin.value()),
@@ -2438,6 +2529,14 @@ class MainWindow(QMainWindow):
 	def _apply_processing_params(self, params: dict):
 		if "seg_method" in params:
 			self.seg_method.setCurrentText(str(params["seg_method"]))
+		if "roi_source" in params:
+			self.set_roi_source(str(params["roi_source"]))
+		if "cavity_center" in params:
+			# blockSignals: process_current() ya corre al terminar de aplicar el preset.
+			self.cavity_center_check.blockSignals(True)
+			self.cavity_center_check.setChecked(bool(params["cavity_center"]))
+			self.cavity_center_check.blockSignals(False)
+			self._propagate_cavity_center()
 		if "threshold" in params:
 			self.threshold_spin.setValue(float(params["threshold"]))
 		if "smooth_sigma" in params:
@@ -3165,6 +3264,133 @@ class MainWindow(QMainWindow):
 		else:
 			self.primary_manual_rois_autogenerated = False
 
+	def roi_source(self) -> str:
+		"""Geometría de ROI elegida para el análisis: 'ring' o 'ectb_wall'."""
+		combo = getattr(self, "roi_source_combo", None)
+		if combo is None:
+			return "ring"
+		value = combo.currentData()
+		return str(value) if value else "ring"
+
+	def set_roi_source(self, source: str) -> bool:
+		"""Selecciona la geometría de ROI. Devuelve True si cambió."""
+		combo = getattr(self, "roi_source_combo", None)
+		if combo is None:
+			return False
+		index = combo.findData(str(source))
+		if index < 0 or index == combo.currentIndex():
+			return False
+		combo.setCurrentIndex(index)
+		return True
+
+	def cavity_center_enabled(self) -> bool:
+		"""True si el centro del VI se refina sobre la cavidad en vez del músculo."""
+		check = getattr(self, "cavity_center_check", None)
+		return bool(check is not None and check.isChecked())
+
+	def set_cavity_center_enabled(self, enabled: bool) -> bool:
+		"""Activa/desactiva el centrado en cavidad. Devuelve True si cambió."""
+		check = getattr(self, "cavity_center_check", None)
+		if check is None or bool(check.isChecked()) == bool(enabled):
+			return False
+		check.setChecked(bool(enabled))
+		return True
+
+	def _propagate_cavity_center(self):
+		"""Baja el flag a los visores para que el Auto ROI dibujado coincida."""
+		enabled = self.cavity_center_enabled()
+		for name in ("cine", "cine_compare"):
+			widget = getattr(self, name, None)
+			setter = getattr(widget, "set_refine_cavity_center", None)
+			if callable(setter):
+				setter(enabled)
+
+	def _on_cavity_center_toggled(self, checked: bool):
+		"""Reprocesa al cambiar el criterio de centrado.
+
+		Mover el centro cambia radios, contornos ECTb y la asignación angular a
+		segmentos, así que invalida segmentación y fase por completo.
+		"""
+		self._propagate_cavity_center()
+		state = "cavidad" if bool(checked) else "centroide de miocardio"
+		self.statusBar().showMessage(f"Centro del VI: {state}")
+		if self.study is None or not bool(getattr(self.study, "reconstructed", True)):
+			return
+		self._cache_seg_sig = ""
+		self._cache_phase_sig = ""
+		self._invalidate_output_cache()
+		QTimer.singleShot(0, self.process_current)
+
+	def _log_cavity_center_shift(self, seg):
+		"""Informa cuánto movió el centro el refinamiento en cavidad.
+
+		Sin esto no hay forma de saber si la opción hizo algo: un corrimiento de
+		medio píxel es invisible a ojo pero mueve la asignación angular.
+		"""
+		if not self.cavity_center_enabled():
+			return
+		shift = getattr(seg, "center_shift_px", None)
+		if shift is None:
+			return
+		shift = np.asarray(shift, dtype=np.float64)
+		valid = shift[np.isfinite(shift)]
+		if valid.size == 0:
+			self._log("Centrado en cavidad activo, pero ningún corte pudo refinarse.")
+			return
+		mean_shift = float(np.mean(valid))
+		max_shift = float(np.max(valid))
+		worst = int(np.nanargmax(np.where(np.isfinite(shift), shift, -np.inf)))
+		moved = int(np.count_nonzero(valid > 0.05))
+		self._log(
+			f"Centrado en cavidad: {moved} de {valid.size} cortes movidos; "
+			f"desplazamiento medio {mean_shift:.2f} px, máximo {max_shift:.2f} px (corte {worst + 1})."
+		)
+
+	def _apply_ectb_wall_segmentation(self, cube) -> bool:
+		"""Reemplaza la ROI anular por la pared irregular que traza el ECTb.
+
+		La segmentación clásica queda como semilla (aporta centro y extensión
+		por corte, que es lo que el ECTb necesita para tirar los rayos); sobre
+		esa base se recalculan endocardio y epicardio ángulo por ángulo y con
+		eso se rearma la máscara. Si el ECTb no puede cuantificar, se conserva
+		la ROI anular y se avisa, en vez de dejar el análisis sin máscara.
+		"""
+		study = self.study
+		seg = self.seg
+		if study is None or seg is None:
+			return False
+		pixel_spacing = getattr(study, "pixel_spacing", None)
+		slice_mm = getattr(study, "z_spacing_mm", None)
+		if not pixel_spacing or slice_mm is None:
+			self._log("[WARN] Pared ECTb no aplicada: el estudio no trae spacing.")
+			return False
+
+		try:
+			pixel_mm = (float(pixel_spacing[0]), float(pixel_spacing[1]))
+			result = analyze_lv_ectb(cube, seg, pixel_mm, float(slice_mm), self.ectb_config())
+			if not getattr(result, "available", False):
+				reason = str(getattr(result, "reason", "") or "sin motivo informado")
+				self._log(f"[WARN] Pared ECTb no aplicada ({reason}). Se mantiene la ROI anular.")
+				return False
+			wall_seg = wall_segmentation_from_ectb(result, seg, pixel_mm)
+		except Exception as exc:
+			self._log(f"[WARN] Pared ECTb no aplicada: {exc}. Se mantiene la ROI anular.")
+			return False
+
+		if wall_seg is None:
+			self._log("[WARN] Pared ECTb no aplicada: los contornos no generaron máscara. Se mantiene la ROI anular.")
+			return False
+
+		ring_voxels = int(getattr(seg, "n_voxels", 0))
+		self.seg_ring_base = seg
+		self.seg = wall_seg
+		self._log(
+			f"ROI de análisis = pared ECTb (contornos irregulares): {wall_seg.n_voxels} voxels "
+			f"en {len(result.valid_slices)} de {result.n_slices_total} cortes "
+			f"(la ROI anular tenía {ring_voxels})."
+		)
+		return True
+
 	def _expose_segmentation_rois(self, seg_method: str):
 		if self.seg is None:
 			return
@@ -3356,6 +3582,35 @@ class MainWindow(QMainWindow):
 			preferred_slice=preferred_slice,
 		)
 		self._update_cine_active_border()
+		self._clamp_window_to_screen()
+
+	def _clamp_window_to_screen(self):
+		"""Evita crecimiento horizontal fuera del monitor activo.
+
+		Algunos cambios de visibilidad/layout (p.ej. alternar cine en asincronia)
+		pueden hacer que Qt intente ensanchar la ventana para satisfacer nuevos
+		size hints. Este clamp mantiene la geometria dentro del area visible.
+		"""
+		if self.isFullScreen() or self.isMaximized():
+			return
+		screen = self.screen() or QApplication.primaryScreen()
+		if screen is None:
+			return
+		available = screen.availableGeometry()
+		geom = self.geometry()
+		new_w = min(geom.width(), available.width())
+		new_h = min(geom.height(), available.height())
+		max_x = available.left() + max(0, available.width() - new_w)
+		max_y = available.top() + max(0, available.height() - new_h)
+		new_x = min(max(geom.x(), available.left()), max_x)
+		new_y = min(max(geom.y(), available.top()), max_y)
+		if (
+			new_w != geom.width()
+			or new_h != geom.height()
+			or new_x != geom.x()
+			or new_y != geom.y()
+		):
+			self.setGeometry(new_x, new_y, new_w, new_h)
 
 	def _on_cine_source_changed(self, index: int):
 		if index < 0:
@@ -4040,6 +4295,10 @@ class MainWindow(QMainWindow):
 				"scope": "slice",
 				"poly_s": "none",
 				"poly_g": "none",
+				"mode": "attenuate",
+				"bg_method": "idw",
+				"ref_s": "none",
+				"ref_g": "none",
 			}
 		atten, feather = cine_widget.intestinal_params()
 		scope = cine_widget.intestinal_scope()
@@ -4054,6 +4313,22 @@ class MainWindow(QMainWindow):
 			poly_g_items = sorted(((int(g), int(s)), [(float(a), float(b)) for a, b in (v or [])]) for (g, s), v in poly_gate.items())
 		except Exception:
 			poly_g_items = []
+		ref_slice = getattr(cine_widget, "_intestinal_ref_polygons", {}) or {}
+		ref_gate = getattr(cine_widget, "_intestinal_ref_polygons_by_gate", {}) or {}
+		try:
+			ref_s_items = sorted(
+				(int(k), [[(float(a), float(b)) for a, b in (poly or [])] for poly in (v or [])])
+				for k, v in ref_slice.items()
+			)
+		except Exception:
+			ref_s_items = []
+		try:
+			ref_g_items = sorted(
+				((int(g), int(s)), [[(float(a), float(b)) for a, b in (poly or [])] for poly in (v or [])])
+				for (g, s), v in ref_gate.items()
+			)
+		except Exception:
+			ref_g_items = []
 		return {
 			"global_render": bool(self.global_intestinal_render_check.isChecked()),
 			"enabled": bool(enabled),
@@ -4062,6 +4337,14 @@ class MainWindow(QMainWindow):
 			"scope": str(scope),
 			"poly_s": self._hash_payload({"items": poly_s_items}) if poly_s_items else "none",
 			"poly_g": self._hash_payload({"items": poly_g_items}) if poly_g_items else "none",
+			"mode": str(cine_widget.intestinal_mode()) if hasattr(cine_widget, "intestinal_mode") else "attenuate",
+			"bg_method": (
+				str(cine_widget.intestinal_background_method())
+				if hasattr(cine_widget, "intestinal_background_method")
+				else "idw"
+			),
+			"ref_s": self._hash_payload({"items": ref_s_items}) if ref_s_items else "none",
+			"ref_g": self._hash_payload({"items": ref_g_items}) if ref_g_items else "none",
 		}
 
 	def _gate_roi_signature_for_widget(self, cine_widget: CineWidget | None) -> dict:
@@ -4129,6 +4412,73 @@ class MainWindow(QMainWindow):
 		for g in range(int(out.shape[0])):
 			out[g] = cine_widget.apply_intestinal_mask_to_gate_volume(out[g], gate_index=g)
 		return out
+
+	def _apply_intestinal_subtraction_to_cube(
+		self, cube: np.ndarray, cine_widget: CineWidget | None
+	) -> tuple[np.ndarray, dict | None]:
+		"""Sustracción de fondo intestinal (modo 'subtract') sobre el cubo completo.
+
+		A diferencia de la atenuación porcentual, que solo sirve para que el Auto ROI
+		no se enganche con el asa, esta corrección **sí** tiene que alimentar el
+		análisis de fase: restar la componente DC del intestino es lo único que
+		mejora la amplitud relativa que mira el filtro de amplitud. Ver el docstring
+		de `core.intestinal_subtraction` para el desarrollo.
+		"""
+		arr = np.asarray(cube, dtype=np.float64)
+		if arr.ndim != 4 or cine_widget is None:
+			return arr, None
+		if not cine_widget.intestinal_apply_enabled():
+			return arr, None
+		if cine_widget.intestinal_mode() != "subtract":
+			return arr, None
+
+		shape = (int(arr.shape[2]), int(arr.shape[3]))
+		n_slices = int(arr.shape[1])
+		targets = cine_widget.intestinal_target_weights(shape, n_slices)
+		if not targets:
+			return arr, None
+		references = cine_widget.intestinal_reference_masks(shape, n_slices)
+		method = (
+			cine_widget.intestinal_background_method()
+			if hasattr(cine_widget, "intestinal_background_method")
+			else "idw"
+		)
+		return apply_intestinal_subtraction(arr, targets, references, method=method)
+
+	def _log_intestinal_subtraction(self, info: dict | None):
+		if not info:
+			return
+		message = str(info.get("message") or "").strip()
+		if message:
+			self._log(message)
+		method = str(info.get("method") or "").strip().lower()
+		if method:
+			self._log(
+				"Fondo estimado por media simple de las referencias (nivel constante)."
+				if method == "mean"
+				else "Fondo estimado por interpolación de distancia inversa entre referencias."
+			)
+		per_slice = info.get("per_slice") or {}
+		mejoras = [
+			(int(s), float(d.get("rel_amp_before") or 0.0), float(d.get("rel_amp_after") or 0.0))
+			for s, d in per_slice.items()
+			if d.get("applied") and np.isfinite(d.get("rel_amp_after", np.nan))
+		]
+		if mejoras:
+			# Control de calidad: lo que queda tras restar TIENE que latir. Si la
+			# amplitud relativa no sube, ahí había intestino, no miocardio
+			# recuperable, y la corrección no sirvió.
+			subieron = sum(1 for _s, a, b in mejoras if b > a)
+			detalle = ", ".join(f"corte {s}: {a:.3f}→{b:.3f}" for s, a, b in sorted(mejoras)[:6])
+			self._log(
+				f"QC sustracción de fondo: amplitud relativa mejoró en {subieron}/{len(mejoras)} corte(s) "
+				f"({detalle}). Si no mejora, lo que había ahí era fondo y no miocardio recuperable."
+			)
+		if info.get("slices_oversubtracted"):
+			self._log(
+				"ADVERTENCIA: posible sobre-sustracción. Revisá el nivel de las ROI de referencia: "
+				"restar de más fabrica un defecto inferior que no existe."
+			)
 
 	def _intestinal_export_stamp_text(self, cine_widget: CineWidget | None = None) -> str:
 		widget = cine_widget
@@ -4311,6 +4661,13 @@ class MainWindow(QMainWindow):
 			# fase: si no, el déficit del último gate contamina la máscara y la FFT.
 			cube_corrected, dropout_info = self._apply_gate_dropout_correction(self.study.cube, "principal")
 			self._refresh_gate_dropout_status(dropout_info)
+			# La sustracción de fondo intestinal va ANTES de separar los cubos y
+			# alimenta a los dos: a diferencia de la atenuación porcentual, restar
+			# la componente DC del intestino es lo único que mejora la amplitud
+			# relativa que evalúa el filtro de amplitud de la fase.
+			cube_corrected, intestinal_sub_info = self._apply_intestinal_subtraction_to_cube(cube_corrected, self.cine)
+			self.intestinal_subtraction_info = intestinal_sub_info
+			self._log_intestinal_subtraction(intestinal_sub_info)
 			cube_for_segmentation = self._apply_intestinal_mask_to_cube(cube_corrected, self.cine, require_global_visual=False)
 			cube_for_analysis = cube_corrected
 			intestinal_sig_primary = self._intestinal_signature_for_widget(self.cine)
@@ -4318,6 +4675,8 @@ class MainWindow(QMainWindow):
 			seg_payload = {
 				"study": study_sig,
 				"method": seg_method,
+				"roi_source": self.roi_source(),
+				"cavity_center": bool(self.cavity_center_enabled()),
 				"threshold": round(float(self.threshold_spin.value()), 5),
 				"sigma": round(float(self.sigma_spin.value()), 5),
 				"gate_dropout": bool(self.gate_dropout_enabled()),
@@ -4334,7 +4693,13 @@ class MainWindow(QMainWindow):
 					threshold_frac=float(self.threshold_spin.value()),
 					smooth_sigma=float(self.sigma_spin.value()),
 					manual_rois=manual_rois,
+					refine_cavity_center=self.cavity_center_enabled(),
 				)
+				self.seg_ring_base = self.seg
+				self._log_cavity_center_shift(self.seg)
+				if self.roi_source() == "ectb_wall":
+					self._set_progress(38, "Reemplazando ROI por la pared ECTb...")
+					self._apply_ectb_wall_segmentation(cube_for_segmentation)
 				self._cache_seg_sig = seg_sig
 				self._cache_phase_sig = ""
 				self._invalidate_output_cache()
@@ -4516,6 +4881,10 @@ class MainWindow(QMainWindow):
 				self._refresh_gqc_window()
 			except Exception as exc:
 				self._log(f"[WARN] Refresco del panel GQC falló: {exc}")
+			try:
+				self._refresh_asynchrony_review_window()
+			except Exception as exc:
+				self._log(f"[WARN] Refresco de la vista asincrónica falló: {exc}")
 		except Exception as exc:
 			self._set_progress(0, "Error")
 			self.statusBar().showMessage("Error")
@@ -5630,6 +5999,27 @@ class MainWindow(QMainWindow):
 			QMessageBox.critical(self, "Error exportando DICOM", str(exc))
 			self._log(f"[ERROR] Exportar desgatillado: {exc}")
 
+	def _compute_perfusion_texture(self):
+		"""Textura GLCM de perfusión por segmento AHA + tabla combinada perfusión+fase.
+
+		Perfusión = media de gates del cubo actual (short-axis). Devuelve
+		(texture_by_seg, perfusion_phase_rows) o (None, None) si falta info.
+		"""
+		if self.aha is None or self.study is None or not isinstance(self.phase_by_seg, dict):
+			return None, None
+		segment_map = getattr(self.aha, "segment_map", None)
+		if segment_map is None:
+			return None, None
+		cube = self.study.cube
+		if cube is None or cube.ndim != 4:
+			return None, None
+		perfusion = np.asarray(cube, dtype=np.float64).mean(axis=0)  # (n_slices, H, W)
+		if perfusion.shape != segment_map.shape:
+			return None, None
+		texture_by_seg = perfusion_texture_by_segment(perfusion, segment_map)
+		perfusion_phase_rows = combine_perfusion_phase(texture_by_seg, self.phase_by_seg)
+		return texture_by_seg, perfusion_phase_rows
+
 	def _export_structured_results(self):
 		"""Exporta resultados a JSON/CSV/Excel en el directorio de salida."""
 		if self.study is None or self.metrics is None:
@@ -5660,6 +6050,8 @@ class MainWindow(QMainWindow):
 		# Parámetros de procesamiento
 		proc_params = {
 			"seg_method": str(self.seg_method.currentText()),
+			"roi_source": self.roi_source(),
+			"cavity_center": bool(self.cavity_center_enabled()),
 			"threshold": float(self.threshold_spin.value()),
 			"smooth_sigma": float(self.sigma_spin.value()),
 			"harmonics": int(self.harmonics_spin.value()),
@@ -5683,6 +6075,28 @@ class MainWindow(QMainWindow):
 		# QC
 		qc_info = self.phase_qc if self.phase_qc else None
 
+		# Datos de investigación por segmento AHA / territorio / textura / stress-rest.
+		phase_by_seg = self.phase_by_seg if isinstance(self.phase_by_seg, dict) else None
+		territory = self.territory if isinstance(self.territory, dict) else None
+		n_per_segment = getattr(self.aha, "n_per_segment", None) if self.aha is not None else None
+		texture_by_seg = None
+		perfusion_phase_rows = None
+		stress_rest = None
+		try:
+			texture_by_seg, perfusion_phase_rows = self._compute_perfusion_texture()
+		except Exception as exc:
+			self._log(f"Textura de perfusión no disponible para export: {exc}")
+		try:
+			if self.compare_bundle is not None:
+				stress_rest = compare_stress_rest(
+					self.metrics,
+					self.compare_bundle.get("metrics"),
+					self.territory,
+					self.compare_bundle.get("territory"),
+				)
+		except Exception as exc:
+			self._log(f"Comparación stress-rest no disponible para export: {exc}")
+
 		# Nombre base
 		patient_id = study_meta.get("patient_id", "unknown")
 		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -5699,6 +6113,12 @@ class MainWindow(QMainWindow):
 			normal_db_eval,
 			qc_info,
 			base_name,
+			phase_by_seg,
+			territory,
+			n_per_segment,
+			texture_by_seg,
+			perfusion_phase_rows,
+			stress_rest,
 		)
 
 		# Log
@@ -5919,6 +6339,31 @@ class MainWindow(QMainWindow):
 		clinical.append("Territorios coronarios")
 		for name, data in self.territory.items():
 			clinical.append(f"  {name}: mean={data['mean']:.1f}°, SD={data['std']:.1f}°, n={data['n']}")
+
+		# Delta stress-rest de fase (solo si hay estudio de comparación cargado).
+		# Es la señal con mayor respaldo predictivo (Fukumoto 2025 entropy /
+		# Tanaka 2025 bandwidth). Ver core.stress_rest.
+		if self.compare_bundle is not None:
+			try:
+				sr = compare_stress_rest(
+					self.metrics,
+					self.compare_bundle.get("metrics"),
+					self.territory,
+					self.compare_bundle.get("territory"),
+				)
+				if sr.get("available"):
+					d = sr["deltas"]
+					clinical.append("")
+					clinical.append("Delta stress-rest de fase (esfuerzo - reposo)")
+					clinical.append(
+						f"  Phase SD: {d.get('phase_sd', float('nan')):+.1f}°  |  "
+						f"Bandwidth: {d.get('bandwidth', float('nan')):+.1f}°  |  "
+						f"Entropy: {d.get('entropy_normalized_pct', float('nan')):+.1f}%"
+					)
+					for note in sr.get("notes", []):
+						clinical.append(f"  • {note}")
+			except Exception:
+				pass
 
 		technical = []
 		technical.append("Identificación")
@@ -7690,6 +8135,7 @@ class MainWindow(QMainWindow):
 			"report_cmap_amp": str(self.report_cmap_amp.currentText()),
 			"report_cmap_bullseye": str(self.report_cmap_bullseye.currentText()),
 			"report_cmap_polar_perf": str(self.report_cmap_polar_perf.currentText()),
+			"intestinal_subtraction": self.intestinal_subtraction_info,
 		}
 		vol = self._compute_volumes_ml()
 		ef = self._estimate_lv_ef()
@@ -7709,6 +8155,23 @@ class MainWindow(QMainWindow):
 			report_metrics["normal_db_protocol"] = protocol
 		except Exception:
 			pass
+		# Territorio/textura/stress-rest para el PDF (mismos datos que el export crudo).
+		stress_rest = None
+		perfusion_phase_rows = None
+		try:
+			_texture, perfusion_phase_rows = self._compute_perfusion_texture()
+		except Exception as exc:
+			self._log(f"Textura de perfusión no disponible para PDF: {exc}")
+		try:
+			if self.compare_bundle is not None:
+				stress_rest = compare_stress_rest(
+					self.metrics,
+					self.compare_bundle.get("metrics"),
+					self.territory,
+					self.compare_bundle.get("territory"),
+				)
+		except Exception as exc:
+			self._log(f"Comparación stress-rest no disponible para PDF: {exc}")
 		try:
 			generate_report(
 				output_pdf=pdf_path,
@@ -7720,6 +8183,8 @@ class MainWindow(QMainWindow):
 				processing_params=params,
 				volumes=vol,
 				ef=ef,
+				stress_rest=stress_rest,
+				perfusion_phase_rows=perfusion_phase_rows,
 			)
 			self._log(f"PDF actualizado: {pdf_path}")
 		except Exception as exc:
@@ -10847,6 +11312,10 @@ class MainWindow(QMainWindow):
 		comp_study = dicom_loader.load(path, verbose=False)
 		comp_axis = self._load_axis_companions(path)
 		comp_cube_corrected, _ = self._apply_gate_dropout_correction(comp_study.cube, "comparación")
+		comp_cube_corrected, comp_intestinal_info = self._apply_intestinal_subtraction_to_cube(
+			comp_cube_corrected, self.cine_compare
+		)
+		self._log_intestinal_subtraction(comp_intestinal_info)
 		comp_cube_for_segmentation = self._apply_intestinal_mask_to_cube(comp_cube_corrected, self.cine_compare, require_global_visual=False)
 		comp_cube_for_analysis = comp_cube_corrected
 		seg_method = "auto"

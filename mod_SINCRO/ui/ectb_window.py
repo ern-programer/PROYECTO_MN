@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
 	QRadioButton,
 	QScrollArea,
 	QSizePolicy,
+	QSlider,
 	QSpinBox,
 	QVBoxLayout,
 	QWidget,
@@ -56,6 +57,11 @@ from core.ectb_lv import (
 )
 from ui.collapsible import CollapsibleSection
 from ui.wall_ruler import WallThicknessRuler
+
+try:
+	from core.col_registry import available_colormaps
+except Exception:  # pragma: no cover - registro opcional
+	available_colormaps = None
 
 
 class VolumeCurveWidget(QWidget):
@@ -607,6 +613,79 @@ class ECTbWindow(QDialog):
 		)
 		box_layout.addWidget(self.ruler_contours_check)
 
+		self.ruler_show_check = QCheckBox("Mostrar la cota sobre la imagen")
+		self.ruler_show_check.setChecked(True)
+		self.ruler_show_check.setToolTip(
+			"Oculta o muestra la cota amarilla sin perder su posición.\n"
+			"Útil para ver la pared limpia mientras se ajusta la escala de grises."
+		)
+		self.ruler_show_check.toggled.connect(
+			lambda checked: self.ruler.set_show_ruler(bool(checked))
+		)
+		box_layout.addWidget(self.ruler_show_check)
+
+		# --- Escala de grises en vivo (window/level) ---------------------------
+		scale_row = QHBoxLayout()
+		scale_row.setSpacing(6)
+		scale_row.addWidget(QLabel("Nivel:"))
+		self.ruler_level_slider = QSlider(Qt.Orientation.Horizontal)
+		self.ruler_level_slider.setRange(0, 100)
+		self.ruler_level_slider.setValue(50)
+		self.ruler_level_slider.setMinimumWidth(90)
+		self.ruler_level_slider.setToolTip(
+			"Sube o baja el centro de la ventana de grises (brillo).\n"
+			"Es solo visual: no cambia la medición ni el cálculo."
+		)
+		self.ruler_level_slider.valueChanged.connect(self._on_ruler_scale_changed)
+		scale_row.addWidget(self.ruler_level_slider, 1)
+
+		scale_row.addWidget(QLabel("Ventana:"))
+		self.ruler_width_slider = QSlider(Qt.Orientation.Horizontal)
+		self.ruler_width_slider.setRange(2, 100)
+		self.ruler_width_slider.setValue(100)
+		self.ruler_width_slider.setMinimumWidth(90)
+		self.ruler_width_slider.setToolTip(
+			"Abre o cierra el ancho de la ventana de grises (contraste).\n"
+			"Es solo visual: no cambia la medición ni el cálculo."
+		)
+		self.ruler_width_slider.valueChanged.connect(self._on_ruler_scale_changed)
+		scale_row.addWidget(self.ruler_width_slider, 1)
+
+		scale_row.addWidget(QLabel("Escala:"))
+		self.ruler_cmap_combo = QComboBox()
+		cmap_names = ["gray"]
+		if available_colormaps is not None:
+			try:
+				extra = [c for c in available_colormaps() if c != "gray"]
+				cmap_names = ["gray"] + extra
+			except Exception:
+				cmap_names = ["gray", "hot", "jet", "french"]
+		else:
+			cmap_names = ["gray", "hot", "jet", "french"]
+		self.ruler_cmap_combo.addItems(cmap_names)
+		self.ruler_cmap_combo.setCurrentText("gray")
+		self.ruler_cmap_combo.setToolTip(
+			"Escala de color con la que se muestra el corte.\n"
+			"Es solo visual: no cambia la medición ni el cálculo."
+		)
+		self.ruler_cmap_combo.currentTextChanged.connect(
+			lambda name: self.ruler.set_colormap(str(name))
+		)
+		scale_row.addWidget(self.ruler_cmap_combo)
+
+		self.ruler_invert_check = QCheckBox("Invertir")
+		self.ruler_invert_check.setToolTip("Invierte la escala de grises (blanco↔negro).")
+		self.ruler_invert_check.toggled.connect(
+			lambda checked: self.ruler.set_invert(bool(checked))
+		)
+		scale_row.addWidget(self.ruler_invert_check)
+
+		self.ruler_scale_reset_btn = QPushButton("Reset escala")
+		self.ruler_scale_reset_btn.setToolTip("Vuelve la escala de grises al ajuste automático.")
+		self.ruler_scale_reset_btn.clicked.connect(self._reset_ruler_scale)
+		scale_row.addWidget(self.ruler_scale_reset_btn)
+		box_layout.addLayout(scale_row)
+
 		self.ruler = WallThicknessRuler()
 		self.ruler.measured.connect(self._on_ruler_measured)
 		box_layout.addWidget(self.ruler)
@@ -952,7 +1031,65 @@ class ECTbWindow(QDialog):
 	def _on_ruler_measured(self, mm: float):
 		self._update_ruler_readout(mm)
 		if self.manual_thickness_check.isChecked():
+			# Las áreas (endo/epi) se redibujan en vivo mientras se arrastra la
+			# cota, sin esperar al recálculo completo (que llega con rebote).
+			self._preview_contours_for_thickness(mm)
 			self._apply_measured_thickness(mm)
+
+	def _preview_contours_for_thickness(self, mm: float):
+		"""Redibuja endo/epi en vivo como centro ± espesor/2, sin recalcular todo."""
+		result = self._result
+		seg = getattr(self._main, "seg", None)
+		if result is None or seg is None:
+			return
+		slice_index = int(self.ruler_slice_spin.value())
+		if slice_index not in result.valid_slices:
+			return
+		row = result.valid_slices.index(slice_index)
+		gate_index = max(0, int(result.ed_gate) - 1)
+		centers = np.asarray(getattr(seg, "center_per_slice", np.empty((0, 2))), dtype=np.float64)
+		if slice_index >= centers.shape[0]:
+			return
+		cy, cx = float(centers[slice_index, 0]), float(centers[slice_index, 1])
+		px_mm = max(self._last_pixel_mm, 1e-6)
+		center_radii = np.asarray(result.center_radii_mm[gate_index, row], dtype=np.float64)
+		half = max(float(mm), 0.0) / 2.0
+		endo = np.clip(center_radii - half, 0.0, None)
+		epi = center_radii + half
+		n_ang = int(center_radii.shape[-1])
+		angles = np.linspace(0.0, 2.0 * np.pi, n_ang, endpoint=False)
+		out = []
+		for color, radii in (
+			(QColor(255, 210, 63, 140), center_radii),
+			(QColor(80, 160, 255), endo),
+			(QColor(80, 220, 120), epi),
+		):
+			r_px = np.asarray(radii, dtype=np.float64) / px_mm
+			xs = cx + r_px * np.cos(angles)
+			ys = cy + r_px * np.sin(angles)
+			out.append((color, np.stack([xs, ys], axis=1)))
+		self.ruler.set_contours(out)
+
+	def _on_ruler_scale_changed(self, *_args):
+		"""Aplica el nivel y el ancho de ventana de grises a la vista de la cota."""
+		level = self.ruler_level_slider.value() / 100.0
+		width = self.ruler_width_slider.value() / 100.0
+		self.ruler.set_window_level(level, width)
+
+	def _reset_ruler_scale(self):
+		"""Devuelve la escala de grises al ajuste automático."""
+		for slider, value in (
+			(self.ruler_level_slider, 50),
+			(self.ruler_width_slider, 100),
+		):
+			slider.blockSignals(True)
+			slider.setValue(value)
+			slider.blockSignals(False)
+		self.ruler_invert_check.setChecked(False)
+		self.ruler.set_invert(False)
+		self.ruler_cmap_combo.setCurrentText("gray")
+		self.ruler.set_colormap("gray")
+		self.ruler.set_window_level(0.5, 1.0)
 
 	def _update_ruler_readout(self, mm: float | None = None):
 		value = self.ruler.measurement_mm() if mm is None else float(mm)

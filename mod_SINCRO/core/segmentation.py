@@ -28,6 +28,7 @@ from scipy.ndimage import (
 
 from core import dicom_loader
 from core.console_utf8 import enable_utf8
+from core.lv_center import refine_center_to_cavity
 
 
 @dataclass
@@ -38,6 +39,9 @@ class SegmentationResult:
     outer_radius: np.ndarray
     method: str
     n_voxels: int
+    #: Desplazamiento por corte (en píxeles) que produjo el centrado en cavidad.
+    #: NaN donde no se aplicó. Sirve para saber si la opción cambió algo o no.
+    center_shift_px: np.ndarray | None = None
 
 
 def _largest_component(bin_mask: np.ndarray) -> np.ndarray:
@@ -112,23 +116,52 @@ def _lv_candidate_component(bin_mask: np.ndarray) -> np.ndarray:
     return _largest_component(bin_mask)
 
 
-def _slice_center_and_radii(slice_mask: np.ndarray) -> tuple[float, float, float, float]:
+def _slice_center_and_radii(
+    slice_mask: np.ndarray,
+    *,
+    img: np.ndarray | None = None,
+    refine_cavity: bool = False,
+) -> tuple[float, float, float, float, float]:
+    """Devuelve (cy, cx, r_inner, r_outer, shift_px) del corte.
+
+    `shift_px` es cuánto movió el centro el refinamiento en cavidad (NaN si no
+    se aplicó), para poder informar si la opción tuvo efecto real.
+    """
     if not np.any(slice_mask):
-        return np.nan, np.nan, np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan, np.nan
 
     ring = _largest_component(np.asarray(slice_mask, dtype=bool))
     if not np.any(ring):
-        return np.nan, np.nan, np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan, np.nan
 
     filled = binary_fill_holes(ring)
     cavity = filled & (~ring)
     if int(cavity.sum()) >= 4:
         cy, cx = center_of_mass(cavity)
     else:
+        # Sin hueco de píxeles enteros (típico en 22x22 o cerca del ápex) cae al
+        # centroide del músculo, que se corre hacia el sector de mayor captación.
         cy, cx = center_of_mass(ring)
 
     if not (np.isfinite(cy) and np.isfinite(cx)):
-        return np.nan, np.nan, np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan, np.nan
+
+    shift_px = np.nan
+    if refine_cavity:
+        # Radio preliminar solo para acotar la búsqueda; los radios definitivos
+        # se calculan más abajo ya con el centro corregido.
+        rys, rxs = np.nonzero(ring)
+        r_prelim = 0.5 * float(max(np.ptp(rys), np.ptp(rxs), 2))
+        new_cy, new_cx = refine_center_to_cavity(
+            float(cy),
+            float(cx),
+            r_prelim,
+            mask=ring,
+            img=img,
+            low_res=min(ring.shape) <= 28,
+        )
+        shift_px = float(np.hypot(new_cy - float(cy), new_cx - float(cx)))
+        cy, cx = new_cy, new_cx
 
     outer_edge = ring & (~binary_erosion(ring, structure=np.ones((3, 3), dtype=bool)))
     inner_edge = cavity & (~binary_erosion(cavity, structure=np.ones((3, 3), dtype=bool)))
@@ -142,7 +175,7 @@ def _slice_center_and_radii(slice_mask: np.ndarray) -> tuple[float, float, float
         ys, xs = np.nonzero(ring)
         outer_d = np.sqrt((ys - cy) ** 2 + (xs - cx) ** 2)
         if outer_d.size == 0:
-            return np.nan, np.nan, np.nan, np.nan
+            return np.nan, np.nan, np.nan, np.nan, np.nan
 
     h, w = ring.shape
     low_res = min(h, w) <= 28
@@ -172,8 +205,7 @@ def _slice_center_and_radii(slice_mask: np.ndarray) -> tuple[float, float, float
     if np.isfinite(r_inner) and np.isfinite(r_outer):
         r_inner = min(float(r_inner), 0.84 * float(r_outer))
 
-    return float(cy), float(cx), r_inner, r_outer
-
+    return float(cy), float(cx), r_inner, r_outer, float(shift_px)
 
 def _stabilize_auto_roi_series(
     centers: np.ndarray,
@@ -297,12 +329,14 @@ def _segment_auto_or_threshold(
     threshold_frac: float,
     smooth_sigma: float,
     with_cleanup: bool,
+    refine_cavity_center: bool = False,
 ) -> SegmentationResult:
     n_slices, H, W = mean_img.shape
     mask = np.zeros((n_slices, H, W), dtype=bool)
     centers = np.full((n_slices, 2), np.nan, dtype=np.float64)
     inner = np.full((n_slices,), np.nan, dtype=np.float64)
     outer = np.full((n_slices,), np.nan, dtype=np.float64)
+    shift = np.full((n_slices,), np.nan, dtype=np.float64)
 
     low_res = min(H, W) <= 28
     for s in range(n_slices):
@@ -343,10 +377,15 @@ def _segment_auto_or_threshold(
             continue
 
         mask[s] = bin_mask
-        cy, cx, rin, rout = _slice_center_and_radii(bin_mask)
+        cy, cx, rin, rout, shift_px = _slice_center_and_radii(
+            bin_mask,
+            img=img_s,
+            refine_cavity=refine_cavity_center,
+        )
         centers[s] = [cy, cx]
         inner[s] = rin
         outer[s] = rout
+        shift[s] = shift_px
 
     if with_cleanup:
         centers, inner, outer = _stabilize_auto_roi_series(centers, inner, outer, mask)
@@ -367,6 +406,7 @@ def _segment_auto_or_threshold(
         outer_radius=outer,
         method="auto" if with_cleanup else "threshold",
         n_voxels=int(mask.sum()),
+        center_shift_px=shift,
     )
 
 
@@ -376,6 +416,7 @@ def segment_myocardium(
     threshold_frac: float = 0.35,
     smooth_sigma: float = 1.0,
     manual_rois: dict | None = None,
+    refine_cavity_center: bool = False,
 ) -> SegmentationResult:
     if cube.ndim != 4:
         raise ValueError(f"cube debe ser 4D (n_gates,n_slices,H,W); recibió {cube.shape}")
@@ -389,6 +430,7 @@ def segment_myocardium(
             threshold_frac=threshold_frac,
             smooth_sigma=smooth_sigma,
             with_cleanup=True,
+            refine_cavity_center=refine_cavity_center,
         )
 
     if method == "threshold":
@@ -397,6 +439,7 @@ def segment_myocardium(
             threshold_frac=threshold_frac,
             smooth_sigma=smooth_sigma,
             with_cleanup=False,
+            refine_cavity_center=refine_cavity_center,
         )
 
     if method == "manual":

@@ -95,6 +95,8 @@ def generate_report(
 	processing_params: dict,
 	volumes: dict,
 	ef: dict,
+	stress_rest: dict | None = None,
+	perfusion_phase_rows: list | None = None,
 ) -> str:
 	"""Genera informe PDF clínico con bloque de auditoría y retorna la ruta final."""
 
@@ -260,6 +262,132 @@ def generate_report(
 	story.append(met_table)
 	story.append(Spacer(1, 4 * mm))
 
+	# --- Territorios coronarios, textura de perfusión y delta stress-rest ---
+	def _fmt_deg(v):
+		try:
+			fv = float(v)
+			return f"{fv:+.1f}°" if np.isfinite(fv) else "N/D"
+		except (TypeError, ValueError):
+			return "N/D"
+
+	territory = territory or {}
+	if territory or (stress_rest and stress_rest.get("available")) or perfusion_phase_rows:
+		story.append(Paragraph("2b. Territorios coronarios, textura y stress-rest", section_style))
+
+		# Tabla de territorios coronarios (fase por LAD/LCx/RCA)
+		if territory:
+			terr_rows = [["Territorio", "Fase media", "SD", "Rango", "n seg."]]
+			for terr in ("LAD", "LCx", "RCA"):
+				d = territory.get(terr, {}) or {}
+				mean_v = d.get("mean")
+				std_v = d.get("std")
+				min_v = d.get("min")
+				max_v = d.get("max")
+				rango = f"{_safe_float(min_v, 0)}–{_safe_float(max_v, 0)}°" if (min_v is not None and max_v is not None) else "N/D"
+				terr_rows.append([
+					terr,
+					f"{_safe_float(mean_v, 1)}°",
+					f"{_safe_float(std_v, 1)}°",
+					rango,
+					str(d.get("n", "N/D")),
+				])
+			terr_table = Table(terr_rows, colWidths=[26 * mm, 34 * mm, 26 * mm, 50 * mm, 30 * mm])
+			terr_table.setStyle(TableStyle([
+				("BACKGROUND", (0, 0), (-1, 0), DARK_BLUE),
+				("TEXTCOLOR", (0, 0), (-1, 0), white),
+				("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+				("FONTSIZE", (0, 0), (-1, -1), 9),
+				("ROWBACKGROUNDS", (0, 1), (-1, -1), [white, LIGHT_GREY]),
+				("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cccccc")),
+				("LEFTPADDING", (0, 0), (-1, -1), 3 * mm),
+			]))
+			story.append(Paragraph("<b>Fase por territorio coronario (mapeo AHA)</b>", body_style))
+			story.append(Spacer(1, 1.5 * mm))
+			story.append(terr_table)
+			story.append(Spacer(1, 3 * mm))
+
+		# Delta stress-rest de fase (Fukumoto/Tanaka)
+		if stress_rest and stress_rest.get("available"):
+			deltas = stress_rest.get("deltas", {})
+			st = stress_rest.get("stress", {})
+			rs = stress_rest.get("rest", {})
+			sr_rows = [["Métrica", "Esfuerzo", "Reposo", "Δ (esf−rep)"]]
+			for key, label, is_ang in (
+				("phase_sd", "Phase SD", False),
+				("bandwidth", "Bandwidth", False),
+				("entropy_normalized_pct", "Entropy norm.", False),
+				("entropy_shannon_bits", "Entropy bits", False),
+				("asynchrony_index", "Asynchrony Idx", False),
+				("mean_phase", "Fase media", True),
+			):
+				unit = "" if key in ("entropy_shannon_bits",) else ("%" if "pct" in key or key == "asynchrony_index" else "°")
+				sr_rows.append([
+					label,
+					f"{_safe_float(st.get(key), 1)}{unit}",
+					f"{_safe_float(rs.get(key), 1)}{unit}",
+					_fmt_deg(deltas.get(key)) if key != "entropy_shannon_bits" else f"{_safe_float(deltas.get(key), 3)}",
+				])
+			sr_table = Table(sr_rows, colWidths=[42 * mm, 34 * mm, 34 * mm, 36 * mm])
+			sr_table.setStyle(TableStyle([
+				("BACKGROUND", (0, 0), (-1, 0), DARK_BLUE),
+				("TEXTCOLOR", (0, 0), (-1, 0), white),
+				("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+				("FONTSIZE", (0, 0), (-1, -1), 9),
+				("ROWBACKGROUNDS", (0, 1), (-1, -1), [white, LIGHT_GREY]),
+				("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cccccc")),
+				("LEFTPADDING", (0, 0), (-1, -1), 3 * mm),
+			]))
+			story.append(Paragraph("<b>Delta stress-rest de fase (convención: esfuerzo − reposo)</b>", body_style))
+			story.append(Spacer(1, 1.5 * mm))
+			story.append(sr_table)
+			story.append(Spacer(1, 1.5 * mm))
+			for note in stress_rest.get("notes", []):
+				story.append(Paragraph(f"• {note}", small_style))
+			story.append(Spacer(1, 3 * mm))
+
+		# Textura GLCM de perfusión por segmento (resumen)
+		if perfusion_phase_rows:
+			avail = [r for r in perfusion_phase_rows if np.isfinite(r.get("contrast", float("nan")))]
+			if avail:
+				tex_rows = [["Seg.", "Fase", "Contrast", "Homog.", "Energy", "Correl.", "Entropy"]]
+				for r in perfusion_phase_rows:
+					if not np.isfinite(r.get("contrast", float("nan"))):
+						continue
+					tex_rows.append([
+						str(r.get("segment", "")),
+						f"{_safe_float(r.get('phase_deg'), 0)}°",
+						_safe_float(r.get("contrast"), 2),
+						_safe_float(r.get("homogeneity"), 3),
+						_safe_float(r.get("energy"), 3),
+						_safe_float(r.get("correlation"), 3),
+						_safe_float(r.get("glcm_entropy"), 2),
+					])
+				tex_table = Table(tex_rows, colWidths=[16 * mm, 22 * mm, 26 * mm, 24 * mm, 22 * mm, 24 * mm, 24 * mm])
+				tex_table.setStyle(TableStyle([
+					("BACKGROUND", (0, 0), (-1, 0), DARK_BLUE),
+					("TEXTCOLOR", (0, 0), (-1, 0), white),
+					("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+					("FONTSIZE", (0, 0), (-1, -1), 8),
+					("ROWBACKGROUNDS", (0, 1), (-1, -1), [white, LIGHT_GREY]),
+					("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cccccc")),
+					("LEFTPADDING", (0, 0), (-1, -1), 2 * mm),
+				]))
+				story.append(Paragraph(
+					"<b>Textura GLCM de perfusión + fase por segmento AHA</b> "
+					"(perfusión + fase mejoran la predicción de respuesta a CRT; Jiang 2025, PMID 40391672)",
+					body_style,
+				))
+				story.append(Spacer(1, 1.5 * mm))
+				story.append(tex_table)
+				story.append(Spacer(1, 1.5 * mm))
+				story.append(Paragraph(
+					"Textura de perfusión (contraste/homogeneidad/energía/correlación/entropía GLCM) por segmento, "
+					"con su fase media. Hallazgo EXPLORATORIO; no reemplaza la evaluación clínica.",
+					small_style,
+				))
+				story.append(Spacer(1, 3 * mm))
+
+
 	story.append(Paragraph("3. Criterios usados (auditoría y validación)", section_style))
 	roi_lines = [line.strip() for line in str(processing_params.get("manual_rois_text", "") or "").splitlines() if line.strip() and not line.strip().startswith("#")]
 	roi_preview = "; ".join(roi_lines[:4]) if roi_lines else "N/D"
@@ -337,6 +465,52 @@ def generate_report(
 		f"MP4 polar cine={'sí' if processing_params.get('export_polar_mp4', False) else 'no'}"
 	)
 	story.append(Paragraph(f"<b>Parámetros usados:</b> {proc_txt}", body_style))
+
+	# Declaración obligatoria de la sustracción de fondo intestinal.
+	# Es una corrección operador-dependiente: si se aplicó, tiene que quedar
+	# escrita en el informe con las cuentas restadas. Sin esta declaración el
+	# resultado no es auditable.
+	intestinal = processing_params.get("intestinal_subtraction") or {}
+	if isinstance(intestinal, dict) and intestinal.get("applied"):
+		slices_txt = _slice_list_text([int(s) for s in (intestinal.get("slices_corrected") or [])])
+		warn_style = ParagraphStyle(
+			"IntestinalWarn",
+			parent=body_style,
+			backColor=HexColor("#fff7ed"),
+			borderColor=HexColor("#f59e0b"),
+			borderWidth=0.8,
+			borderPadding=4,
+			leftIndent=2,
+			rightIndent=2,
+		)
+		story.append(Spacer(1, 2 * mm))
+		texto = (
+			"<b>CORRECCIÓN APLICADA — Sustracción de fondo por ROI de referencia.</b> "
+			f"Se restó fondo aditivo en el/los corte(s) {slices_txt}: "
+			f"{intestinal.get('counts_subtracted', 0):,.0f} cuentas "
+			f"({_safe_float(intestinal.get('subtracted_pct'), 2)}% del total del estudio). "
+			"El nivel de fondo se estimó como la mediana de cuentas de ROI de referencia marcadas por el "
+			"operador fuera de la región a corregir, sobre la imagen promediada de los gates, y se restó "
+			"como componente constante en el tiempo, igual para todos los gates."
+		)
+		if intestinal.get("slices_oversubtracted"):
+			texto += (
+				" <b>ATENCIÓN:</b> se detectó posible sobre-sustracción en el/los corte(s) "
+				f"{_slice_list_text([int(s) for s in intestinal.get('slices_oversubtracted') or []])}; "
+				"un exceso de sustracción puede simular un defecto de la cara inferior que no existe."
+			)
+		texto += (
+			" Esta corrección es operador-dependiente y modifica los datos de origen. "
+			"<b>NO constituye corrección de atenuación</b>: la atenuación es un factor multiplicativo "
+			"que solo se compensa dividiendo por un mapa de atenuación (TC, fuente de transmisión o "
+			"método de Chang), mientras que esta operación resta un término aditivo. Sustraer fondo "
+			"<b>no reduce y puede acentuar</b> los defectos aparentes por atenuación, por lo que los cortes "
+			"corregidos no deben emplearse para juzgar perfusión regional. "
+			"<b>Los hallazgos de los cortes corregidos deben interpretarse con cautela y correlacionarse "
+			"siempre con la clínica del paciente, la perfusión regional y el resto del estudio.</b>"
+		)
+		story.append(Paragraph(texto, warn_style))
+		story.append(Spacer(1, 2 * mm))
 
 	# Sección ECG si hay datos
 	ecg_data = []

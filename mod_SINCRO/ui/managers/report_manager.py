@@ -26,6 +26,8 @@ class ReportManager:
         volumes: dict,
         ef: dict,
         output_filename: str | None = None,
+        stress_rest: dict | None = None,
+        perfusion_phase_rows: list | None = None,
     ) -> str:
         """Genera reporte PDF completo."""
         if output_filename is None:
@@ -45,6 +47,8 @@ class ReportManager:
                 processing_params=processing_params,
                 volumes=volumes,
                 ef=ef,
+                stress_rest=stress_rest,
+                perfusion_phase_rows=perfusion_phase_rows,
             )
             logger = get_logger()
             logger.log_export("pdf", output_path)

@@ -25,10 +25,16 @@ from PyQt6.QtCore import QTimer, QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
 	QCheckBox, QComboBox, QDialog, QGridLayout, QLabel, QPushButton, QSlider,
-	QToolButton, QVBoxLayout, QWidget, QHBoxLayout, QMessageBox,
+	QToolButton, QVBoxLayout, QWidget, QHBoxLayout, QMessageBox, QSizePolicy,
 )
 
 from core.col_registry import register_all_colormaps, available_colormaps
+from core.intestinal_subtraction import (
+	BACKGROUND_METHODS,
+	apply_intestinal_subtraction,
+	estimate_background_map,
+)
+from core.lv_center import refine_center_to_cavity
 from ui.floating_toolbar import FloatingToolbar
 
 
@@ -282,8 +288,10 @@ class RoiImageLabel(QLabel):
 		self._frame_shape: tuple[int, int] | None = None
 		self._slice_index = 0
 		self._roi: tuple[float, float, float, float] | None = None
+		self._overlay_contours: list[tuple[QColor, np.ndarray]] = []
 		self._exclusion_polygon: list[tuple[float, float]] = []
 		self._draft_exclusion_polygon: list[tuple[float, float]] = []
+		self._reference_polygons: list[list[tuple[float, float]]] = []
 		self._draw_exclusion_mode = False
 		self._message = "Cargá un estudio para ver el cine"
 		self._zoom = 1.0
@@ -322,6 +330,28 @@ class RoiImageLabel(QLabel):
 
 	def set_roi(self, roi: tuple[float, float, float, float] | None):
 		self._roi = roi
+		self.update()
+
+	def set_overlay_contours(self, contours: list[tuple[QColor, np.ndarray]] | None):
+		"""Define contornos arbitrarios (coords de imagen) para superponer."""
+		normalized: list[tuple[QColor, np.ndarray]] = []
+		for item in contours or []:
+			if not isinstance(item, tuple) or len(item) != 2:
+				continue
+			color, points = item
+			arr = np.asarray(points, dtype=np.float64)
+			if arr.ndim != 2 or arr.shape[0] < 3 or arr.shape[1] != 2:
+				continue
+			normalized.append((QColor(color), arr))
+		self._overlay_contours = normalized
+		self.update()
+
+	def set_reference_polygons(self, polygons: list[list[tuple[float, float]]] | None):
+		self._reference_polygons = [
+			[tuple(map(float, p)) for p in (poly or [])]
+			for poly in (polygons or [])
+			if poly and len(poly) >= 3
+		]
 		self.update()
 
 	def set_exclusion_polygon(self, polygon: list[tuple[float, float]] | None):
@@ -402,6 +432,22 @@ class RoiImageLabel(QLabel):
 			pts.append(QPointF(rect.x() + float(cx) * sx, rect.y() + float(cy) * sy))
 		return pts
 
+	def _points_to_widget(self, points_yx: np.ndarray) -> list[QPointF]:
+		rect = self._image_rect()
+		if rect is None or self._frame_shape is None:
+			return []
+		h, w = self._frame_shape
+		sx = rect.width() / max(1.0, float(w))
+		sy = rect.height() / max(1.0, float(h))
+		out: list[QPointF] = []
+		for p in np.asarray(points_yx, dtype=np.float64):
+			if p.shape[0] < 2:
+				continue
+			y = float(p[0])
+			x = float(p[1])
+			out.append(QPointF(rect.x() + x * sx, rect.y() + y * sy))
+		return out
+
 	def paintEvent(self, event):
 		painter = QPainter(self)
 		painter.fillRect(self.rect(), QColor("#111111"))
@@ -415,6 +461,18 @@ class RoiImageLabel(QLabel):
 		if rect is None:
 			return
 		painter.drawPixmap(rect.toRect(), self._base_pixmap)
+
+		# ROI de referencia del asa intestinal limpia (de donde sale el nivel de
+		# fondo a restar). Se dibujan en cian para no confundirlas con la zona a
+		# corregir, que va en magenta.
+		for ref_poly in self._reference_polygons:
+			rpts = self._polygon_to_widget(ref_poly)
+			if len(rpts) < 3:
+				continue
+			painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+			painter.setPen(QPen(QColor("#22d3ee"), 2, Qt.PenStyle.DotLine))
+			painter.setBrush(QColor(34, 211, 238, 45))
+			painter.drawPolygon(QPolygonF(rpts))
 
 		# ROI intestinal irregular (overlay de referencia para atenuación local).
 		poly_draw = self._exclusion_polygon
@@ -431,6 +489,17 @@ class RoiImageLabel(QLabel):
 				painter.setPen(QPen(QColor("#ff4dd2"), 1))
 				painter.setBrush(QColor(255, 77, 210, 35))
 				painter.drawPolygon(QPolygonF(wpts))
+
+		for color, pts_img in self._overlay_contours:
+			wpoly = self._points_to_widget(pts_img)
+			if len(wpoly) < 3:
+				continue
+			painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+			painter.setPen(QPen(color, 1.8, Qt.PenStyle.SolidLine))
+			painter.setBrush(Qt.BrushStyle.NoBrush)
+			poly = QPolygonF(wpoly)
+			painter.drawPolyline(poly)
+			painter.drawLine(wpoly[-1], wpoly[0])
 
 		roi_data = self._roi_to_widget()
 		if roi_data is not None:
@@ -638,8 +707,17 @@ class CineWidget(QWidget):
 		self._window_low = 0.0
 		self._window_high = 1.0
 		self._auto_roi_method = "robusto"
+		self._refine_cavity_center = False
 		self._intestinal_roi_polygons: dict[int, list[tuple[float, float]]] = {}
 		self._intestinal_roi_polygons_by_gate: dict[tuple[int, int], list[tuple[float, float]]] = {}
+		# ROI de referencia sobre el asa intestinal limpia: de ahí sale el nivel de
+		# fondo que después se resta en la zona de solapamiento. Son varias por
+		# corte (típicamente la "entrada" y la "salida" del asa).
+		self._intestinal_ref_polygons: dict[int, list[list[tuple[float, float]]]] = {}
+		self._intestinal_ref_polygons_by_gate: dict[tuple[int, int], list[list[tuple[float, float]]]] = {}
+		self._intestinal_mode = "attenuate"
+		self._intestinal_bg_method = "idw"
+		self._intestinal_draw_role = "target"
 		self._intestinal_attenuation_pct = 60
 		self._intestinal_feather_px = 2
 		self._intestinal_scope_mode = "slice"
@@ -657,6 +735,10 @@ class CineWidget(QWidget):
 
 		self.gate_slider = QSlider(Qt.Orientation.Horizontal)
 		self.slice_slider = QSlider(Qt.Orientation.Horizontal)
+		self.gate_slider.setMinimumWidth(180)
+		self.gate_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+		self.slice_slider.setMinimumWidth(180)
+		self.slice_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 		self.gate_slider.valueChanged.connect(self._update_view)
 		self.slice_slider.valueChanged.connect(self._update_view)
 		self.gate_prev_btn = QPushButton("<")
@@ -701,8 +783,8 @@ class CineWidget(QWidget):
 		self.zoom_slider.setRange(40, 500)
 		self.zoom_slider.setValue(100)
 		self.zoom_slider.setMaximumHeight(20)
-		self.zoom_slider.setMinimumWidth(320)
-		self.zoom_slider.setMaximumWidth(520)
+		self.zoom_slider.setMinimumWidth(180)
+		self.zoom_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 		self.zoom_slider.valueChanged.connect(self._on_zoom_slider)
 		self.zoom_prev_btn = QPushButton("<")
 		self.zoom_next_btn = QPushButton(">")
@@ -741,6 +823,23 @@ class CineWidget(QWidget):
 		self.intestinal_apply_btn.setStyleSheet("font-weight:600;")
 		self.intestinal_roi_clear_btn = QPushButton("Borrar intestino")
 		self.intestinal_roi_clear_btn.clicked.connect(self._clear_intestinal_roi_current_slice)
+		self.intestinal_mode_combo = QComboBox()
+		self.intestinal_mode_combo.addItem("Atenuar %", "attenuate")
+		self.intestinal_mode_combo.addItem("Restar fondo estimado", "subtract")
+		self.intestinal_mode_combo.currentIndexChanged.connect(self._on_intestinal_mode_changed)
+		self.intestinal_ref_toggle_btn = QPushButton("ROI referencia")
+		self.intestinal_ref_toggle_btn.setCheckable(True)
+		self.intestinal_ref_toggle_btn.toggled.connect(self._on_intestinal_ref_draw_toggled)
+		self.intestinal_ref_clear_btn = QPushButton("Borrar referencias")
+		self.intestinal_ref_clear_btn.clicked.connect(self._clear_intestinal_references_current_slice)
+		self.intestinal_ref_count_label = QLabel("0 ref.")
+		self.intestinal_ref_count_label.setStyleSheet("color:#0e7490;")
+		self.intestinal_bg_method_combo = QComboBox()
+		self.intestinal_bg_method_combo.addItem("Interpolado (IDW)", "idw")
+		self.intestinal_bg_method_combo.addItem("Media simple", "mean")
+		self.intestinal_bg_method_combo.currentIndexChanged.connect(self._on_intestinal_bg_method_changed)
+		self.intestinal_preview_btn = QPushButton("Antes/después")
+		self.intestinal_preview_btn.clicked.connect(self._open_intestinal_preview_dialog)
 		self.intestinal_scope_combo = QComboBox()
 		self.intestinal_scope_combo.addItem("Slice actual", "slice")
 		self.intestinal_scope_combo.addItem("Todos los slices", "all_slices")
@@ -764,6 +863,30 @@ class CineWidget(QWidget):
 		self.intestinal_roi_toggle_btn.setToolTip("Activa dibujo irregular del ROI intestinal: clic agrega puntos, doble clic cierra, clic derecho borra.")
 		self.intestinal_apply_btn.setToolTip("Activa o desactiva la atenuación intestinal. Si está activo, se ve en tiempo real y afecta Auto ROI.")
 		self.intestinal_roi_clear_btn.setToolTip("Borra el ROI intestinal según el alcance seleccionado.")
+		self.intestinal_mode_combo.setToolTip(
+			"Atenuar %: reduce un porcentaje de cuentas (solo mejora el Auto ROI; no cambia la amplitud relativa de la fase).\n"
+			"Restar fondo estimado: mide el nivel del intestino en las ROI de referencia y lo resta como componente constante.\n"
+			"La resta SÍ recupera vóxeles para el análisis de fase y no desplaza la fase, porque el intestino no late."
+		)
+		self.intestinal_ref_toggle_btn.setToolTip(
+			"Dibuja ROI de REFERENCIA sobre zona de fondo limpia, fuera de la región a corregir.\n"
+			"Para un asa intestinal: la 'entrada' y la 'salida' donde se ve sin miocardio encima.\n"
+			"Para fondo general: varias zonas repartidas, siempre DENTRO del paciente (nunca sobre aire,\n"
+			"que daría mediana ~0 y subestimaría el fondo). Se admiten todas las que quieras."
+		)
+		self.intestinal_bg_method_combo.setToolTip(
+			"Cómo se combina el nivel de las ROI de referencia:\n"
+			"Interpolado (IDW): el fondo varía dentro de la zona según la referencia más cercana.\n"
+			"Media simple: promedio aritmético de los niveles, aplicado como una única constante.\n"
+			"En media simple cada ROI pesa igual, sin importar su tamaño.\n\n"
+			"Restar fondo NO es corrección de atenuación (el fondo es aditivo, la atenuación multiplicativa).\n"
+			"Ver docs/FUNDAMENTO_MATEMATICO_SUSTRACCION_FONDO.md"
+		)
+		self.intestinal_preview_btn.setToolTip(
+			"Compara lado a lado el corte actual antes y después de la sustracción, "
+			"con el mapa de lo restado y el control de calidad de amplitud."
+		)
+		self.intestinal_ref_clear_btn.setToolTip("Borra las ROI de referencia según el alcance seleccionado.")
 		self.intestinal_atten_slider.setToolTip("Porcentaje de reducción de cuentas dentro del ROI intestinal (solo para Auto ROI).")
 		self.intestinal_feather_slider.setToolTip("Suavizado/borde blando alrededor del ROI intestinal para evitar cortes bruscos.")
 		self.intestinal_scope_combo.setToolTip(
@@ -794,8 +917,8 @@ class CineWidget(QWidget):
 		self.speed_slider.setRange(50, 600)
 		self.speed_slider.setValue(250)
 		self.speed_slider.setMaximumHeight(20)
-		self.speed_slider.setMinimumWidth(320)
-		self.speed_slider.setMaximumWidth(520)
+		self.speed_slider.setMinimumWidth(180)
+		self.speed_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 		self.speed_slider.valueChanged.connect(self._on_speed_change)
 		self.speed_label = QLabel("250 ms")
 		self.speed_slider.setToolTip("Tiempo por frame: más bajo = más rápido.")
@@ -804,8 +927,8 @@ class CineWidget(QWidget):
 		self.smooth_slider.setRange(0, 30)
 		self.smooth_slider.setValue(0)
 		self.smooth_slider.setMaximumHeight(20)
-		self.smooth_slider.setMinimumWidth(320)
-		self.smooth_slider.setMaximumWidth(520)
+		self.smooth_slider.setMinimumWidth(180)
+		self.smooth_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 		self.smooth_slider.valueChanged.connect(self._on_smooth_change)
 		self.smooth_prev_btn = QPushButton("<")
 		self.smooth_next_btn = QPushButton(">")
@@ -887,36 +1010,47 @@ class CineWidget(QWidget):
 		intestinal_grid.addWidget(self.intestinal_feather_label, 1, 2)
 		intestinal_grid.addWidget(QLabel("Alcance int."), 1, 3)
 		intestinal_grid.addWidget(self.intestinal_scope_combo, 1, 4)
+		intestinal_grid.addWidget(QLabel("Modo"), 2, 0)
+		intestinal_grid.addWidget(self.intestinal_mode_combo, 2, 1, 1, 2)
+		intestinal_grid.addWidget(self.intestinal_ref_toggle_btn, 2, 3)
+		intestinal_grid.addWidget(self.intestinal_ref_clear_btn, 2, 4)
+		intestinal_grid.addWidget(self.intestinal_ref_count_label, 2, 5)
+		intestinal_grid.addWidget(QLabel("Fondo"), 3, 0)
+		intestinal_grid.addWidget(self.intestinal_bg_method_combo, 3, 1, 1, 2)
+		intestinal_grid.addWidget(self.intestinal_preview_btn, 3, 3, 1, 2)
 		intestinal_btn_menu = self._build_toolbar_button(
 			"ROI intestinal ▾", [intestinal_grid], key="roi_panel_intestinal",
 			tooltip="Dibujo y atenuación manual del intestino, para no contaminar el Auto ROI del corazón.",
 		)
 		nav_grid.addWidget(intestinal_btn_menu, 0, 6)
 
-		nav_grid.addWidget(self.gate_label, 1, 0)
-		nav_grid.addWidget(self.gate_prev_btn, 1, 1)
+		_lbl_align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+		nav_grid.addWidget(self.gate_label, 1, 0, _lbl_align)
+		nav_grid.addWidget(self.gate_prev_btn, 1, 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 		nav_grid.addWidget(self.gate_slider, 1, 2)
 		nav_grid.addWidget(self.gate_next_btn, 1, 3)
-		nav_grid.addWidget(self.slice_label, 1, 4)
-		nav_grid.addWidget(self.slice_prev_btn, 1, 5)
+		nav_grid.addWidget(self.slice_label, 1, 4, _lbl_align)
+		nav_grid.addWidget(self.slice_prev_btn, 1, 5, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 		nav_grid.addWidget(self.slice_slider, 1, 6)
 		nav_grid.addWidget(self.slice_next_btn, 1, 7)
 		nav_grid.addWidget(self.matrix_label, 1, 8)
 
-		nav_grid.addWidget(QLabel("Zoom"), 2, 0)
-		nav_grid.addWidget(self.zoom_prev_btn, 2, 1)
+		nav_grid.addWidget(QLabel("Zoom"), 2, 0, _lbl_align)
+		nav_grid.addWidget(self.zoom_prev_btn, 2, 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 		nav_grid.addWidget(self.zoom_slider, 2, 2)
 		nav_grid.addWidget(self.zoom_next_btn, 2, 3)
 		nav_grid.addWidget(self.zoom_label, 2, 4)
-		nav_grid.addWidget(QLabel("Speed"), 2, 5)
+		nav_grid.addWidget(QLabel("Speed"), 2, 5, _lbl_align)
 		nav_grid.addWidget(self.speed_slider, 2, 6)
 		nav_grid.addWidget(self.speed_label, 2, 7)
 
-		nav_grid.addWidget(QLabel("Smooth"), 3, 0)
-		nav_grid.addWidget(self.smooth_prev_btn, 3, 1)
+		nav_grid.addWidget(QLabel("Smooth"), 3, 0, _lbl_align)
+		nav_grid.addWidget(self.smooth_prev_btn, 3, 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 		nav_grid.addWidget(self.smooth_slider, 3, 2)
 		nav_grid.addWidget(self.smooth_next_btn, 3, 3)
 		nav_grid.addWidget(self.smooth_label, 3, 4)
+		nav_grid.setColumnStretch(2, 1)
+		nav_grid.setColumnStretch(6, 1)
 
 		self.window_low_slider.setOrientation(Qt.Orientation.Vertical)
 		self.window_high_slider.setOrientation(Qt.Orientation.Vertical)
@@ -965,6 +1099,7 @@ class CineWidget(QWidget):
 		self.setSizePolicy(self.sizePolicy().horizontalPolicy(), self.sizePolicy().verticalPolicy())
 		self.set_active_highlight(False)
 		self._refresh_intestinal_apply_button_text()
+		self._refresh_intestinal_mode_widgets()
 		self._capture_tooltips()
 
 	def _build_toolbar_button(self, title: str, grids: list, key: str, tooltip: str = "") -> QToolButton:
@@ -1087,6 +1222,76 @@ class CineWidget(QWidget):
 	def intestinal_scope(self) -> str:
 		return str(self._intestinal_scope_mode)
 
+	def set_intestinal_mode(self, mode: str):
+		"""Modo de corrección intestinal: 'attenuate' (porcentual) o 'subtract' (fondo estimado)."""
+		value = str(mode or "").strip().lower()
+		if value not in ("attenuate", "subtract"):
+			value = "attenuate"
+		self._intestinal_mode = value
+		idx = self.intestinal_mode_combo.findData(value)
+		if idx >= 0 and self.intestinal_mode_combo.currentIndex() != idx:
+			self.intestinal_mode_combo.blockSignals(True)
+			self.intestinal_mode_combo.setCurrentIndex(idx)
+			self.intestinal_mode_combo.blockSignals(False)
+		self._refresh_intestinal_mode_widgets()
+
+	def intestinal_mode(self) -> str:
+		return str(self._intestinal_mode)
+
+	def set_intestinal_background_method(self, method: str):
+		"""Cómo se combinan los niveles de las ROI de referencia: 'idw' o 'mean'."""
+		value = str(method or "").strip().lower()
+		if value not in BACKGROUND_METHODS:
+			value = "idw"
+		self._intestinal_bg_method = value
+		idx = self.intestinal_bg_method_combo.findData(value)
+		if idx >= 0 and self.intestinal_bg_method_combo.currentIndex() != idx:
+			self.intestinal_bg_method_combo.blockSignals(True)
+			self.intestinal_bg_method_combo.setCurrentIndex(idx)
+			self.intestinal_bg_method_combo.blockSignals(False)
+
+	def intestinal_background_method(self) -> str:
+		return str(self._intestinal_bg_method)
+
+	def _refresh_intestinal_mode_widgets(self):
+		subtract = self._intestinal_mode == "subtract"
+		self.intestinal_ref_toggle_btn.setEnabled(subtract)
+		self.intestinal_ref_clear_btn.setEnabled(subtract)
+		self.intestinal_ref_count_label.setEnabled(subtract)
+		self.intestinal_bg_method_combo.setEnabled(subtract)
+		self.intestinal_preview_btn.setEnabled(subtract)
+		self.intestinal_atten_slider.setEnabled(not subtract)
+		self.intestinal_atten_label.setEnabled(not subtract)
+		if not subtract and self.intestinal_ref_toggle_btn.isChecked():
+			self.intestinal_ref_toggle_btn.setChecked(False)
+		self._refresh_intestinal_ref_label()
+
+	def _refresh_intestinal_ref_label(self):
+		refs = self._intestinal_ref_polygons_for_slice(
+			self.current_slice_index(), gate_index=self.current_gate_index()
+		)
+		n = len(refs)
+		self.intestinal_ref_count_label.setText(f"{n} ref.")
+		if self._intestinal_mode == "subtract" and n == 0:
+			self.intestinal_ref_count_label.setStyleSheet("color:#b45309; font-weight:600;")
+		else:
+			self.intestinal_ref_count_label.setStyleSheet("color:#0e7490;")
+
+	def _intestinal_ref_polygons_for_slice(
+		self, slice_index: int, gate_index: int | None = None
+	) -> list[list[tuple[float, float]]]:
+		sl = int(slice_index)
+		if self._intestinal_scope_mode == "gate_slices":
+			g = int(self.current_gate_index() if gate_index is None else gate_index)
+			polys = self._intestinal_ref_polygons_by_gate.get((g, sl))
+			if polys:
+				return polys
+			for (gg, _ss), any_polys in self._intestinal_ref_polygons_by_gate.items():
+				if int(gg) == g and any_polys:
+					return any_polys
+			return []
+		return list(self._intestinal_ref_polygons.get(sl, []))
+
 	def intestinal_roi_state(self) -> dict[str, object]:
 		"""Estado serializable del ROI intestinal dibujado."""
 		slice_polygons = []
@@ -1101,15 +1306,35 @@ class CineWidget(QWidget):
 			if len(pts) >= 3:
 				gate_polygons.append({"gate": int(gate_index), "slice": int(slice_index), "points": pts})
 
+		ref_slice_polygons = []
+		for slice_index, polygons in sorted((self._intestinal_ref_polygons or {}).items()):
+			for polygon in polygons or []:
+				pts = [[float(cy), float(cx)] for cy, cx in (polygon or [])]
+				if len(pts) >= 3:
+					ref_slice_polygons.append({"slice": int(slice_index), "points": pts})
+
+		ref_gate_polygons = []
+		for (gate_index, slice_index), polygons in sorted((self._intestinal_ref_polygons_by_gate or {}).items()):
+			for polygon in polygons or []:
+				pts = [[float(cy), float(cx)] for cy, cx in (polygon or [])]
+				if len(pts) >= 3:
+					ref_gate_polygons.append({"gate": int(gate_index), "slice": int(slice_index), "points": pts})
+
 		return {
 			"slice_polygons": slice_polygons,
 			"gate_polygons": gate_polygons,
+			"reference_slice_polygons": ref_slice_polygons,
+			"reference_gate_polygons": ref_gate_polygons,
+			"mode": str(self._intestinal_mode),
+			"background_method": str(self._intestinal_bg_method),
 		}
 
 	def set_intestinal_roi_state(self, state: dict | None):
 		"""Restaura polígonos de ROI intestinal desde un preset."""
 		self._intestinal_roi_polygons = {}
 		self._intestinal_roi_polygons_by_gate = {}
+		self._intestinal_ref_polygons = {}
+		self._intestinal_ref_polygons_by_gate = {}
 		if isinstance(state, dict):
 			for item in state.get("slice_polygons", []) or []:
 				try:
@@ -1128,7 +1353,32 @@ class CineWidget(QWidget):
 					continue
 				if len(points) >= 3:
 					self._intestinal_roi_polygons_by_gate[(gate_index, slice_index)] = points
+			for item in state.get("reference_slice_polygons", []) or []:
+				try:
+					slice_index = int(item.get("slice"))
+					points = [tuple(float(v) for v in pt[:2]) for pt in (item.get("points") or [])]
+				except Exception:
+					continue
+				if len(points) >= 3:
+					self._intestinal_ref_polygons.setdefault(slice_index, []).append(points)
+			for item in state.get("reference_gate_polygons", []) or []:
+				try:
+					gate_index = int(item.get("gate"))
+					slice_index = int(item.get("slice"))
+					points = [tuple(float(v) for v in pt[:2]) for pt in (item.get("points") or [])]
+				except Exception:
+					continue
+				if len(points) >= 3:
+					self._intestinal_ref_polygons_by_gate.setdefault((gate_index, slice_index), []).append(points)
+			if state.get("mode"):
+				self.set_intestinal_mode(str(state.get("mode")))
+			if state.get("background_method"):
+				self.set_intestinal_background_method(str(state.get("background_method")))
 		self.preview.set_exclusion_polygon(self._intestinal_polygon_for_slice(self.current_slice_index(), gate_index=self.current_gate_index()))
+		self.preview.set_reference_polygons(
+			self._intestinal_ref_polygons_for_slice(self.current_slice_index(), gate_index=self.current_gate_index())
+		)
+		self._refresh_intestinal_ref_label()
 		self._update_view()
 
 	def _intestinal_polygon_for_slice(self, slice_index: int, gate_index: int | None = None) -> list[tuple[float, float]]:
@@ -1254,10 +1504,297 @@ class CineWidget(QWidget):
 			return np.clip(soft, 0.0, 1.0)
 		return base.astype(np.float64)
 
+	def intestinal_target_weights(self, shape: tuple[int, int], n_slices: int, gate_index: int | None = None) -> dict[int, np.ndarray]:
+		"""Mapas de peso (ROI a corregir + feather) por corte, para el motor de sustracción."""
+		g = self.current_gate_index() if gate_index is None else int(gate_index)
+		out: dict[int, np.ndarray] = {}
+		for s in range(int(n_slices)):
+			poly = self._intestinal_polygon_for_slice(s, gate_index=g)
+			if not poly:
+				continue
+			soft = self._soft_mask_from_polygon(shape, poly)
+			if np.any(soft > 0):
+				out[int(s)] = soft
+		return out
+
+	def intestinal_reference_masks(self, shape: tuple[int, int], n_slices: int, gate_index: int | None = None) -> dict[int, list[np.ndarray]]:
+		"""Máscaras booleanas de las ROI de referencia por corte."""
+		g = self.current_gate_index() if gate_index is None else int(gate_index)
+		out: dict[int, list[np.ndarray]] = {}
+		for s in range(int(n_slices)):
+			polys = self._intestinal_ref_polygons_for_slice(s, gate_index=g)
+			masks = [self._polygon_to_mask(shape, p) for p in polys]
+			masks = [m for m in masks if np.any(m)]
+			if masks:
+				out[int(s)] = masks
+		return out
+
+	def has_intestinal_references(self) -> bool:
+		return bool(self._intestinal_ref_polygons or self._intestinal_ref_polygons_by_gate)
+
+	def _subtract_intestinal_background(self, img: np.ndarray, slice_index: int, gate_index: int | None = None) -> np.ndarray:
+		"""Vista previa de la sustracción sobre un único frame.
+
+		Ojo: acá el fondo se estima sobre el frame mostrado, no sobre el promedio
+		de gates. Es una aproximación **solo para el preview visual**. El cálculo
+		que alimenta segmentación y fase se hace en `MainWindow.process_current`
+		con `core.intestinal_subtraction.apply_intestinal_subtraction`, que estima
+		una única vez sobre el promedio de gates. Estimar por gate en el análisis
+		metería variación temporal artificial y contaminaría la fase.
+		"""
+		g = self.current_gate_index() if gate_index is None else int(gate_index)
+		poly = self._intestinal_polygon_for_slice(int(slice_index), gate_index=g)
+		if not poly:
+			return img
+		refs = self._intestinal_ref_polygons_for_slice(int(slice_index), gate_index=g)
+		ref_masks = [self._polygon_to_mask(img.shape, p) for p in refs]
+		ref_masks = [m for m in ref_masks if np.any(m)]
+		if not ref_masks:
+			return img
+		weight = self._soft_mask_from_polygon(img.shape, poly)
+		if float(np.max(weight)) <= 0.0:
+			return img
+		background, info = estimate_background_map(img, ref_masks, method=self._intestinal_bg_method)
+		if not info["applicable"]:
+			return img
+		return np.clip(img - background * weight, 0.0, None)
+
+	def _fixed_scale_pixmap(self, data: np.ndarray, vmin: float, vmax: float, size: int, cmap_name: str | None = None) -> QPixmap:
+		"""Pixmap con escala de grises/color **fijada**, para comparar dos imágenes.
+
+		`_array_to_pixmap` renormaliza cada frame a su propio min/max, lo que haría
+		que 'antes' y 'después' se vean iguales aunque cambien las cuentas. Acá la
+		escala se impone desde afuera.
+		"""
+		arr = np.asarray(data, dtype=np.float64)
+		span = max(1e-8, float(vmax) - float(vmin))
+		norm = np.clip((arr - float(vmin)) / span, 0.0, 1.0)
+		if cmap_name is None:
+			name = str(self.cmap_combo.currentText())
+			if self.invert_cmap_check.isChecked():
+				name = f"{name}_r"
+		else:
+			name = str(cmap_name)
+		cmap = _resolve_cmap(name)
+		rgb8 = (np.asarray(cmap(norm)[..., :3], dtype=np.float32) * 255.0).astype(np.uint8)
+		h, w, _ = rgb8.shape
+		qimg = QImage(rgb8.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+		pix = QPixmap.fromImage(qimg.copy())
+		return pix.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+	def _intestinal_preview_panel(
+		self,
+		data: np.ndarray,
+		vmin: float,
+		vmax: float,
+		size: int,
+		target_poly,
+		ref_polys,
+		cmap_name: str | None = None,
+	) -> QPixmap:
+		"""Panel del diálogo antes/después, con los contornos superpuestos."""
+		scaled = self._fixed_scale_pixmap(data, vmin, vmax, size, cmap_name=cmap_name)
+		canvas = QPixmap(size, size)
+		canvas.fill(QColor("#020617"))
+		painter = QPainter(canvas)
+		x0 = int((size - scaled.width()) / 2)
+		y0 = int((size - scaled.height()) / 2)
+		painter.drawPixmap(x0, y0, scaled)
+		try:
+			h, w = int(np.asarray(data).shape[0]), int(np.asarray(data).shape[1])
+			sx = float(scaled.width()) / max(1.0, float(w))
+			sy = float(scaled.height()) / max(1.0, float(h))
+			painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+			def _draw(points, color: str, style):
+				if not points or len(points) < 2:
+					return
+				painter.setPen(QPen(QColor(color), 2, style))
+				# Los polígonos se almacenan como (fila, columna) = (y, x), igual
+				# que en el visor principal (_polygon_to_widget). Hay que mapear la
+				# columna al eje horizontal y la fila al vertical; invertirlo produce
+				# una reflexión sobre la diagonal que se ve como una rotación de 90°.
+				poly = QPolygonF([QPointF(x0 + float(px) * sx, y0 + float(py) * sy) for py, px in points])
+				painter.drawPolygon(poly)
+
+			for rp in (ref_polys or []):
+				_draw(rp, "#22d3ee", Qt.PenStyle.DotLine)
+			_draw(target_poly, "#ff4dd2", Qt.PenStyle.SolidLine)
+		except Exception:
+			pass
+		painter.end()
+		return canvas
+
+	def _open_intestinal_preview_dialog(self):
+		"""Compara el corte actual antes y después de la sustracción de fondo.
+
+		Usa el motor real (`apply_intestinal_subtraction`), que estima el fondo
+		una sola vez sobre el promedio de gates. Es decir, lo que se ve acá es
+		exactamente lo que va a alimentar segmentación y análisis de fase.
+		"""
+		if self._cube is None or np.asarray(self._cube).ndim != 4:
+			QMessageBox.information(self, "Antes/después", "Cargá un estudio gated primero.")
+			return
+		if self._intestinal_mode != "subtract":
+			QMessageBox.information(self, "Antes/después", "Esta vista aplica al modo 'Restar fondo'.")
+			return
+
+		cube = np.asarray(self._cube, dtype=np.float64)
+		n_gates, n_slices, h, w = cube.shape
+		sl = int(self.slice_slider.value())
+		if sl < 0 or sl >= n_slices:
+			return
+		g = int(self.current_gate_index())
+		g = max(0, min(n_gates - 1, g))
+
+		weights = self.intestinal_target_weights((h, w), n_slices, gate_index=g)
+		refs = self.intestinal_reference_masks((h, w), n_slices, gate_index=g)
+		if sl not in weights:
+			QMessageBox.information(
+				self,
+				"Antes/después",
+				"Dibujá primero la ROI de la zona a corregir (la que se superpone con el miocardio) en este corte.",
+			)
+			return
+		if sl not in refs:
+			QMessageBox.information(
+				self,
+				"Antes/después",
+				"Dibujá al menos una ROI de referencia sobre el asa donde se ve limpia.\n"
+				"Con dos o más, el nivel de fondo sale de combinarlas según el método elegido.",
+			)
+			return
+
+		sub_cube = cube[:, sl : sl + 1, :, :]
+		corrected, info = apply_intestinal_subtraction(
+			sub_cube,
+			{0: weights[sl]},
+			{0: refs[sl]},
+			method=self._intestinal_bg_method,
+		)
+		detail = dict(info.get("per_slice", {}).get(0, {}))
+		if not detail.get("applied"):
+			QMessageBox.information(self, "Antes/después", str(detail.get("message") or "No se pudo estimar el fondo."))
+			return
+
+		before = cube[g, sl]
+		after = np.asarray(corrected)[g, 0]
+		removed = np.clip(before - after, 0.0, None)
+		vmin = 0.0
+		vmax = float(np.max(before)) if np.isfinite(np.max(before)) else 1.0
+		target_poly = self._intestinal_polygon_for_slice(sl, gate_index=g)
+		ref_polys = self._intestinal_ref_polygons_for_slice(sl, gate_index=g)
+
+		dialog = QDialog(self)
+		dialog.setWindowTitle(f"Sustracción de fondo — Slice {sl + 1}, gate {g + 1}")
+		dialog.setModal(True)
+		dialog.resize(1040, 660)
+		root = QVBoxLayout(dialog)
+		header = QLabel(
+			"Comparación con el cálculo real: el fondo se estima una sola vez sobre el promedio de gates "
+			"y se resta igual a todos. Contorno magenta = zona corregida; punteado cian = referencias."
+		)
+		header.setWordWrap(True)
+		root.addWidget(header)
+
+		grid = QGridLayout()
+		grid.setHorizontalSpacing(8)
+		grid.setVerticalSpacing(8)
+		panels = [
+			("Antes", before, vmin, vmax, None),
+			("Después", after, vmin, vmax, None),
+			("Restado", removed, 0.0, max(1e-8, float(np.max(removed))), "inferno"),
+		]
+		for col, (title_txt, data, lo, hi, cmap_name) in enumerate(panels):
+			card = QWidget()
+			card_layout = QVBoxLayout(card)
+			card_layout.setContentsMargins(6, 6, 6, 6)
+			card_layout.setSpacing(4)
+			card.setStyleSheet("background:#0f172a; border:1px solid #334155; border-radius:6px;")
+			title = QLabel(title_txt)
+			title.setStyleSheet("color:#e2e8f0; font-weight:600;")
+			card_layout.addWidget(title)
+			img_label = QLabel()
+			img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+			img_label.setPixmap(
+				self._intestinal_preview_panel(data, lo, hi, 280, target_poly, ref_polys, cmap_name=cmap_name)
+			)
+			card_layout.addWidget(img_label)
+			scale_txt = (
+				f"escala 0–{hi:.0f} cuentas" if cmap_name else f"escala común 0–{vmax:.0f} cuentas"
+			)
+			sub = QLabel(scale_txt)
+			sub.setStyleSheet("color:#94a3b8;")
+			card_layout.addWidget(sub)
+			grid.addWidget(card, 0, col)
+		root.addLayout(grid)
+
+		levels = detail.get("levels") or []
+		levels_txt = ", ".join(f"{float(lv):.1f}" for lv in levels) or "—"
+		method_txt = "media simple" if str(detail.get("method")) == "mean" else "interpolado (IDW)"
+		bg_level = detail.get("background_level")
+		bg_txt = f"{float(bg_level):.1f} cuentas/gate (constante)" if bg_level is not None else "variable en la zona"
+		amp_before = float(detail.get("rel_amp_before", float("nan")))
+		amp_after = float(detail.get("rel_amp_after", float("nan")))
+		amp_txt = (
+			f"{amp_before:.3f} → {amp_after:.3f}"
+			if np.isfinite(amp_before) and np.isfinite(amp_after)
+			else "no evaluable"
+		)
+		lines = [
+			f"Referencias: {int(detail.get('n_references', 0))} (niveles: {levels_txt} cuentas/gate)",
+			f"Método de fondo: {method_txt} → {bg_txt}",
+			f"Cuentas restadas: {float(detail.get('counts_subtracted', 0.0)):,.0f} "
+			f"({float(detail.get('subtracted_pct', 0.0)):.1f}% del corte)",
+			f"Píxeles llevados a cero: {100.0 * float(detail.get('clipped_fraction', 0.0)):.1f}%",
+			f"Amplitud relativa del 1er armónico en la zona: {amp_txt}",
+		]
+		metrics = QLabel("\n".join(lines))
+		metrics.setStyleSheet("color:#cbd5e1;")
+		metrics.setToolTip(
+			"La amplitud relativa debería SUBIR al restar: el fondo intestinal es continuo (DC) y "
+			"diluye la modulación del miocardio. Si baja, la ROI o las referencias están mal puestas."
+		)
+		root.addWidget(metrics)
+
+		warn_bits = []
+		if detail.get("oversubtracted"):
+			warn_bits.append(
+				"Sobresustracción: demasiados píxeles quedaron en cero. Bajá el nivel de fondo usando "
+				"referencias más representativas o achicá la zona a corregir."
+			)
+		if np.isfinite(amp_before) and np.isfinite(amp_after) and amp_after < amp_before:
+			warn_bits.append(
+				"La amplitud relativa bajó tras restar. Revisá que las referencias estén sobre intestino "
+				"limpio y no sobre miocardio."
+			)
+		if warn_bits:
+			warn = QLabel("⚠ " + "  ".join(warn_bits))
+			warn.setWordWrap(True)
+			warn.setStyleSheet("color:#b45309; font-weight:600;")
+			root.addWidget(warn)
+
+		disclaimer = QLabel(
+			"Esta operación resta un fondo aditivo. NO es corrección de atenuación: la atenuación es un factor "
+			"multiplicativo y solo se compensa dividiendo por un mapa de atenuación (TC, fuente de transmisión o "
+			"método de Chang). Restar fondo puede incluso acentuar el defecto inferior por atenuación. "
+			"Ver docs/FUNDAMENTO_MATEMATICO_SUSTRACCION_FONDO.md"
+		)
+		disclaimer.setWordWrap(True)
+		disclaimer.setStyleSheet("color:#94a3b8; font-style:italic;")
+		root.addWidget(disclaimer)
+
+		close_btn = QPushButton("Cerrar")
+		close_btn.clicked.connect(dialog.accept)
+		root.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+		dialog.exec()
+
 	def _attenuate_image_with_intestinal_roi(self, img: np.ndarray, slice_index: int, gate_index: int | None = None) -> np.ndarray:
 		img = np.asarray(img, dtype=np.float64)
 		if not self._intestinal_apply_enabled:
 			return img
+		if self._intestinal_mode == "subtract":
+			return self._subtract_intestinal_background(img, slice_index, gate_index)
 		g = self.current_gate_index() if gate_index is None else int(gate_index)
 		poly = self._intestinal_polygon_for_slice(int(slice_index), gate_index=g)
 		if not poly:
@@ -1431,6 +1968,8 @@ class CineWidget(QWidget):
 				roi = None
 		self.preview.set_roi(roi)
 		self.preview.set_exclusion_polygon(self._intestinal_polygon_for_slice(sl, gate_index=gate))
+		self.preview.set_reference_polygons(self._intestinal_ref_polygons_for_slice(sl, gate_index=gate))
+		self._refresh_intestinal_ref_label()
 		self.gate_label.setText(f"Gate: {gate + 1}/{self._cube.shape[0]}")
 		self.slice_label.setText(f"Slice: {sl + 1}/{self._cube.shape[1]}")
 		self.matrix_label.setText(f"Matriz: {self._cube.shape[2]}x{self._cube.shape[3]}")
@@ -1608,6 +2147,12 @@ class CineWidget(QWidget):
 
 	def auto_roi_method(self) -> str:
 		return str(self._auto_roi_method)
+
+	def set_refine_cavity_center(self, enabled: bool):
+		self._refine_cavity_center = bool(enabled)
+
+	def refine_cavity_center(self) -> bool:
+		return bool(self._refine_cavity_center)
 
 	def _method_label(self, method: str) -> str:
 		m = str(method).lower()
@@ -1903,21 +2448,39 @@ class CineWidget(QWidget):
 
 	def _auto_roi_from_image_with_method(self, img: np.ndarray, *, low_res: bool, method: str):
 		method_key = str(method or "").strip().lower()
-		if method_key == "clasico":
-			return self._auto_roi_from_image_clasico(img, low_res)
-		if method_key == "gradiente":
-			return self._auto_roi_from_image_gradiente(img, low_res)
-		if method_key == "hotbowel":
-			return self._auto_roi_from_image_hotbowel(img, low_res)
-		if method_key == "percentil_central":
-			return self._auto_roi_from_image_percentil_central(img, low_res)
-		if method_key == "consenso":
-			return self._auto_roi_from_image_consenso(img, low_res)
-		if method_key == "inferior_overlap":
-			return self._auto_roi_from_image_inferior_overlap(img, low_res)
 		if method_key == "cavidad_dominante":
-			return self._auto_roi_from_image_cavidad_dominante(img, low_res)
-		return self._auto_roi_from_image_robusto(img, low_res)
+			roi = self._auto_roi_from_image_cavidad_dominante(img, low_res)
+		elif method_key == "clasico":
+			roi = self._auto_roi_from_image_clasico(img, low_res)
+		elif method_key == "gradiente":
+			roi = self._auto_roi_from_image_gradiente(img, low_res)
+		elif method_key == "hotbowel":
+			roi = self._auto_roi_from_image_hotbowel(img, low_res)
+		elif method_key == "percentil_central":
+			roi = self._auto_roi_from_image_percentil_central(img, low_res)
+		elif method_key == "consenso":
+			roi = self._auto_roi_from_image_consenso(img, low_res)
+		elif method_key == "inferior_overlap":
+			roi = self._auto_roi_from_image_inferior_overlap(img, low_res)
+		else:
+			roi = self._auto_roi_from_image_robusto(img, low_res)
+		return self._refine_roi_center(img, roi, low_res=low_res)
+
+	def _refine_roi_center(self, img: np.ndarray, roi, *, low_res: bool):
+		"""Corre el centro del ROI del centroide del músculo al de la cavidad.
+
+		Salvo "Cavidad dominante", todos los métodos derivan su centro de
+		``center_of_mass`` de la máscara de miocardio, que se sesga hacia el sector
+		de mayor captación. Se aplica solo con el refinamiento activado, para que
+		el comportamiento histórico siga disponible y sea comparable.
+		"""
+		if not self._refine_cavity_center or roi is None or len(roi) != 4:
+			return roi
+		cy, cx, ri, ro = (float(v) for v in roi)
+		if not (np.isfinite(cy) and np.isfinite(cx) and np.isfinite(ro)) or ro <= 0.0:
+			return roi
+		new_cy, new_cx = refine_center_to_cavity(cy, cx, ro, img=img, low_res=low_res)
+		return (new_cy, new_cx, ri, ro)
 
 	def _score_auto_roi_candidate(self, img: np.ndarray, roi: tuple[float, float, float, float], slice_index: int) -> float:
 		cy, cx, ri, ro = (float(v) for v in roi)
@@ -2171,6 +2734,9 @@ class CineWidget(QWidget):
 
 	def _on_intestinal_draw_toggled(self, checked: bool):
 		enabled = bool(checked)
+		if enabled and self.intestinal_ref_toggle_btn.isChecked():
+			self.intestinal_ref_toggle_btn.setChecked(False)
+		self._intestinal_draw_role = "target" if enabled else self._intestinal_draw_role
 		self.preview.set_exclusion_draw_mode(enabled)
 		if enabled:
 			self.help_label.setText(
@@ -2182,9 +2748,83 @@ class CineWidget(QWidget):
 				"apex/base sin cavidad: usar 'Borrar internos'"
 			)
 
+	def _on_intestinal_mode_changed(self, _index: int):
+		mode = self.intestinal_mode_combo.currentData()
+		self._intestinal_mode = str(mode or "attenuate")
+		self._refresh_intestinal_mode_widgets()
+		self._update_view()
+
+	def _on_intestinal_bg_method_changed(self, _index: int):
+		method = self.intestinal_bg_method_combo.currentData()
+		self._intestinal_bg_method = str(method or "idw")
+		self._update_view()
+
+	def _on_intestinal_ref_draw_toggled(self, checked: bool):
+		enabled = bool(checked)
+		if enabled and self.intestinal_roi_toggle_btn.isChecked():
+			self.intestinal_roi_toggle_btn.setChecked(False)
+		self._intestinal_draw_role = "reference" if enabled else "target"
+		self.preview.set_exclusion_draw_mode(enabled)
+		if enabled:
+			self.help_label.setText(
+				"Modo ROI REFERENCIA activo: dibujá sobre el asa intestinal donde se ve LIMPIA (sin miocardio encima). "
+				"Ideal: una a la entrada y otra a la salida del asa. Doble clic cierra el polígono."
+			)
+		else:
+			self.help_label.setText(
+				"Mouse: clic izq = centro | Shift+clic = radio externo | Ctrl+clic = radio interno | clic der = borrar ROI | "
+				"apex/base sin cavidad: usar 'Borrar internos'"
+			)
+
+	def _store_reference_polygon(self, slice_index: int, gate_index: int, points: list[tuple[float, float]]):
+		"""Agrega una ROI de referencia respetando el alcance elegido."""
+		if self._intestinal_scope_mode == "all_slices" and self._cube is not None:
+			for i in range(int(self._cube.shape[1])):
+				self._intestinal_ref_polygons.setdefault(int(i), []).append(list(points))
+		elif self._intestinal_scope_mode == "gate_slices":
+			if self._cube is not None:
+				for i in range(int(self._cube.shape[1])):
+					self._intestinal_ref_polygons_by_gate.setdefault((gate_index, int(i)), []).append(list(points))
+			else:
+				self._intestinal_ref_polygons_by_gate.setdefault((gate_index, slice_index), []).append(list(points))
+		else:
+			self._intestinal_ref_polygons.setdefault(slice_index, []).append(list(points))
+
+	def _clear_intestinal_references_current_slice(self):
+		sl = int(self.slice_slider.value())
+		if self._intestinal_scope_mode == "all_slices":
+			self._intestinal_ref_polygons = {}
+		elif self._intestinal_scope_mode == "gate_slices":
+			gate = int(self.current_gate_index())
+			self._intestinal_ref_polygons_by_gate = {
+				(k, s): p for (k, s), p in self._intestinal_ref_polygons_by_gate.items() if int(k) != gate
+			}
+		else:
+			self._intestinal_ref_polygons.pop(sl, None)
+		self.preview.set_reference_polygons([])
+		self._refresh_intestinal_ref_label()
+		self._update_view()
+
 	def _on_exclusion_polygon_edited(self, slice_index: int, polygon):
 		sl = int(slice_index)
 		gate = int(self.current_gate_index())
+
+		if self._intestinal_draw_role == "reference":
+			# El clic derecho (polygon=None) borra las referencias del alcance actual.
+			if polygon is None:
+				self._clear_intestinal_references_current_slice()
+				return
+			pts = [tuple(map(float, p)) for p in (polygon or [])]
+			if len(pts) >= 3:
+				self._store_reference_polygon(sl, gate, pts)
+			# El label de exclusión no debe quedarse con la referencia dibujada:
+			# restauramos el polígono real de la zona a corregir.
+			self.preview.set_exclusion_polygon(self._intestinal_polygon_for_slice(sl, gate_index=gate))
+			self.preview.set_reference_polygons(self._intestinal_ref_polygons_for_slice(sl, gate_index=gate))
+			self._refresh_intestinal_ref_label()
+			self._update_view()
+			return
+
 		if polygon is None:
 			if self._intestinal_scope_mode == "all_slices":
 				self._intestinal_roi_polygons = {}

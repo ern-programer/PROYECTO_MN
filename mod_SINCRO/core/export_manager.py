@@ -43,6 +43,9 @@ def export_json(
     robustness: dict | None = None,
     normal_db_eval: dict | None = None,
     qc_info: dict | None = None,
+    phase_by_seg: dict[int, float] | None = None,
+    territory: dict[str, dict] | None = None,
+    stress_rest: dict | None = None,
 ) -> str:
     """
     Exporta resultados completos a JSON estructurado.
@@ -78,7 +81,7 @@ def export_json(
         "export_timestamp": datetime.now().isoformat(),
         "software": {
             "name": "GammaSync",
-            "version": "1.8.0",
+            "version": "1.16.0",
             "module": "SINCRO",
         },
         "study": study_metadata,
@@ -117,6 +120,16 @@ def export_json(
     # Agregar QC
     if qc_info:
         payload["quality_control"] = qc_info
+
+    # Fase por segmento AHA + territorio coronario (datos crudos)
+    if phase_by_seg:
+        payload["metrics"]["phase_by_segment"] = {int(k): _safe_get(phase_by_seg, k) for k in phase_by_seg}
+    if territory:
+        payload["metrics"]["coronary_territory"] = territory
+
+    # Delta stress-rest de fase
+    if stress_rest and stress_rest.get("available"):
+        payload["stress_rest_comparison"] = stress_rest
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, cls=NumpyEncoder, indent=2, ensure_ascii=False)
@@ -355,6 +368,149 @@ def export_excel(
     return output_path
 
 
+#: Territorios coronarios (mismo mapa que core.aha_segments.TERRITORY_MAP).
+_TERRITORY_OF_SEGMENT = {
+    **{s: "LAD" for s in (1, 2, 7, 8, 13, 14, 17)},
+    **{s: "LCx" for s in (5, 6, 11, 12, 16)},
+    **{s: "RCA" for s in (3, 4, 9, 10, 15)},
+}
+
+
+def export_segmental_csv(
+    output_path: str,
+    study_metadata: dict,
+    phase_by_seg: dict[int, float] | None,
+    territory: dict[str, dict] | None = None,
+    n_per_segment: dict[int, int] | None = None,
+    texture_by_seg: dict[int, dict] | None = None,
+    perfusion_phase_rows: list[dict] | None = None,
+    stress_rest: dict | None = None,
+) -> str:
+    """Exporta datos CRUDOS de fase por segmento AHA (grado de investigación).
+
+    Ningún software comercial exporta la fase por segmento en crudo; esto es lo
+    que necesita un protocolo de investigación para publicar/meta-analizar. Sale
+    en CSV (sin dependencias) con secciones: fase por segmento (17 AHA) +
+    territorio coronario, textura GLCM de perfusión por segmento (si se pasa),
+    tabla combinada perfusión+fase, y delta stress-rest (si hay comparación).
+
+    Parameters
+    ----------
+    phase_by_seg : dict[int, float]
+        Fase media (circular, grados) por segmento AHA 1..17.
+    territory : dict, optional
+        Salida de ``core.aha_segments.territory_analysis``.
+    n_per_segment : dict, optional
+        Nº de voxels por segmento (de ``AHAResult.n_per_segment``).
+    texture_by_seg : dict, optional
+        Salida de ``core.perfusion_texture.perfusion_texture_by_segment``.
+    perfusion_phase_rows : list, optional
+        Salida de ``core.perfusion_texture.combine_perfusion_phase``.
+    stress_rest : dict, optional
+        Salida de ``core.stress_rest.compare_stress_rest``.
+    """
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    def _fmt(v: Any) -> str:
+        if v is None:
+            return ""
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return str(v)
+        if not np.isfinite(fv):
+            return ""
+        return f"{fv:.3f}"
+
+    lines = [
+        "# GammaSync Export - Fase por segmento AHA (datos crudos de investigación)",
+        f"# Fecha exportación: {datetime.now().isoformat()}",
+        f"# Paciente: {study_metadata.get('patient_name', 'N/D')}",
+        f"# ID: {study_metadata.get('patient_id', 'N/D')}",
+        f"# Estudio: {study_metadata.get('study_description', 'N/D')}",
+        "",
+        "## Fase media por segmento (modelo AHA de 17 segmentos)",
+        "segmento,territorio,fase_media_deg,n_voxels",
+    ]
+    phase_by_seg = phase_by_seg or {}
+    n_per_segment = n_per_segment or {}
+    for seg_id in range(1, 18):
+        terr = _TERRITORY_OF_SEGMENT.get(seg_id, "")
+        phase = phase_by_seg.get(seg_id)
+        nvox = n_per_segment.get(seg_id, "")
+        lines.append(f"{seg_id},{terr},{_fmt(phase)},{nvox}")
+
+    # Territorio coronario
+    if territory:
+        lines.append("")
+        lines.append("## Territorio coronario (fase circular)")
+        lines.append("territorio,fase_media_deg,fase_sd_deg,fase_min_deg,fase_max_deg,n_segmentos")
+        for terr in ("LAD", "LCx", "RCA"):
+            d = territory.get(terr, {}) or {}
+            lines.append(
+                f"{terr},{_fmt(d.get('mean'))},{_fmt(d.get('std'))},"
+                f"{_fmt(d.get('min'))},{_fmt(d.get('max'))},{d.get('n', '')}"
+            )
+
+    # Textura GLCM de perfusión por segmento (Jiang 2025, PMID 40391672)
+    if texture_by_seg:
+        lines.append("")
+        lines.append("## Textura GLCM de perfusión por segmento (Jiang 2025, PMID 40391672)")
+        lines.append("segmento,contrast,dissimilarity,homogeneity,energy,correlation,glcm_entropy,n_pixels")
+        for seg_id in range(1, 18):
+            t = texture_by_seg.get(seg_id, {}) or {}
+            if t.get("available"):
+                lines.append(
+                    f"{seg_id},{_fmt(t.get('contrast'))},{_fmt(t.get('dissimilarity'))},"
+                    f"{_fmt(t.get('homogeneity'))},{_fmt(t.get('energy'))},"
+                    f"{_fmt(t.get('correlation'))},{_fmt(t.get('glcm_entropy'))},{t.get('n_pixels', '')}"
+                )
+            else:
+                lines.append(f"{seg_id},,,,,,,{t.get('n_pixels', '')}")
+
+    # Tabla combinada perfusión + fase (para análisis de respuesta CRT)
+    if perfusion_phase_rows:
+        lines.append("")
+        lines.append("## Perfusión (GLCM) + fase por segmento (tabla combinada)")
+        lines.append("segmento,fase_deg,contrast,dissimilarity,homogeneity,energy,correlation,glcm_entropy,n_pixels")
+        for row in perfusion_phase_rows:
+            lines.append(
+                f"{row.get('segment', '')},{_fmt(row.get('phase_deg'))},"
+                f"{_fmt(row.get('contrast'))},{_fmt(row.get('dissimilarity'))},"
+                f"{_fmt(row.get('homogeneity'))},{_fmt(row.get('energy'))},"
+                f"{_fmt(row.get('correlation'))},{_fmt(row.get('glcm_entropy'))},{row.get('n_pixels', '')}"
+            )
+
+    # Delta stress-rest de fase
+    if stress_rest and stress_rest.get("available"):
+        lines.append("")
+        lines.append("## Delta stress-rest de fase (convención: esfuerzo - reposo)")
+        lines.append("metrica,esfuerzo,reposo,delta")
+        deltas = stress_rest.get("deltas", {})
+        st = stress_rest.get("stress", {})
+        rs = stress_rest.get("rest", {})
+        for key in sorted(deltas.keys()):
+            lines.append(f"{key},{_fmt(st.get(key))},{_fmt(rs.get(key))},{_fmt(deltas.get(key))}")
+        st_terr = stress_rest.get("territory", {})
+        if st_terr:
+            lines.append("")
+            lines.append("## Delta stress-rest por territorio coronario")
+            lines.append("territorio,esfuerzo_mean_deg,reposo_mean_deg,delta_mean_circular_deg,delta_sd_deg")
+            for terr in ("LAD", "LCx", "RCA"):
+                d = st_terr.get(terr, {}) or {}
+                lines.append(
+                    f"{terr},{_fmt(d.get('stress_mean'))},{_fmt(d.get('rest_mean'))},"
+                    f"{_fmt(d.get('delta_mean_circular'))},{_fmt(d.get('delta_std'))}"
+                )
+        for note in stress_rest.get("notes", []):
+            lines.append(f"# nota: {note}")
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    return output_path
+
+
 def export_all(
     output_dir: str,
     study_metadata: dict,
@@ -365,6 +521,12 @@ def export_all(
     normal_db_eval: dict | None = None,
     qc_info: dict | None = None,
     base_name: str | None = None,
+    phase_by_seg: dict[int, float] | None = None,
+    territory: dict[str, dict] | None = None,
+    n_per_segment: dict[int, int] | None = None,
+    texture_by_seg: dict[int, dict] | None = None,
+    perfusion_phase_rows: list[dict] | None = None,
+    stress_rest: dict | None = None,
 ) -> dict[str, str]:
     """
     Exporta todos los formatos disponibles.
@@ -394,6 +556,9 @@ def export_all(
         robustness,
         normal_db_eval,
         qc_info,
+        phase_by_seg,
+        territory,
+        stress_rest,
     )
 
     # CSV
@@ -405,6 +570,21 @@ def export_all(
         segmentation_info,
         processing_params,
     )
+
+    # CSV segmental (datos crudos de fase por segmento AHA + territorio + textura
+    # + delta stress-rest). Solo si hay al menos fase por segmento.
+    if phase_by_seg or texture_by_seg or perfusion_phase_rows or (stress_rest and stress_rest.get("available")):
+        seg_csv_path = os.path.join(output_dir, f"{base_name}_segmental.csv")
+        results["csv_segmental"] = export_segmental_csv(
+            seg_csv_path,
+            study_metadata,
+            phase_by_seg,
+            territory,
+            n_per_segment,
+            texture_by_seg,
+            perfusion_phase_rows,
+            stress_rest,
+        )
 
     # Excel (opcional, si pandas está disponible)
     try:

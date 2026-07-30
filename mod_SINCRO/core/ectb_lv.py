@@ -613,6 +613,135 @@ def analyze_lv_ectb(
     return res
 
 
+def wall_segmentation_from_ectb(
+    result: ECTbLVResult,
+    seg,
+    pixel_mm: tuple[float, float],
+    *,
+    gate_index: int | None = None,
+):
+    """Convierte los contornos irregulares ECTb en una segmentación de miocardio.
+
+    POR QUÉ
+    -------
+    La segmentación clásica del módulo modela cada corte como un **anillo
+    circular** (centro + radio interno + radio externo). Eso es estable pero
+    obliga a que la pared tenga el mismo espesor en todos los ángulos, cosa que
+    no pasa en un VI real (el septum y la pared inferior no miden lo mismo).
+
+    El ECTb ya calcula, para cada corte y cada ángulo, dónde está el endocardio
+    y dónde el epicardio siguiendo el máximo de cuentas. Esta función usa esos
+    radios para rellenar la máscara: un píxel entra al miocardio si su distancia
+    al centro, **en su propio ángulo**, cae entre el radio endocárdico y el
+    epicárdico. El resultado es una pared de espesor variable, pegada a la
+    anatomía, en vez de un anillo de compás.
+
+    Sobre qué gate
+    --------------
+    La máscara que alimenta el análisis de fase tiene que ser **una sola para
+    todo el ciclo** (si cambiara gate a gate, la FFT compararía voxels
+    distintos). Por eso, con ``gate_index=None`` se promedian los radios de
+    todos los gates: la pared queda en su posición media del ciclo, que es la
+    que mejor contiene al miocardio durante la contracción completa.
+
+    Parameters
+    ----------
+    result : ECTbLVResult con ``available=True``.
+    seg : segmentación semilla (aporta forma de la máscara y centros por corte).
+    pixel_mm : (dy, dx) del píxel, para pasar los radios de mm a píxeles.
+    gate_index : gate a usar; None promedia todos los gates.
+
+    Returns
+    -------
+    SegmentationResult con ``method="ectb_wall"``, o None si no se pudo.
+    """
+    from core.segmentation import SegmentationResult
+
+    if result is None or not getattr(result, "available", False):
+        return None
+
+    base_mask = np.asarray(getattr(seg, "mask", np.empty((0, 0, 0))), dtype=bool)
+    centers = np.asarray(getattr(seg, "center_per_slice", np.empty((0, 2))), dtype=np.float64)
+    if base_mask.ndim != 3 or centers.ndim != 2 or centers.shape[1] != 2:
+        return None
+
+    endo = np.asarray(result.endo_radii_mm, dtype=np.float64)
+    epi = np.asarray(result.epi_radii_mm, dtype=np.float64)
+    if endo.ndim != 3 or epi.shape != endo.shape or endo.size == 0:
+        return None
+
+    valid = tuple(int(s) for s in result.valid_slices)
+    if not valid or endo.shape[1] != len(valid):
+        return None
+
+    if gate_index is None:
+        endo_sel = endo.mean(axis=0)
+        epi_sel = epi.mean(axis=0)
+    else:
+        g = int(np.clip(int(gate_index), 0, endo.shape[0] - 1))
+        endo_sel = endo[g]
+        epi_sel = epi[g]
+
+    px_mm = float(np.mean([abs(float(pixel_mm[0])), abs(float(pixel_mm[1]))]))
+    if not np.isfinite(px_mm) or px_mm <= 0.0:
+        return None
+
+    n_slices, height, width = base_mask.shape
+    n_ang = int(endo_sel.shape[-1])
+    theta_grid = np.linspace(0.0, 2.0 * np.pi, n_ang, endpoint=False)
+
+    mask = np.zeros_like(base_mask, dtype=bool)
+    out_centers = np.full((n_slices, 2), np.nan, dtype=np.float64)
+    inner = np.full((n_slices,), np.nan, dtype=np.float64)
+    outer = np.full((n_slices,), np.nan, dtype=np.float64)
+
+    yy = np.arange(height, dtype=np.float64)[:, None]
+    xx = np.arange(width, dtype=np.float64)[None, :]
+
+    for row, slice_index in enumerate(valid):
+        if slice_index < 0 or slice_index >= n_slices or slice_index >= centers.shape[0]:
+            continue
+        cy = float(centers[slice_index, 0])
+        cx = float(centers[slice_index, 1])
+        if not (np.isfinite(cy) and np.isfinite(cx)):
+            continue
+
+        r_endo = np.asarray(endo_sel[row], dtype=np.float64) / px_mm
+        r_epi = np.asarray(epi_sel[row], dtype=np.float64) / px_mm
+        if not np.all(np.isfinite(r_endo)) or not np.all(np.isfinite(r_epi)):
+            continue
+        # El endocardio nunca puede quedar por fuera del epicardio.
+        r_endo = np.minimum(r_endo, np.maximum(r_epi - 0.25, 0.0))
+
+        dy = yy - cy
+        dx = xx - cx
+        radius = np.sqrt(dy * dy + dx * dx)
+        theta = np.mod(np.arctan2(dy, dx), 2.0 * np.pi)
+
+        endo_px = np.interp(theta, theta_grid, r_endo, period=2.0 * np.pi)
+        epi_px = np.interp(theta, theta_grid, r_epi, period=2.0 * np.pi)
+        ring = (radius >= endo_px) & (radius <= epi_px)
+        if int(np.count_nonzero(ring)) < 1:
+            continue
+
+        mask[slice_index] = ring
+        out_centers[slice_index] = [cy, cx]
+        inner[slice_index] = float(np.mean(r_endo))
+        outer[slice_index] = float(np.mean(r_epi))
+
+    if int(np.count_nonzero(mask)) < 1:
+        return None
+
+    return SegmentationResult(
+        mask=mask,
+        center_per_slice=out_centers,
+        inner_radius=inner,
+        outer_radius=outer,
+        method="ectb_wall",
+        n_voxels=int(mask.sum()),
+    )
+
+
 def apply_regression(ef_fraction: float, slope: float, intercept: float) -> float:
     """Aplica una regresión lineal de conversión entre softwares.
 

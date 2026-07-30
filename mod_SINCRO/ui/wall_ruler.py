@@ -63,6 +63,17 @@ class WallThicknessRuler(QWidget):
 		#: Contornos de referencia: lista de (color, puntos en coords de imagen).
 		self._contours: list[tuple[QColor, np.ndarray]] = []
 		self._show_contours = True
+		self._show_ruler = True
+		#: Escala de grises en vivo (window/level) e inversión.
+		self._invert = False
+		self._colormap = "gray"
+		self._data_min = 0.0
+		self._data_top = 1.0
+		#: Nivel y ancho de ventana como fracción de [min, top] (0..1).
+		self._wl_level = 0.5
+		self._wl_width = 1.0
+		#: Forma de la última imagen, para preservar zoom/paneo entre refrescos.
+		self._image_shape: tuple[int, int] | None = None
 
 		self.setMinimumHeight(260)
 		self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -84,25 +95,93 @@ class WallThicknessRuler(QWidget):
 
 		Se normaliza al percentil 99 en vez de al máximo para que un píxel
 		caliente aislado no aplaste el resto de la escala de grises.
+
+		Si el corte que llega tiene la misma forma que el anterior (por ejemplo
+		un recálculo en vivo o un cambio de gate), se conserva el zoom, el paneo
+		y la ventana de grises que el usuario haya ajustado. Solo se reencuadra
+		cuando cambia el tamaño de la imagen o es la primera vez.
 		"""
 		arr = np.asarray(image, dtype=np.float64)
 		if arr.ndim != 2 or arr.size == 0:
 			self._image = None
 			self._pixmap = None
+			self._image_shape = None
 			self.update()
 			return
 
+		same_shape = self._image_shape == arr.shape
 		self._image = arr
 		self._pixel_mm = max(float(pixel_mm), 1e-6)
 		top = float(np.percentile(arr, 99.0))
 		if not np.isfinite(top) or top <= 0.0:
 			top = float(arr.max()) or 1.0
-		norm = np.clip(arr / top, 0.0, 1.0)
-		buf = np.ascontiguousarray((norm * 255.0).astype(np.uint8))
-		height, width = buf.shape
-		qimage = QImage(buf.data, width, height, width, QImage.Format.Format_Grayscale8)
-		self._pixmap = QPixmap.fromImage(qimage.copy())
-		self._fit()
+		self._data_min = float(np.nanmin(arr))
+		self._data_top = top if top > self._data_min else self._data_min + 1.0
+		self._render_pixmap()
+		if not same_shape:
+			self._image_shape = arr.shape
+			self._fit()
+		self.update()
+
+	def _render_pixmap(self):
+		"""Reconstruye el pixmap aplicando la ventana de grises, la inversión y la escala de color."""
+		if self._image is None:
+			self._pixmap = None
+			return
+		rng = max(self._data_top - self._data_min, 1e-9)
+		lo_frac = self._wl_level - self._wl_width / 2.0
+		hi_frac = self._wl_level + self._wl_width / 2.0
+		lo = self._data_min + lo_frac * rng
+		hi = self._data_min + hi_frac * rng
+		span = max(hi - lo, 1e-9)
+		norm = np.clip((self._image - lo) / span, 0.0, 1.0)
+		if self._invert:
+			norm = 1.0 - norm
+		cmap_name = str(self._colormap or "gray").lower()
+		if cmap_name in ("gray", "grey", ""):
+			buf = np.ascontiguousarray((norm * 255.0).astype(np.uint8))
+			height, width = buf.shape
+			qimage = QImage(buf.data, width, height, width, QImage.Format.Format_Grayscale8)
+			self._pixmap = QPixmap.fromImage(qimage.copy())
+			return
+		try:
+			from ui.cine_widget import _resolve_cmap
+
+			cmap = _resolve_cmap(self._colormap)
+			rgb = np.asarray(cmap(norm)[..., :3], dtype=np.float32)
+			rgb8 = np.ascontiguousarray((rgb * 255.0).astype(np.uint8))
+			height, width, _ = rgb8.shape
+			qimage = QImage(rgb8.data, width, height, 3 * width, QImage.Format.Format_RGB888)
+			self._pixmap = QPixmap.fromImage(qimage.copy())
+		except Exception:
+			# Si el colormap no se puede resolver, se cae a escala de grises.
+			buf = np.ascontiguousarray((norm * 255.0).astype(np.uint8))
+			height, width = buf.shape
+			qimage = QImage(buf.data, width, height, width, QImage.Format.Format_Grayscale8)
+			self._pixmap = QPixmap.fromImage(qimage.copy())
+
+	def set_window_level(self, level_frac: float, width_frac: float):
+		"""Ajusta la ventana de grises en vivo (fracciones 0..1 de [min, top])."""
+		self._wl_level = float(np.clip(level_frac, 0.0, 1.0))
+		self._wl_width = float(np.clip(width_frac, 0.02, 2.0))
+		self._render_pixmap()
+		self.update()
+
+	def set_invert(self, invert: bool):
+		"""Invierte la escala de grises (blanco↔negro) en vivo."""
+		self._invert = bool(invert)
+		self._render_pixmap()
+		self.update()
+
+	def set_colormap(self, name: str):
+		"""Cambia la escala de color de la vista en vivo."""
+		self._colormap = str(name) if name else "gray"
+		self._render_pixmap()
+		self.update()
+
+	def set_show_ruler(self, visible: bool):
+		"""Muestra u oculta la cota sin borrar su posición."""
+		self._show_ruler = bool(visible)
 		self.update()
 
 	def set_contours(self, contours: list[tuple[QColor, np.ndarray]]):
@@ -177,6 +256,10 @@ class WallThicknessRuler(QWidget):
 			self.setCursor(Qt.CursorShape.ClosedHandCursor)
 			return
 		if event.button() != Qt.MouseButton.LeftButton:
+			return
+
+		if not self._show_ruler:
+			# Con la cota oculta, el clic izquierdo no crea ni arrastra la cota.
 			return
 
 		near = self._handle_at(pos)
@@ -260,7 +343,8 @@ class WallThicknessRuler(QWidget):
 		painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 		if self._show_contours:
 			self._draw_contours(painter)
-		self._draw_ruler(painter)
+		if self._show_ruler:
+			self._draw_ruler(painter)
 		painter.end()
 
 	def _draw_contours(self, painter: QPainter):
