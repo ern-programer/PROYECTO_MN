@@ -1906,12 +1906,13 @@ class MainWindow(QMainWindow):
 		self.debug_grid_btn.setCheckable(True)
 		self.debug_grid_btn.setToolTip("Debug: muestra/oculta la grilla del layout (bordes rojos).")
 		self.debug_grid_btn.toggled.connect(self._on_debug_grid_toggled)
-		lower_header.addWidget(self.debug_grid_btn)
+		self.debug_grid_btn.setVisible(False)
 
 		# Contenedor del cine principal: header (centro/colapsar) + el visor.
 		# El segundo visor (cine_compare) ya NO va acá; según el mockup vive al
 		# extremo derecho de la banda inferior (ver bottom_hsplit más abajo).
 		cine_area = QWidget()
+		cine_area.setMinimumWidth(456)  # evita que el splitter comprima las imágenes
 		cine_area_layout = QVBoxLayout(cine_area)
 		cine_area_layout.setContentsMargins(0, 0, 0, 0)
 		cine_area_layout.setSpacing(2)

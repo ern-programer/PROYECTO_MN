@@ -1089,7 +1089,7 @@ class CineWidget(QWidget):
 		self.qc_gates_btn.setToolTip("Abre la vista QC de todos los gates del slice actual para editar ROI por gate.")
 		self.qc_gates_btn.clicked.connect(self._open_gate_qc_dialog)
 
-		self.play_button = QPushButton("▶ Reproducir")
+		self.play_button = QPushButton("▶")
 		self.play_button.clicked.connect(self.toggle_playback)
 		self.play_button.setToolTip("Reproduce los gates en tiempo real.")
 		self.speed_slider = QSlider(Qt.Orientation.Horizontal)
@@ -1322,19 +1322,13 @@ class CineWidget(QWidget):
 			preview_row.addWidget(self.preview, 1)
 			preview_row.addWidget(self.window_panel_widget)
 
-		self.controls_panel = QWidget()
-		controls_layout = QVBoxLayout()
-		controls_layout.setContentsMargins(0, 0, 0, 0)
-		controls_layout.setSpacing(2)
-		if self._compact_viewer:
-			# Los controles van ABAJO, alineados con la parte baja de la imagen (el
-			# usuario los pidió corridos hacia abajo, no pegados arriba). El stretch
-			# de arriba los empuja hacia el fondo del panel.
-			controls_layout.addStretch(1)
+		if not self._compact_viewer:
+			self.controls_panel = QWidget()
+			controls_layout = QVBoxLayout()
+			controls_layout.setContentsMargins(0, 0, 0, 0)
+			controls_layout.setSpacing(2)
 			controls_layout.addLayout(nav_grid)
-		else:
-			controls_layout.addLayout(nav_grid)
-		self.controls_panel.setLayout(controls_layout)
+			self.controls_panel.setLayout(controls_layout)
 
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(4, 4, 4, 4)
@@ -1427,9 +1421,13 @@ class CineWidget(QWidget):
 			grid.addWidget(_top_w, 0, 1)
 			grid.addWidget(self.preview, 1, 0)   # preview fijo 160x160
 			grid.addWidget(_slider_w, 1, 1)
+			# Slice/Gate (texto): se muestra en ambas etapas debajo de la imagen.
+			# Los sliders de gate/slice están en la fila inferior de controles.
 			grid.addWidget(pos_w, 2, 0)
+			# 0%/100% abajo del RangeSlider.
 			grid.addWidget(_base_w, 2, 1)
 			grid.setRowMinimumHeight(1, IMG_H)
+			grid.setRowMinimumHeight(2, BOTTOM_H)
 			grid.setRowStretch(0, 0)
 			grid.setRowStretch(1, 0)
 			grid.setRowStretch(2, 0)
@@ -1450,12 +1448,6 @@ class CineWidget(QWidget):
 				self._compare_slot = img_ctrls_row
 				self._compare_widget = None
 				self._sliders_col_widget = _slider_w
-					# Controles con ancho FIJO: no se estiran ni empujan el resto fuera de
-				# la pantalla al activar la grilla debug o al maximizar.
-				self.controls_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-				self.controls_panel.setFixedWidth(300)
-				img_ctrls_row.addWidget(self.controls_panel, 0)
-				img_ctrls_row.addStretch(1)
 				layout.addStretch(1)
 				layout.addLayout(img_ctrls_row)
 				# Fila inferior debajo de los dos cines: play, colormap, invertir, speed
@@ -1497,22 +1489,21 @@ class CineWidget(QWidget):
 				_gs_row = QHBoxLayout()
 				_gs_row.setContentsMargins(0, 0, 0, 0)
 				_gs_row.setSpacing(10)
-				# Gate slider con sus etiquetas y botones
+				# Gate slider con sus etiquetas y botones (NO usar gate_label/slice_label,
+				# que ya están en pos_w dentro de la grilla).
 				_gate_group = QHBoxLayout()
 				_gate_group.setSpacing(3)
-				_gate_group.addWidget(QLabel("Gate"))
+				_gate_group.addWidget(QLabel("Gate:"))
 				_gate_group.addWidget(self.gate_prev_btn)
 				_gate_group.addWidget(self.gate_slider, 1)
 				_gate_group.addWidget(self.gate_next_btn)
-				_gate_group.addWidget(self.gate_label)
 				# Slice slider con sus etiquetas y botones
 				_slice_group = QHBoxLayout()
 				_slice_group.setSpacing(3)
-				_slice_group.addWidget(QLabel("Slice"))
+				_slice_group.addWidget(QLabel("Slice:"))
 				_slice_group.addWidget(self.slice_prev_btn)
 				_slice_group.addWidget(self.slice_slider, 1)
 				_slice_group.addWidget(self.slice_next_btn)
-				_slice_group.addWidget(self.slice_label)
 				_gs_row.addLayout(_gate_group, 1)
 				_gs_row.addLayout(_slice_group, 1)
 				_gs_w = QWidget()
@@ -1533,6 +1524,11 @@ class CineWidget(QWidget):
 		# Visor compacto: alto mínimo ajustado a la imagen fija 160px + fila
 		# Slice/Gate (~20px) + márgenes. Así no sobra espacio vacío vertical.
 		self.setMinimumHeight(190 if self._compact_viewer else 260)
+		if self._compact_viewer and self._is_compare:
+			# Altura fija = su grilla 3×2 (márgenes 4+4 + title 20 + spacing 2 + img
+			# 160 + spacing 2 + bottom 18 = 210). Sin esto el splitter lo estiraba y
+			# la fila inferior se desalineaba vs la 1ra etapa.
+			self.setFixedHeight(210)
 		self.setSizePolicy(self.sizePolicy().horizontalPolicy(), self.sizePolicy().verticalPolicy())
 		self.set_active_highlight(False)
 		self._refresh_intestinal_apply_button_text()
@@ -1611,7 +1607,9 @@ class CineWidget(QWidget):
 		# agregado al layout.
 		if not self._compact_viewer:
 			self.help_label.setVisible(show and bool(self._helpers_visible))
-		self.controls_panel.setVisible(show)
+		controls = getattr(self, "controls_panel", None)
+		if controls is not None:
+			controls.setVisible(show)
 		# window_panel_widget solo existe en el visor completo; en el compacto el
 		# panel de sliders es _sliders_col_widget (la celda del RangeSlider).
 		panel = getattr(self, "window_panel_widget", None) or getattr(self, "_sliders_col_widget", None)
