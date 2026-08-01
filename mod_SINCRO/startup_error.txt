@@ -1,7 +1,0 @@
-Traceback (most recent call last):
-  File "D:\- PROGRAMACIÓN\PROYECTO_MN\mod_SINCRO\main.py", line 41, in main
-    window = MainWindow(initial_path=file_path)
-  File "D:\- PROGRAMACIÓN\PROYECTO_MN\mod_SINCRO\ui\main_window.py", line 1439, in __init__
-    "Ajuste manual ▾", [toolbar4, toolbar5],
-                        ^^^^^^^^
-UnboundLocalError: cannot access local variable 'toolbar4' where it is not associated with a value
