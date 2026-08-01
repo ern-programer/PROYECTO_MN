@@ -11,7 +11,7 @@ menos. Posición y orientación se recuerdan entre sesiones vía QSettings.
 from __future__ import annotations
 
 from PyQt6.QtCore import QPoint, Qt, QSettings
-from PyQt6.QtGui import QColor, QLinearGradient, QPainter, QPen
+from PyQt6.QtGui import QColor, QGuiApplication, QLinearGradient, QPainter, QPen
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QSizeGrip, QToolButton, QVBoxLayout, QWidget
 
 
@@ -163,13 +163,36 @@ class FloatingToolbar(QWidget):
 		posición recordada, si el usuario ya la movió antes)."""
 		if not self.isVisible():
 			pos = self._settings.value(f"floating_toolbar/{self._key}/pos", None)
-			if pos is not None:
-				self.move(pos)
-			else:
-				self.move(widget.mapToGlobal(widget.rect().bottomLeft()))
+			target = pos if isinstance(pos, QPoint) else None
+			# Si la posición guardada quedó fuera de las pantallas actuales
+			# (típico al cambiar de monitor), se descarta y se reubica junto
+			# al botón que la abre para que nunca aparezca inaccesible.
+			if target is None or not self._point_on_screen(target):
+				target = widget.mapToGlobal(widget.rect().bottomLeft())
+			self.move(self._clamp_to_screen(target))
 		self.show()
 		self.raise_()
 		self.activateWindow()
+
+	def _point_on_screen(self, pos: QPoint) -> bool:
+		"""True si el punto cae dentro del área visible de alguna pantalla."""
+		for screen in QGuiApplication.screens():
+			if screen.availableGeometry().contains(pos):
+				return True
+		return False
+
+	def _clamp_to_screen(self, pos: QPoint) -> QPoint:
+		"""Ajusta la esquina superior-izquierda para que la barra entera quede
+		dentro del área visible de la pantalla más cercana al punto."""
+		screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
+		if screen is None:
+			return pos
+		area = screen.availableGeometry()
+		w = max(self.width(), self.minimumWidth())
+		h = max(self.height(), self.minimumHeight())
+		x = min(max(pos.x(), area.left()), max(area.left(), area.right() - w))
+		y = min(max(pos.y(), area.top()), max(area.top(), area.bottom() - h))
+		return QPoint(x, y)
 
 	def toggle_near(self, widget: QWidget) -> None:
 		if self.isVisible():

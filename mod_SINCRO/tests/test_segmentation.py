@@ -73,6 +73,32 @@ def test_synthetic_segmentation_and_aha():
     print("[OK] sintético: segmentación y mapeo AHA 1..17")
 
 
+def test_center_override_fija_el_centro_del_operador():
+    cube = _make_ring_cube()
+    n_slices = cube.shape[1]
+
+    # El operador fija un centro corrido 2 px respecto del centroide natural (16,16).
+    ov = np.full((n_slices, 2), np.nan, dtype=np.float64)
+    ov[:, 0] = 18.0
+    ov[:, 1] = 14.0
+
+    seg = segment_myocardium(cube, method="auto", center_override_per_slice=ov)
+    centers = seg.center_per_slice
+    non_empty = seg.mask.reshape(n_slices, -1).any(axis=1)
+    assert non_empty.any(), "el sintético debe tener slices con anillo"
+
+    cy = centers[non_empty, 0]
+    cx = centers[non_empty, 1]
+    assert np.allclose(cy, 18.0), f"cy debe respetar el override exacto: {cy}"
+    assert np.allclose(cx, 14.0), f"cx debe respetar el override exacto: {cx}"
+
+    # Sin override, el centro NO queda fijado en (18,14) (vuelve al centroide ~16,16).
+    seg_auto = segment_myocardium(cube, method="auto")
+    ca = seg_auto.center_per_slice[seg_auto.mask.reshape(n_slices, -1).any(axis=1)]
+    assert not np.allclose(ca[:, 0], 18.0), "sin override el centro no debería quedar en 18"
+    print("[OK] center_override fija el centro exacto del operador")
+
+
 def test_real_smoke_if_available():
     if not os.path.exists(SA_GATED_PATH):
         print(f"[SKIP] no existe: {SA_GATED_PATH}")
@@ -114,6 +140,7 @@ def test_real_smoke_if_available():
 
 def _run_all():
     test_synthetic_segmentation_and_aha()
+    test_center_override_fija_el_centro_del_operador()
     test_real_smoke_if_available()
     print("\n[TODOS LOS TESTS DE SEGMENTACIÓN PASARON]")
 

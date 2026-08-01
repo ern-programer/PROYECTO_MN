@@ -1,19 +1,19 @@
 # Trackeo de horas trabajadas - PROYECTO_MN (era GammaSync)
 
-Generado: 2026-07-28 23:18 por `_track_horas_proyecto.py`
+Generado: 2026-07-30 19:29 por `_track_horas_proyecto.py`
 
 ## Resumen ejecutivo
 
 | Metrica | Valor |
 |---|---|
 | Primer rastro (creacion repo) | 2026-07-14 12:12 |
-| Ultimo rastro | 2026-07-28 23:00 |
-| Dias calendario del periodo | 15 |
-| **Dias con actividad** | **14** |
-| Sesiones detectadas | 37 |
-| **Horas crudas** (spans activos) | **55h 23m** |
-| **Horas estimadas** (+20 min cola/sesion) | **67h 43m** |
-| Promedio por dia activo (est.) | 4h 50m |
+| Ultimo rastro | 2026-07-30 19:21 |
+| Dias calendario del periodo | 17 |
+| **Dias con actividad** | **16** |
+| Sesiones detectadas | 45 |
+| **Horas crudas** (spans activos) | **68h 18m** |
+| **Horas estimadas** (+20 min cola/sesion) | **83h 18m** |
+| Promedio por dia activo (est.) | 5h 12m |
 
 > **Lectura honesta:** las horas crudas son el piso medible (actividad
 > digital registrada). Las estimadas agregan cola por arranque/cierre.
@@ -26,11 +26,11 @@ Generado: 2026-07-28 23:18 por `_track_horas_proyecto.py`
 - **Duracion cruda:** ultimo evento - primer evento de cada sesion.
 - **Duracion estimada:** cruda + 20 min por sesion.
 - **Fuentes de eventos:**
-  - commits git (todas las ramas): 88
-  - lineas de log de la app (arranques, procesamientos, exports): 1229
-  - exports output_demo (json/csv/xlsx/npz): 656
+  - commits git (todas las ramas): 92
+  - lineas de log de la app (arranques, procesamientos, exports): 1917
+  - exports output_demo (json/csv/xlsx/npz): 1094
   - presets guardados: 2
-  - mtimes de .md de memoria/docs (trabajo en otros chats): 15
+  - mtimes de .md de memoria/docs (trabajo en otros chats): 17
 
 ## Jornadas por dia
 
@@ -49,9 +49,11 @@ Generado: 2026-07-28 23:18 por `_track_horas_proyecto.py`
 | 2026-07-24 | 3 | 09:01-11:31, 12:37-12:50, 20:12-20:15 | 2h 46m | 3h 46m | 0 | 42 |  |
 | 2026-07-25 | 2 | 01:50-01:58, 11:13-12:31 | 1h 27m | 2h 07m | 0 | 102 |  |
 | 2026-07-27 | 3 | 09:47-09:59, 13:30-17:23, 22:32-22:42 | 4h 16m | 5h 16m | 1 | 180 | v1.12.0 |
-| 2026-07-28 | 4 | 15:12-15:58, 17:05-17:17, 18:35-19:58, 21:27-23:00 | 3h 54m | 5h 14m | 3 | 156 | v1.13.0 |
+| 2026-07-28 | 4 | 15:12-15:58, 17:05-17:17, 18:35-19:58, 21:27-00:00 | 4h 54m | 6h 14m | 4 | 174 | v1.13.0, v1.15.0 |
+| 2026-07-29 | 3 | 09:27-16:53, 20:24-21:01, 23:40-23:51 | 8h 15m | 9h 15m | 0 | 294 |  |
+| 2026-07-30 | 5 | 00:54-01:40, 10:02-10:19, 12:05-13:11, 15:38-17:09, 19:21-19:21 | 3h 40m | 5h 20m | 3 | 126 | v1.15.1 |
 
-| **TOTAL** | **37** | | **55h 23m** | **67h 43m** | **88** | **656** | |
+| **TOTAL** | **45** | | **68h 18m** | **83h 18m** | **92** | **1094** | |
 
 ## Limitaciones
 

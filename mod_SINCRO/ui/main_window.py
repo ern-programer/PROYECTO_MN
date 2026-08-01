@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 	QLabel,
 	QLineEdit,
 	QMainWindow,
+	QMenu,
 	QMessageBox,
 	QPushButton,
 	QPlainTextEdit,
@@ -771,14 +772,21 @@ class MainWindow(QMainWindow):
 		button_row.setHorizontalSpacing(4)
 		button_row.setVerticalSpacing(4)
 		self.restart_btn = QPushButton("RESTART")
+		self.restart_btn.setStyleSheet(
+			"QPushButton{background:#dc2626;color:white;font-weight:bold;border:1px solid #b91c1c;"
+			"border-radius:4px;padding:4px 8px;} "
+			"QPushButton:hover{background:#b91c1c;}"
+		)
 		self.restart_btn.clicked.connect(self.restart_workspace_state)
 		self.restart_btn.setToolTip("Limpia el estado en memoria de la sesión para cargar estudios nuevos desde cero.")
 		self.process_btn = QPushButton("Procesar")
+		self.process_btn.setStyleSheet(
+			"QPushButton{background:#16a34a;color:white;font-weight:bold;border:1px solid #15803d;"
+			"border-radius:4px;padding:4px 8px;} "
+			"QPushButton:hover{background:#15803d;}"
+		)
 		self.process_btn.clicked.connect(self.process_current)
 		self.process_btn.setToolTip("Recalcula segmentación, fase, métricas, polar map y gráficos.")
-		self.auto_btn = QPushButton("Auto")
-		self.auto_btn.clicked.connect(self.process_auto)
-		self.auto_btn.setToolTip("Fuerza modo automático y procesa todo sin tocar manualmente el flujo.")
 		self.open_folder_btn = QPushButton("Carpeta")
 		self.open_folder_btn.clicked.connect(self.open_output_folder)
 		self.open_folder_btn.setToolTip("Abre la carpeta con los PNG y el PDF generados.")
@@ -788,6 +796,15 @@ class MainWindow(QMainWindow):
 		self.save_pdf_as_btn = QPushButton("Guardar PDF")
 		self.save_pdf_as_btn.clicked.connect(self.save_pdf_as)
 		self.save_pdf_as_btn.setToolTip("Guarda una copia del informe PDF en la ubicación que elijas.")
+		# Botón PDF con menú (Abrir / Guardar como)
+		self.pdf_menu = QMenu(self)
+		self.pdf_menu.addAction("Abrir PDF", self.open_pdf)
+		self.pdf_menu.addAction("Guardar PDF como...", self.save_pdf_as)
+		self.pdf_btn = QToolButton()
+		self.pdf_btn.setText("PDF ▾")
+		self.pdf_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+		self.pdf_btn.setMenu(self.pdf_menu)
+		self.pdf_btn.setToolTip("Abrir o guardar el informe PDF.")
 		self.compare_stress_rest_btn = QPushButton("Comparar Rest/Stress")
 		self.compare_stress_rest_btn.clicked.connect(self.load_compare_study)
 		self.compare_stress_rest_btn.setToolTip(
@@ -838,20 +855,20 @@ class MainWindow(QMainWindow):
 			"Abre una vista separada para inspección visual de imagen, ROIs y bordes en modo asincrónico.\n"
 			"No reemplaza el flujo actual: conserva la ventana principal y añade una vista de revisión independiente."
 		)
-		button_row.addWidget(self.restart_btn, 0, 0, 1, 2)
-		button_row.addWidget(self.process_btn, 1, 0)
-		button_row.addWidget(self.auto_btn, 1, 1)
-		button_row.addWidget(self.open_folder_btn, 2, 0)
-		button_row.addWidget(self.open_pdf_btn, 2, 1)
-		button_row.addWidget(self.save_pdf_as_btn, 3, 0, 1, 2)
-		button_row.addWidget(self.compare_stress_rest_btn, 4, 0, 1, 2)
-		button_row.addWidget(self.load_one_or_two_btn, 5, 0, 1, 2)
-		button_row.addWidget(self.advanced_toggle_btn, 6, 0, 1, 2)
-		button_row.addWidget(self.export_ungated_btn, 7, 0)
-		button_row.addWidget(self.ui_config_btn, 7, 1)
-		button_row.addWidget(self.ectb_window_btn, 8, 0, 1, 2)
-		button_row.addWidget(self.gqc_window_btn, 9, 0, 1, 2)
-		button_row.addWidget(self.asynchrony_review_btn, 10, 0, 1, 2)
+		button_row.addWidget(self.process_btn, 0, 0)
+		button_row.addWidget(self.pdf_btn, 0, 1)
+		button_row.addWidget(self.restart_btn, 0, 2)
+		button_row.setColumnStretch(0, 3)
+		button_row.setColumnStretch(1, 3)
+		button_row.setColumnStretch(2, 1)
+		button_row.addWidget(self.compare_stress_rest_btn, 1, 0, 1, 2)
+		button_row.addWidget(self.load_one_or_two_btn, 1, 2)
+		button_row.addWidget(self.advanced_toggle_btn, 2, 0, 1, 2)
+		button_row.addWidget(self.export_ungated_btn, 3, 0)
+		button_row.addWidget(self.ui_config_btn, 3, 1)
+		button_row.addWidget(self.ectb_window_btn, 4, 0, 1, 2)
+		button_row.addWidget(self.gqc_window_btn, 5, 0, 1, 2)
+		button_row.addWidget(self.asynchrony_review_btn, 6, 0, 1, 2)
 		# Ubicar Acciones arriba de Procesamiento para tener comandos a la vista.
 		self._sidebar_layout.insertWidget(1, button_box)
 
@@ -1415,7 +1432,6 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_correct_btn.setToolTip("Aplica motion correction con método/eje/threshold seleccionados.")
 				self.cine_crudo_correct_btn.clicked.connect(self._apply_cine_crudo_motion_correction)
 				toolbar3.addWidget(self.cine_crudo_correct_btn)
-				toolbar3.addStretch(1)
 
 				# --- Fila 4 (corrección manual): flechas + paso + reset + ajuste fino + referencia + comparar ---
 				toolbar4 = QHBoxLayout()
@@ -1541,6 +1557,15 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_save_dcm_btn.clicked.connect(self._save_cine_crudo_corrected_dicom)
 				toolbar5.addWidget(self.cine_crudo_save_dcm_btn)
 				toolbar5.addStretch(1)
+
+				# Botón "Ajuste manual" dentro de la barra de corrección de movimiento:
+				# agrega un submenú (FloatingToolbar) con toolbar4 + toolbar5 al final de toolbar3.
+				self._cine_crudo_ajuste_btn = self._build_toolbar_group_menu(
+					"Ajuste manual ▾", [toolbar4, toolbar5],
+					key="cine_crudo_ajuste_manual_export",
+					tooltip="Nudge manual, comparación visual, offsets, curvas de shift y exportar/importar/grabar DICOM.",
+				)
+				toolbar3.addWidget(self._cine_crudo_ajuste_btn)
 
 				# --- Fila 6 (reconstrucción raw): separada en 3 filas para
 				# legibilidad y mejor adaptación en barra flotante.
@@ -2718,7 +2743,33 @@ class MainWindow(QMainWindow):
 
 	def closeEvent(self, event):
 		self._save_window_layout()
+		if self._check_unsaved_study():
+			event.ignore()
+			return
 		super().closeEvent(event)
+
+	def _check_unsaved_study(self) -> bool:
+		if getattr(self, "study", None) is None or getattr(self, "metrics", None) is None:
+			return False
+		try:
+			pdf_path = os.path.join(self.output_dir, "informe_sincro.pdf")
+			if os.path.isfile(pdf_path):
+				return False
+		except Exception:
+			pass
+		btn = QMessageBox.question(
+			self, "Estudio sin guardar",
+			"El estudio actual NO tiene un PDF guardado.\n\n"
+			"¿Guardar el informe antes de salir?",
+			QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+			QMessageBox.StandardButton.Cancel,
+		)
+		if btn == QMessageBox.StandardButton.Yes:
+			self.save_pdf_as()
+			return False
+		if btn == QMessageBox.StandardButton.No:
+			return False
+		return True
 
 	def _load_presets_store(self) -> dict:
 		if not os.path.exists(self.presets_path):
@@ -8770,15 +8821,17 @@ class MainWindow(QMainWindow):
 			return
 		self.polar_cine_toggle_btn.setEnabled(enabled)
 		if not enabled:
-			self.polar_cine_toggle_btn.setText("Play/Pause")
+			self.polar_cine_toggle_btn.setText("▶")
 			return
 		if not self.polar_cine_preview_frames:
-			self.polar_cine_toggle_btn.setText("Play/Pause")
+			self.polar_cine_toggle_btn.setText("▶")
 			return
 		if self.polar_cine_playing:
-			self.polar_cine_toggle_btn.setText("Pause")
+			self.polar_cine_toggle_btn.setText("⏸")
+			self.polar_cine_toggle_btn.setToolTip("Pausar")
 		else:
-			self.polar_cine_toggle_btn.setText("Play")
+			self.polar_cine_toggle_btn.setText("▶")
+			self.polar_cine_toggle_btn.setToolTip("Reproducir")
 
 	def _set_polar_cine_memory_frame(self, index: int):
 		if not self.polar_cine_preview_frames:
@@ -10941,7 +10994,7 @@ class MainWindow(QMainWindow):
 			if counts is not None and self.cine_crudo_index < len(counts):
 				counts_txt = f" · {int(counts[self.cine_crudo_index]):,} cts"
 			matrix_txt = f" · {self.cine_crudo_matrix_txt}" if self.cine_crudo_matrix_txt else ""
-			self.cine_crudo_frame_label.setText(f"Img {self.cine_crudo_index + 1}/{n}{counts_txt}{matrix_txt}")
+			self.cine_crudo_frame_label.setText(f"Img {self.cine_crudo_index + 1:02d}/{n}{counts_txt}{matrix_txt}")
 
 	def _advance_cine_crudo_frame(self):
 		if not self.cine_crudo_frames:

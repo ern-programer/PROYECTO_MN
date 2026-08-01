@@ -6,15 +6,22 @@ Vista de inspección asincrónica lado a lado:
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtWidgets import (
 	QCheckBox,
 	QComboBox,
+	QDoubleSpinBox,
+	QFormLayout,
+	QGroupBox,
 	QHBoxLayout,
 	QLabel,
 	QPushButton,
+	QScrollArea,
+	QSpinBox,
 	QSplitter,
 	QVBoxLayout,
 	QWidget,
@@ -112,6 +119,25 @@ class AsynchronyReviewWindow(QWidget):
 		center_row.addWidget(self.cavity_center_check)
 		center_row.addStretch(1)
 
+		# Centro manual acá mismo: se clickea sobre el panel izquierdo y el resto
+		# (radios, ángulo AHA, muestreo polar) se recalcula desde ese punto.
+		self.manual_center_check = QCheckBox("Centro manual (clic en cavidad)")
+		self.manual_center_check.setToolTip(
+			"Clic izquierdo en el panel izquierdo fija el centro de la cavidad; clic derecho lo borra.\n"
+			"Mueve el muestreo polar/AHA y los radios (no recorta la máscara: FEVI no cambia por esto)."
+		)
+		self.manual_center_check.toggled.connect(self._on_manual_center_mode_toggled)
+		self.manual_center_all_check = QCheckBox("Aplicar el clic a todos los cortes")
+		self.manual_center_all_check.toggled.connect(self._on_manual_center_all_toggled)
+		self.manual_center_clear_btn = QPushButton("Limpiar centros")
+		self.manual_center_clear_btn.clicked.connect(self._on_manual_center_clear)
+		manual_center_row = QHBoxLayout()
+		manual_center_row.setContentsMargins(0, 0, 0, 4)
+		manual_center_row.addWidget(self.manual_center_check)
+		manual_center_row.addWidget(self.manual_center_all_check)
+		manual_center_row.addWidget(self.manual_center_clear_btn)
+		manual_center_row.addStretch(1)
+
 		self.cine_main = CineWidget(self)
 		self.cine_main.setToolTip("Flujo principal con ROIs actuales.")
 		self.cine_main.set_controls_visible(True)
@@ -128,16 +154,47 @@ class AsynchronyReviewWindow(QWidget):
 		splitter.setSizes([650, 650])
 		self.splitter = splitter
 
-		layout = QVBoxLayout(self)
-		layout.setContentsMargins(6, 6, 6, 6)
-		layout.addWidget(self.help_label)
-		layout.addLayout(legend_row)
-		layout.addLayout(apply_row)
-		layout.addLayout(center_row)
-		layout.addWidget(self.status_label)
-		layout.addWidget(splitter)
+		# Mapa de fase coloreado (resultado real de asincronía): se muestra el PNG
+		# que la main renderiza (polar_clinico.png = bullseye + histograma + métricas).
+		# Es el "mapa de fase" que el usuario quiere ver acá, no en la principal.
+		self.phase_map_view = QLabel("Sin mapa de fase: procesá un estudio.")
+		self.phase_map_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+		self.phase_map_view.setStyleSheet("color:#5b6470; background:#0b1220;")
+		self._phase_map_pixmap = None
+		phase_map_scroll = QScrollArea(self)
+		phase_map_scroll.setWidgetResizable(True)
+		phase_map_scroll.setWidget(self.phase_map_view)
+		phase_map_scroll.setMinimumHeight(160)
+		self.phase_map_scroll = phase_map_scroll
+
+		viewers_split = QSplitter(Qt.Orientation.Vertical, self)
+		viewers_split.addWidget(splitter)
+		viewers_split.addWidget(phase_map_scroll)
+		viewers_split.setStretchFactor(0, 3)
+		viewers_split.setStretchFactor(1, 2)
+		viewers_split.setSizes([460, 300])
+		self.viewers_split = viewers_split
+
+		content = QWidget(self)
+		content_layout = QVBoxLayout(content)
+		content_layout.setContentsMargins(6, 6, 6, 6)
+		content_layout.addWidget(self.help_label)
+		content_layout.addLayout(legend_row)
+		content_layout.addLayout(apply_row)
+		content_layout.addLayout(center_row)
+		content_layout.addLayout(manual_center_row)
+		content_layout.addWidget(self.status_label)
+		content_layout.addWidget(viewers_split)
+
+		sidebar = self._build_sync_sidebar()
+
+		root = QHBoxLayout(self)
+		root.setContentsMargins(0, 0, 0, 0)
+		root.addWidget(content, 1)
+		root.addWidget(sidebar, 0)
 
 		self._wire_sync()
+		self.cine_main.centerPicked.connect(self._on_center_picked)
 		self.sync_from_main()
 
 	def _refresh_applied_label(self):
@@ -178,6 +235,284 @@ class AsynchronyReviewWindow(QWidget):
 			self._set_status(f"Centro del VI: {modo}. Cargá un estudio para procesarlo.")
 			return
 		self._set_status(f"Centro del VI: {modo}. Reprocesando...", ok=True)
+
+	def _on_manual_center_mode_toggled(self, checked: bool):
+		"""Prende/apaga el modo de fijar centro por clic en el panel izquierdo."""
+		self.cine_main.set_center_pick_mode(bool(checked))
+		if checked:
+			self._set_status(
+				"Centro manual activo: clic izquierdo en la cavidad (clic derecho borra).", ok=True
+			)
+		else:
+			self._set_status("Centro manual desactivado.")
+
+	def _on_manual_center_all_toggled(self, checked: bool):
+		"""Refleja en la ventana principal si el clic aplica a todos los cortes."""
+		main = self._main
+		chk = getattr(main, "manual_center_all_check", None) if main is not None else None
+		if chk is not None and bool(chk.isChecked()) != bool(checked):
+			chk.setChecked(bool(checked))
+
+	def _on_manual_center_clear(self):
+		"""Borra todos los centros manuales vía la ventana principal."""
+		main = self._main
+		if main is None or not hasattr(main, "_clear_manual_centers"):
+			self._set_status("No hay ventana principal para limpiar centros.")
+			return
+		main._clear_manual_centers()
+		self._push_manual_centers()
+		self._set_status("Centros manuales borrados; vuelve el centro automático.", ok=True)
+
+	def _on_center_picked(self, slice_index, center):
+		"""Reenvía el clic de centro a la ventana principal y refresca el marcador."""
+		main = self._main
+		if main is None or not hasattr(main, "_on_center_picked"):
+			self._set_status("No hay ventana principal para fijar el centro.")
+			return
+		main._on_center_picked(slice_index, center)
+		self._push_manual_centers()
+
+	def _push_manual_centers(self):
+		"""Dibuja en el panel izquierdo los centros manuales de la principal."""
+		main = self._main
+		centers = getattr(main, "manual_center_per_slice", None) if main is not None else None
+		self.cine_main.set_manual_centers(centers)
+
+	def _sync_manual_center_checks(self):
+		"""Refleja el 'aplicar a todos' de la principal sin disparar señales."""
+		main = self._main
+		chk = getattr(main, "manual_center_all_check", None) if main is not None else None
+		if chk is None:
+			return
+		enabled = bool(chk.isChecked())
+		if bool(self.manual_center_all_check.isChecked()) == enabled:
+			return
+		self.manual_center_all_check.blockSignals(True)
+		self.manual_center_all_check.setChecked(enabled)
+		self.manual_center_all_check.blockSignals(False)
+
+	def _build_sync_sidebar(self) -> QWidget:
+		"""Sidebar propio de sincronía: controles de fase y readout de métricas.
+
+		Los controles reflejan los de la ventana principal (que sigue siendo el
+		motor). Al tocar 'Reprocesar' se vuelcan los valores al main y se corre
+		process_current; el readout se refresca desde main.metrics y la FEVI.
+		"""
+		panel = QWidget(self)
+		panel.setMaximumWidth(280)
+		v = QVBoxLayout(panel)
+		v.setContentsMargins(6, 6, 6, 6)
+		v.setSpacing(8)
+
+		phase_box = QGroupBox("Parámetros de fase")
+		form = QFormLayout(phase_box)
+
+		self.seg_method_combo = QComboBox()
+		self.seg_method_combo.addItems(["auto", "threshold", "manual"])
+		self.threshold_spin = QDoubleSpinBox()
+		self.threshold_spin.setRange(0.01, 0.90)
+		self.threshold_spin.setSingleStep(0.01)
+		self.sigma_spin = QDoubleSpinBox()
+		self.sigma_spin.setRange(0.0, 6.0)
+		self.sigma_spin.setSingleStep(0.1)
+		self.harmonics_spin = QSpinBox()
+		self.harmonics_spin.setRange(1, 4)
+		self.amp_filter_spin = QDoubleSpinBox()
+		self.amp_filter_spin.setRange(0.01, 0.80)
+		self.amp_filter_spin.setSingleStep(0.01)
+		self.cmap_combo = QComboBox()
+		main = self._main
+		cmaps = list(getattr(main, "_all_cmaps", []) or [])
+		if not cmaps and main is not None and hasattr(main, "cmap_combo"):
+			cmaps = [main.cmap_combo.itemText(i) for i in range(main.cmap_combo.count())]
+		self.cmap_combo.addItems(cmaps or ["french"])
+
+		form.addRow("Segmentación", self.seg_method_combo)
+		form.addRow("Umbral", self.threshold_spin)
+		form.addRow("Sigma", self.sigma_spin)
+		form.addRow("Armónicos", self.harmonics_spin)
+		form.addRow("Filtro amplitud", self.amp_filter_spin)
+		form.addRow("Colormap", self.cmap_combo)
+		v.addWidget(phase_box)
+
+		self.reprocess_btn = QPushButton("Reprocesar")
+		self.reprocess_btn.setToolTip("Vuelca estos parámetros a la ventana principal y reprocesa el estudio.")
+		self.reprocess_btn.clicked.connect(self._apply_phase_controls_and_reprocess)
+		v.addWidget(self.reprocess_btn)
+
+		# Colormap es barato: se aplica en vivo sin reprocesar.
+		self.cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
+
+		readout_box = QGroupBox("Resultados en vivo")
+		readout_layout = QVBoxLayout(readout_box)
+		self.metrics_readout = QLabel("—")
+		self.metrics_readout.setWordWrap(True)
+		self.metrics_readout.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+		self.metrics_readout.setStyleSheet("font-size:11pt; color:#1f2937;")
+		readout_layout.addWidget(self.metrics_readout)
+		v.addWidget(readout_box)
+
+		v.addStretch(1)
+		return panel
+
+	def _apply_phase_controls_and_reprocess(self):
+		"""Vuelca los parámetros del sidebar a la ventana principal y reprocesa."""
+		main = self._main
+		if main is None:
+			self._set_status("No hay ventana principal para reprocesar.")
+			return
+		self._write_phase_controls_to_main()
+		if getattr(main, "study", None) is None:
+			self._set_status("Parámetros aplicados. Cargá un estudio en la ventana principal.")
+			return
+		try:
+			main.process_current()
+		except Exception as exc:
+			self._set_status(f"No se pudo reprocesar: {exc}")
+			return
+		self._set_status("Reprocesado con los parámetros de fase actuales.", ok=True)
+
+	def _write_phase_controls_to_main(self):
+		"""Copia los valores del sidebar a los widgets del motor (sin reprocesar)."""
+		main = self._main
+		if main is None:
+			return
+		combo = getattr(main, "seg_method", None)
+		if combo is not None:
+			idx = combo.findText(self.seg_method_combo.currentText())
+			if idx >= 0:
+				combo.setCurrentIndex(idx)
+		for src, dst_name in (
+			(self.threshold_spin, "threshold_spin"),
+			(self.sigma_spin, "sigma_spin"),
+			(self.harmonics_spin, "harmonics_spin"),
+			(self.amp_filter_spin, "phase_threshold_spin"),
+		):
+			dst = getattr(main, dst_name, None)
+			if dst is not None:
+				dst.setValue(src.value())
+		# El colormap del sidebar manda el color del mapa de fase renderizado.
+		cmap_text = self.cmap_combo.currentText()
+		for attr in ("cmap_combo", "report_cmap_phase", "report_cmap_polar_clinico"):
+			combo = getattr(main, attr, None)
+			if combo is None:
+				continue
+			idx = combo.findText(cmap_text)
+			if idx >= 0 and idx != combo.currentIndex():
+				combo.setCurrentIndex(idx)
+
+	def _on_cmap_changed(self, text: str):
+		"""Recolorea EN VIVO los visores de esta ventana y deja listo el mapa de fase.
+
+		- SPECT de fondo (cine_main/cine_wall): recolor inmediato acá, no en la main.
+		- Mapa de fase (polar_clinico.png): se recolorea al Reprocesar; para eso se
+		  vuelca el colormap a los cmaps de reporte de fase de la main.
+		"""
+		text = str(text)
+		# 1) Recolor inmediato del SPECT en esta ventana (dispara _sync_visual_from_main).
+		combo_local = getattr(self.cine_main, "cmap_combo", None)
+		if combo_local is not None:
+			idx = combo_local.findText(text)
+			if idx >= 0 and idx != combo_local.currentIndex():
+				combo_local.setCurrentIndex(idx)
+		# 2) Volcar a la main: cine + colormaps de reporte de fase (recolor al reprocesar).
+		main = self._main
+		if main is None:
+			return
+		for attr in ("cmap_combo", "report_cmap_phase", "report_cmap_polar_clinico"):
+			combo = getattr(main, attr, None)
+			if combo is None:
+				continue
+			idx = combo.findText(text)
+			if idx >= 0 and idx != combo.currentIndex():
+				combo.setCurrentIndex(idx)
+
+	def _sync_phase_controls_from_main(self):
+		"""Refleja en el sidebar los valores actuales del motor, sin disparar señales."""
+		main = self._main
+		if main is None:
+			return
+		pairs = [
+			(self.seg_method_combo, getattr(main, "seg_method", None), "combo"),
+			(self.threshold_spin, getattr(main, "threshold_spin", None), "spin"),
+			(self.sigma_spin, getattr(main, "sigma_spin", None), "spin"),
+			(self.harmonics_spin, getattr(main, "harmonics_spin", None), "spin"),
+			(self.amp_filter_spin, getattr(main, "phase_threshold_spin", None), "spin"),
+			(self.cmap_combo, getattr(main, "cmap_combo", None), "combo"),
+		]
+		for widget, src, kind in pairs:
+			if src is None:
+				continue
+			widget.blockSignals(True)
+			if kind == "spin":
+				widget.setValue(src.value())
+			else:
+				idx = widget.findText(src.currentText())
+				if idx >= 0:
+					widget.setCurrentIndex(idx)
+			widget.blockSignals(False)
+
+	def _refresh_metrics_readout(self):
+		"""Muestra PSD / BW / Entropy / FEVI del estudio ya procesado."""
+		main = self._main
+		metrics = getattr(main, "metrics", None) if main is not None else None
+		if not metrics:
+			self.metrics_readout.setText("Sin resultados: procesá un estudio.")
+			return
+
+		def _fmt(key, unit=""):
+			val = metrics.get(key)
+			try:
+				return f"{float(val):.1f}{unit}"
+			except (TypeError, ValueError):
+				return "N/D"
+
+		fevi_txt = "N/D"
+		try:
+			ef = main._estimate_lv_ef()
+			if ef and ef.get("available"):
+				fevi_txt = f"{float(ef.get('ef_pct')):.1f}%"
+		except Exception:
+			fevi_txt = "N/D"
+
+		cls = metrics.get("technical_classification", metrics.get("classification", "N/D"))
+		self.metrics_readout.setText(
+			f"Phase SD: {_fmt('phase_sd', '°')}\n"
+			f"Bandwidth: {_fmt('bandwidth', '°')}\n"
+			f"Entropy: {_fmt('entropy_normalized_pct', '%')}\n"
+			f"FEVI: {fevi_txt}\n"
+			f"PSD técnico: {cls} (no dx)"
+		)
+
+	def _refresh_phase_map_view(self):
+		"""Muestra el mapa de fase coloreado que renderiza la main (polar_clinico.png)."""
+		main = self._main
+		out_dir = getattr(main, "output_dir", None) if main is not None else None
+		path = os.path.join(out_dir, "polar_clinico.png") if out_dir else ""
+		if not path or not os.path.exists(path):
+			self._phase_map_pixmap = None
+			self.phase_map_view.setText("Sin mapa de fase: procesá un estudio.")
+			return
+		pix = QPixmap(path)
+		if pix.isNull():
+			self._phase_map_pixmap = None
+			self.phase_map_view.setText("No se pudo leer el mapa de fase.")
+			return
+		self._phase_map_pixmap = pix
+		self._apply_phase_map_scale()
+
+	def _apply_phase_map_scale(self):
+		"""Escala el mapa de fase al ancho disponible manteniendo proporción."""
+		pix = self._phase_map_pixmap
+		if pix is None:
+			return
+		vp = self.phase_map_scroll.viewport().width() if hasattr(self, "phase_map_scroll") else 0
+		target_w = max(320, vp - 4) if vp > 0 else 800
+		self.phase_map_view.setPixmap(pix.scaledToWidth(int(target_w), Qt.TransformationMode.SmoothTransformation))
+
+	def resizeEvent(self, event):
+		super().resizeEvent(event)
+		self._apply_phase_map_scale()
 
 	def _apply_selected_roi_source(self):
 		"""Fija la geometría elegida en la ventana principal y reprocesa."""
@@ -235,6 +570,11 @@ class AsynchronyReviewWindow(QWidget):
 			self.cine_wall.set_manual_rois(None)
 			self.cine_wall.preview.set_overlay_contours([])
 
+		self._push_manual_centers()
+		self._sync_manual_center_checks()
+		self._sync_phase_controls_from_main()
+		self._refresh_metrics_readout()
+		self._refresh_phase_map_view()
 		self._apply_ui_preferences()
 
 	def _apply_ui_preferences(self):

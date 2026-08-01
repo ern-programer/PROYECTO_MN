@@ -474,9 +474,15 @@ class CardiacReorientationDialog(QDialog):
         info = QLabel(
             "El VI se detecta y orienta <b>automáticamente</b> con el movimiento del gated "
             "(elipse amarilla + eje largo verde ya colocados sobre <b>cortes tomográficos</b>). "
-            "Ajustá la <b>elipse (VOI)</b> y el <b>eje largo (base→ápex)</b> en <b>Anterior</b> y "
+            "Ajustá la <b>elipse (VOI)</b> y el <b>eje largo</b> en <b>Anterior</b> y "
             "<b>Lateral izq.</b> si hace falta; usá <b>Invertir base↔ápex</b> si quedaron al revés. "
-            "SA/HLA/VLA se actualizan al instante."
+            "SA/HLA/VLA se actualizan al instante.<br>"
+            "<b>Ejes:</b> el eje largo va de <span style='color:#ffe14d'>●</span> <b>base</b> "
+            "(punto <span style='color:#ffe14d'>amarillo</span>) a "
+            "<span style='color:#ff5a5a'>●</span> <b>ápex</b> (punto <span style='color:#ff5a5a'>rojo</span>). "
+            "<b>Cuadrados amarillos</b> = centro y radios de la VOI. "
+            "<b>Arrastrá</b> cada punto a su lugar; <b>rueda</b> = zoom; los spin <b>Base/Ápex/Esp</b> "
+            "fijan los límites y el espesor del corte."
         )
         info.setWordWrap(True)
         root.addWidget(info)
@@ -807,6 +813,12 @@ class CardiacReorientationDialog(QDialog):
         )
         self.ax_tra.plot(self.h_tra1.x, self.h_tra1.y, "o", color="#ffe14d", ms=7)
         self.ax_tra.plot(self.h_tra2.x, self.h_tra2.y, "o", color="#ff5a5a", ms=7)
+        self.ax_tra.annotate("base", (self.h_tra1.x, self.h_tra1.y), color="#ffe14d",
+                             fontsize=8, fontweight="bold", xytext=(6, 0),
+                             textcoords="offset points", va="center")
+        self.ax_tra.annotate("ápex", (self.h_tra2.x, self.h_tra2.y), color="#ff5a5a",
+                             fontsize=8, fontweight="bold", xytext=(6, 0),
+                             textcoords="offset points", va="center")
         # VOI elíptica (heart box): AP define semiejes en x (ancho) y z (alto).
         ap_cx = self._ap_disp_from_vol_x(self._voi_cx)
         ap_rx_x = self._ap_disp_from_vol_x(self._voi_cx + self._voi_rx)
@@ -831,6 +843,12 @@ class CardiacReorientationDialog(QDialog):
         )
         self.ax_cor.plot(self.h_cor1.x, self.h_cor1.y, "o", color="#ffe14d", ms=7)
         self.ax_cor.plot(self.h_cor2.x, self.h_cor2.y, "o", color="#ff5a5a", ms=7)
+        self.ax_cor.annotate("base", (self.h_cor1.x, self.h_cor1.y), color="#ffe14d",
+                             fontsize=8, fontweight="bold", xytext=(6, 0),
+                             textcoords="offset points", va="center")
+        self.ax_cor.annotate("ápex", (self.h_cor2.x, self.h_cor2.y), color="#ff5a5a",
+                             fontsize=8, fontweight="bold", xytext=(6, 0),
+                             textcoords="offset points", va="center")
         # VOI en lateral: define semiejes en y (ancho) y z (alto).
         ll_cy = self._ll_disp_from_vol_y(self._voi_cy)
         ll_ry_x = self._ll_disp_from_vol_y(self._voi_cy + self._voi_ry)

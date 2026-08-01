@@ -121,11 +121,16 @@ def _slice_center_and_radii(
     *,
     img: np.ndarray | None = None,
     refine_cavity: bool = False,
+    center_override: tuple[float, float] | None = None,
 ) -> tuple[float, float, float, float, float]:
     """Devuelve (cy, cx, r_inner, r_outer, shift_px) del corte.
 
     `shift_px` es cuánto movió el centro el refinamiento en cavidad (NaN si no
     se aplicó), para poder informar si la opción tuvo efecto real.
+
+    Si `center_override` es un (cy, cx) finito, se usa ese centro fijo del
+    operador y se saltea tanto el centroide automático como el refinamiento;
+    los radios se calculan respecto de ese centro.
     """
     if not np.any(slice_mask):
         return np.nan, np.nan, np.nan, np.nan, np.nan
@@ -136,32 +141,42 @@ def _slice_center_and_radii(
 
     filled = binary_fill_holes(ring)
     cavity = filled & (~ring)
-    if int(cavity.sum()) >= 4:
-        cy, cx = center_of_mass(cavity)
+
+    override_ok = (
+        center_override is not None
+        and np.isfinite(center_override[0])
+        and np.isfinite(center_override[1])
+    )
+    if override_ok:
+        cy, cx = float(center_override[0]), float(center_override[1])
+        shift_px = np.nan
     else:
-        # Sin hueco de píxeles enteros (típico en 22x22 o cerca del ápex) cae al
-        # centroide del músculo, que se corre hacia el sector de mayor captación.
-        cy, cx = center_of_mass(ring)
+        if int(cavity.sum()) >= 4:
+            cy, cx = center_of_mass(cavity)
+        else:
+            # Sin hueco de píxeles enteros (típico en 22x22 o cerca del ápex) cae al
+            # centroide del músculo, que se corre hacia el sector de mayor captación.
+            cy, cx = center_of_mass(ring)
 
-    if not (np.isfinite(cy) and np.isfinite(cx)):
-        return np.nan, np.nan, np.nan, np.nan, np.nan
+        if not (np.isfinite(cy) and np.isfinite(cx)):
+            return np.nan, np.nan, np.nan, np.nan, np.nan
 
-    shift_px = np.nan
-    if refine_cavity:
-        # Radio preliminar solo para acotar la búsqueda; los radios definitivos
-        # se calculan más abajo ya con el centro corregido.
-        rys, rxs = np.nonzero(ring)
-        r_prelim = 0.5 * float(max(np.ptp(rys), np.ptp(rxs), 2))
-        new_cy, new_cx = refine_center_to_cavity(
-            float(cy),
-            float(cx),
-            r_prelim,
-            mask=ring,
-            img=img,
-            low_res=min(ring.shape) <= 28,
-        )
-        shift_px = float(np.hypot(new_cy - float(cy), new_cx - float(cx)))
-        cy, cx = new_cy, new_cx
+        shift_px = np.nan
+        if refine_cavity:
+            # Radio preliminar solo para acotar la búsqueda; los radios definitivos
+            # se calculan más abajo ya con el centro corregido.
+            rys, rxs = np.nonzero(ring)
+            r_prelim = 0.5 * float(max(np.ptp(rys), np.ptp(rxs), 2))
+            new_cy, new_cx = refine_center_to_cavity(
+                float(cy),
+                float(cx),
+                r_prelim,
+                mask=ring,
+                img=img,
+                low_res=min(ring.shape) <= 28,
+            )
+            shift_px = float(np.hypot(new_cy - float(cy), new_cx - float(cx)))
+            cy, cx = new_cy, new_cx
 
     outer_edge = ring & (~binary_erosion(ring, structure=np.ones((3, 3), dtype=bool)))
     inner_edge = cavity & (~binary_erosion(cavity, structure=np.ones((3, 3), dtype=bool)))
@@ -330,6 +345,7 @@ def _segment_auto_or_threshold(
     smooth_sigma: float,
     with_cleanup: bool,
     refine_cavity_center: bool = False,
+    center_override_per_slice: np.ndarray | None = None,
 ) -> SegmentationResult:
     n_slices, H, W = mean_img.shape
     mask = np.zeros((n_slices, H, W), dtype=bool)
@@ -337,6 +353,14 @@ def _segment_auto_or_threshold(
     inner = np.full((n_slices,), np.nan, dtype=np.float64)
     outer = np.full((n_slices,), np.nan, dtype=np.float64)
     shift = np.full((n_slices,), np.nan, dtype=np.float64)
+
+    ov = None
+    if center_override_per_slice is not None:
+        ov = np.asarray(center_override_per_slice, dtype=np.float64)
+        if ov.shape != (n_slices, 2):
+            raise ValueError(
+                f"center_override_per_slice debe ser ({n_slices}, 2); recibió {ov.shape}"
+            )
 
     low_res = min(H, W) <= 28
     for s in range(n_slices):
@@ -377,10 +401,14 @@ def _segment_auto_or_threshold(
             continue
 
         mask[s] = bin_mask
+        slice_override = None
+        if ov is not None and np.isfinite(ov[s, 0]) and np.isfinite(ov[s, 1]):
+            slice_override = (float(ov[s, 0]), float(ov[s, 1]))
         cy, cx, rin, rout, shift_px = _slice_center_and_radii(
             bin_mask,
             img=img_s,
             refine_cavity=refine_cavity_center,
+            center_override=slice_override,
         )
         centers[s] = [cy, cx]
         inner[s] = rin
@@ -398,6 +426,14 @@ def _segment_auto_or_threshold(
             inner=inner,
             outer=outer,
         )
+
+    # El centro elegido por el operador manda: se re-impone tras estabilizar y
+    # regularizar para que center_per_slice (base de radios, ángulo AHA y fase)
+    # quede exactamente donde lo puso, sin que el suavizado lo corra de vuelta.
+    if ov is not None:
+        for s in range(n_slices):
+            if np.isfinite(ov[s, 0]) and np.isfinite(ov[s, 1]) and mask[s].any():
+                centers[s] = ov[s]
 
     return SegmentationResult(
         mask=mask,
@@ -417,6 +453,7 @@ def segment_myocardium(
     smooth_sigma: float = 1.0,
     manual_rois: dict | None = None,
     refine_cavity_center: bool = False,
+    center_override_per_slice: np.ndarray | None = None,
 ) -> SegmentationResult:
     if cube.ndim != 4:
         raise ValueError(f"cube debe ser 4D (n_gates,n_slices,H,W); recibió {cube.shape}")
@@ -431,6 +468,7 @@ def segment_myocardium(
             smooth_sigma=smooth_sigma,
             with_cleanup=True,
             refine_cavity_center=refine_cavity_center,
+            center_override_per_slice=center_override_per_slice,
         )
 
     if method == "threshold":
@@ -440,6 +478,7 @@ def segment_myocardium(
             smooth_sigma=smooth_sigma,
             with_cleanup=False,
             refine_cavity_center=refine_cavity_center,
+            center_override_per_slice=center_override_per_slice,
         )
 
     if method == "manual":

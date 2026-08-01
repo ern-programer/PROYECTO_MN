@@ -11,6 +11,7 @@ from core.raw_projections import make_synthetic_raw_motion_projections, motion_c
 from core.raw_reconstruction import (
     ProjectionFilterConfig,
     RawReconConfig,
+    _detect_rotation_ccw,
     filter_projections,
     reconstruct_raw_gated_pipeline,
 )
@@ -66,6 +67,13 @@ class RawReconstructionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "FEVI"):
             reconstruct_raw_gated_pipeline(raw, config=RawReconConfig(fevi_slice_step_px=2))
+
+    def test_detect_rotation_ccw_from_angles(self):
+        self.assertTrue(_detect_rotation_ccw(np.array([0.0, 3.0, 6.0, 9.0])))       # crece = CCW
+        self.assertFalse(_detect_rotation_ccw(np.array([9.0, 6.0, 3.0, 0.0])))      # decrece = CW
+        self.assertTrue(_detect_rotation_ccw(np.array([358.0, 1.0, 4.0])))          # cruce 360 crece
+        self.assertIsNone(_detect_rotation_ccw(None))
+        self.assertIsNone(_detect_rotation_ccw(np.array([5.0])))
 
 
 if __name__ == "__main__":

@@ -448,6 +448,31 @@ def make_display_cube(phase_cube: np.ndarray, step_px: int = 2) -> np.ndarray:
     return cube[:, ::step].copy()
 
 
+# Sentido de giro que recibe el flip L/R para converger a orientación anatómica
+# canónica (VI a la izquierda del paciente). Es un único interruptor global: si
+# la validación clínica muestra TODOS los estudios espejados, invertir a False.
+_FLIP_X_ON_CCW = False
+
+
+def _detect_rotation_ccw(angles_deg: np.ndarray | None) -> bool | None:
+    """Detecta el sentido de giro desde los ángulos de proyección.
+
+    Devuelve True si el ángulo crece con el índice (CC/CCW), False si decrece
+    (CW), o None si no hay metadata suficiente para decidir. Usa unwrap para
+    tolerar el cruce por 0/360°.
+    """
+    if angles_deg is None:
+        return None
+    a = np.asarray(angles_deg, dtype=np.float64)
+    if a.size < 2:
+        return None
+    diffs = np.diff(np.unwrap(np.deg2rad(a)))
+    mean_step = float(np.mean(diffs))
+    if abs(mean_step) < 1e-6:
+        return None
+    return mean_step > 0.0
+
+
 def reconstruct_raw_gated_pipeline(
     projections: np.ndarray,
     angles_deg: np.ndarray | None = None,
@@ -514,8 +539,21 @@ def reconstruct_raw_gated_pipeline(
     # de la pantalla, y la LATERAL izquierda debe mirar hacia la izquierda de la
     # pantalla. Se espeja el eje x una sola vez aquí, de modo que las vistas de
     # referencia y todos los cortes SA/HLA/VLA hereden la orientación correcta.
-    ungated_volume = np.ascontiguousarray(np.flip(ungated_volume, axis=-1))
-    gated_volume = np.ascontiguousarray(np.flip(gated_volume, axis=-1))
+    # CLAVE: iradon produce imágenes ESPEJADAS entre CW y CCW. Aplicar el flip de
+    # forma incondicional dejaba correctos los estudios de un sentido de giro y
+    # espejados los del otro (causa del "posterior/lateral derecha" en la mayoría
+    # salvo el de calibración). Se condiciona el flip al sentido detectado para
+    # que AMBOS sentidos converjan a la misma orientación anatómica. Si no hay
+    # metadata angular, se conserva el flip previo (comportamiento heredado).
+    ccw = _detect_rotation_ccw(angles_deg)
+    flip_x = True if ccw is None else (bool(ccw) == _FLIP_X_ON_CCW)
+    if flip_x:
+        ungated_volume = np.ascontiguousarray(np.flip(ungated_volume, axis=-1))
+        gated_volume = np.ascontiguousarray(np.flip(gated_volume, axis=-1))
+    notes.append(
+        f"Orientacion L/R: sentido={'CCW' if ccw else ('CW' if ccw is False else '?')}, "
+        f"flip_x={flip_x} (converge CW/CCW a orientacion canonica)."
+    )
 
     phase_cube = gated_volume[:, :: int(cfg.fevi_slice_step_px)].copy()
     display_cube = make_display_cube(phase_cube, step_px=int(cfg.display_slice_step_px))
