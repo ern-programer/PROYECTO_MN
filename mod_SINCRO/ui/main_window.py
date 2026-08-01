@@ -1861,6 +1861,27 @@ class MainWindow(QMainWindow):
 		self.cine_compare.setToolTip("Segundo visor (otro estudio): editable para ajustar ROI esfuerzo/reposo en paralelo.")
 		self.cine.set_controls_visible(True)
 		self.cine_compare.set_controls_visible(False)
+		# Sincronización: el compare refleja colormap, invertir y velocidad del cine
+		# principal. Un solo juego de controles maneja ambas imágenes.
+		self.cine.cmap_combo.currentTextChanged.connect(
+			self.cine_compare.cmap_combo.setCurrentText
+		)
+		self.cine.invert_cmap_check.toggled.connect(
+			self.cine_compare.invert_cmap_check.setChecked
+		)
+		self.cine.speed_slider.valueChanged.connect(
+			self.cine_compare.speed_slider.setValue
+		)
+		self.cine.playStateChanged.connect(
+			self._sync_cine_compare_playback
+		)
+		# Sincronización gate/slice: el mismo corte en ambas etapas para comparar.
+		self.cine.gate_slider.valueChanged.connect(
+			self.cine_compare.gate_slider.setValue
+		)
+		self.cine.slice_slider.valueChanged.connect(
+			self.cine_compare.slice_slider.setValue
+		)
 		# Controles de centro manual, a mano justo encima del visor donde se clickea.
 		self.manual_center_clear_btn.setText("Limpiar centros")
 		# Se agrupan en un widget propio para poder ocultarlos como bloque cuando la
@@ -1906,9 +1927,9 @@ class MainWindow(QMainWindow):
 		#   [ cine principal + 2da etapa (juntos) ] [ Datos Paciente / Resultados ]
 		#   [ curvas: histograma de fase + volumen/derivada ]
 		self.bottom_hsplit = QSplitter(Qt.Orientation.Horizontal)
-		# Sin colapso: evita que el splitter comprima el cine por debajo de su
-		# mínimo, que es lo que hacía que los sliders se SOLAPEN sobre las imágenes
-		# cuando el ancho disponible es insuficiente.
+		# El cine (1ra+2da) no colapsa para que los sliders no se solapen sobre
+		# las imágenes. El mintrack total está controlado por el minimumSize de
+		# la ventana (≈1280px), no por los mínimos de cada zona.
 		self.bottom_hsplit.setChildrenCollapsible(False)
 		self.bottom_hsplit.setHandleWidth(6)
 		self.bottom_hsplit.addWidget(cine_area)
@@ -1937,7 +1958,7 @@ class MainWindow(QMainWindow):
 		right_splitter.setSizes([840, 220])
 		# 3 zonas: cine+2da etapa | Datos+Resultados | curvas. La primera es más
 		# ancha porque ahora contiene las DOS imágenes (cine + cine_compare).
-		self.bottom_hsplit.setSizes([680, 300, 320])
+		self.bottom_hsplit.setSizes([400, 260, 280])
 		self.main_splitter = splitter
 		self.right_splitter = right_splitter
 		self._ui_settings = QSettings("Gammasys", "GammaSync")
@@ -3084,8 +3105,8 @@ class MainWindow(QMainWindow):
 	def _build_sidebar(self) -> QWidget:
 		sidebar = QWidget()
 		sidebar.setObjectName("sincroSidebar")
-		sidebar.setMinimumWidth(400)
-		sidebar.setMaximumWidth(680)
+		sidebar.setMinimumWidth(320)
+		sidebar.setMaximumWidth(560)
 		sidebar.setStyleSheet(
 			"#sincroSidebar { background: #f7f8fb; border-right: 1px solid #d7dce5; }"
 			"QGroupBox { font-weight: 600; border: 1px solid #d7dce5; border-radius: 7px; margin-top: 6px; background: white; }"
@@ -4448,6 +4469,14 @@ class MainWindow(QMainWindow):
 
 	def _on_play_state_changed(self, playing: bool):
 		self.statusBar().showMessage("Cine en reproducción" if playing else "Cine en pausa")
+
+	def _sync_cine_compare_playback(self, playing: bool):
+		"""Sincroniza el play/pausa del cine_compare con el principal, evitando
+		bucle (solo llama toggle si los estados no coinciden)."""
+		if getattr(self, "cine_compare", None) is None:
+			return
+		if playing != self.cine_compare._playing:
+			self.cine_compare.toggle_playback()
 
 	def process_auto(self):
 		self.seg_method.setCurrentText("auto")

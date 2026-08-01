@@ -1097,8 +1097,8 @@ class CineWidget(QWidget):
 		self.speed_slider.setValue(250)
 		self.speed_slider.setMaximumHeight(20)
 		if self._compact_viewer:
-			self.speed_slider.setFixedWidth(120)
-			self.speed_slider.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+			self.speed_slider.setMinimumWidth(60)
+			self.speed_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 		else:
 			self.speed_slider.setMinimumWidth(180)
 			self.speed_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -1220,41 +1220,12 @@ class CineWidget(QWidget):
 			# cine. Sin slider de zoom (se usa la rueda del mouse), sin smooth, sin
 			# matriz ni Auto ROI. Play + ROI intestinal arriba; luego colormap /
 			# invertir; y navegación de gate / slice / velocidad.
-			self.play_button.setText("▶")
-			self.play_button.setMaximumWidth(52)
+			self.play_button.setFixedWidth(40)
 			nav_grid = QGridLayout()
 			nav_grid.setHorizontalSpacing(6)
 			nav_grid.setVerticalSpacing(3)
-			top_row = QHBoxLayout()
-			top_row.setSpacing(6)
-			top_row.addWidget(self.play_button)
-			top_row.addWidget(intestinal_btn_menu)
-			top_row.addStretch(1)
-			nav_grid.addLayout(top_row, 0, 0, 1, 4)
-			nav_grid.addWidget(QLabel("Colormap"), 1, 0, _lbl_align)
-			nav_grid.addWidget(self.cmap_combo, 1, 1, 1, 2)
-			nav_grid.addWidget(self.invert_cmap_check, 1, 3)
-			nav_grid.addWidget(QLabel("Gate"), 2, 0, _lbl_align)
-			nav_grid.addWidget(self.gate_prev_btn, 2, 1, _lbl_align)
-			nav_grid.addWidget(self.gate_slider, 2, 2)
-			nav_grid.addWidget(self.gate_next_btn, 2, 3)
-			nav_grid.addWidget(QLabel("Slice"), 3, 0, _lbl_align)
-			nav_grid.addWidget(self.slice_prev_btn, 3, 1, _lbl_align)
-			nav_grid.addWidget(self.slice_slider, 3, 2)
-			nav_grid.addWidget(self.slice_next_btn, 3, 3)
-			nav_grid.addWidget(QLabel("Speed"), 4, 0, _lbl_align)
-			nav_grid.addWidget(self.speed_prev_btn, 4, 1, _lbl_align)
-			nav_grid.addWidget(self.speed_slider, 4, 2)
-			# Botón '>' y el valor '250 ms' juntos en la misma celda (sin gap),
-			# para que el número quede pegado al lado del botón.
-			_speed_end = QHBoxLayout()
-			_speed_end.setContentsMargins(0, 0, 0, 0)
-			_speed_end.setSpacing(3)
-			_speed_end.addWidget(self.speed_next_btn)
-			_speed_end.addWidget(self.speed_label)
-			_speed_end_w = QWidget()
-			_speed_end_w.setLayout(_speed_end)
-			nav_grid.addWidget(_speed_end_w, 4, 3)
+			nav_grid.setColumnStretch(0, 1)
+			nav_grid.setRowStretch(0, 1)
 			nav_grid.setColumnStretch(2, 1)
 		else:
 			# --- Grupo esencial (siempre visible): colormap, play, navegación de
@@ -1388,16 +1359,22 @@ class CineWidget(QWidget):
 			# ninguna se estire más que la otra ni se solape con la imagen vecina.
 			SLIDERS_W = 56
 
-			# --- Celda (0,1): botones Base / Top (reset) ---
-			_btn_row = QHBoxLayout()
-			_btn_row.setContentsMargins(0, 0, 0, 0)
-			_btn_row.setSpacing(6)
-			_btn_row.addWidget(self.window_low_reset_btn)
-			_btn_row.addWidget(self.window_high_reset_btn)
-			_btn_w = QWidget()
-			_btn_w.setLayout(_btn_row)
-			_btn_w.setFixedHeight(TITLE_H)
-			_btn_w.setFixedWidth(SLIDERS_W)
+			# --- Celda (0,1): Top arriba (botón + valor en vivo) ---
+			_top_row = QHBoxLayout()
+			_top_row.setContentsMargins(0, 0, 0, 0)
+			_top_row.setSpacing(2)
+			# Botón más explícito (con fondo y borde) para resetear Top.
+			self.window_high_reset_btn.setStyleSheet(
+				"QPushButton{font-weight:bold;font-size:8pt;border:1px solid #94a3b8;border-radius:3px;"
+				"padding:1px 3px;color:#1e293b;background:#e2e8f0;} "
+				"QPushButton:hover{background:#cbd5e1;color:#2563eb;}"
+			)
+			_top_row.addWidget(self.window_high_reset_btn)
+			_top_row.addWidget(self.window_high_label)
+			_top_w = QWidget()
+			_top_w.setLayout(_top_row)
+			_top_w.setFixedHeight(TITLE_H)
+			_top_w.setFixedWidth(SLIDERS_W)
 
 			# --- Celda (1,1): UN SOLO RangeSlider (dos handles Base/Top, 0-200%) ---
 			_slider_row = QHBoxLayout()
@@ -1410,16 +1387,21 @@ class CineWidget(QWidget):
 			_slider_w.setFixedHeight(IMG_H)
 			_slider_w.setFixedWidth(SLIDERS_W)
 
-			# --- Celda (2,1): % Base / Top ---
-			_lbl_row = QHBoxLayout()
-			_lbl_row.setContentsMargins(0, 0, 0, 0)
-			_lbl_row.setSpacing(6)
-			_lbl_row.addWidget(self.window_low_label)
-			_lbl_row.addWidget(self.window_high_label)
-			_lbl_w = QWidget()
-			_lbl_w.setLayout(_lbl_row)
-			_lbl_w.setFixedHeight(BOTTOM_H)
-			_lbl_w.setFixedWidth(SLIDERS_W)
+			# --- Celda (2,1): Base abajo (botón + valor en vivo) ---
+			_base_row = QHBoxLayout()
+			_base_row.setContentsMargins(0, 0, 0, 0)
+			_base_row.setSpacing(2)
+			self.window_low_reset_btn.setStyleSheet(
+				"QPushButton{font-weight:bold;font-size:8pt;border:1px solid #94a3b8;border-radius:3px;"
+				"padding:1px 3px;color:#1e293b;background:#e2e8f0;} "
+				"QPushButton:hover{background:#cbd5e1;color:#2563eb;}"
+			)
+			_base_row.addWidget(self.window_low_reset_btn)
+			_base_row.addWidget(self.window_low_label)
+			_base_w = QWidget()
+			_base_w.setLayout(_base_row)
+			_base_w.setFixedHeight(BOTTOM_H)
+			_base_w.setFixedWidth(SLIDERS_W)
 
 			# --- Celda (2,0): slice/gate de la 1ra imagen ---
 			pos_row = QHBoxLayout()
@@ -1442,11 +1424,11 @@ class CineWidget(QWidget):
 			grid.setVerticalSpacing(2)
 			grid.setContentsMargins(0, 0, 0, 0)
 			grid.addWidget(self.phase_title_label, 0, 0)
-			grid.addWidget(_btn_w, 0, 1)
+			grid.addWidget(_top_w, 0, 1)
 			grid.addWidget(self.preview, 1, 0)   # preview fijo 160x160
 			grid.addWidget(_slider_w, 1, 1)
 			grid.addWidget(pos_w, 2, 0)
-			grid.addWidget(_lbl_w, 2, 1)
+			grid.addWidget(_base_w, 2, 1)
 			grid.setRowMinimumHeight(1, IMG_H)
 			grid.setRowStretch(0, 0)
 			grid.setRowStretch(1, 0)
@@ -1476,6 +1458,67 @@ class CineWidget(QWidget):
 				img_ctrls_row.addStretch(1)
 				layout.addStretch(1)
 				layout.addLayout(img_ctrls_row)
+				# Fila inferior debajo de los dos cines: play, colormap, invertir, speed
+				# SOLO en la 1ra etapa (el compare no lleva estos controles duplicados).
+				bottom_controls = QHBoxLayout()
+				bottom_controls.setContentsMargins(0, 0, 0, 0)
+				bottom_controls.setSpacing(6)
+				bottom_controls.addWidget(self.play_button)
+				bottom_controls.addWidget(QLabel("Colormap"))
+				bottom_controls.addWidget(self.cmap_combo)
+				bottom_controls.addWidget(self.invert_cmap_check)
+				bottom_controls.addSpacing(8)
+				bottom_controls.addWidget(intestinal_btn_menu)
+				bottom_controls.addStretch(1)
+				_bcw = QWidget()
+				_bcw.setLayout(bottom_controls)
+				_bcw.setFixedWidth(440)
+				layout.addWidget(_bcw, 0)
+				# Fila del speed: slider con label que ocupa el MISMO ancho que los
+				# dos cines juntos (imagen 1ra + rangeSlider 1ra + gap + imagen 2da +
+				# rangeSlider 2da ≈ 440px). El label "Speed" va a la izquierda del
+				# slider, y los botones < / > a los costados. Contenedor centrado.
+				_speed_total = 440
+				_speed_row = QHBoxLayout()
+				_speed_row.setContentsMargins(0, 0, 0, 0)
+				_speed_row.setSpacing(4)
+				_speed_row.addWidget(QLabel("Speed"))
+				_speed_row.addWidget(self.speed_prev_btn)
+				_speed_row.addWidget(self.speed_slider, 1)
+				_speed_row.addWidget(self.speed_next_btn)
+				_speed_row.addWidget(self.speed_label)
+				_speed_w = QWidget()
+				_speed_w.setLayout(_speed_row)
+				_speed_w.setFixedWidth(_speed_total)
+				layout.addWidget(_speed_w, 0)
+				# Fila de Gate y Slice lado a lado, debajo del speed.
+				# Ambos ocupan el mismo ancho total que los cines (440px).
+				_gs_total = 440
+				_gs_row = QHBoxLayout()
+				_gs_row.setContentsMargins(0, 0, 0, 0)
+				_gs_row.setSpacing(10)
+				# Gate slider con sus etiquetas y botones
+				_gate_group = QHBoxLayout()
+				_gate_group.setSpacing(3)
+				_gate_group.addWidget(QLabel("Gate"))
+				_gate_group.addWidget(self.gate_prev_btn)
+				_gate_group.addWidget(self.gate_slider, 1)
+				_gate_group.addWidget(self.gate_next_btn)
+				_gate_group.addWidget(self.gate_label)
+				# Slice slider con sus etiquetas y botones
+				_slice_group = QHBoxLayout()
+				_slice_group.setSpacing(3)
+				_slice_group.addWidget(QLabel("Slice"))
+				_slice_group.addWidget(self.slice_prev_btn)
+				_slice_group.addWidget(self.slice_slider, 1)
+				_slice_group.addWidget(self.slice_next_btn)
+				_slice_group.addWidget(self.slice_label)
+				_gs_row.addLayout(_gate_group, 1)
+				_gs_row.addLayout(_slice_group, 1)
+				_gs_w = QWidget()
+				_gs_w.setLayout(_gs_row)
+				_gs_w.setFixedWidth(_gs_total)
+				layout.addWidget(_gs_w, 0)
 			self.help_label.setVisible(False)
 		else:
 			layout.addLayout(preview_row)
@@ -1573,7 +1616,10 @@ class CineWidget(QWidget):
 		# panel de sliders es _sliders_col_widget (la celda del RangeSlider).
 		panel = getattr(self, "window_panel_widget", None) or getattr(self, "_sliders_col_widget", None)
 		if panel is not None:
-			panel.setVisible(show)
+			# El visor de comparación (is_compare) SIEMPRE muestra sus sliders,
+			# aunque estén ocultos los controles. Así el RangeSlider de la 2da
+			# etapa nunca desaparece.
+			panel.setVisible(show or bool(getattr(self, "_is_compare", False)))
 
 	def _capture_tooltips(self):
 		for w in self.findChildren(QWidget):
