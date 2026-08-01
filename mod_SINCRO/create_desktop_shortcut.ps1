@@ -2,7 +2,8 @@
 # Ejecutar como: .\create_desktop_shortcut.ps1
 
 $shortcutPath = "$env:USERPROFILE\Desktop\GammaSync.lnk"
-$pythonPath = "C:\Users\Ernesto\AppData\Local\Programs\Python\Python313\python.exe"
+# pythonw.exe (NO python.exe): arranca la GUI sin abrir la ventana de consola.
+$pythonPath = "C:\Users\Ernesto\AppData\Local\Programs\Python\Python313\pythonw.exe"
 $scriptPath = "D:\- PROGRAMACIÓN\PROYECTO_MN\mod_SINCRO\main.py"
 $workingDir = "D:\- PROGRAMACIÓN\PROYECTO_MN\mod_SINCRO"
 $iconPath = "D:\- PROGRAMACIÓN\PROYECTO_MN\mod_SINCRO\assets\logo_gammasync_ern_02.ico"

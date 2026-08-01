@@ -29,9 +29,23 @@ def main(argv: list[str]) -> int:
     app.setApplicationVersion(__version__)
     app.setOrganizationName("Gammasys")
 
+    # Tema visual: se aplica el tema guardado por el usuario (default "classic"
+    # = nativo). El QSS moderno queda como opción seleccionable desde el panel de
+    # Configuración. Si falta el .qss, el tema moderno cae a nativo sin romper.
+    from ui.theme_manager import apply_theme
+    apply_theme(app)
+
     from ui.main_window import MainWindow
 
-    window = MainWindow(initial_path=file_path)
+    try:
+        window = MainWindow(initial_path=file_path)
+    except Exception:
+        import traceback, os
+        log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "startup_error.txt")
+        with open(log, "w", encoding="utf-8") as fh:
+            traceback.print_exc(file=fh)
+        traceback.print_exc()
+        return 1
     window.show()
     return app.exec()
 

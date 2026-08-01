@@ -143,6 +143,10 @@ class MainWindow(QMainWindow):
 		self.aha = None
 		self.phase_by_seg = None
 		self.territory = None
+		# Centro de cavidad fijado por el operador (clic), por corte:
+		# {slice_idx: (cy, cx)}. Manda sobre el centroide automático y se propaga
+		# a radios, ángulo AHA y fase. Vacío = centro 100% automático.
+		self.manual_center_per_slice: dict[int, tuple[float, float]] = {}
 		# Estudio de comparación (típicamente REST vs el actual STRESS) para el
 		# análisis stress/rest de disincronía (stunning isquémico, Camilletti 2015).
 		self.compare_metrics = None
@@ -313,6 +317,7 @@ class MainWindow(QMainWindow):
 
 		controls_box = QGroupBox("Procesamiento")
 		controls_form = QFormLayout(controls_box)
+		self.controls_form = controls_form
 
 		self.seg_method = QComboBox()
 		self.seg_method.addItems(["auto", "threshold", "manual"])
@@ -330,6 +335,16 @@ class MainWindow(QMainWindow):
 		self.cavity_center_check = QCheckBox("Centrar ROI en la cavidad")
 		self.cavity_center_check.setChecked(False)
 		self.cavity_center_check.toggled.connect(self._on_cavity_center_toggled)
+
+		# Centro manual: el operador hace clic en la cavidad y ese centro manda
+		# sobre el automático. Resuelve los casos donde ningún método auto acierta.
+		self.manual_center_check = QCheckBox("Centro manual (clic en cavidad)")
+		self.manual_center_check.setChecked(False)
+		self.manual_center_check.toggled.connect(self._on_manual_center_mode_toggled)
+		self.manual_center_all_check = QCheckBox("Aplicar el clic a todos los cortes")
+		self.manual_center_all_check.setChecked(False)
+		self.manual_center_clear_btn = QPushButton("Limpiar centros manuales")
+		self.manual_center_clear_btn.clicked.connect(self._clear_manual_centers)
 
 		self.threshold_spin = QDoubleSpinBox()
 		self.threshold_spin.setRange(0.01, 0.90)
@@ -506,6 +521,18 @@ class MainWindow(QMainWindow):
 			"Afecta radios, contornos ECTb y la asignación angular a segmentos AHA, "
 			"así que cambia los valores de fase. Reprocesa para verlo."
 		)
+		self.manual_center_check.setToolTip(
+			"Fija el centro de la cavidad a mano cuando el automático no acierta.\n"
+			"Encendido: hacé clic en el centro de la cavidad sobre la imagen del cine "
+			"(clic derecho borra el de ese corte). Ese centro manda sobre el automático "
+			"y todo lo que viene después (radios, ángulo AHA, fase) se recalcula respecto de él.\n"
+			"Reprocesa solo el/los corte(s) con centro fijado; el resto sigue automático."
+		)
+		self.manual_center_all_check.setToolTip(
+			"Si está encendido, un solo clic aplica ese mismo centro a TODOS los cortes.\n"
+			"Útil cuando el corazón está bien alineado. Apagado: el centro es por corte."
+		)
+		self.manual_center_clear_btn.setToolTip("Borra todos los centros manuales y vuelve al centro automático.")
 		self.threshold_spin.setToolTip("Porcentaje del máximo usado para separar miocardio del fondo.")
 		self.sigma_spin.setToolTip("Suavizado espacial aplicado antes del threshold en segmentación.")
 		self.harmonics_spin.setToolTip("Cantidad de armónicos usados para estabilizar la fase.")
@@ -776,9 +803,12 @@ class MainWindow(QMainWindow):
 		self.advanced_toggle_btn = QPushButton("AVANZADO")
 		self.advanced_toggle_btn.clicked.connect(self.toggle_advanced_mode)
 		self.advanced_toggle_btn.setToolTip("Activa paneles y render pesado. En básico se prioriza velocidad para asincronía.")
-		self.ui_config_btn = QPushButton("Config UI")
+		self.ui_config_btn = QPushButton("Configuración")
 		self.ui_config_btn.clicked.connect(self.open_ui_preferences_dialog)
-		self.ui_config_btn.setToolTip("Configura helpers, tooltips y modo compacto de botones.")
+		self.ui_config_btn.setToolTip(
+			"Panel de Configuración: tema visual (Clásico/Moderno), helpers, tooltips "
+			"y modo compacto de botones. Se irán agregando más opciones."
+		)
 		self.export_ungated_btn = QPushButton("Ungated DCM")
 		self.export_ungated_btn.clicked.connect(self._export_ungated_dicom)
 		self.export_ungated_btn.setToolTip("Exporta el desgatillado (suma de gates = perfusión total) como DICOM NM no-gated para compartir o releer.")
@@ -1813,14 +1843,17 @@ class MainWindow(QMainWindow):
 			self._tab_tooltips[name] = helptxt or ""
 
 		self._rebuild_tabs_for_mode()
-		self.cine = CineWidget()
+		self.cine = CineWidget(compact_viewer=True)
 		self.cine.roiEdited.connect(self._on_cine_roi_changed)
 		self.cine.roiEditedGate.connect(self._on_cine_roi_changed_gate)
 		self.cine.playStateChanged.connect(self._on_play_state_changed)
 		self.cine.activated.connect(lambda: self._on_cine_panel_activated("main"))
+		self.cine.centerPicked.connect(self._on_center_picked)
 		self.cine.setToolTip("Reproducí el cine, hacé zoom y dibujá ROIs sobre la imagen.")
 		self.cine_secondary_source: str | None = None
-		self.cine_compare = CineWidget()
+		# is_compare=True: oculta su título interno y sus sliders Base/Top (son
+		# solo de la 1ra etapa), para que las dos imágenes queden alineadas.
+		self.cine_compare = CineWidget(compact_viewer=True, is_compare=True)
 		self.cine_compare.roiEdited.connect(self._on_cine_compare_roi_changed)
 		self.cine_compare.roiEditedGate.connect(self._on_cine_compare_roi_changed_gate)
 		self.cine_compare.playStateChanged.connect(self._on_play_state_changed)
@@ -1828,37 +1861,68 @@ class MainWindow(QMainWindow):
 		self.cine_compare.setToolTip("Segundo visor (otro estudio): editable para ajustar ROI esfuerzo/reposo en paralelo.")
 		self.cine.set_controls_visible(True)
 		self.cine_compare.set_controls_visible(False)
-
-		# Panel inferior con QSplitter (en vez de QHBoxLayout fijo): el usuario
-		# puede arrastrar el borde para agrandar/achicar el visor de esfuerzo,
-		# o achicarlo de un clic con el botón cuando trabaja a una sola etapa.
-		self.cine_compare_collapse_btn = QToolButton()
-		self.cine_compare_collapse_btn.setText("◀ Esfuerzo")
-		self.cine_compare_collapse_btn.setCheckable(True)
-		self.cine_compare_collapse_btn.setToolTip(
-			"Achica/agranda el visor de esfuerzo (segundo estudio) de un clic. "
-			"También se puede arrastrar el borde entre los dos visores para ajustar el ancho libremente."
-		)
-		self.cine_compare_collapse_btn.toggled.connect(self._on_cine_compare_collapse_toggled)
+		# Controles de centro manual, a mano justo encima del visor donde se clickea.
+		self.manual_center_clear_btn.setText("Limpiar centros")
+		# Se agrupan en un widget propio para poder ocultarlos como bloque cuando la
+		# sincronía se centraliza en la ventana "vista asincronía".
+		self.manual_center_bar = QWidget()
+		manual_center_bar_layout = QHBoxLayout(self.manual_center_bar)
+		manual_center_bar_layout.setContentsMargins(0, 0, 0, 0)
+		manual_center_bar_layout.addWidget(QLabel("Centro:"))
+		manual_center_bar_layout.addWidget(self.manual_center_check)
+		manual_center_bar_layout.addWidget(self.manual_center_all_check)
+		manual_center_bar_layout.addWidget(self.manual_center_clear_btn)
 		lower_header = QHBoxLayout()
 		lower_header.setContentsMargins(0, 0, 0, 0)
+		# El cine_compare (2da etapa) queda SIEMPRE VISIBLE: ya no hay botón
+		# Mostrar/Ocultar. El header solo lleva los controles de centro manual.
+		lower_header.addWidget(self.manual_center_bar)
 		lower_header.addStretch(1)
-		lower_header.addWidget(self.cine_compare_collapse_btn)
+		# Botón debug: dibuja la grilla (bordes rojos 2px) del layout del cine para
+		# diagnosticar desalineaciones. Temporal.
+		self.debug_grid_btn = QToolButton()
+		self.debug_grid_btn.setText("⊞ Grilla")
+		self.debug_grid_btn.setCheckable(True)
+		self.debug_grid_btn.setToolTip("Debug: muestra/oculta la grilla del layout (bordes rojos).")
+		self.debug_grid_btn.toggled.connect(self._on_debug_grid_toggled)
+		lower_header.addWidget(self.debug_grid_btn)
 
-		self.cine_lower_splitter = QSplitter(Qt.Orientation.Horizontal)
-		self.cine_lower_splitter.setChildrenCollapsible(True)
-		self.cine_lower_splitter.setHandleWidth(6)
-		self.cine_lower_splitter.addWidget(self.cine)
-		self.cine_lower_splitter.addWidget(self.cine_compare)
-		self.cine_lower_splitter.setStretchFactor(0, 1)
-		self.cine_lower_splitter.setStretchFactor(1, 1)
+		# Contenedor del cine principal: header (centro/colapsar) + el visor.
+		# El segundo visor (cine_compare) ya NO va acá; según el mockup vive al
+		# extremo derecho de la banda inferior (ver bottom_hsplit más abajo).
+		cine_area = QWidget()
+		cine_area_layout = QVBoxLayout(cine_area)
+		cine_area_layout.setContentsMargins(0, 0, 0, 0)
+		cine_area_layout.setSpacing(2)
+		cine_area_layout.addLayout(lower_header)
+		cine_area_layout.addWidget(self.cine)
+
+		# El cine_compare (2da etapa) va PEGADO al cine principal, con su propia
+		# grilla 3x2 (título '2da. Fase' + imagen + sliders + slice/gate), igual
+		# que la 1ra. Su título dinámico se actualiza en _refresh_cine_compare_title.
+		self.cine.set_compare_viewer(self.cine_compare)
+
+		# Banda inferior (izquierda → derecha):
+		#   [ cine principal + 2da etapa (juntos) ] [ Datos Paciente / Resultados ]
+		#   [ curvas: histograma de fase + volumen/derivada ]
+		self.bottom_hsplit = QSplitter(Qt.Orientation.Horizontal)
+		# Sin colapso: evita que el splitter comprima el cine por debajo de su
+		# mínimo, que es lo que hacía que los sliders se SOLAPEN sobre las imágenes
+		# cuando el ancho disponible es insuficiente.
+		self.bottom_hsplit.setChildrenCollapsible(False)
+		self.bottom_hsplit.setHandleWidth(6)
+		self.bottom_hsplit.addWidget(cine_area)
+		self.bottom_hsplit.addWidget(self._build_readonly_results_panel())
+		self.bottom_hsplit.addWidget(self._build_curves_panel())
+		self.bottom_hsplit.setStretchFactor(0, 1)
+		self.bottom_hsplit.setStretchFactor(1, 0)
+		self.bottom_hsplit.setStretchFactor(2, 0)
 
 		lower_cine_panel = QWidget()
 		lower_cine_layout = QVBoxLayout(lower_cine_panel)
 		lower_cine_layout.setContentsMargins(0, 0, 0, 0)
 		lower_cine_layout.setSpacing(2)
-		lower_cine_layout.addLayout(lower_header)
-		lower_cine_layout.addWidget(self.cine_lower_splitter)
+		lower_cine_layout.addWidget(self.bottom_hsplit)
 		right_splitter.addWidget(self.tabs)
 		right_splitter.addWidget(lower_cine_panel)
 		right_splitter.setStretchFactor(0, 3)
@@ -1870,7 +1934,10 @@ class MainWindow(QMainWindow):
 		splitter.setStretchFactor(0, 1)
 		splitter.setStretchFactor(1, 4)
 		splitter.setSizes([420, 1140])
-		right_splitter.setSizes([920, 140])
+		right_splitter.setSizes([840, 220])
+		# 3 zonas: cine+2da etapa | Datos+Resultados | curvas. La primera es más
+		# ancha porque ahora contiene las DOS imágenes (cine + cine_compare).
+		self.bottom_hsplit.setSizes([680, 300, 320])
 		self.main_splitter = splitter
 		self.right_splitter = right_splitter
 		self._ui_settings = QSettings("Gammasys", "GammaSync")
@@ -1891,6 +1958,8 @@ class MainWindow(QMainWindow):
 		self._capture_global_tooltips()
 		self._apply_global_ui_preferences()
 		self._update_cine_active_border()
+		self._hide_sync_controls_in_main()
+		self._refresh_readonly_results_panel()
 
 		if initial_path:
 			self.file_edit.setText(initial_path)
@@ -1898,6 +1967,164 @@ class MainWindow(QMainWindow):
 				self.process_auto()
 			else:
 				self.process_current()
+
+	def _hide_sync_controls_in_main(self):
+		"""Oculta en el sidebar principal los controles de sincronía ya duplicados
+		en la ventana 'vista asincronía' (ROI de análisis, centrar en cavidad y
+		centro manual). Los widgets siguen existiendo y operativos; solo dejan de
+		mostrarse acá, porque la sincronía se maneja desde 'vista asincronía'."""
+		form = getattr(self, "controls_form", None)
+		for w in (getattr(self, "roi_source_combo", None), getattr(self, "cavity_center_check", None)):
+			if w is None:
+				continue
+			if form is not None:
+				lbl = form.labelForField(w)
+				if lbl is not None:
+					lbl.setVisible(False)
+			w.setVisible(False)
+		bar = getattr(self, "manual_center_bar", None)
+		if bar is not None:
+			bar.setVisible(False)
+
+	def _build_readonly_results_panel(self) -> QWidget:
+		"""Construye el panel de solo-lectura de la banda inferior: datos del
+		paciente, resultados en vivo (mismas métricas que 'vista asincronía') y
+		las dos curvas ya renderizadas (histograma de fase y volumen/derivada).
+		No tiene controles: solo refleja lo calculado por el motor."""
+		panel = QWidget()
+		panel.setMinimumWidth(240)
+		panel.setMaximumWidth(420)
+		lay = QVBoxLayout(panel)
+		lay.setContentsMargins(3, 3, 3, 3)
+		lay.setSpacing(3)
+
+		# Según el mockup: "Datos del Paciente" es una caja ancha ARRIBA y
+		# "Resultados en vivo" va DEBAJO, a la altura de los controles del cine.
+		pat_box = QGroupBox("Datos del Paciente")
+		pat_l = QVBoxLayout(pat_box)
+		pat_l.setContentsMargins(6, 3, 6, 3)
+		self.patient_data_label = QLabel("Sin estudio cargado.")
+		self.patient_data_label.setWordWrap(True)
+		self.patient_data_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+		self.patient_data_label.setStyleSheet("font-size:9pt; color:#1f2937;")
+		pat_l.addWidget(self.patient_data_label)
+		lay.addWidget(pat_box, 0)
+
+		res_box = QGroupBox("Resultados en vivo")
+		res_l = QVBoxLayout(res_box)
+		res_l.setContentsMargins(6, 3, 6, 3)
+		self.main_metrics_readout = QLabel("Sin resultados: procesá un estudio.")
+		self.main_metrics_readout.setWordWrap(True)
+		self.main_metrics_readout.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+		self.main_metrics_readout.setStyleSheet("font-size:10pt; color:#1f2937;")
+		res_l.addWidget(self.main_metrics_readout)
+		lay.addWidget(res_box, 1)
+
+		self.readonly_panel = panel
+		return panel
+
+	def _build_curves_panel(self) -> QWidget:
+		"""Zona derecha de la banda inferior (mockup interfaz02): las dos curvas
+		ya renderizadas, apiladas — histograma clínico de fase arriba y curva
+		volumen/derivada abajo. Solo-lectura: reflejan lo calculado por el motor."""
+		panel = QWidget()
+		panel.setMinimumWidth(220)
+		lay = QVBoxLayout(panel)
+		lay.setContentsMargins(3, 3, 3, 3)
+		lay.setSpacing(3)
+		self.curve_hist_view = QLabel("Histograma de fase: procesá un estudio.")
+		self.curve_hist_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+		self.curve_hist_view.setMinimumHeight(110)
+		self.curve_hist_view.setStyleSheet("color:#5b6470; background:#0b1220; border:1px solid #26324a;")
+		self.curve_fevi_view = QLabel("Curva volumen/derivada: modo avanzado.")
+		self.curve_fevi_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+		self.curve_fevi_view.setMinimumHeight(110)
+		self.curve_fevi_view.setStyleSheet("color:#5b6470; background:#0b1220; border:1px solid #26324a;")
+		lay.addWidget(self.curve_hist_view, 1)
+		lay.addWidget(self.curve_fevi_view, 1)
+		self.curves_panel = panel
+		return panel
+
+	def _load_curve_pixmap(self, label: QLabel, filename: str, placeholder: str) -> None:
+		"""Carga un PNG ya renderizado (desde output_dir) en un QLabel escalado al
+		ancho disponible. Si el archivo no existe, deja un placeholder."""
+		try:
+			path = os.path.join(self.output_dir, filename)
+		except Exception:
+			path = ""
+		if not path or not os.path.isfile(path):
+			label.setPixmap(QPixmap())
+			label.setText(placeholder)
+			return
+		pix = QPixmap(path)
+		if pix.isNull():
+			label.setPixmap(QPixmap())
+			label.setText(placeholder)
+			return
+		target_w = max(240, label.width() - 4)
+		label.setText("")
+		label.setPixmap(pix.scaledToWidth(target_w, Qt.TransformationMode.SmoothTransformation))
+
+	def _refresh_readonly_results_panel(self) -> None:
+		"""Refresca el panel de solo-lectura de la banda inferior tras procesar."""
+		if getattr(self, "patient_data_label", None) is None:
+			return
+		# --- Datos del paciente ---
+		study = getattr(self, "study", None)
+		if study is None:
+			self.patient_data_label.setText("Sin estudio cargado.")
+		else:
+			ctx = self._study_context()
+
+			def g(attr: str) -> str:
+				return str(getattr(study, attr, "") or "").strip() or "N/D"
+
+			birth = self._format_dicom_date(str(getattr(study, "patient_birth_date", "") or "")) or "N/D"
+			stime_raw = str(getattr(study, "study_time", "") or "").strip()
+			if len(stime_raw) >= 4 and stime_raw[:4].isdigit():
+				stime = f"{stime_raw[:2]}:{stime_raw[2:4]}"
+			else:
+				stime = ""
+			self.patient_data_label.setText(
+				f"<b>{ctx['patient_name']}</b> (ID: {ctx['patient_id']})<br>"
+				f"Sexo: {g('patient_sex')} &nbsp;|&nbsp; Nac.: {birth}<br>"
+				f"Estudio: {ctx['study_date']} {stime}<br>"
+				f"Accession: {g('accession_number')}<br>"
+				f"Desc.: {g('study_description')}<br>"
+				f"Serie: {g('series_description')}<br>"
+				f"Tipo: {ctx['phase']}"
+			)
+		# --- Resultados en vivo ---
+		metrics = getattr(self, "metrics", None)
+		if not metrics:
+			self.main_metrics_readout.setText("Sin resultados: procesá un estudio.")
+		else:
+			def m(key: str) -> str:
+				val = metrics.get(key)
+				try:
+					return f"{float(val):.1f}"
+				except (TypeError, ValueError):
+					return "N/D"
+
+			lines = [
+				f"Phase SD: {m('phase_sd')}°",
+				f"Bandwidth: {m('bandwidth')}°",
+				f"Entropy: {m('entropy_normalized_pct')} %",
+			]
+			try:
+				ef = self._estimate_lv_ef()
+				ef_pct = ef.get("ef_pct") if isinstance(ef, dict) else None
+				if ef_pct is not None:
+					lines.append(f"FEVI: {float(ef_pct):.0f} %")
+			except Exception:
+				pass
+			self.main_metrics_readout.setText("<br>".join(lines))
+		# --- Curvas ya renderizadas ---
+		self._load_curve_pixmap(self.curve_hist_view, "histograma.png", "Histograma de fase: procesá un estudio.")
+		self._load_curve_pixmap(self.curve_fevi_view, "curva_fevi.png", "Curva volumen/derivada: modo avanzado.")
+		# Título de la 2da. etapa sobre el cine_compare (reposo/esfuerzo según la
+		# 1ra. cargada); se actualiza cada vez que se reprocesa/carga.
+		self._refresh_cine_compare_title()
 
 	def _tab_name_from_title(self, title: str) -> str | None:
 		for name, tab_title in self._tab_titles.items():
@@ -1991,34 +2218,50 @@ class MainWindow(QMainWindow):
 		geom = self._ui_settings.value("window_geometry", None)
 		if geom is not None:
 			self.restoreGeometry(geom)
+			# Tras restaurar, clamar a la pantalla y si aun así no entra, abrir
+			# maximizada. Sin esto, la ventana abre estirada fuera de la pantalla y
+			# las filas del cine se solapan hasta que el usuario maximiza a mano.
+			QTimer.singleShot(0, self._clamp_or_maximize)
 		main_state = self._ui_settings.value("main_splitter_state", None)
 		if main_state is not None:
 			self.main_splitter.restoreState(main_state)
-		right_state = self._ui_settings.value("right_splitter_state", None)
+		# Clave versionada: el layout cambió (75/25 + panel + cine compacto), así que
+		# se ignora el estado guardado con la clave vieja para aplicar el nuevo ratio.
+		right_state = self._ui_settings.value("right_splitter_state_v3", None)
 		if right_state is not None:
 			self.right_splitter.restoreState(right_state)
-		lower_state = self._ui_settings.value("cine_lower_splitter_state", None)
-		if lower_state is not None:
-			self.cine_lower_splitter.restoreState(lower_state)
+		# Clave versionada v5: la banda pasó de 4 a 3 zonas (el cine_compare se
+		# movió DENTRO del cine principal), así que el estado viejo se descarta.
+		bottom_state = self._ui_settings.value("bottom_hsplit_state_v5", None)
+		if bottom_state is not None:
+			self.bottom_hsplit.restoreState(bottom_state)
 
-	def _on_cine_compare_collapse_toggled(self, checked: bool):
-		"""Achica/agranda el visor de esfuerzo (segundo estudio) de un clic,
-		para trabajar cómodo cuando el protocolo es de una sola etapa."""
-		splitter = self.cine_lower_splitter
-		sizes = splitter.sizes()
-		total = sum(sizes) or 1
-		if checked:
-			if sizes and sizes[-1] > 60:
-				self._cine_compare_prev_sizes = list(sizes)
-			splitter.setSizes([total - 40, 40])
-			self.cine_compare_collapse_btn.setText("▶ Esfuerzo")
-		else:
-			prev = getattr(self, "_cine_compare_prev_sizes", None)
-			if prev and len(prev) == 2 and prev[1] > 60:
-				splitter.setSizes(prev)
-			else:
-				splitter.setSizes([total // 2, total - total // 2])
-			self.cine_compare_collapse_btn.setText("◀ Esfuerzo")
+	def _second_phase_label(self) -> str:
+		"""Etiqueta de la 2da. Fase = la OTRA etapa respecto de la cargada.
+		La fase se lee de la metadata/nombre del archivo (REST→Reposo,
+		STRESS→Esfuerzo). Si la 1ra. es Reposo, la 2da. es Esfuerzo y viceversa.
+		Si no se puede determinar, se usa la genérica '2da. Fase'."""
+		try:
+			phase = self._study_context().get("phase", "")
+		except Exception:
+			phase = ""
+		if phase == "Reposo":
+			return "Esfuerzo"
+		if phase == "Esfuerzo":
+			return "Reposo"
+		return "2da. Fase"
+
+	def _refresh_cine_compare_title(self) -> None:
+		"""Actualiza los rótulos de fase de ambos cines: la 2da. etapa en el
+		cine_compare (reposo/esfuerzo según la 1ra. cargada) y la 1ra. en el cine."""
+		if getattr(self, "cine_compare", None) is not None:
+			self.cine_compare.set_phase_title(self._second_phase_label())
+		if getattr(self, "cine", None) is not None:
+			try:
+				phase = self._study_context().get("phase", "")
+			except Exception:
+				phase = ""
+			self.cine.set_phase_title(phase if phase in ("Reposo", "Esfuerzo") else "1ra. Fase")
 
 	# ---------------------------------------------------------------------
 	# Grupos de controles en menú desplegable dentro de pestañas (cine_crudo)
@@ -2242,8 +2485,8 @@ class MainWindow(QMainWindow):
 	def _save_window_layout(self):
 		self._ui_settings.setValue("window_geometry", self.saveGeometry())
 		self._ui_settings.setValue("main_splitter_state", self.main_splitter.saveState())
-		self._ui_settings.setValue("right_splitter_state", self.right_splitter.saveState())
-		self._ui_settings.setValue("cine_lower_splitter_state", self.cine_lower_splitter.saveState())
+		self._ui_settings.setValue("right_splitter_state_v3", self.right_splitter.saveState())
+		self._ui_settings.setValue("bottom_hsplit_state_v5", self.bottom_hsplit.saveState())
 		self._save_sidebar_sections_state()
 		self._save_fevi_settings()
 		self._ui_settings.sync()
@@ -2364,33 +2607,92 @@ class MainWindow(QMainWindow):
 			window.sync_from_main()
 
 	def open_ui_preferences_dialog(self):
+		"""Panel de Configuración de la aplicación.
+
+		Reúne (y seguirá reuniendo, migración gradual) las opciones de
+		configuración. Hoy: selección de tema visual (Clásico/Moderno) + las
+		preferencias de interfaz que antes estaban en "Config UI".
+		"""
+		from ui import theme_manager
+
 		dlg = QDialog(self)
-		dlg.setWindowTitle("Configuración UI")
+		dlg.setWindowTitle("Configuración")
 		root = QVBoxLayout(dlg)
+
+		# --- Apariencia: selector de tema ---
+		appearance_box = QGroupBox("Apariencia")
+		appearance_l = QFormLayout(appearance_box)
+		theme_combo = QComboBox()
+		for tid, label in theme_manager.AVAILABLE_THEMES:
+			theme_combo.addItem(label, tid)
+		cur_theme = theme_manager.current_theme()
+		idx = theme_combo.findData(cur_theme)
+		if idx >= 0:
+			theme_combo.setCurrentIndex(idx)
+		theme_combo.setToolTip(
+			"Clásico: estilo nativo de Qt (como estaba la app).\n"
+			"Moderno: hoja de estilo con acento azul GammaSync, tarjetas redondeadas, etc."
+		)
+		appearance_l.addRow("Tema visual:", theme_combo)
+		theme_note = QLabel("El cambio de tema se aplica al instante.")
+		theme_note.setWordWrap(True)
+		theme_note.setStyleSheet("color:#6b7280; font-size:8pt;")
+		appearance_l.addRow(theme_note)
+		root.addWidget(appearance_box)
+
+		# --- Interfaz: helpers, tooltips, modo compacto ---
+		ui_box = QGroupBox("Interfaz")
+		ui_l = QVBoxLayout(ui_box)
 		msg = QLabel("Preferencias globales de interfaz para simplificar controles y ayuda visual.")
 		msg.setWordWrap(True)
-		root.addWidget(msg)
+		ui_l.addWidget(msg)
 		show_helpers = QCheckBox("Mostrar helpers / ayuda rápida")
 		show_helpers.setChecked(bool(self._ui_show_helpers))
 		enable_tooltips = QCheckBox("Habilitar tooltips")
 		enable_tooltips.setChecked(bool(self._ui_enable_tooltips))
 		compact_controls = QCheckBox("Modo compacto (ocultar botones secundarios)")
 		compact_controls.setChecked(bool(self._ui_compact_controls))
-		root.addWidget(show_helpers)
-		root.addWidget(enable_tooltips)
-		root.addWidget(compact_controls)
+		ui_l.addWidget(show_helpers)
+		ui_l.addWidget(enable_tooltips)
+		ui_l.addWidget(compact_controls)
+		root.addWidget(ui_box)
+
+		# Aplicar el tema en vivo al cambiar el combo (aunque se cancele el diálogo,
+		# ya queda aplicado el tema elegido; se persiste solo al Aceptar).
+		def _on_theme_changed(_idx: int):
+			tid = theme_combo.currentData()
+			app = QApplication.instance()
+			if app is not None and tid:
+				theme_manager.apply_theme(app, tid)
+		theme_combo.currentIndexChanged.connect(_on_theme_changed)
+
 		buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
 		buttons.accepted.connect(dlg.accept)
 		buttons.rejected.connect(dlg.reject)
 		root.addWidget(buttons)
+
+		prev_theme = cur_theme
 		if dlg.exec() != int(QDialog.DialogCode.Accepted):
+			# Cancelado: restaurar el tema previo (por si se estuvo previsualizando).
+			app = QApplication.instance()
+			if app is not None:
+				theme_manager.apply_theme(app, prev_theme)
 			return
+
+		# Tema
+		chosen_theme = theme_combo.currentData() or theme_manager.DEFAULT_THEME
+		theme_manager.save_theme(chosen_theme)
+		app = QApplication.instance()
+		if app is not None:
+			theme_manager.apply_theme(app, chosen_theme)
+
+		# Interfaz
 		self._ui_show_helpers = bool(show_helpers.isChecked())
 		self._ui_enable_tooltips = bool(enable_tooltips.isChecked())
 		self._ui_compact_controls = bool(compact_controls.isChecked())
 		self._apply_global_ui_preferences()
 		self._save_global_ui_preferences()
-		self.statusBar().showMessage("Configuración UI aplicada")
+		self.statusBar().showMessage("Configuración aplicada")
 
 	def closeEvent(self, event):
 		self._save_window_layout()
@@ -3321,6 +3623,92 @@ class MainWindow(QMainWindow):
 		self._invalidate_output_cache()
 		QTimer.singleShot(0, self.process_current)
 
+	def _on_manual_center_mode_toggled(self, checked: bool):
+		"""Activa el modo de fijar el centro de cavidad por clic en el cine."""
+		cine = getattr(self, "cine", None)
+		setter = getattr(cine, "set_center_pick_mode", None)
+		if callable(setter):
+			setter(bool(checked))
+		if checked:
+			self.statusBar().showMessage(
+				"Centro manual activo: hacé clic en el centro de la cavidad (clic derecho borra)."
+			)
+		else:
+			self.statusBar().showMessage("Centro manual desactivado.")
+
+	def _clear_manual_centers(self):
+		"""Borra todos los centros manuales y vuelve al centro automático."""
+		if not self.manual_center_per_slice:
+			self.statusBar().showMessage("No había centros manuales.")
+			return
+		self.manual_center_per_slice = {}
+		self._push_manual_centers_to_cine()
+		self.statusBar().showMessage("Centros manuales borrados; vuelve el centro automático.")
+		if self.study is None or not bool(getattr(self.study, "reconstructed", True)):
+			return
+		self._cache_seg_sig = ""
+		self._cache_phase_sig = ""
+		self._invalidate_output_cache()
+		QTimer.singleShot(0, self.process_current)
+
+	def _on_center_picked(self, slice_index: int, center):
+		"""Guarda (o borra) el centro de cavidad que el operador marcó por clic.
+
+		center = (cy, cx) fija; center = None borra el de ese corte. Si está
+		activo 'Aplicar a todos los cortes', el clic se propaga a toda la pila.
+		"""
+		try:
+			s = int(slice_index)
+		except (TypeError, ValueError):
+			return
+		apply_all = bool(getattr(self, "manual_center_all_check", None) and self.manual_center_all_check.isChecked())
+		n_slices = None
+		if self.study is not None and getattr(self.study, "cube", None) is not None:
+			n_slices = int(self.study.cube.shape[1])
+
+		if center is None:
+			if apply_all:
+				self.manual_center_per_slice = {}
+			else:
+				self.manual_center_per_slice.pop(s, None)
+		else:
+			cy, cx = float(center[0]), float(center[1])
+			if apply_all and n_slices:
+				self.manual_center_per_slice = {k: (cy, cx) for k in range(n_slices)}
+			else:
+				self.manual_center_per_slice[s] = (cy, cx)
+
+		count = len(self.manual_center_per_slice)
+		self._push_manual_centers_to_cine()
+		self.statusBar().showMessage(
+			f"Centro manual {'borrado' if center is None else 'fijado'} · {count} corte(s) con centro fijo."
+		)
+		if self.study is None or not bool(getattr(self.study, "reconstructed", True)):
+			return
+		self._cache_seg_sig = ""
+		self._cache_phase_sig = ""
+		self._invalidate_output_cache()
+		QTimer.singleShot(0, self.process_current)
+
+	def _manual_center_override_array(self, n_slices: int):
+		"""Arma el array (n_slices, 2) de override para segment_myocardium, con
+		NaN donde no hay centro manual. Devuelve None si no hay ninguno."""
+		if not self.manual_center_per_slice:
+			return None
+		ov = np.full((int(n_slices), 2), np.nan, dtype=np.float64)
+		for s, c in self.manual_center_per_slice.items():
+			if 0 <= int(s) < int(n_slices) and c is not None:
+				ov[int(s), 0] = float(c[0])
+				ov[int(s), 1] = float(c[1])
+		return ov
+
+	def _push_manual_centers_to_cine(self):
+		"""Envía el dict de centros manuales a los visores para dibujar el marcador."""
+		for cine in (getattr(self, "cine", None), getattr(self, "cine_compare", None)):
+			setter = getattr(cine, "set_manual_centers", None)
+			if callable(setter):
+				setter(self.manual_center_per_slice)
+
 	def _log_cavity_center_shift(self, seg):
 		"""Informa cuánto movió el centro el refinamiento en cavidad.
 
@@ -3535,6 +3923,12 @@ class MainWindow(QMainWindow):
 		self._apply_cine_source("primary", preserve_position=True)
 		self.statusBar().showMessage("Visor activo: Esfuerzo")
 
+	def _on_debug_grid_toggled(self, checked: bool):
+		"""Activa/desactiva la grilla de debug (bordes rojos) en ambos cines."""
+		for cine in (self.cine, self.cine_compare):
+			if cine is not None and hasattr(cine, "set_debug_grid"):
+				cine.set_debug_grid(checked)
+
 	def _current_cine_cube(self):
 		if self.active_cine_source == "compare" and self.compare_bundle is not None:
 			return self.compare_bundle["study"].cube
@@ -3583,6 +3977,21 @@ class MainWindow(QMainWindow):
 		)
 		self._update_cine_active_border()
 		self._clamp_window_to_screen()
+
+	def _clamp_or_maximize(self):
+		"""Si la ventana restaurada no entra en la pantalla disponible, abre
+		maximizada; si entra pero sobresale, la clama al área visible."""
+		if self.isFullScreen() or self.isMaximized():
+			return
+		screen = self.screen() or QApplication.primaryScreen()
+		if screen is None:
+			return
+		available = screen.availableGeometry()
+		geom = self.geometry()
+		if geom.width() > available.width() or geom.height() > available.height():
+			self.showMaximized()
+		else:
+			self._clamp_window_to_screen()
 
 	def _clamp_window_to_screen(self):
 		"""Evita crecimiento horizontal fuera del monitor activo.
@@ -4229,6 +4638,8 @@ class MainWindow(QMainWindow):
 		self.compare_manual_rois_text = ""
 		self._sync_manual_rois({})
 		self.manual_rois.clear()
+		self.manual_center_per_slice = {}
+		self._push_manual_centers_to_cine()
 		if self.seg_method.currentText() == "manual":
 			self.seg_method.setCurrentText("auto")
 		self.summary_clinical.clear()
@@ -4682,11 +5093,16 @@ class MainWindow(QMainWindow):
 				"gate_dropout": bool(self.gate_dropout_enabled()),
 				"intestinal": intestinal_sig_primary,
 				"manual_rois": self._serialize_manual_rois(manual_rois or {}),
+				"manual_center": sorted(
+					(int(s), round(float(c[0]), 3), round(float(c[1]), 3))
+					for s, c in self.manual_center_per_slice.items() if c is not None
+				),
 			}
 			seg_sig = self._hash_payload(seg_payload)
 			if self.seg is None or seg_sig != self._cache_seg_sig:
 				t_stage = perf_counter()
 				self._set_progress(30, "Segmentando miocardio...")
+				center_override = self._manual_center_override_array(cube_for_segmentation.shape[1])
 				self.seg = segment_myocardium(
 					cube_for_segmentation,
 					method=seg_method,
@@ -4694,6 +5110,7 @@ class MainWindow(QMainWindow):
 					smooth_sigma=float(self.sigma_spin.value()),
 					manual_rois=manual_rois,
 					refine_cavity_center=self.cavity_center_enabled(),
+					center_override_per_slice=center_override,
 				)
 				self.seg_ring_base = self.seg
 				self._log_cavity_center_shift(self.seg)
@@ -4885,6 +5302,10 @@ class MainWindow(QMainWindow):
 				self._refresh_asynchrony_review_window()
 			except Exception as exc:
 				self._log(f"[WARN] Refresco de la vista asincrónica falló: {exc}")
+			try:
+				self._refresh_readonly_results_panel()
+			except Exception as exc:
+				self._log(f"[WARN] Refresco del panel de resultados falló: {exc}")
 		except Exception as exc:
 			self._set_progress(0, "Error")
 			self.statusBar().showMessage("Error")

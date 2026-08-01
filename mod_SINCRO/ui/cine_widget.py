@@ -107,10 +107,12 @@ def _array_to_pixmap(
 		else:
 			data = np.zeros_like(data, dtype=np.float64)
 
-	w0 = max(0.0, min(1.0, float(window_low)))
-	w1 = max(0.0, min(1.0, float(window_high)))
+	w0 = max(0.0, float(window_low))
+	# window_high puede superar 1.0 (hasta 2.0 = 200%) para 'desquemar' la imagen:
+	# el rango (w1 - w0) se amplía y los valores quedan comprimidos (menos saturados).
+	w1 = max(0.0, min(2.0, float(window_high)))
 	if w1 <= w0:
-		w1 = min(1.0, w0 + 0.01)
+		w1 = min(2.0, w0 + 0.01)
 	data = np.clip((data - w0) / max(1e-8, (w1 - w0)), 0.0, 1.0)
 
 	name = f"{cmap_name}_r" if invert_cmap else str(cmap_name)
@@ -121,6 +123,112 @@ def _array_to_pixmap(
 	h, w, _ = rgb8.shape
 	qimg = QImage(rgb8.data, w, h, 3 * w, QImage.Format.Format_RGB888)
 	return QPixmap.fromImage(qimg.copy())
+
+
+class RangeSlider(QWidget):
+	"""Slider vertical de DOS handles (base y top) en un solo control, rango 0-200%.
+
+	Handle inferior = base de la ventana (0-200), handle superior = top (0-200).
+	El top puede pasar de 100% para 'desquemar' (desaturar) la imagen. Marcas
+	cada 50% con un stop visual. Emite valuesChanged(low, high) al arrastrar.
+	"""
+
+	valuesChanged = pyqtSignal(int, int)
+	RANGE = 200
+	STOP_MARKS = (0, 50, 100, 150, 200)
+
+	def __init__(self, parent=None):
+		super().__init__(parent)
+		self._low = 0
+		self._high = 100
+		self._drag: str | None = None  # "low" | "high" | None
+		self.setMinimumWidth(28)
+		self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+		self.setToolTip("Ventana: handle inferior = Base, superior = Top (hasta 200%).")
+
+	def set_values(self, low: int, high: int) -> None:
+		low = max(0, min(self.RANGE, int(low)))
+		high = max(0, min(self.RANGE, int(high)))
+		if high <= low:
+			high = min(self.RANGE, low + 1)
+		if low != self._low or high != self._high:
+			self._low, self._high = low, high
+			self.valuesChanged.emit(self._low, self._high)
+			self.update()
+
+	def values(self) -> tuple[int, int]:
+		return self._low, self._high
+
+	def _val_to_y(self, val: int) -> float:
+		h = self.height()
+		margin = 10.0
+		usable = h - 2 * margin
+		return margin + usable * (1.0 - (val / self.RANGE))
+
+	def _y_to_val(self, y: float) -> int:
+		h = self.height()
+		margin = 10.0
+		usable = h - 2 * margin
+		if usable <= 0:
+			return 0
+		frac = 1.0 - ((y - margin) / usable)
+		return max(0, min(self.RANGE, round(frac * self.RANGE)))
+
+	def _handle_at(self, y: float) -> str | None:
+		y_low = self._val_to_y(self._low)
+		y_high = self._val_to_y(self._high)
+		# El más cercano al click, con tolerancia de 12px.
+		if abs(y - y_high) <= 12 and abs(y - y_high) <= abs(y - y_low):
+			return "high"
+		if abs(y - y_low) <= 12:
+			return "low"
+		return None
+
+	def mousePressEvent(self, event):
+		self._drag = self._handle_at(event.position().y())
+		if self._drag:
+			self._apply_y(event.position().y())
+
+	def mouseMoveEvent(self, event):
+		if self._drag:
+			self._apply_y(event.position().y())
+
+	def mouseReleaseEvent(self, event):
+		self._drag = None
+
+	def _apply_y(self, y: float) -> None:
+		val = self._y_to_val(y)
+		if self._drag == "low":
+			self.set_values(min(val, self._high - 1), self._high)
+		elif self._drag == "high":
+			self.set_values(self._low, max(val, self._low + 1))
+
+	def paintEvent(self, event):
+		p = QPainter(self)
+		p.setRenderHint(QPainter.RenderHint.Antialiasing)
+		cx = self.width() / 2.0
+		# Groove (riel) vertical.
+		y0 = self._val_to_y(self.RANGE)
+		y1 = self._val_to_y(0)
+		p.setPen(Qt.PenStyle.NoPen)
+		p.setBrush(QColor("#d1d5db"))
+		p.drawRoundedRect(QRectF(cx - 3, y0, 6, y1 - y0), 3, 3)
+		# Zona activa (entre base y top).
+		ya = self._val_to_y(self._high)
+		yb = self._val_to_y(self._low)
+		p.setBrush(QColor("#93c5fd"))
+		p.drawRoundedRect(QRectF(cx - 3, ya, 6, yb - ya), 3, 3)
+		# Marcas cada 50%.
+		p.setPen(QPen(QColor("#64748b"), 1))
+		for m in self.STOP_MARKS:
+			ym = self._val_to_y(m)
+			p.drawLine(QPointF(cx - 7, ym), QPointF(cx + 7, ym))
+		# Handles (base abajo, top arriba).
+		for val, color in ((self._low, "#2563eb"), (self._high, "#1e40af")):
+			y = self._val_to_y(val)
+			p.setBrush(QColor(color))
+			p.setPen(QPen(QColor("#0f172a"), 1))
+			p.drawRoundedRect(QRectF(cx - 9, y - 6, 18, 12), 3, 3)
 
 
 class GateMontageLabel(QLabel):
@@ -276,6 +384,7 @@ class RoiImageLabel(QLabel):
 	zoomChanged = pyqtSignal(float)
 	middleClicked = pyqtSignal()
 	exclusionPolygonEdited = pyqtSignal(int, object)
+	centerPicked = pyqtSignal(int, object)
 
 	def __init__(self, parent=None):
 		super().__init__(parent)
@@ -293,8 +402,21 @@ class RoiImageLabel(QLabel):
 		self._draft_exclusion_polygon: list[tuple[float, float]] = []
 		self._reference_polygons: list[list[tuple[float, float]]] = []
 		self._draw_exclusion_mode = False
+		self._center_pick_mode = False
+		self._manual_centers: dict[int, tuple[float, float]] = {}
 		self._message = "Cargá un estudio para ver el cine"
 		self._zoom = 1.0
+
+	def set_center_pick_mode(self, enabled: bool):
+		"""Modo 'fijar centro de cavidad': el clic izquierdo define solo el
+		centro del corte (no un ROI completo) y el derecho lo borra."""
+		self._center_pick_mode = bool(enabled)
+		self.update()
+
+	def set_manual_centers(self, centers: dict[int, tuple[float, float]] | None):
+		"""Recibe el dict slice->(cy,cx) de centros manuales para dibujarlos."""
+		self._manual_centers = dict(centers or {})
+		self.update()
 
 	def set_message(self, message: str):
 		self._message = message
@@ -501,6 +623,23 @@ class RoiImageLabel(QLabel):
 			painter.drawPolyline(poly)
 			painter.drawLine(wpoly[-1], wpoly[0])
 
+		# Marcador del centro manual del operador (cruz verde), independiente del
+		# ROI: se dibuja aunque no haya ROI en el corte para dar feedback del clic.
+		man_c = self._manual_centers.get(self._slice_index)
+		if man_c is not None and self._frame_shape is not None:
+			rect_img = self._image_rect()
+			if rect_img is not None:
+				h, w = self._frame_shape
+				sx = rect_img.width() / max(1.0, float(w))
+				sy = rect_img.height() / max(1.0, float(h))
+				px = rect_img.x() + float(man_c[1]) * sx
+				py = rect_img.y() + float(man_c[0]) * sy
+				painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+				painter.setPen(QPen(QColor("#39ff14"), 2))
+				painter.drawLine(QPointF(px - 8, py), QPointF(px + 8, py))
+				painter.drawLine(QPointF(px, py - 8), QPointF(px, py + 8))
+				painter.drawEllipse(QPointF(px, py), 5, 5)
+
 		roi_data = self._roi_to_widget()
 		if roi_data is not None:
 			center, r_inner, r_outer = roi_data
@@ -515,13 +654,15 @@ class RoiImageLabel(QLabel):
 				painter.drawEllipse(center, r_inner, r_inner)
 
 			painter.setPen(QColor("#ffffff"))
-			label = f"Slice {self._slice_index + 1} | clic = centro | Shift = radio externo | Ctrl = radio interno | botón derecho = borrar"
+			# Sin texto sobre la imagen en el visor compacto (el slice/gate ya se
+			# muestran debajo). Solo se avisa en modos especiales de edición.
+			label = ""
+			if self._center_pick_mode:
+				label = "CENTRO MANUAL: clic izq = fijar · clic der = borrar"
 			if self._draw_exclusion_mode:
-				label += " | ROI intestino: clic agrega punto, doble clic cierra, clic derecho borra"
-			painter.drawText(12, 22, label)
-		else:
-			painter.setPen(QColor("#ffffff"))
-			painter.drawText(12, 22, f"Slice {self._slice_index + 1}")
+				label = (label + " | " if label else "") + "ROI intestino: clic agrega, doble clic cierra, clic der borra"
+			if label:
+				painter.drawText(12, 22, label)
 
 	def mousePressEvent(self, event):
 		if self._base_pixmap is None or self._frame_shape is None:
@@ -529,6 +670,21 @@ class RoiImageLabel(QLabel):
 		if event.button() == Qt.MouseButton.MiddleButton:
 			self.middleClicked.emit()
 			return
+		if self._center_pick_mode:
+			mapped = self._widget_to_image(event.position())
+			if mapped is None:
+				return
+			if event.button() == Qt.MouseButton.RightButton:
+				self._manual_centers.pop(self._slice_index, None)
+				self.centerPicked.emit(self._slice_index, None)
+				self.update()
+				return
+			if event.button() == Qt.MouseButton.LeftButton:
+				cy, cx = mapped
+				self._manual_centers[self._slice_index] = (float(cy), float(cx))
+				self.centerPicked.emit(self._slice_index, (float(cy), float(cx)))
+				self.update()
+				return
 		if self._draw_exclusion_mode:
 			mapped = self._widget_to_image(event.position())
 			if mapped is None:
@@ -690,9 +846,16 @@ class CineWidget(QWidget):
 	playStateChanged = pyqtSignal(bool)
 	playbackSpeedChanged = pyqtSignal(int)
 	activated = pyqtSignal()
+	centerPicked = pyqtSignal(int, object)  # (slice, (cy,cx)) o (slice, None) para borrar
 
-	def __init__(self, parent=None):
+	def __init__(self, parent=None, *, compact_viewer=False, is_compare=False):
 		super().__init__(parent)
+		# Visor reducido: solo controles para MIRAR el cine (ventana principal).
+		self._compact_viewer = bool(compact_viewer)
+		# Visor de COMPARACIÓN (2da etapa): no lleva título propio ni sliders
+		# Base/Top — el título lo pone el contenedor y los sliders son solo de la
+		# 1ra etapa. Así las dos imágenes quedan alineadas a la misma altura.
+		self._is_compare = bool(is_compare)
 		self._cube = None
 		self._rois: dict[int, tuple[float, float, float, float]] = {}
 		self._roi_source: dict[int, str] = {}
@@ -731,14 +894,30 @@ class CineWidget(QWidget):
 		self._timer.timeout.connect(self._advance_gate)
 
 		self.preview = RoiImageLabel()
-		self.preview.setMinimumSize(220, 220)
+		if self._compact_viewer:
+			# Visor de la ventana principal: TAMAÑO FIJO 160x160 px (el recuadro),
+			# con ~150x150 px de imagen efectiva dentro. No crece con el panel: el
+			# usuario pidió un cine chico y cuadrado de tamaño constante.
+			self.preview.setFixedSize(160, 160)
+		else:
+			self.preview.setMinimumSize(220, 220)
+			self.preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
 		self.gate_slider = QSlider(Qt.Orientation.Horizontal)
 		self.slice_slider = QSlider(Qt.Orientation.Horizontal)
-		self.gate_slider.setMinimumWidth(180)
-		self.gate_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-		self.slice_slider.setMinimumWidth(180)
-		self.slice_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+		if self._compact_viewer:
+			# Visor de la ventana principal: sliders CORTOS (como el mockup), no
+			# estirados. Ancho fijo para que los controles queden compactos al
+			# lado de la imagen.
+			for _sl in (self.gate_slider, self.slice_slider):
+				_sl.setFixedWidth(120)
+				_sl.setMaximumHeight(18)
+				_sl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+		else:
+			self.gate_slider.setMinimumWidth(180)
+			self.gate_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+			self.slice_slider.setMinimumWidth(180)
+			self.slice_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 		self.gate_slider.valueChanged.connect(self._update_view)
 		self.slice_slider.valueChanged.connect(self._update_view)
 		self.gate_prev_btn = QPushButton("<")
@@ -917,11 +1096,27 @@ class CineWidget(QWidget):
 		self.speed_slider.setRange(50, 600)
 		self.speed_slider.setValue(250)
 		self.speed_slider.setMaximumHeight(20)
-		self.speed_slider.setMinimumWidth(180)
-		self.speed_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+		if self._compact_viewer:
+			self.speed_slider.setFixedWidth(120)
+			self.speed_slider.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+		else:
+			self.speed_slider.setMinimumWidth(180)
+			self.speed_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 		self.speed_slider.valueChanged.connect(self._on_speed_change)
 		self.speed_label = QLabel("250 ms")
 		self.speed_slider.setToolTip("Tiempo por frame: más bajo = más rápido.")
+		self.speed_prev_btn = QPushButton("<")
+		self.speed_next_btn = QPushButton(">")
+		for btn in (self.speed_prev_btn, self.speed_next_btn):
+			btn.setFixedWidth(24)
+			btn.setMaximumHeight(20)
+			btn.setAutoRepeat(True)
+			btn.setAutoRepeatDelay(260)
+			btn.setAutoRepeatInterval(70)
+		self.speed_prev_btn.setToolTip("Más rápido")
+		self.speed_next_btn.setToolTip("Más lento")
+		self.speed_prev_btn.clicked.connect(lambda: self._step_slider(self.speed_slider, -10))
+		self.speed_next_btn.clicked.connect(lambda: self._step_slider(self.speed_slider, 10))
 
 		self.smooth_slider = QSlider(Qt.Orientation.Horizontal)
 		self.smooth_slider.setRange(0, 30)
@@ -945,38 +1140,35 @@ class CineWidget(QWidget):
 		self.smooth_label = QLabel("0.0")
 		self.smooth_slider.setToolTip("Smooth visual de la imagen en la preview (no altera el motor).")
 
-		self.window_low_slider = QSlider(Qt.Orientation.Horizontal)
-		self.window_low_slider.setRange(0, 99)
-		self.window_low_slider.setValue(0)
-		self.window_low_slider.setMaximumHeight(20)
-		self.window_low_slider.setMaximumWidth(220)
-		self.window_low_slider.valueChanged.connect(self._on_window_low_change)
+		# Ventana (Base/Top): en el visor compacto UN SOLO slider de dos handles
+		# (RangeSlider, 0-200%) para ahorrar ancho; en el completo, dos QSlider.
+		if self._compact_viewer:
+			self.range_slider = RangeSlider()
+			self.range_slider.set_values(0, 100)
+			self.range_slider.valuesChanged.connect(self._on_range_window_change)
+			# Aliases para que el resto del código (auto ventana, labels) siga andando.
+			self.window_low_slider = None
+			self.window_high_slider = None
+		else:
+			self.range_slider = None
+			self.window_low_slider = QSlider(Qt.Orientation.Horizontal)
+			self.window_low_slider.setRange(0, 99)
+			self.window_low_slider.setValue(0)
+			self.window_low_slider.setMaximumHeight(20)
+			self.window_low_slider.setMaximumWidth(220)
+			self.window_low_slider.valueChanged.connect(self._on_window_low_change)
+			self.window_high_slider = QSlider(Qt.Orientation.Horizontal)
+			self.window_high_slider.setRange(1, 100)
+			self.window_high_slider.setValue(100)
+			self.window_high_slider.setMaximumHeight(20)
+			self.window_high_slider.setMaximumWidth(220)
+			self.window_high_slider.valueChanged.connect(self._on_window_high_change)
 		self.window_low_label = QLabel("0%")
-
-		self.window_high_slider = QSlider(Qt.Orientation.Horizontal)
-		self.window_high_slider.setRange(1, 100)
-		self.window_high_slider.setValue(100)
-		self.window_high_slider.setMaximumHeight(20)
-		self.window_high_slider.setMaximumWidth(220)
-		self.window_high_slider.valueChanged.connect(self._on_window_high_change)
 		self.window_high_label = QLabel("100%")
 
-		# --- Grupo esencial (siempre visible): colormap, play, navegación de
-		# gate/slice, zoom, velocidad y smooth. Son los controles que se usan
-		# todo el tiempo mientras se mira el cine.
-		nav_grid = QGridLayout()
-		nav_grid.setHorizontalSpacing(8)
-		nav_grid.setVerticalSpacing(2)
-		nav_grid.addWidget(QLabel("Colormap"), 0, 0)
-		nav_grid.addWidget(self.cmap_combo, 0, 1)
-		nav_grid.addWidget(self.invert_cmap_check, 0, 2)
-		nav_grid.addWidget(self.play_button, 0, 3)
-		nav_grid.addWidget(self.zoom_reset, 0, 4)
-
-		# Grupos secundarios (ROI automático / ROI intestinal): en vez de un
-		# panel que se despliega y empuja el layout (cambiando el tamaño de la
-		# imagen), se agrupan en un menú desplegable. El botón ocupa el mismo
-		# lugar siempre; el menú flota por encima sin afectar el layout.
+		# Menús secundarios (ROI automático / ROI intestinal): barras flotantes
+		# que no empujan el layout. Se construyen siempre; el visor reducido solo
+		# usa el de intestino.
 		auto_roi_grid = QGridLayout()
 		auto_roi_grid.setHorizontalSpacing(8)
 		auto_roi_grid.setVerticalSpacing(2)
@@ -994,7 +1186,6 @@ class CineWidget(QWidget):
 			"ROI automático ▾", [auto_roi_grid], key="roi_panel_auto_roi",
 			tooltip="Detección automática del corazón por slice/gate, config y ayuda del método.",
 		)
-		nav_grid.addWidget(auto_roi_btn_menu, 0, 5)
 
 		intestinal_grid = QGridLayout()
 		intestinal_grid.setHorizontalSpacing(8)
@@ -1022,85 +1213,328 @@ class CineWidget(QWidget):
 			"ROI intestinal ▾", [intestinal_grid], key="roi_panel_intestinal",
 			tooltip="Dibujo y atenuación manual del intestino, para no contaminar el Auto ROI del corazón.",
 		)
-		nav_grid.addWidget(intestinal_btn_menu, 0, 6)
 
 		_lbl_align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-		nav_grid.addWidget(self.gate_label, 1, 0, _lbl_align)
-		nav_grid.addWidget(self.gate_prev_btn, 1, 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-		nav_grid.addWidget(self.gate_slider, 1, 2)
-		nav_grid.addWidget(self.gate_next_btn, 1, 3)
-		nav_grid.addWidget(self.slice_label, 1, 4, _lbl_align)
-		nav_grid.addWidget(self.slice_prev_btn, 1, 5, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-		nav_grid.addWidget(self.slice_slider, 1, 6)
-		nav_grid.addWidget(self.slice_next_btn, 1, 7)
-		nav_grid.addWidget(self.matrix_label, 1, 8)
+		if self._compact_viewer:
+			# Visor reducido (ventana principal): solo lo necesario para MIRAR el
+			# cine. Sin slider de zoom (se usa la rueda del mouse), sin smooth, sin
+			# matriz ni Auto ROI. Play + ROI intestinal arriba; luego colormap /
+			# invertir; y navegación de gate / slice / velocidad.
+			self.play_button.setText("▶")
+			self.play_button.setMaximumWidth(52)
+			nav_grid = QGridLayout()
+			nav_grid.setHorizontalSpacing(6)
+			nav_grid.setVerticalSpacing(3)
+			top_row = QHBoxLayout()
+			top_row.setSpacing(6)
+			top_row.addWidget(self.play_button)
+			top_row.addWidget(intestinal_btn_menu)
+			top_row.addStretch(1)
+			nav_grid.addLayout(top_row, 0, 0, 1, 4)
+			nav_grid.addWidget(QLabel("Colormap"), 1, 0, _lbl_align)
+			nav_grid.addWidget(self.cmap_combo, 1, 1, 1, 2)
+			nav_grid.addWidget(self.invert_cmap_check, 1, 3)
+			nav_grid.addWidget(QLabel("Gate"), 2, 0, _lbl_align)
+			nav_grid.addWidget(self.gate_prev_btn, 2, 1, _lbl_align)
+			nav_grid.addWidget(self.gate_slider, 2, 2)
+			nav_grid.addWidget(self.gate_next_btn, 2, 3)
+			nav_grid.addWidget(QLabel("Slice"), 3, 0, _lbl_align)
+			nav_grid.addWidget(self.slice_prev_btn, 3, 1, _lbl_align)
+			nav_grid.addWidget(self.slice_slider, 3, 2)
+			nav_grid.addWidget(self.slice_next_btn, 3, 3)
+			nav_grid.addWidget(QLabel("Speed"), 4, 0, _lbl_align)
+			nav_grid.addWidget(self.speed_prev_btn, 4, 1, _lbl_align)
+			nav_grid.addWidget(self.speed_slider, 4, 2)
+			# Botón '>' y el valor '250 ms' juntos en la misma celda (sin gap),
+			# para que el número quede pegado al lado del botón.
+			_speed_end = QHBoxLayout()
+			_speed_end.setContentsMargins(0, 0, 0, 0)
+			_speed_end.setSpacing(3)
+			_speed_end.addWidget(self.speed_next_btn)
+			_speed_end.addWidget(self.speed_label)
+			_speed_end_w = QWidget()
+			_speed_end_w.setLayout(_speed_end)
+			nav_grid.addWidget(_speed_end_w, 4, 3)
+			nav_grid.setColumnStretch(2, 1)
+		else:
+			# --- Grupo esencial (siempre visible): colormap, play, navegación de
+			# gate/slice, zoom, velocidad y smooth.
+			nav_grid = QGridLayout()
+			nav_grid.setHorizontalSpacing(8)
+			nav_grid.setVerticalSpacing(2)
+			nav_grid.addWidget(QLabel("Colormap"), 0, 0)
+			nav_grid.addWidget(self.cmap_combo, 0, 1)
+			nav_grid.addWidget(self.invert_cmap_check, 0, 2)
+			nav_grid.addWidget(self.play_button, 0, 3)
+			nav_grid.addWidget(self.zoom_reset, 0, 4)
+			nav_grid.addWidget(auto_roi_btn_menu, 0, 5)
+			nav_grid.addWidget(intestinal_btn_menu, 0, 6)
+			nav_grid.addWidget(self.gate_label, 1, 0, _lbl_align)
+			nav_grid.addWidget(self.gate_prev_btn, 1, 1, _lbl_align)
+			nav_grid.addWidget(self.gate_slider, 1, 2)
+			nav_grid.addWidget(self.gate_next_btn, 1, 3)
+			nav_grid.addWidget(self.slice_label, 1, 4, _lbl_align)
+			nav_grid.addWidget(self.slice_prev_btn, 1, 5, _lbl_align)
+			nav_grid.addWidget(self.slice_slider, 1, 6)
+			nav_grid.addWidget(self.slice_next_btn, 1, 7)
+			nav_grid.addWidget(self.matrix_label, 1, 8)
+			nav_grid.addWidget(QLabel("Zoom"), 2, 0, _lbl_align)
+			nav_grid.addWidget(self.zoom_prev_btn, 2, 1, _lbl_align)
+			nav_grid.addWidget(self.zoom_slider, 2, 2)
+			nav_grid.addWidget(self.zoom_next_btn, 2, 3)
+			nav_grid.addWidget(self.zoom_label, 2, 4)
+			nav_grid.addWidget(QLabel("Speed"), 2, 5, _lbl_align)
+			nav_grid.addWidget(self.speed_slider, 2, 6)
+			nav_grid.addWidget(self.speed_label, 2, 7)
+			nav_grid.addWidget(QLabel("Smooth"), 3, 0, _lbl_align)
+			nav_grid.addWidget(self.smooth_prev_btn, 3, 1, _lbl_align)
+			nav_grid.addWidget(self.smooth_slider, 3, 2)
+			nav_grid.addWidget(self.smooth_next_btn, 3, 3)
+			nav_grid.addWidget(self.smooth_label, 3, 4)
+			nav_grid.setColumnStretch(2, 1)
+			nav_grid.setColumnStretch(6, 1)
 
-		nav_grid.addWidget(QLabel("Zoom"), 2, 0, _lbl_align)
-		nav_grid.addWidget(self.zoom_prev_btn, 2, 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-		nav_grid.addWidget(self.zoom_slider, 2, 2)
-		nav_grid.addWidget(self.zoom_next_btn, 2, 3)
-		nav_grid.addWidget(self.zoom_label, 2, 4)
-		nav_grid.addWidget(QLabel("Speed"), 2, 5, _lbl_align)
-		nav_grid.addWidget(self.speed_slider, 2, 6)
-		nav_grid.addWidget(self.speed_label, 2, 7)
+		if not self._compact_viewer:
+			# Visor completo: dos QSlider verticales (Base/Top) con botones reset.
+			self.window_low_slider.setOrientation(Qt.Orientation.Vertical)
+			self.window_high_slider.setOrientation(Qt.Orientation.Vertical)
+			self.window_low_slider.setMinimumHeight(180)
+			self.window_high_slider.setMinimumHeight(180)
+			self.window_low_slider.setMaximumWidth(18)
+			self.window_high_slider.setMaximumWidth(18)
+			for _wsl in (self.window_low_slider, self.window_high_slider):
+				_wsl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
-		nav_grid.addWidget(QLabel("Smooth"), 3, 0, _lbl_align)
-		nav_grid.addWidget(self.smooth_prev_btn, 3, 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-		nav_grid.addWidget(self.smooth_slider, 3, 2)
-		nav_grid.addWidget(self.smooth_next_btn, 3, 3)
-		nav_grid.addWidget(self.smooth_label, 3, 4)
-		nav_grid.setColumnStretch(2, 1)
-		nav_grid.setColumnStretch(6, 1)
+		# Botones reset Base/Top (en compacto resetean el RangeSlider, en completo
+		# los QSlider). Base a la izquierda, Top a la derecha.
+		self.window_low_reset_btn = QPushButton("Base")
+		self.window_low_reset_btn.setFlat(True)
+		self.window_low_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+		self.window_low_reset_btn.setToolTip("Volver Base a 0%")
+		self.window_low_reset_btn.clicked.connect(self._reset_window_low)
+		self.window_high_reset_btn = QPushButton("Top")
+		self.window_high_reset_btn.setFlat(True)
+		self.window_high_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+		self.window_high_reset_btn.setToolTip("Volver Top a 100%")
+		self.window_high_reset_btn.clicked.connect(self._reset_window_high)
+		for _rb in (self.window_low_reset_btn, self.window_high_reset_btn):
+			_rb.setStyleSheet("QPushButton{border:none;padding:0;color:#1f2937;background:transparent;} QPushButton:hover{color:#2563eb;}")
 
-		self.window_low_slider.setOrientation(Qt.Orientation.Vertical)
-		self.window_high_slider.setOrientation(Qt.Orientation.Vertical)
-		self.window_low_slider.setMinimumHeight(180)
-		self.window_high_slider.setMinimumHeight(180)
-		self.window_low_slider.setMaximumHeight(240)
-		self.window_high_slider.setMaximumHeight(240)
-		self.window_low_slider.setMaximumWidth(18)
-		self.window_high_slider.setMaximumWidth(18)
-
-		window_panel = QVBoxLayout()
-		window_panel.setSpacing(2)
-		window_panel.addWidget(QLabel("Top"), 0, Qt.AlignmentFlag.AlignHCenter)
-		window_panel.addWidget(self.window_high_slider, 0, Qt.AlignmentFlag.AlignHCenter)
-		window_panel.addWidget(self.window_high_label, 0, Qt.AlignmentFlag.AlignHCenter)
-		window_panel.addSpacing(4)
-		window_panel.addWidget(QLabel("Base"), 0, Qt.AlignmentFlag.AlignHCenter)
-		window_panel.addWidget(self.window_low_slider, 0, Qt.AlignmentFlag.AlignHCenter)
-		window_panel.addWidget(self.window_low_label, 0, Qt.AlignmentFlag.AlignHCenter)
-		self.window_panel_widget = QWidget()
-		self.window_panel_widget.setLayout(window_panel)
+		if not self._compact_viewer:
+			window_panel = QHBoxLayout()
+			window_panel.setSpacing(6)
+			window_panel.setContentsMargins(0, 2, 0, 2)
+			_base_col = QVBoxLayout()
+			_base_col.setSpacing(2)
+			_base_col.addWidget(self.window_low_reset_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+			_base_col.addWidget(self.window_low_slider, 1)
+			_base_col.addWidget(self.window_low_label, 0, Qt.AlignmentFlag.AlignHCenter)
+			_top_col = QVBoxLayout()
+			_top_col.setSpacing(2)
+			_top_col.addWidget(self.window_high_reset_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+			_top_col.addWidget(self.window_high_slider, 1)
+			_top_col.addWidget(self.window_high_label, 0, Qt.AlignmentFlag.AlignHCenter)
+			window_panel.addLayout(_base_col)
+			window_panel.addLayout(_top_col)
+			self.window_panel_widget = QWidget()
+			self.window_panel_widget.setLayout(window_panel)
+			self.window_panel_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
 		preview_row = QHBoxLayout()
-		preview_row.addWidget(self.preview, 1)
-		preview_row.addWidget(self.window_panel_widget)
+		if self._compact_viewer:
+			# En el visor compacto la imagen va SOLA en su fila (los sliders Base/Top
+			# se agregan DESPUÉS, entre las dos imágenes, en el layout principal).
+			# Así la 1ra y la 2da imagen tienen el mismo ancho y quedan alineadas.
+			preview_row.addWidget(self.preview, 0, Qt.AlignmentFlag.AlignTop)
+			preview_row.addStretch(1)
+		else:
+			preview_row.addWidget(self.preview, 1)
+			preview_row.addWidget(self.window_panel_widget)
 
 		self.controls_panel = QWidget()
 		controls_layout = QVBoxLayout()
 		controls_layout.setContentsMargins(0, 0, 0, 0)
 		controls_layout.setSpacing(2)
-		controls_layout.addLayout(nav_grid)
+		if self._compact_viewer:
+			# Los controles van ABAJO, alineados con la parte baja de la imagen (el
+			# usuario los pidió corridos hacia abajo, no pegados arriba). El stretch
+			# de arriba los empuja hacia el fondo del panel.
+			controls_layout.addStretch(1)
+			controls_layout.addLayout(nav_grid)
+		else:
+			controls_layout.addLayout(nav_grid)
 		self.controls_panel.setLayout(controls_layout)
 
 		layout = QVBoxLayout(self)
 		layout.setContentsMargins(4, 4, 4, 4)
 		layout.setSpacing(2)
-		layout.addLayout(preview_row)
-		layout.addWidget(self.help_label)
-		layout.addWidget(self.controls_panel)
+		if self._compact_viewer:
+			# GRILLA 3x3 REAL (QGridLayout), según lo descripto por el usuario:
+			#   fila 0: [ "1ra. Fase" | "Base  Top" | "2da. Fase" ]
+			#   fila 1: [ imagen 1ra  | sliders    | imagen 2da  ]  ← alto FIJO 160px
+			#   fila 2: [ slice/gate  | 0% / 100%  | slice/gate  ]
+			# La fila 1 tiene alto fijo compartido, así las 3 celdas (y por ende las
+			# dos imágenes y los sliders) quedan EXACTAMENTE a la misma altura.
+			TITLE_H = 20
+			IMG_H = 160
+			BOTTOM_H = 18
+
+			# --- Celda (0,0): título de fase (1ra en el principal, 2da en el compare) ---
+			self.phase_title_label = QLabel("2da. Fase" if self._is_compare else "1ra. Fase")
+			self.phase_title_label.setStyleSheet("font-weight:bold; color:#1f2937; padding:1px 2px;")
+			self.phase_title_label.setFixedHeight(TITLE_H)
+
+			# Ancho FIJO de la columna de sliders (igual en 1ra y 2da fase), para que
+			# ninguna se estire más que la otra ni se solape con la imagen vecina.
+			SLIDERS_W = 56
+
+			# --- Celda (0,1): botones Base / Top (reset) ---
+			_btn_row = QHBoxLayout()
+			_btn_row.setContentsMargins(0, 0, 0, 0)
+			_btn_row.setSpacing(6)
+			_btn_row.addWidget(self.window_low_reset_btn)
+			_btn_row.addWidget(self.window_high_reset_btn)
+			_btn_w = QWidget()
+			_btn_w.setLayout(_btn_row)
+			_btn_w.setFixedHeight(TITLE_H)
+			_btn_w.setFixedWidth(SLIDERS_W)
+
+			# --- Celda (1,1): UN SOLO RangeSlider (dos handles Base/Top, 0-200%) ---
+			_slider_row = QHBoxLayout()
+			_slider_row.setContentsMargins(0, 0, 0, 0)
+			_slider_row.setSpacing(0)
+			self.range_slider.setFixedHeight(IMG_H)
+			_slider_row.addWidget(self.range_slider, 1)
+			_slider_w = QWidget()
+			_slider_w.setLayout(_slider_row)
+			_slider_w.setFixedHeight(IMG_H)
+			_slider_w.setFixedWidth(SLIDERS_W)
+
+			# --- Celda (2,1): % Base / Top ---
+			_lbl_row = QHBoxLayout()
+			_lbl_row.setContentsMargins(0, 0, 0, 0)
+			_lbl_row.setSpacing(6)
+			_lbl_row.addWidget(self.window_low_label)
+			_lbl_row.addWidget(self.window_high_label)
+			_lbl_w = QWidget()
+			_lbl_w.setLayout(_lbl_row)
+			_lbl_w.setFixedHeight(BOTTOM_H)
+			_lbl_w.setFixedWidth(SLIDERS_W)
+
+			# --- Celda (2,0): slice/gate de la 1ra imagen ---
+			pos_row = QHBoxLayout()
+			pos_row.setContentsMargins(2, 0, 0, 0)
+			pos_row.addWidget(self.slice_label)
+			pos_row.addSpacing(14)
+			pos_row.addWidget(self.gate_label)
+			pos_row.addStretch(1)
+			pos_w = QWidget()
+			pos_w.setLayout(pos_row)
+			pos_w.setFixedHeight(BOTTOM_H)
+
+			# --- Grilla 3x2 (MISMA para 1ra y 2da etapa) ---
+			#   fila 0: [ título      | Base  Top ]
+			#   fila 1: [ imagen      | sliders   ]  ← alto FIJO 160px
+			#   fila 2: [ slice/gate  | 0% / 100% ]
+			# Ambos cines muestran sus sliders Base/Top (pedido del usuario).
+			grid = QGridLayout()
+			grid.setHorizontalSpacing(8)
+			grid.setVerticalSpacing(2)
+			grid.setContentsMargins(0, 0, 0, 0)
+			grid.addWidget(self.phase_title_label, 0, 0)
+			grid.addWidget(_btn_w, 0, 1)
+			grid.addWidget(self.preview, 1, 0)   # preview fijo 160x160
+			grid.addWidget(_slider_w, 1, 1)
+			grid.addWidget(pos_w, 2, 0)
+			grid.addWidget(_lbl_w, 2, 1)
+			grid.setRowMinimumHeight(1, IMG_H)
+			grid.setRowStretch(0, 0)
+			grid.setRowStretch(1, 0)
+			grid.setRowStretch(2, 0)
+
+			# Fila principal: [grilla 1ra etapa][2da etapa][controles][stretch]
+			img_ctrls_row = QHBoxLayout()
+			img_ctrls_row.setSpacing(8)
+			img_ctrls_row.addLayout(grid, 0)
+			if self._is_compare:
+				# El compare va incrustado en el CineWidget principal: no necesita
+				# sus propios controles ni stretch, solo la grilla limpia.
+				self._compare_slot = None
+				self._compare_widget = None
+				self._sliders_col_widget = _slider_w
+				layout.addLayout(img_ctrls_row)
+			else:
+				# Hueco para la 2da etapa (set_compare_viewer la inserta acá, pos 1).
+				self._compare_slot = img_ctrls_row
+				self._compare_widget = None
+				self._sliders_col_widget = _slider_w
+					# Controles con ancho FIJO: no se estiran ni empujan el resto fuera de
+				# la pantalla al activar la grilla debug o al maximizar.
+				self.controls_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+				self.controls_panel.setFixedWidth(300)
+				img_ctrls_row.addWidget(self.controls_panel, 0)
+				img_ctrls_row.addStretch(1)
+				layout.addStretch(1)
+				layout.addLayout(img_ctrls_row)
+			self.help_label.setVisible(False)
+		else:
+			layout.addLayout(preview_row)
+			layout.addWidget(self.help_label)
+			layout.addWidget(self.controls_panel)
 
 		self.preview.roiChanged.connect(self._on_roi_changed)
 		self.preview.zoomChanged.connect(self._on_preview_zoom_changed)
 		self.preview.middleClicked.connect(self.activated.emit)
 		self.preview.exclusionPolygonEdited.connect(self._on_exclusion_polygon_edited)
-		self.setMinimumHeight(260)
+		self.preview.centerPicked.connect(self.centerPicked.emit)
+		# Visor compacto: alto mínimo ajustado a la imagen fija 160px + fila
+		# Slice/Gate (~20px) + márgenes. Así no sobra espacio vacío vertical.
+		self.setMinimumHeight(190 if self._compact_viewer else 260)
 		self.setSizePolicy(self.sizePolicy().horizontalPolicy(), self.sizePolicy().verticalPolicy())
 		self.set_active_highlight(False)
 		self._refresh_intestinal_apply_button_text()
 		self._refresh_intestinal_mode_widgets()
 		self._capture_tooltips()
+
+	def set_compare_viewer(self, widget) -> None:
+		"""Inserta el visor de la 2da etapa AL LADO de la grilla de la 1ra (entre
+		la grilla y los controles), alineado arriba para que las filas coincidan."""
+		if not self._compact_viewer or getattr(self, "_compare_slot", None) is None:
+			return
+		if self._compare_widget is widget:
+			return
+		# Posición 1: [grilla 1ra][2da etapa][controles][stretch]
+		self._compare_slot.insertWidget(1, widget, 0, Qt.AlignmentFlag.AlignTop)
+		self._compare_widget = widget
+
+	def set_phase_title(self, text: str) -> None:
+		"""Actualiza el rótulo de la 1ra etapa (ej. 'Esfuerzo' / 'Reposo' / '1ra. Fase')."""
+		if getattr(self, "phase_title_label", None) is not None:
+			self.phase_title_label.setText(str(text))
+
+	def set_debug_grid(self, enabled: bool) -> None:
+		"""Modo debug: dibuja bordes rojos de 1px alrededor de cada contenedor del
+		layout compacto (imagen, sliders, controles, compare) para ver la grilla
+		real en la interfaz. Temporal, para diagnosticar desalineaciones."""
+		if not self._compact_viewer:
+			return
+		border = "border:1px solid red;" if enabled else ""
+		targets = [
+			getattr(self, "preview", None),
+			getattr(self, "_sliders_col_widget", None),
+			getattr(self, "controls_panel", None),
+			getattr(self, "_compare_widget", None),
+			getattr(self, "phase_title_label", None),
+		]
+		for w in targets:
+			if w is None:
+				continue
+			# Guardar el stylesheet original una sola vez para poder restaurarlo.
+			if not hasattr(w, "_dbg_orig_ss"):
+				w._dbg_orig_ss = w.styleSheet()
+			orig = getattr(w, "_dbg_orig_ss", "")
+			# Al activar: estilo original + borde rojo. Al desactivar: solo el original.
+			w.setStyleSheet((orig + border) if enabled else orig)
 
 	def _build_toolbar_button(self, title: str, grids: list, key: str, tooltip: str = "") -> QToolButton:
 		"""Agrupa una o más QGridLayout de controles secundarios en una
@@ -1128,9 +1562,18 @@ class CineWidget(QWidget):
 
 	def _refresh_ui_visibility(self):
 		show = bool(self._controls_visible)
-		self.help_label.setVisible(show and bool(self._helpers_visible))
+		# En el visor compacto el help_label NO está en ningún layout: si se hace
+		# visible Qt lo abre como VENTANA SEPARADA (la 'ventana fantasma' con el
+		# texto de ayuda). Solo se muestra en el visor completo, donde sí está
+		# agregado al layout.
+		if not self._compact_viewer:
+			self.help_label.setVisible(show and bool(self._helpers_visible))
 		self.controls_panel.setVisible(show)
-		self.window_panel_widget.setVisible(show)
+		# window_panel_widget solo existe en el visor completo; en el compacto el
+		# panel de sliders es _sliders_col_widget (la celda del RangeSlider).
+		panel = getattr(self, "window_panel_widget", None) or getattr(self, "_sliders_col_widget", None)
+		if panel is not None:
+			panel.setVisible(show)
 
 	def _capture_tooltips(self):
 		for w in self.findChildren(QWidget):
@@ -1145,6 +1588,9 @@ class CineWidget(QWidget):
 			w.setToolTip(tip if enabled else "")
 
 	def _apply_compact_controls(self):
+		if self._compact_viewer:
+			# El visor reducido ya curó su propio set de controles.
+			return
 		compact = bool(self._compact_controls)
 		hide_when_compact = [
 			self.auto_window_btn,
@@ -1877,6 +2323,14 @@ class CineWidget(QWidget):
 	def current_slice_index(self) -> int:
 		return int(self._current_slice)
 
+	def set_center_pick_mode(self, enabled: bool):
+		"""Activa/desactiva el modo de fijar centro de cavidad por clic."""
+		self.preview.set_center_pick_mode(bool(enabled))
+
+	def set_manual_centers(self, centers: dict[int, tuple[float, float]] | None):
+		"""Propaga los centros manuales al label para dibujarlos por corte."""
+		self.preview.set_manual_centers(centers)
+
 	def current_gate_index(self) -> int:
 		return int(self.gate_slider.value())
 
@@ -1918,10 +2372,10 @@ class CineWidget(QWidget):
 		self._playing = not self._playing
 		if self._playing:
 			self._timer.start()
-			self.play_button.setText("⏸ Pausar")
+			self.play_button.setText("⏸" if self._compact_viewer else "⏸ Pausar")
 		else:
 			self._timer.stop()
-			self.play_button.setText("▶ Reproducir")
+			self.play_button.setText("▶" if self._compact_viewer else "▶ Reproducir")
 		self.playStateChanged.emit(self._playing)
 
 	def stop_playback(self):
@@ -2007,6 +2461,28 @@ class CineWidget(QWidget):
 		self._window_high = float(value) / 100.0
 		self._update_view()
 
+	def _on_range_window_change(self, low: int, high: int):
+		"""RangeSlider de dos handles: base (low) y top (high) en 0-200%."""
+		self._window_low = float(low) / 100.0
+		self._window_high = float(high) / 100.0
+		self._update_view()
+
+	def _reset_window_low(self):
+		"""Reset Base a 0% (RangeSlider en compacto, QSlider en completo)."""
+		if self.range_slider is not None:
+			low, high = self.range_slider.values()
+			self.range_slider.set_values(0, high)
+		else:
+			self.window_low_slider.setValue(0)
+
+	def _reset_window_high(self):
+		"""Reset Top a 100% (RangeSlider en compacto, QSlider en completo)."""
+		if self.range_slider is not None:
+			low, high = self.range_slider.values()
+			self.range_slider.set_values(low, 100)
+		else:
+			self.window_high_slider.setValue(100)
+
 	def _auto_window(self):
 		if self._cube is None:
 			return
@@ -2029,12 +2505,15 @@ class CineWidget(QWidget):
 		base = max(0, min(98, base))
 		top = max(base + 1, min(100, top))
 
-		self.window_low_slider.blockSignals(True)
-		self.window_high_slider.blockSignals(True)
-		self.window_low_slider.setValue(base)
-		self.window_high_slider.setValue(top)
-		self.window_low_slider.blockSignals(False)
-		self.window_high_slider.blockSignals(False)
+		if self.range_slider is not None:
+			self.range_slider.set_values(base, top)
+		else:
+			self.window_low_slider.blockSignals(True)
+			self.window_high_slider.blockSignals(True)
+			self.window_low_slider.setValue(base)
+			self.window_high_slider.setValue(top)
+			self.window_low_slider.blockSignals(False)
+			self.window_high_slider.blockSignals(False)
 		self._window_low = float(base) / 100.0
 		self._window_high = float(top) / 100.0
 		self._update_view()
