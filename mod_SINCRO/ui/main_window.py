@@ -2157,6 +2157,47 @@ class MainWindow(QMainWindow):
 			label.setPixmap(QPixmap())
 			label.setText("")
 
+	def _render_fevi_curve_panel(self, label: QLabel, ef: dict | None) -> bool:
+		"""Dibuja la curva volumen/gate (FEVI) autónoma para la banda inferior,
+		usando el EF ya calculado. Devuelve True si pudo dibujar datos."""
+		if not ef or not bool(ef.get("available")):
+			return False
+		try:
+			gate_volumes = np.asarray(ef.get("gate_volumes_ml", []), dtype=np.float64)
+			if gate_volumes.size < 2 or not np.isfinite(gate_volumes).any():
+				return False
+			import matplotlib
+			matplotlib.use("Agg")
+			import matplotlib.pyplot as plt
+			bg, fg, grid = "#0b1220", "#5b6470", "#26324a"
+			vol_c, ed_c, es_c = "#38bdf8", "#22c55e", "#ef4444"
+			gate_axis = np.arange(gate_volumes.size) + 1
+			fig, ax = plt.subplots(figsize=(5, 2.2), facecolor=bg)
+			ax.set_facecolor(bg)
+			ax.plot(gate_axis, gate_volumes, "o-", color=vol_c, linewidth=1.8, markersize=3.5)
+			ed_gate = int(ef.get("ed_gate", 1))
+			es_gate = int(ef.get("es_gate", 1))
+			ax.axvline(ed_gate, color=ed_c, linestyle="--", linewidth=1.0)
+			ax.axvline(es_gate, color=es_c, linestyle="--", linewidth=1.0)
+			ax.set_title(f"FEVI {float(ef.get('ef_pct', 0.0)):.0f} %", color=fg, fontsize=9)
+			ax.set_xlabel("Gate", color=fg, fontsize=9)
+			ax.set_ylabel("Volumen (mL)", color=fg, fontsize=9)
+			ax.tick_params(colors=fg, labelsize=7)
+			for spine in ax.spines.values():
+				spine.set_color(grid)
+			ax.grid(True, color=grid, alpha=0.35)
+			out = os.path.join(self.output_dir, "curva_fevi_panel.png")
+			fig.tight_layout()
+			fig.savefig(out, dpi=140, facecolor=bg, bbox_inches="tight")
+			plt.close(fig)
+			pix = QPixmap(out)
+			target_w = max(240, label.width() - 4)
+			label.setText("")
+			label.setPixmap(pix.scaledToWidth(target_w, Qt.TransformationMode.SmoothTransformation))
+			return True
+		except Exception:
+			return False
+
 	def _refresh_readonly_results_panel(self) -> None:
 		"""Refresca el panel de solo-lectura de la banda inferior tras procesar."""
 		if getattr(self, "patient_data_label", None) is None:
@@ -2187,6 +2228,13 @@ class MainWindow(QMainWindow):
 				f"Tipo: {ctx['phase']}"
 			)
 		# --- Resultados en vivo ---
+		# EF calculado una sola vez y reutilizado por el readout y la curva FEVI.
+		ef = None
+		if getattr(self, "study", None) is not None and getattr(self, "phase_result", None) is not None:
+			try:
+				ef = self._estimate_lv_ef()
+			except Exception:
+				ef = None
 		metrics = getattr(self, "metrics", None)
 		if not metrics:
 			self.main_metrics_readout.setText("Sin resultados: procesá un estudio.")
@@ -2203,13 +2251,9 @@ class MainWindow(QMainWindow):
 				f"Bandwidth: {m('bandwidth')}°",
 				f"Entropy: {m('entropy_normalized_pct')} %",
 			]
-			try:
-				ef = self._estimate_lv_ef()
-				ef_pct = ef.get("ef_pct") if isinstance(ef, dict) else None
-				if ef_pct is not None:
-					lines.append(f"FEVI: {float(ef_pct):.0f} %")
-			except Exception:
-				pass
+			ef_pct = ef.get("ef_pct") if isinstance(ef, dict) else None
+			if ef_pct is not None:
+				lines.append(f"FEVI: {float(ef_pct):.0f} %")
 			self.main_metrics_readout.setText("<br>".join(lines))
 		# --- Curvas ya renderizadas ---
 		# Asincronía (histograma de fase): solo si hay resultado actual; si no,
@@ -2219,11 +2263,10 @@ class MainWindow(QMainWindow):
 			self._load_curve_pixmap(self.curve_hist_view, "histograma.png", "Histograma de fase: procesá un estudio.")
 		else:
 			self._render_empty_curve(self.curve_hist_view, "Fase (°)", "Frecuencia", "_empty_hist.png")
-		# FEVI (volumen/derivada): solo si se generó el PNG; si no, ejes vacíos.
-		fevi_path = os.path.join(self.output_dir, "curva_fevi.png")
-		if os.path.isfile(fevi_path):
-			self._load_curve_pixmap(self.curve_fevi_view, "curva_fevi.png", "Curva volumen/derivada: modo avanzado.")
-		else:
+		# FEVI (volumen/gate): curva autónoma desde el EF ya calculado (funciona en
+		# básico y avanzado, sin depender del pipeline pesado). Si no hay datos
+		# suficientes, ejes vacíos.
+		if not self._render_fevi_curve_panel(self.curve_fevi_view, ef):
 			self._render_empty_curve(self.curve_fevi_view, "Gate", "Volumen (mL)", "_empty_fevi.png")
 		# Título de la 2da. etapa sobre el cine_compare (reposo/esfuerzo según la
 		# 1ra. cargada); se actualiza cada vez que se reprocesa/carga.
