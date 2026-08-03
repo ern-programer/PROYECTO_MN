@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
 	QScrollArea,
 	QSpinBox,
 	QSlider,
+	QSizePolicy,
 	QSplitter,
 	QTabWidget,
 	QTextEdit,
@@ -801,6 +802,7 @@ class MainWindow(QMainWindow):
 		self.pdf_btn.setText("PDF ▾")
 		self.pdf_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
 		self.pdf_btn.setMenu(self.pdf_menu)
+		self.pdf_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 		self.pdf_btn.setToolTip("Abrir o guardar el informe PDF.")
 		self.compare_stress_rest_btn = QPushButton("Comparar Rest/Stress")
 		self.compare_stress_rest_btn.clicked.connect(self.load_compare_study)
@@ -858,16 +860,25 @@ class MainWindow(QMainWindow):
 		button_row.setColumnStretch(0, 3)
 		button_row.setColumnStretch(1, 3)
 		button_row.setColumnStretch(2, 1)
-		button_row.addWidget(self.compare_stress_rest_btn, 1, 0, 1, 2)
-		button_row.addWidget(self.load_one_or_two_btn, 1, 2)
-		button_row.addWidget(self.advanced_toggle_btn, 2, 0, 1, 2)
-		button_row.addWidget(self.export_ungated_btn, 3, 0)
-		button_row.addWidget(self.ui_config_btn, 3, 1)
-		button_row.addWidget(self.ectb_window_btn, 4, 0, 1, 2)
-		button_row.addWidget(self.gqc_window_btn, 5, 0, 1, 2)
-		button_row.addWidget(self.asynchrony_review_btn, 6, 0, 1, 2)
-		# Ubicar Acciones arriba de Procesamiento para tener comandos a la vista.
-		self._sidebar_layout.insertWidget(1, button_box)
+		compare_load_row = QHBoxLayout()
+		compare_load_row.setContentsMargins(0, 0, 0, 0)
+		compare_load_row.setSpacing(4)
+		compare_load_row.addWidget(self.compare_stress_rest_btn, 1)
+		compare_load_row.addWidget(self.load_one_or_two_btn, 1)
+		button_row.addLayout(compare_load_row, 1, 0, 1, 3)
+		button_row.addWidget(self.advanced_toggle_btn, 2, 0, 1, 3)
+		ungated_config_row = QHBoxLayout()
+		ungated_config_row.setContentsMargins(0, 0, 0, 0)
+		ungated_config_row.setSpacing(4)
+		ungated_config_row.addWidget(self.export_ungated_btn, 1)
+		ungated_config_row.addWidget(self.ui_config_btn, 1)
+		button_row.addLayout(ungated_config_row, 3, 0, 1, 3)
+		button_row.addWidget(self.ectb_window_btn, 4, 0, 1, 3)
+		button_row.addWidget(self.gqc_window_btn, 5, 0, 1, 3)
+		button_row.addWidget(self.asynchrony_review_btn, 6, 0, 1, 3)
+		# Ubicar Acciones justo debajo de la versión y la barra de progreso.
+		insert_at = self._sidebar_layout.indexOf(self._progress_bar) + 1
+		self._sidebar_layout.insertWidget(insert_at, button_box)
 
 		roi_box = QGroupBox("ROI manual por slice")
 		roi_layout = QVBoxLayout(roi_box)
@@ -1975,7 +1986,7 @@ class MainWindow(QMainWindow):
 		splitter.addWidget(right)
 		splitter.setStretchFactor(0, 1)
 		splitter.setStretchFactor(1, 4)
-		splitter.setSizes([420, 1140])
+		splitter.setSizes([300, 1260])
 		right_splitter.setSizes([840, 220])
 		# 3 zonas: cine+2da etapa | Datos+Resultados | curvas. La primera es más
 		# ancha porque ahora contiene las DOS imágenes (cine + cine_compare).
@@ -2264,7 +2275,9 @@ class MainWindow(QMainWindow):
 			# maximizada. Sin esto, la ventana abre estirada fuera de la pantalla y
 			# las filas del cine se solapan hasta que el usuario maximiza a mano.
 			QTimer.singleShot(0, self._clamp_or_maximize)
-		main_state = self._ui_settings.value("main_splitter_state", None)
+		# Clave versionada v2: el sidebar pasó a arrancar en su ancho mínimo (~300px)
+		# para no estirar las filas de botones, así que se descarta el ancho guardado viejo.
+		main_state = self._ui_settings.value("main_splitter_state_v2", None)
 		if main_state is not None:
 			self.main_splitter.restoreState(main_state)
 		# Clave versionada: el layout cambió (75/25 + panel + cine compacto), así que
@@ -2526,7 +2539,7 @@ class MainWindow(QMainWindow):
 
 	def _save_window_layout(self):
 		self._ui_settings.setValue("window_geometry", self.saveGeometry())
-		self._ui_settings.setValue("main_splitter_state", self.main_splitter.saveState())
+		self._ui_settings.setValue("main_splitter_state_v2", self.main_splitter.saveState())
 		self._ui_settings.setValue("right_splitter_state_v3", self.right_splitter.saveState())
 		self._ui_settings.setValue("bottom_hsplit_state_v5", self.bottom_hsplit.saveState())
 		self._save_sidebar_sections_state()
@@ -3161,7 +3174,7 @@ class MainWindow(QMainWindow):
 	def _build_sidebar(self) -> QWidget:
 		sidebar = QWidget()
 		sidebar.setObjectName("sincroSidebar")
-		sidebar.setMinimumWidth(320)
+		sidebar.setMinimumWidth(300)
 		sidebar.setMaximumWidth(560)
 		sidebar.setStyleSheet(
 			"#sincroSidebar { background: #f7f8fb; border-right: 1px solid #d7dce5; }"
