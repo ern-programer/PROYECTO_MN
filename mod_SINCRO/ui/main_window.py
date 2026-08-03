@@ -1574,16 +1574,16 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_save_dcm_btn.setToolTip("Graba las proyecciones corregidas como un DICOM GATED TOMO nuevo (misma estructura y geometría que el original, re-cargable por SINCRO o Xeleris).")
 				self.cine_crudo_save_dcm_btn.clicked.connect(self._save_cine_crudo_corrected_dicom)
 				toolbar_export.addWidget(self.cine_crudo_save_dcm_btn)
-				toolbar_export.addStretch(1)
 
-				# Botón "Ajuste manual" dentro de la barra de corrección de movimiento:
-				# agrega un submenú (FloatingToolbar) con toolbar4 + toolbar5 al final de toolbar3.
+				# Botón "Ajuste manual" en toolbar_export (después de Grabar DICOM):
+				# agrega un submenú (FloatingToolbar) con toolbar4 + toolbar5.
 				self._cine_crudo_ajuste_btn = self._build_toolbar_group_menu(
 					"Ajuste manual ▾", [toolbar4, toolbar5],
 					key="cine_crudo_ajuste_manual_export",
 					tooltip="Nudge manual, comparación visual, offsets y curvas de shift.",
 				)
-				toolbar2.addWidget(self._cine_crudo_ajuste_btn)
+				toolbar_export.addWidget(self._cine_crudo_ajuste_btn)
+				toolbar_export.addStretch(1)
 
 				# --- Fila 6 (reconstrucción raw): separada en 3 filas para
 				# legibilidad y mejor adaptación en barra flotante.
