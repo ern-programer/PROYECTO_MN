@@ -124,9 +124,11 @@ def register_all_colormaps() -> list[str]:
             stem = col_file.stem.strip()
             if not stem:
                 continue
-            # Prefijo para distinguir FX vs LX si hay nombre duplicado.
-            tag = col_dir.name.replace(" ", "_").replace("TABLAS_", "")
-            reg_name = f"odyssey_{tag}_{stem}" if stem in seen_col_names else f"odyssey_{stem}"
+            # Los .col con el mismo nombre en TABLAS LX son idénticos a los de FX:
+            # se registra solo la primera aparición y se descarta el duplicado.
+            if stem in seen_col_names:
+                continue
+            reg_name = f"odyssey_{stem}"
             seen_col_names.add(stem)
             palette = _read_col_binary(col_file)
             if not palette:

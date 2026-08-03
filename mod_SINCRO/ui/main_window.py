@@ -4894,6 +4894,7 @@ class MainWindow(QMainWindow):
 			self.seg_method.setCurrentText("auto")
 		self.summary_clinical.clear()
 		self.summary_technical.clear()
+		self._refresh_readonly_results_panel()
 		for movie in list(self.preview_movies.values()):
 			movie.stop()
 		self.preview_movies.clear()
