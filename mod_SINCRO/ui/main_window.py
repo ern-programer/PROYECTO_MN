@@ -10023,7 +10023,7 @@ class MainWindow(QMainWindow):
 						"• Flechas: navegación de tiras (↑/↓ cambia eje, ←/→ desplaza)."
 					)
 					self._apply_preview_zoom(tab_name)
-			self._select_tab_by_title("comparacion_ejes")
+			self._select_tab_by_title("cine_crudo")
 		except Exception as exc:
 			self._cine_crudo_cut_limits_meta = None
 			self._log(f"[WARN] Preview límites falló: {exc}")
@@ -10359,7 +10359,7 @@ class MainWindow(QMainWindow):
 					self.preview_pixmaps[tab_name] = pix
 					self.preview_base_sizes[tab_name] = pix.size()
 					self._apply_preview_zoom(tab_name)
-			self._select_tab_by_title("comparacion_ejes")
+			self._select_tab_by_title("cine_crudo")
 			# Espesor de corte físico. En un SPECT reconstruido desde proyecciones el
 			# volumen es ISOTRÓPICO: el espesor Z = pixel spacing en plano. Si el
 			# estudio crudo no trae z_spacing/slice_thickness DICOM (lo normal en
@@ -10665,7 +10665,7 @@ class MainWindow(QMainWindow):
 					self.preview_pixmaps[tab_name] = pix
 					self.preview_base_sizes[tab_name] = pix.size()
 					self._apply_preview_zoom(tab_name)
-			self._select_tab_by_title("comparacion_ejes")
+			self._select_tab_by_title("cine_crudo")
 			self._log(
 				f"Montaje generado: SA {n_sa_stress} cortes · Esp {th_txt} · recorte {crop_txt} · gates {min(gate_from, gate_to)}→{max(gate_from, gate_to)} · template {template_mode}"
 				+ (" · doble fila ESFUERZO/REPOSO" if has_rest else "")
