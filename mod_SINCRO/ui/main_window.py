@@ -2258,6 +2258,44 @@ class MainWindow(QMainWindow):
 		except Exception:
 			return False
 
+	def _format_async_metrics_lines(self, metrics: dict, ef_pct=None) -> list[str]:
+		"""Bloque de métricas de asincronía con la nomenclatura del ECTb 4.0
+		(Fase máximo, SD, Ancho de banda, Sesgo, Curtosis) + Entropy y FEVI opcional.
+		'Fase máximo' es el pico/moda del histograma (peak_phase), NO la media."""
+		def m(key: str, decimals: int = 1) -> str:
+			val = metrics.get(key) if isinstance(metrics, dict) else None
+			try:
+				return f"{float(val):.{decimals}f}"
+			except (TypeError, ValueError):
+				return "N/D"
+
+		lines = [
+			f"Fase máximo: {m('peak_phase')}°",
+			f"SD: {m('phase_sd')}°",
+			f"Ancho de banda: {m('bandwidth')}°",
+			f"Sesgo: {m('skewness', 2)}",
+			f"Curtosis: {m('kurtosis', 2)}",
+			f"Entropy: {m('entropy_normalized_pct')} %",
+		]
+		if ef_pct is not None:
+			try:
+				lines.append(f"<b>FEVI: {float(ef_pct):.1f} %</b>")
+			except (TypeError, ValueError):
+				pass
+		return lines
+
+	def _format_async_delta_lines(self, primary: dict, compare: dict) -> list[str]:
+		"""Delta de asincronía etapa 1 − etapa 2 (convención del módulo: primario − comparación)."""
+		try:
+			d_sd = float(primary.get("phase_sd", 0.0)) - float(compare.get("phase_sd", 0.0))
+			d_bw = float(primary.get("bandwidth", 0.0)) - float(compare.get("bandwidth", 0.0))
+		except (TypeError, ValueError, AttributeError):
+			return []
+		return [
+			"<b>Δ (etapa 1 − etapa 2)</b>",
+			f"Δ SD: {d_sd:+.1f}°   Δ Ancho banda: {d_bw:+.1f}°",
+		]
+
 	def _refresh_readonly_results_panel(self) -> None:
 		"""Refresca el panel de solo-lectura de la banda inferior tras procesar."""
 		if getattr(self, "patient_data_label", None) is None:
@@ -2299,22 +2337,37 @@ class MainWindow(QMainWindow):
 		if not metrics:
 			self.main_metrics_readout.setText("Sin resultados: procesá un estudio.")
 		else:
-			def m(key: str) -> str:
-				val = metrics.get(key)
-				try:
-					return f"{float(val):.1f}"
-				except (TypeError, ValueError):
-					return "N/D"
-
-			lines = [
-				f"Phase SD: {m('phase_sd')}°",
-				f"Bandwidth: {m('bandwidth')}°",
-				f"Entropy: {m('entropy_normalized_pct')} %",
-			]
 			ef_pct = ef.get("ef_pct") if isinstance(ef, dict) else None
-			if ef_pct is not None:
-				lines.append(f"FEVI: {float(ef_pct):.1f} %")
-			self.main_metrics_readout.setText("<br>".join(lines))
+			compare_metrics = getattr(self, "compare_metrics", None)
+			if compare_metrics is not None:
+				# Dos etapas apiladas como la pantalla Asincronía VI del ECTb (b_07):
+				# etapa procesada arriba, etapa de comparación abajo, + delta.
+				try:
+					primary_phase = str(self._study_context().get("phase", "") or "").strip()
+				except Exception:
+					primary_phase = ""
+				primary_label = primary_phase or "Etapa 1"
+				second_phase = self._second_phase_label()
+				compare_label = (
+					second_phase
+					if second_phase in ("Reposo", "Esfuerzo")
+					else str(self.compare_label or "Etapa 2").strip()
+				)
+				text = (
+					f"<b>{primary_label}</b><br>"
+					+ "<br>".join(self._format_async_metrics_lines(metrics, ef_pct))
+					+ "<br><br>"
+					+ f"<b>{compare_label}</b><br>"
+					+ "<br>".join(self._format_async_metrics_lines(compare_metrics, None))
+				)
+				delta = self._format_async_delta_lines(metrics, compare_metrics)
+				if delta:
+					text += "<br><br>" + "<br>".join(delta)
+				self.main_metrics_readout.setText(text)
+			else:
+				self.main_metrics_readout.setText(
+					"<br>".join(self._format_async_metrics_lines(metrics, ef_pct))
+				)
 		# --- Curvas ya renderizadas ---
 		# Asincronía (histograma de fase): solo si hay resultado actual; si no,
 		# ejes vacíos para no mostrar el último gráfico que quedó.
