@@ -71,14 +71,14 @@ class FloatingToolbar(QWidget):
 	controles (QHBoxLayout/QGridLayout ya armados) y se abre/cierra con un
 	botón trigger, sin afectar el tamaño del panel que la contiene."""
 
-	def __init__(self, title: str, key: str, parent=None):
+	def __init__(self, title: str, key: str, side_widget: QWidget | None = None, parent=None):
 		super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
 		self.setWindowTitle(title)
 		self._key = key
 		self._settings = QSettings("Gammasys", "GammaSync")
 		self._orientation = Qt.Orientation.Horizontal
 		self._groups: list = []
-		self._widgets: list[QWidget] = []
+		self._side_widget = side_widget
 		self._collapsed = False
 		self._rebuilding = False
 		self._horizontal_rows = 3
@@ -141,22 +141,7 @@ class FloatingToolbar(QWidget):
 	def add_layout(self, layout) -> None:
 		"""Agrega un QHBoxLayout/QGridLayout ya armado con sus widgets."""
 		self._groups.append(layout)
-		self._widgets.extend(self._extract_widgets(layout))
 		self._rebuild_content_layout()
-
-	def _extract_widgets(self, layout) -> list[QWidget]:
-		"""Extrae widgets de un layout (incluyendo sublayouts) conservando orden."""
-		widgets: list[QWidget] = []
-		while layout.count():
-			item = layout.takeAt(0)
-			w = item.widget()
-			if w is not None:
-				widgets.append(w)
-				continue
-			inner = item.layout()
-			if inner is not None:
-				widgets.extend(self._extract_widgets(inner))
-		return widgets
 
 	def show_near(self, widget: QWidget) -> None:
 		"""Muestra la barra cerca del botón que la abrió (o en la última
@@ -226,24 +211,19 @@ class FloatingToolbar(QWidget):
 		self._content_host.setLayout(new_layout)
 		self._content_layout = new_layout
 
-		widgets = list(self._widgets)
-
 		if self._orientation == Qt.Orientation.Horizontal:
-			rows = self._horizontal_rows
-			row_layouts = []
-			for row in range(rows):
-				rl = QHBoxLayout()
-				rl.setSpacing(6)
-				row_layouts.append(rl)
-				self._content_layout.addLayout(rl, row, 0)
-			if widgets:
-				for idx, w in enumerate(widgets):
-					row_layouts[idx % rows].addWidget(w)
-			for rl in row_layouts:
-				rl.addStretch(1)
+			for row, group in enumerate(self._groups):
+				self._content_layout.addLayout(group, row, 0)
+			# Si hay widget lateral, agregarlo a la derecha con rowspan
+			if self._side_widget is not None:
+				self._content_layout.addWidget(self._side_widget, 0, 1, len(self._groups), 1)
 		else:
-			for idx, w in enumerate(widgets):
-				self._content_layout.addWidget(w, idx, 0)
+			# En vertical, cada grupo (fila original) se apila.
+			for row, group in enumerate(self._groups):
+				self._content_layout.addLayout(group, row, 0)
+			# Widget lateral también abajo en vertical
+			if self._side_widget is not None:
+				self._content_layout.addWidget(self._side_widget, len(self._groups), 0)
 
 		# Al alternar orientación, fuerza recálculo para evitar que quede
 		# "pegado" el ancho de la orientación anterior.

@@ -1377,8 +1377,23 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_threshold_spin.valueChanged.connect(self._on_cine_crudo_threshold_spin_changed)
 				toolbar2.addWidget(self.cine_crudo_threshold_spin)
 				toolbar2.addStretch(1)
+				self.cine_crudo_grid_btn = QToolButton()
+				self.cine_crudo_grid_btn.setText("Grilla pick")
+				self.cine_crudo_grid_btn.setToolTip("Grilla de cortes transaxiales con máscara para discriminar corazón de hígado antes del pick (como Odyssey).")
+				self.cine_crudo_grid_btn.clicked.connect(self._show_cine_crudo_transaxial_grid)
+				toolbar2.addWidget(self.cine_crudo_grid_btn)
+				self.cine_crudo_synthetic_btn = QToolButton()
+				self.cine_crudo_synthetic_btn.setText("Sintético")
+				self.cine_crudo_synthetic_btn.setToolTip("Carga un crudo sintético: corazón con desplazamiento X por rotación, salto Y respiratorio e hígado/intestino inferior intenso. Útil para probar Banda Y y Atenuar hígado.")
+				self.cine_crudo_synthetic_btn.clicked.connect(self._load_cine_crudo_synthetic)
+				toolbar2.addWidget(self.cine_crudo_synthetic_btn)
+				self.cine_crudo_correct_btn = QToolButton()
+				self.cine_crudo_correct_btn.setText("Corregir")
+				self.cine_crudo_correct_btn.setToolTip("Aplica motion correction con método/eje/threshold seleccionados.")
+				self.cine_crudo_correct_btn.clicked.connect(self._apply_cine_crudo_motion_correction)
+				self.cine_crudo_correct_btn.setMinimumHeight(90)
 
-				# --- Fila 3 (selección de órgano + corregir): máscara + pick corazón + ROI + grilla + corregir ---
+				# --- Fila 3 (selección de órgano): máscara + pick corazón + ROI ---
 				toolbar3 = QHBoxLayout()
 				self.cine_crudo_mask_check = QCheckBox("Máscara")
 				self.cine_crudo_mask_check.setToolTip("Superpone la máscara del threshold sobre la proyección actual en tiempo real.")
@@ -1423,45 +1438,38 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_liver_suppress_spin.setMaximumWidth(72)
 				self.cine_crudo_liver_suppress_spin.setToolTip("Porcentaje de atenuación usado solo en la imagen de tracking. Sugerido: 50–70%.")
 				toolbar3.addWidget(self.cine_crudo_liver_suppress_spin)
-				self.cine_crudo_grid_btn = QToolButton()
-				self.cine_crudo_grid_btn.setText("Grilla pick")
-				self.cine_crudo_grid_btn.setToolTip("Grilla de cortes transaxiales con máscara para discriminar corazón de hígado antes del pick (como Odyssey).")
-				self.cine_crudo_grid_btn.clicked.connect(self._show_cine_crudo_transaxial_grid)
-				toolbar3.addWidget(self.cine_crudo_grid_btn)
-				self.cine_crudo_synthetic_btn = QToolButton()
-				self.cine_crudo_synthetic_btn.setText("Sintético")
-				self.cine_crudo_synthetic_btn.setToolTip("Carga un crudo sintético: corazón con desplazamiento X por rotación, salto Y respiratorio e hígado/intestino inferior intenso. Útil para probar Banda Y y Atenuar hígado.")
-				self.cine_crudo_synthetic_btn.clicked.connect(self._load_cine_crudo_synthetic)
-				toolbar3.addWidget(self.cine_crudo_synthetic_btn)
-				self.cine_crudo_correct_btn = QToolButton()
-				self.cine_crudo_correct_btn.setText("Corregir")
-				self.cine_crudo_correct_btn.setToolTip("Aplica motion correction con método/eje/threshold seleccionados.")
-				self.cine_crudo_correct_btn.clicked.connect(self._apply_cine_crudo_motion_correction)
-				toolbar3.addWidget(self.cine_crudo_correct_btn)
+				toolbar3.addStretch(1)
 
-				# --- Fila 4 (corrección manual): flechas + paso + reset + ajuste fino + referencia + comparar ---
+				# --- Fila 4 (corrección manual): flechas tipo teclado + paso + reset + ajuste fino + referencia + comparar ---
 				toolbar4 = QHBoxLayout()
 				toolbar4.addWidget(QLabel("Manual"))
+				# Flechas en layout tipo teclado:
+				#       ↑
+				#   ←   ↓   →
 				self.cine_crudo_up_btn = QToolButton()
 				self.cine_crudo_up_btn.setText("↑")
 				self.cine_crudo_up_btn.setToolTip("Subir el frame ACTUAL (shift Y −paso). Corrección manual frame a frame en vivo.")
 				self.cine_crudo_up_btn.clicked.connect(lambda _=False: self._nudge_cine_crudo_frame(-self._cine_crudo_nudge_step(), 0.0))
-				toolbar4.addWidget(self.cine_crudo_up_btn)
 				self.cine_crudo_down_btn = QToolButton()
 				self.cine_crudo_down_btn.setText("↓")
 				self.cine_crudo_down_btn.setToolTip("Bajar el frame ACTUAL (shift Y +paso).")
 				self.cine_crudo_down_btn.clicked.connect(lambda _=False: self._nudge_cine_crudo_frame(self._cine_crudo_nudge_step(), 0.0))
-				toolbar4.addWidget(self.cine_crudo_down_btn)
 				self.cine_crudo_left_btn = QToolButton()
 				self.cine_crudo_left_btn.setText("←")
 				self.cine_crudo_left_btn.setToolTip("Mover el frame ACTUAL a la izquierda (shift X −paso).")
 				self.cine_crudo_left_btn.clicked.connect(lambda _=False: self._nudge_cine_crudo_frame(0.0, -self._cine_crudo_nudge_step()))
-				toolbar4.addWidget(self.cine_crudo_left_btn)
 				self.cine_crudo_right_btn = QToolButton()
 				self.cine_crudo_right_btn.setText("→")
 				self.cine_crudo_right_btn.setToolTip("Mover el frame ACTUAL a la derecha (shift X +paso).")
 				self.cine_crudo_right_btn.clicked.connect(lambda _=False: self._nudge_cine_crudo_frame(0.0, self._cine_crudo_nudge_step()))
-				toolbar4.addWidget(self.cine_crudo_right_btn)
+				arrow_grid = QGridLayout()
+				arrow_grid.setContentsMargins(0, 0, 0, 0)
+				arrow_grid.setSpacing(2)
+				arrow_grid.addWidget(self.cine_crudo_up_btn, 0, 1)
+				arrow_grid.addWidget(self.cine_crudo_left_btn, 1, 0)
+				arrow_grid.addWidget(self.cine_crudo_down_btn, 1, 1)
+				arrow_grid.addWidget(self.cine_crudo_right_btn, 1, 2)
+				toolbar4.addLayout(arrow_grid)
 				toolbar4.addWidget(QLabel("Paso"))
 				self.cine_crudo_nudge_step_spin = QDoubleSpinBox()
 				self.cine_crudo_nudge_step_spin.setRange(0.10, 5.0)
@@ -1501,13 +1509,9 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_sino_axis_combo.setToolTip("Y: perfil horizontal por ángulo. X: perfil vertical por ángulo.")
 				self.cine_crudo_sino_axis_combo.currentTextChanged.connect(self._refresh_cine_crudo_view)
 				toolbar4.addWidget(self.cine_crudo_sino_axis_combo)
-				self.cine_crudo_compare_line_check = QCheckBox("Línea ref")
-				self.cine_crudo_compare_line_check.setToolTip("Muestra una línea horizontal arrastrable para comparar si el salto quedó alineado entre original/corregido.")
-				self.cine_crudo_compare_line_check.toggled.connect(self._refresh_cine_crudo_view)
-				toolbar4.addWidget(self.cine_crudo_compare_line_check)
 				toolbar4.addStretch(1)
 
-				# --- Fila 5 (offset global + curvas + IO): offset X/Y + curvas + exportar/importar/grabar DICOM ---
+				# --- Fila 5 (offset global + curvas): offset X/Y + curvas de shift ---
 				toolbar5 = QHBoxLayout()
 				toolbar5.addWidget(QLabel("OffY"))
 				self.cine_crudo_offset_y_spin = QDoubleSpinBox()
@@ -1537,41 +1541,49 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_shift_plot_btn.setToolTip("Muestra curvas X/Y de shift por frame (estilo Xeleris).")
 				self.cine_crudo_shift_plot_btn.clicked.connect(self._show_cine_crudo_shift_curves)
 				toolbar5.addWidget(self.cine_crudo_shift_plot_btn)
+				toolbar5.addStretch(1)
+
+				# --- Exportar/Importar/Visual/DICOM: sección IO separada dentro de Corrección de movimiento ---
+				toolbar_export = QHBoxLayout()
+				self.cine_crudo_compare_line_check = QCheckBox("Línea ref")
+				self.cine_crudo_compare_line_check.setToolTip("Muestra una línea horizontal arrastrable para comparar si el salto quedó alineado entre original/corregido.")
+				self.cine_crudo_compare_line_check.toggled.connect(self._refresh_cine_crudo_view)
+				toolbar_export.addWidget(self.cine_crudo_compare_line_check)
 				self.cine_crudo_export_btn = QToolButton()
 				self.cine_crudo_export_btn.setText("Exportar corrección")
 				self.cine_crudo_export_btn.setToolTip("Exporta shifts Y/X por frame (CSV) + proyecciones corregidas (.npz) para comparar y calibrar métodos.")
 				self.cine_crudo_export_btn.clicked.connect(self._export_cine_crudo_correction)
-				toolbar5.addWidget(self.cine_crudo_export_btn)
+				toolbar_export.addWidget(self.cine_crudo_export_btn)
 				self.cine_crudo_import_btn = QToolButton()
 				self.cine_crudo_import_btn.setText("Importar corrección")
 				self.cine_crudo_import_btn.setToolTip("Vuelve a cargar una corrección guardada (CSV o NPZ): aplica los shifts Y/X por frame al estudio actual. Podés seguir ajustando con las flechas, Comparar o Grabar DICOM.")
 				self.cine_crudo_import_btn.clicked.connect(self._import_cine_crudo_correction)
-				toolbar5.addWidget(self.cine_crudo_import_btn)
+				toolbar_export.addWidget(self.cine_crudo_import_btn)
 				self.cine_crudo_save_visual_btn = QToolButton()
 				self.cine_crudo_save_visual_btn.setText("Guardar visual")
 				self.cine_crudo_save_visual_btn.setToolTip("Guarda configuración visual de motion correction: color, Banda Y, línea ref, threshold, método/eje y sinograma.")
 				self.cine_crudo_save_visual_btn.clicked.connect(self._save_cine_crudo_visual_config)
-				toolbar5.addWidget(self.cine_crudo_save_visual_btn)
+				toolbar_export.addWidget(self.cine_crudo_save_visual_btn)
 				self.cine_crudo_load_visual_btn = QToolButton()
 				self.cine_crudo_load_visual_btn.setText("Cargar visual")
 				self.cine_crudo_load_visual_btn.setToolTip("Carga una configuración visual guardada para repetir la misma lectura/overlay.")
 				self.cine_crudo_load_visual_btn.clicked.connect(self._load_cine_crudo_visual_config)
-				toolbar5.addWidget(self.cine_crudo_load_visual_btn)
+				toolbar_export.addWidget(self.cine_crudo_load_visual_btn)
 				self.cine_crudo_save_dcm_btn = QToolButton()
 				self.cine_crudo_save_dcm_btn.setText("Grabar DICOM")
 				self.cine_crudo_save_dcm_btn.setToolTip("Graba las proyecciones corregidas como un DICOM GATED TOMO nuevo (misma estructura y geometría que el original, re-cargable por SINCRO o Xeleris).")
 				self.cine_crudo_save_dcm_btn.clicked.connect(self._save_cine_crudo_corrected_dicom)
-				toolbar5.addWidget(self.cine_crudo_save_dcm_btn)
-				toolbar5.addStretch(1)
+				toolbar_export.addWidget(self.cine_crudo_save_dcm_btn)
+				toolbar_export.addStretch(1)
 
 				# Botón "Ajuste manual" dentro de la barra de corrección de movimiento:
 				# agrega un submenú (FloatingToolbar) con toolbar4 + toolbar5 al final de toolbar3.
 				self._cine_crudo_ajuste_btn = self._build_toolbar_group_menu(
 					"Ajuste manual ▾", [toolbar4, toolbar5],
 					key="cine_crudo_ajuste_manual_export",
-					tooltip="Nudge manual, comparación visual, offsets, curvas de shift y exportar/importar/grabar DICOM.",
+					tooltip="Nudge manual, comparación visual, offsets y curvas de shift.",
 				)
-				toolbar3.addWidget(self._cine_crudo_ajuste_btn)
+				toolbar2.addWidget(self._cine_crudo_ajuste_btn)
 
 				# --- Fila 6 (reconstrucción raw): separada en 3 filas para
 				# legibilidad y mejor adaptación en barra flotante.
@@ -1817,14 +1829,10 @@ class MainWindow(QMainWindow):
 				# flota por encima y NUNCA cambia el tamaño de la imagen.
 				groups_row = QHBoxLayout()
 				groups_row.addWidget(self._build_toolbar_group_menu(
-					"Corrección de movimiento ▾", [toolbar2, toolbar3],
+					"Corrección de movimiento ▾", [toolbar2, toolbar3, toolbar_export],
 					key="cine_crudo_correccion_movimiento",
-					tooltip="Método de corrección (Sinusoide/XCorr/GammaSync/...), eje, threshold, selección de órgano/ROI y atenuación de hígado.",
-				))
-				groups_row.addWidget(self._build_toolbar_group_menu(
-					"Ajuste manual y exportación ▾", [toolbar4, toolbar5],
-					key="cine_crudo_ajuste_manual_export",
-					tooltip="Nudge manual, comparación visual, offsets, curvas de shift y exportar/importar/grabar DICOM.",
+					tooltip="Método de corrección, ajuste manual, offsets y exportar/importar/grabar DICOM.",
+					side_widget=self.cine_crudo_correct_btn,
 				))
 				groups_row.addWidget(self._build_toolbar_group_menu(
 					"Reconstrucción desde crudo ▾", [toolbar6_r1, toolbar6_r2, toolbar6_r3],
@@ -2331,12 +2339,12 @@ class MainWindow(QMainWindow):
 	# que la abre ocupa siempre el mismo lugar, así que nunca cambia el
 	# tamaño del resto de la pestaña.
 
-	def _build_toolbar_group_menu(self, title: str, hlayouts: list, key: str, tooltip: str = "") -> QToolButton:
+	def _build_toolbar_group_menu(self, title: str, hlayouts: list, key: str, tooltip: str = "", side_widget: QWidget | None = None) -> QToolButton:
 		"""Agrupa una o más QHBoxLayout de filas de controles en una
 		`FloatingToolbar`, para bajar el ruido visual de paneles con muchas
 		filas de toolbar (p.ej. la pestaña cine_crudo) sin mover el resto del
-		layout."""
-		toolbar = FloatingToolbar(title, key=key, parent=self)
+		layout. Si se provee `side_widget`, se coloca a la derecha con rowspan."""
+		toolbar = FloatingToolbar(title, key=key, side_widget=side_widget, parent=self)
 		for hl in hlayouts:
 			toolbar.add_layout(hl)
 		btn = QToolButton()
