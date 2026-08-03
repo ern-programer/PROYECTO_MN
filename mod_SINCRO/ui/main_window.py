@@ -2157,9 +2157,46 @@ class MainWindow(QMainWindow):
 			label.setPixmap(QPixmap())
 			label.setText("")
 
+	def _visual_style_dict(self) -> dict:
+		"""Paleta de los paneles clínicos (curva FEVI, panel funcional gated,
+		bull's eye) según el tema visual seleccionado. Fuente única de verdad."""
+		style_catalog = {
+			"clinico": {
+				"fig_bg": "#050811",
+				"ax_bg": "#0a1424",
+				"grid": "#1f3a5f",
+				"fg": "#dbeafe",
+				"subtle": "#93c5fd",
+				"vol": "#fde047",
+				"deriv": "#60a5fa",
+				"ed": "#86efac",
+				"es": "#fca5a5",
+				"amp_cmap": "viridis",
+				"bull_cmap": "plasma",
+			},
+			"gammasync": {
+				"fig_bg": "#f8fafc",
+				"ax_bg": "#ffffff",
+				"grid": "#cbd5e1",
+				"fg": "#0f172a",
+				"subtle": "#475569",
+				"vol": "#b45309",
+				"deriv": "#0f766e",
+				"ed": "#0ea5e9",
+				"es": "#e11d48",
+				"amp_cmap": "turbo",
+				"bull_cmap": "turbo",
+			},
+		}
+		style_name = str(self.visual_style_combo.currentText()).strip().lower() if hasattr(self, "visual_style_combo") else "clinico"
+		if style_name not in style_catalog:
+			style_name = "clinico"
+		return style_catalog[style_name]
+
 	def _render_fevi_curve_panel(self, label: QLabel, ef: dict | None) -> bool:
 		"""Dibuja la curva volumen/gate (FEVI) autónoma para la banda inferior,
-		usando el EF ya calculado. Devuelve True si pudo dibujar datos."""
+		replicando el panel 'Time/Volume y derivada' (mismo estilo y colores que
+		Panel funcional gated). Devuelve True si pudo dibujar datos."""
 		if not ef or not bool(ef.get("available")):
 			return False
 		try:
@@ -2169,26 +2206,33 @@ class MainWindow(QMainWindow):
 			import matplotlib
 			matplotlib.use("Agg")
 			import matplotlib.pyplot as plt
-			bg, fg, grid = "#0b1220", "#5b6470", "#26324a"
-			vol_c, ed_c, es_c = "#38bdf8", "#22c55e", "#ef4444"
-			gate_axis = np.arange(gate_volumes.size) + 1
-			fig, ax = plt.subplots(figsize=(5, 2.2), facecolor=bg)
-			ax.set_facecolor(bg)
-			ax.plot(gate_axis, gate_volumes, "o-", color=vol_c, linewidth=1.8, markersize=3.5)
+			style = self._visual_style_dict()
+			t_gate = np.arange(1, gate_volumes.size + 1)
+			dv = np.gradient(gate_volumes)
+			fig, ax = plt.subplots(figsize=(5, 2.4), facecolor=style["fig_bg"])
+			ax.set_facecolor(style["ax_bg"])
+			ax.plot(t_gate, gate_volumes, color=style["vol"], linewidth=2.2, marker="o", markersize=4, label="Volumen")
+			ax2 = ax.twinx()
+			ax2.plot(t_gate, dv, color=style["deriv"], linewidth=1.8, label="dV/dgate")
+			ax2.set_ylabel("dV/dgate", color=style["deriv"], fontsize=9)
+			ax2.tick_params(axis="y", colors=style["deriv"], labelsize=7)
 			ed_gate = int(ef.get("ed_gate", 1))
 			es_gate = int(ef.get("es_gate", 1))
-			ax.axvline(ed_gate, color=ed_c, linestyle="--", linewidth=1.0)
-			ax.axvline(es_gate, color=es_c, linestyle="--", linewidth=1.0)
-			ax.set_title(f"FEVI {float(ef.get('ef_pct', 0.0)):.0f} %", color=fg, fontsize=9)
-			ax.set_xlabel("Gate", color=fg, fontsize=9)
-			ax.set_ylabel("Volumen (mL)", color=fg, fontsize=9)
-			ax.tick_params(colors=fg, labelsize=7)
+			ax.axvline(ed_gate, color=style["ed"], linestyle="--", linewidth=1.2)
+			ax.axvline(es_gate, color=style["es"], linestyle="--", linewidth=1.2)
+			vol_max = float(np.nanmax(gate_volumes)) if np.isfinite(gate_volumes).any() else 1.0
+			ax.set_ylim(0.0, vol_max * 1.15)
+			ax.set_title("Time/Volume y derivada", color=style["fg"], fontsize=10, fontweight="bold")
+			ax.set_xlabel("Gate", color=style["subtle"], fontsize=9)
+			ax.set_ylabel("Volumen (mL)", color=style["vol"], fontsize=9)
+			ax.tick_params(axis="x", colors=style["subtle"], labelsize=7)
+			ax.tick_params(axis="y", colors=style["vol"], labelsize=7)
 			for spine in ax.spines.values():
-				spine.set_color(grid)
-			ax.grid(True, color=grid, alpha=0.35)
+				spine.set_color(style["grid"])
+			ax.grid(True, color=style["grid"], alpha=0.45)
 			out = os.path.join(self.output_dir, "curva_fevi_panel.png")
 			fig.tight_layout()
-			fig.savefig(out, dpi=140, facecolor=bg, bbox_inches="tight")
+			fig.savefig(out, dpi=140, facecolor=style["fig_bg"], bbox_inches="tight")
 			plt.close(fig)
 			pix = QPixmap(out)
 			target_w = max(240, label.width() - 4)
@@ -7588,37 +7632,7 @@ class MainWindow(QMainWindow):
 			es_gate = (mid_gate + max(1, n_gates // 2)) % n_gates
 
 		style_name = str(self.visual_style_combo.currentText()).strip().lower()
-		style_catalog = {
-			"clinico": {
-				"fig_bg": "#050811",
-				"ax_bg": "#0a1424",
-				"grid": "#1f3a5f",
-				"fg": "#dbeafe",
-				"subtle": "#93c5fd",
-				"vol": "#fde047",
-				"deriv": "#60a5fa",
-				"ed": "#86efac",
-				"es": "#fca5a5",
-				"amp_cmap": "viridis",
-				"bull_cmap": "plasma",
-			},
-			"gammasync": {
-				"fig_bg": "#f8fafc",
-				"ax_bg": "#ffffff",
-				"grid": "#cbd5e1",
-				"fg": "#0f172a",
-				"subtle": "#475569",
-				"vol": "#b45309",
-				"deriv": "#0f766e",
-				"ed": "#0ea5e9",
-				"es": "#e11d48",
-				"amp_cmap": "turbo",
-				"bull_cmap": "turbo",
-			},
-		}
-		if style_name not in style_catalog:
-			style_name = "clinico"
-		style = style_catalog.get(style_name, style_catalog["clinico"])
+		style = self._visual_style_dict()
 
 		panel_zoom = max(1.0, float(self.compare_axes_zoom_slider.value()) / 100.0)
 		sa_ed_raw, hla_ed_raw, vla_ed_raw, _ed_hla_original, _ed_vla_original = _oriented_axes_views(ed_gate)
