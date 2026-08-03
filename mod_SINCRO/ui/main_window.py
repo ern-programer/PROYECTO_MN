@@ -2297,7 +2297,7 @@ class MainWindow(QMainWindow):
 			]
 			ef_pct = ef.get("ef_pct") if isinstance(ef, dict) else None
 			if ef_pct is not None:
-				lines.append(f"FEVI: {float(ef_pct):.0f} %")
+				lines.append(f"FEVI: {float(ef_pct):.1f} %")
 			self.main_metrics_readout.setText("<br>".join(lines))
 		# --- Curvas ya renderizadas ---
 		# Asincronía (histograma de fase): solo si hay resultado actual; si no,
