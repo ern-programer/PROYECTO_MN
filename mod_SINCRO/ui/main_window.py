@@ -168,6 +168,9 @@ class MainWindow(QMainWindow):
 		self.preview_movies: dict[str, QMovie] = {}
 		self.preview_zoom_labels: dict[str, QLabel] = {}
 		self.polar_cine_toggle_btn: QToolButton | None = None
+		self.polar_perf_view_perf_btn: QToolButton | None = None
+		self.polar_perf_view_cine_btn: QToolButton | None = None
+		self.polar_view_mode = "perfusion"  # "perfusion" | "cine" dentro de polar_perfusion_directa
 		self.polar_cine_preview_frames: list[QPixmap] = []
 		self.polar_cine_preview_index = 0
 		self.polar_cine_playing = False
@@ -280,7 +283,6 @@ class MainWindow(QMainWindow):
 		]
 		self._advanced_extra_tab_order = [
 			"polar_perfusion_directa",
-			"polar_cine_montaje",
 			"comparacion_ejes",
 			"panel_funcional_gated",
 			"bullseye_directo",
@@ -1223,7 +1225,6 @@ class MainWindow(QMainWindow):
 			"delta_combo": "delta_polar",
 			"histograma": "histograma",
 			"polar_perfusion_directa": "polar_perfusion_directa",
-			"polar_cine_montaje": "polar_cine_montaje",
 			"comparacion_ejes": "comparacion_ejes",
 			"comparacion_stress_rest": "stress_vs_rest",
 			"panel_funcional_gated": "Panel funcional gated",
@@ -1236,8 +1237,7 @@ class MainWindow(QMainWindow):
 			"polar_combo": "Panel combinado: mapa polar AHA + panel clínico con histograma/PSD/PHB. Mantiene valores y lectura rápida en una sola pestaña.",
 			"histograma": "Histograma de fase global para estimar dispersión temporal (PSD, BW, entropy).",
 			"delta_combo": "Panel combinado de los dos mapas delta (con signo y absoluto) para comparar stress/rest en una sola pestaña.",
-			"polar_perfusion_directa": "Mapa polar continuo de perfusión (intensidad normalizada): complementa fase para analizar heterogeneidad perfusional apex-base.",
-			"polar_cine_montaje": "Cine polar gatillado: evolución temporal por gate del patrón polar; en dual-mode permite lectura dinámica stress/rest.",
+			"polar_perfusion_directa": "Mapa polar de perfusión (crudo + suavizado en paralelo) con vista Cine gatillado integrada: alterná entre 'Perfusión' (estática) y 'Cine' (evolución por gate, incluye operación esfuerzo/reposo).",
 			"comparacion_ejes": "Comparación multicorte por ejes entre estudios para detectar diferencias regionales en el mismo gate.",
 			"comparacion_stress_rest": "Resumen de métricas de disincronía stress vs rest (PSD/BW/Kurtosis/Entropy) e interpretación clínica.",
 			"panel_funcional_gated": "Panel funcional integrado (ED/ES, fase, amplitud y curvas) para lectura clínica rápida.",
@@ -1251,7 +1251,6 @@ class MainWindow(QMainWindow):
 			"delta_combo",
 			"histograma",
 			"polar_perfusion_directa",
-			"polar_cine_montaje",
 			"comparacion_ejes",
 			"comparacion_stress_rest",
 			"panel_funcional_gated",
@@ -1280,7 +1279,24 @@ class MainWindow(QMainWindow):
 			toolbar.addWidget(zoom_in)
 			toolbar.addWidget(zoom_reset)
 			toolbar.addWidget(zoom_label)
-			if name == "polar_cine_montaje":
+			if name == "polar_perfusion_directa":
+				perf_view_btn = QToolButton()
+				perf_view_btn.setText("Perfusión")
+				perf_view_btn.setCheckable(True)
+				perf_view_btn.setChecked(self.polar_view_mode == "perfusion")
+				perf_view_btn.setToolTip("Vista estática: crudo + suavizado en paralelo")
+				perf_view_btn.clicked.connect(lambda _=False: self._set_polar_view_mode("perfusion"))
+				self.polar_perf_view_perf_btn = perf_view_btn
+				cine_view_btn = QToolButton()
+				cine_view_btn.setText("Cine")
+				cine_view_btn.setCheckable(True)
+				cine_view_btn.setChecked(self.polar_view_mode == "cine")
+				cine_view_btn.setToolTip("Vista cine gatillado: evolución por gate + operación esfuerzo/reposo")
+				cine_view_btn.clicked.connect(lambda _=False: self._set_polar_view_mode("cine"))
+				self.polar_perf_view_cine_btn = cine_view_btn
+				toolbar.addWidget(QLabel("Vista"))
+				toolbar.addWidget(perf_view_btn)
+				toolbar.addWidget(cine_view_btn)
 				play_btn = QToolButton()
 				play_btn.setText("Play")
 				play_btn.clicked.connect(self._toggle_polar_cine_preview)
@@ -2347,7 +2363,6 @@ class MainWindow(QMainWindow):
 			"panel_funcional_gated": ("panel_funcional_gated.png",),
 			"bullseye_directo": ("bullseye_directo.png",),
 			"polar_perfusion_directa": ("polar_perfusion_directa.png",),
-			"polar_cine_montaje": ("polar_cine_montaje.png",),
 			"ungated": ("perfusion_ungated.png",),
 		}
 		return mapping.get(str(name), tuple())
@@ -2369,7 +2384,6 @@ class MainWindow(QMainWindow):
 			"panel_funcional_gated",
 			"bullseye_directo",
 			"polar_perfusion_directa",
-			"polar_cine_montaje",
 		}
 		tab_name = str(tab_name or "")
 		if tab_name not in heavy_tabs:
@@ -7162,13 +7176,6 @@ class MainWindow(QMainWindow):
 				"smooth_method": str(self.polar_perf_smooth_method_combo.currentText()),
 				"smooth_strength": float(self.polar_perf_smooth_strength_spin.value()),
 				"cmap_polar_perf": cmap_polar_perf,
-			},
-			"polar_cine_montaje": {
-				**base_payload,
-				"rotation": int(self.polar_rotation_spin.value()),
-				"smooth_method": str(self.polar_perf_smooth_method_combo.currentText()),
-				"smooth_strength": float(self.polar_perf_smooth_strength_spin.value()),
-				"cmap_polar_perf": cmap_polar_perf,
 				"cine_speed": int(self.polar_cine_speed_spin.value()),
 				"export_mp4": bool(self.export_polar_mp4_check.isChecked()),
 				"math_op": str(self.polar_compare_math_combo.currentText()),
@@ -7200,7 +7207,6 @@ class MainWindow(QMainWindow):
 				"panel_funcional_gated",
 				"bullseye_directo",
 				"polar_perfusion_directa",
-				"polar_cine_montaje",
 			):
 				need_tab_render[heavy_tab] = False
 			for fname in (
@@ -8051,7 +8057,7 @@ class MainWindow(QMainWindow):
 			if p is not None:
 				profiles.append(p)
 
-		if len(profiles) >= 2 and (need_tab_render.get("polar_perfusion_directa", True) or need_tab_render.get("polar_cine_montaje", True)):
+		if len(profiles) >= 2 and need_tab_render.get("polar_perfusion_directa", True):
 			perf_bg = "#000000"
 			perf_grid = "#7f8a9a"
 			perf_fg = "#f3f4f6"
@@ -8637,7 +8643,7 @@ class MainWindow(QMainWindow):
 		plt.close(fig)
 
 	def _load_preview(self, name: str):
-		if name == "polar_cine_montaje":
+		if name == "polar_perfusion_directa" and self.polar_view_mode == "cine":
 			self._load_polar_cine_preview()
 			return
 		if name == "comparacion_ejes":
@@ -8671,7 +8677,7 @@ class MainWindow(QMainWindow):
 				self._load_preview(name)
 
 	def _load_polar_cine_preview(self):
-		name = "polar_cine_montaje"
+		name = "polar_perfusion_directa"
 		label = self.preview_labels[name]
 		gif_path = os.path.join(self.output_dir, "polar_cine.gif")
 		png_path = os.path.join(self.output_dir, "polar_cine_montaje.png")
@@ -8902,7 +8908,22 @@ class MainWindow(QMainWindow):
 		self.preview_zoom[name] = max(0.20, min(4.00, float(value)))
 		self._apply_preview_zoom(name)
 
+	def _set_polar_view_mode(self, mode: str):
+		mode = "cine" if mode == "cine" else "perfusion"
+		self.polar_view_mode = mode
+		if self.polar_perf_view_perf_btn is not None:
+			self.polar_perf_view_perf_btn.setChecked(mode == "perfusion")
+		if self.polar_perf_view_cine_btn is not None:
+			self.polar_perf_view_cine_btn.setChecked(mode == "cine")
+		if mode == "perfusion":
+			self.polar_cine_timer.stop()
+			self.polar_cine_playing = False
+			self._update_polar_cine_toggle_text(enabled=bool(self.polar_cine_preview_frames))
+		self._load_preview("polar_perfusion_directa")
+
 	def _toggle_polar_cine_preview(self):
+		if self.polar_view_mode != "cine":
+			self._set_polar_view_mode("cine")
 		if not self.polar_cine_preview_frames:
 			self._update_polar_cine_toggle_text(enabled=False)
 			return
@@ -8914,6 +8935,8 @@ class MainWindow(QMainWindow):
 		self._update_polar_cine_toggle_text(enabled=True)
 
 	def _restart_polar_cine_preview(self):
+		if self.polar_view_mode != "cine":
+			self._set_polar_view_mode("cine")
 		if not self.polar_cine_preview_frames:
 			self._update_polar_cine_toggle_text(enabled=False)
 			return
@@ -8964,9 +8987,9 @@ class MainWindow(QMainWindow):
 		idx = max(0, min(int(index), len(self.polar_cine_preview_frames) - 1))
 		self.polar_cine_preview_index = idx
 		pix = self.polar_cine_preview_frames[idx]
-		self.preview_pixmaps["polar_cine_montaje"] = pix
-		self.preview_base_sizes["polar_cine_montaje"] = pix.size()
-		self._apply_preview_zoom("polar_cine_montaje")
+		self.preview_pixmaps["polar_perfusion_directa"] = pix
+		self.preview_base_sizes["polar_perfusion_directa"] = pix.size()
+		self._apply_preview_zoom("polar_perfusion_directa")
 
 	def _advance_polar_cine_frame(self):
 		if not self.polar_cine_preview_frames:
@@ -11836,9 +11859,8 @@ class MainWindow(QMainWindow):
 			"2) polar_clinico: panel estilo estación (histograma+bullseye) con PSD/PHB para lectura rápida.\n"
 			"3) polar_map_Δsigned: Δ circular (esfuerzo-reposo), conserva dirección (adelanto/atraso relativo).\n"
 			"4) polar_map_Δabs: magnitud |Δ| sin dirección, útil para localizar hotspots dinámicos.\n"
-			"5) polar_perfusion_directa: perfusión polar continua (apex centro, base borde), complementa fase.\n"
-			"6) bullseye_directo: resumen segmentario AHA rápido de intensidad regional.\n"
-			"7) polar_cine_montaje: dinámica gate-a-gate del patrón polar.\n\n"
+			"5) polar_perfusion_directa: perfusión polar continua (apex centro, base borde) + cine gate-a-gate integrado con operación esfuerzo/reposo.\n"
+			"6) bullseye_directo: resumen segmentario AHA rápido de intensidad regional.\n\n"
 			"Fórmulas clave:\n"
 			"• Δsigned = ((φ_esfuerzo - φ_reposo + 180) mod 360) - 180\n"
 			"• Δabs = |Δsigned|\n"
@@ -12073,7 +12095,7 @@ class MainWindow(QMainWindow):
 		if target_tabs is not None:
 			names = [n for n in names if n in set(target_tabs)]
 		for name in names:
-			if name in ("comparacion_stress_rest", "comparacion_ejes", "polar_cine_montaje"):
+			if name in ("comparacion_stress_rest", "comparacion_ejes", "polar_perfusion_directa"):
 				continue
 			left_path = os.path.join(self.output_dir, f"{name}.png")
 			right_path = os.path.join(self.compare_output_dir, f"{name}.png")
