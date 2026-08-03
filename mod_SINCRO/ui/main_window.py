@@ -787,9 +787,6 @@ class MainWindow(QMainWindow):
 		)
 		self.process_btn.clicked.connect(self.process_current)
 		self.process_btn.setToolTip("Recalcula segmentación, fase, métricas, polar map y gráficos.")
-		self.open_folder_btn = QPushButton("Carpeta")
-		self.open_folder_btn.clicked.connect(self.open_output_folder)
-		self.open_folder_btn.setToolTip("Abre la carpeta con los PNG y el PDF generados.")
 		self.open_pdf_btn = QPushButton("Abrir PDF")
 		self.open_pdf_btn.clicked.connect(self.open_pdf)
 		self.open_pdf_btn.setToolTip("Abre el informe clínico PDF generado.")
@@ -1310,22 +1307,20 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_source_combo = QComboBox()
 				self.cine_crudo_source_combo.addItems(["UngGat", "Gated"])
 				self.cine_crudo_source_combo.setCurrentText("UngGat")
+				self.cine_crudo_source_combo.setFixedWidth(80)
 				self.cine_crudo_source_combo.currentTextChanged.connect(self._on_cine_crudo_source_changed)
 				toolbar.addWidget(self.cine_crudo_source_combo)
 				toolbar.addWidget(QLabel("Modo"))
 				self.cine_crudo_mode_combo = QComboBox()
 				self.cine_crudo_mode_combo.addItems(["Continuo", "Rebote"])
 				self.cine_crudo_mode_combo.setCurrentText("Rebote")
+				self.cine_crudo_mode_combo.setFixedWidth(100)
 				self.cine_crudo_mode_combo.setToolTip("Continuo: loop 1→N→1. Rebote: 1→N→1→N (ping-pong).")
 				toolbar.addWidget(self.cine_crudo_mode_combo)
 				self.cine_crudo_frame_label = QLabel("--/--")
 				self.cine_crudo_frame_label.setStyleSheet("color:#444;")
+				self.cine_crudo_frame_label.setFixedWidth(180)
 				toolbar.addWidget(self.cine_crudo_frame_label)
-				self.cine_crudo_drag_label = QLabel("drag: —")
-				self.cine_crudo_drag_label.setMinimumWidth(118)
-				self.cine_crudo_drag_label.setStyleSheet("color:#1f3b5b; font-weight:600;")
-				self.cine_crudo_drag_label.setToolTip("Indica qué guía se va a arrastrar: upper, lower o ref.")
-				toolbar.addWidget(self.cine_crudo_drag_label)
 
 				# --- Fila 2 (toolbar motion correction): método + eje + threshold mejorado + acciones ---
 				toolbar2 = QHBoxLayout()
@@ -2704,6 +2699,15 @@ class MainWindow(QMainWindow):
 		ui_l.addWidget(compact_controls)
 		root.addWidget(ui_box)
 
+		# --- Carpeta de salida ---
+		output_box = QGroupBox("Carpeta de salida")
+		output_l = QVBoxLayout(output_box)
+		output_btn = QPushButton("Abrir carpeta de salida")
+		output_btn.clicked.connect(self.open_output_folder)
+		output_btn.setToolTip("Abre el explorador en la carpeta donde se guardan los PNG, PDF y demás salidas.")
+		output_l.addWidget(output_btn)
+		root.addWidget(output_box)
+
 		# Aplicar el tema en vivo al cambiar el combo (aunque se cancele el diálogo,
 		# ya queda aplicado el tema elegido; se persiste solo al Aceptar).
 		def _on_theme_changed(_idx: int):
@@ -3405,6 +3409,7 @@ class MainWindow(QMainWindow):
 		)
 		self._set_progress(100, "Crudo cargado (QC listo)")
 		self.statusBar().showMessage("Crudo cargado: QC de proyecciones listo")
+		self._refresh_readonly_results_panel()
 
 		QMessageBox.information(
 			self,
@@ -8926,8 +8931,6 @@ class MainWindow(QMainWindow):
 		label = marker or "—"
 		if marker == "compare_line":
 			label = "ref"
-		if hasattr(self, "cine_crudo_drag_label"):
-			self.cine_crudo_drag_label.setText(f"drag: {label}")
 		self._cine_crudo_hover_marker = marker
 		preview = self.preview_labels.get("cine_crudo") if hasattr(self, "preview_labels") else None
 		if preview is not None:
@@ -11038,7 +11041,7 @@ class MainWindow(QMainWindow):
 
 	def _update_cine_crudo_toggle_text(self):
 		if self.cine_crudo_play_btn is not None:
-			self.cine_crudo_play_btn.setText("Pause" if self.cine_crudo_playing else "Play")
+			self.cine_crudo_play_btn.setText("⏸" if self.cine_crudo_playing else "▶")
 
 	def _on_cine_crudo_speed_changed(self, value: int):
 		self.cine_crudo_timer.setInterval(max(40, int(value)))
@@ -11660,15 +11663,15 @@ class MainWindow(QMainWindow):
 			return
 		self.compare_axes_cine_toggle_btn.setEnabled(enabled)
 		if not enabled:
-			self.compare_axes_cine_toggle_btn.setText("Play/Pause")
+			self.compare_axes_cine_toggle_btn.setText("▶ ⏸")
 			return
 		if not self.compare_axes_preview_frames:
-			self.compare_axes_cine_toggle_btn.setText("Play/Pause")
+			self.compare_axes_cine_toggle_btn.setText("▶ ⏸")
 			return
 		if self.compare_axes_playing:
-			self.compare_axes_cine_toggle_btn.setText("Pause")
+			self.compare_axes_cine_toggle_btn.setText("⏸")
 		else:
-			self.compare_axes_cine_toggle_btn.setText("Play")
+			self.compare_axes_cine_toggle_btn.setText("▶")
 
 	def resizeEvent(self, event):
 		super().resizeEvent(event)
@@ -11763,6 +11766,8 @@ class MainWindow(QMainWindow):
 		"""
 		if self.study is None or self.metrics is None:
 			QMessageBox.warning(self, "SINCRO", "Primero procesá el estudio actual (STRESS).")
+			return
+		if self._check_unsaved_study():
 			return
 		path, _ = QFileDialog.getOpenFileName(
 			self,

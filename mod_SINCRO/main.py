@@ -37,15 +37,7 @@ def main(argv: list[str]) -> int:
 
     from ui.main_window import MainWindow
 
-    try:
-        window = MainWindow(initial_path=file_path)
-    except Exception:
-        import traceback, os
-        log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "startup_error.txt")
-        with open(log, "w", encoding="utf-8") as fh:
-            traceback.print_exc(file=fh)
-        traceback.print_exc()
-        return 1
+    window = MainWindow(initial_path=file_path)
     window.show()
     return app.exec()
 
