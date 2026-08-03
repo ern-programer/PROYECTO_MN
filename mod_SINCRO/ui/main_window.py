@@ -2126,6 +2126,37 @@ class MainWindow(QMainWindow):
 		label.setText("")
 		label.setPixmap(pix.scaledToWidth(target_w, Qt.TransformationMode.SmoothTransformation))
 
+	def _render_empty_curve(self, label: QLabel, xlabel: str, ylabel: str, filename: str) -> None:
+		"""Dibuja unos ejes X/Y vacíos (sin datos) en `label`, para no dejar
+		el gráfico anterior 'pegado' cuando no hay estudio procesado."""
+		try:
+			import matplotlib
+			matplotlib.use("Agg")
+			import matplotlib.pyplot as plt
+			bg, fg, grid = "#0b1220", "#5b6470", "#26324a"
+			fig, ax = plt.subplots(figsize=(5, 2.2), facecolor=bg)
+			ax.set_facecolor(bg)
+			ax.set_xlim(0, 1)
+			ax.set_ylim(0, 1)
+			ax.set_xticks([])
+			ax.set_yticks([])
+			ax.set_xlabel(xlabel, color=fg, fontsize=9)
+			ax.set_ylabel(ylabel, color=fg, fontsize=9)
+			for spine in ax.spines.values():
+				spine.set_color(grid)
+			ax.grid(True, color=grid, alpha=0.35)
+			out = os.path.join(self.output_dir, filename)
+			fig.tight_layout()
+			fig.savefig(out, dpi=140, facecolor=bg, bbox_inches="tight")
+			plt.close(fig)
+			pix = QPixmap(out)
+			target_w = max(240, label.width() - 4)
+			label.setText("")
+			label.setPixmap(pix.scaledToWidth(target_w, Qt.TransformationMode.SmoothTransformation))
+		except Exception:
+			label.setPixmap(QPixmap())
+			label.setText("")
+
 	def _refresh_readonly_results_panel(self) -> None:
 		"""Refresca el panel de solo-lectura de la banda inferior tras procesar."""
 		if getattr(self, "patient_data_label", None) is None:
@@ -2181,8 +2212,19 @@ class MainWindow(QMainWindow):
 				pass
 			self.main_metrics_readout.setText("<br>".join(lines))
 		# --- Curvas ya renderizadas ---
-		self._load_curve_pixmap(self.curve_hist_view, "histograma.png", "Histograma de fase: procesá un estudio.")
-		self._load_curve_pixmap(self.curve_fevi_view, "curva_fevi.png", "Curva volumen/derivada: modo avanzado.")
+		# Asincronía (histograma de fase): solo si hay resultado actual; si no,
+		# ejes vacíos para no mostrar el último gráfico que quedó.
+		hist_path = os.path.join(self.output_dir, "histograma.png")
+		if getattr(self, "phase_result", None) is not None and os.path.isfile(hist_path):
+			self._load_curve_pixmap(self.curve_hist_view, "histograma.png", "Histograma de fase: procesá un estudio.")
+		else:
+			self._render_empty_curve(self.curve_hist_view, "Fase (°)", "Frecuencia", "_empty_hist.png")
+		# FEVI (volumen/derivada): solo si se generó el PNG; si no, ejes vacíos.
+		fevi_path = os.path.join(self.output_dir, "curva_fevi.png")
+		if os.path.isfile(fevi_path):
+			self._load_curve_pixmap(self.curve_fevi_view, "curva_fevi.png", "Curva volumen/derivada: modo avanzado.")
+		else:
+			self._render_empty_curve(self.curve_fevi_view, "Gate", "Volumen (mL)", "_empty_fevi.png")
 		# Título de la 2da. etapa sobre el cine_compare (reposo/esfuerzo según la
 		# 1ra. cargada); se actualiza cada vez que se reprocesa/carga.
 		self._refresh_cine_compare_title()
