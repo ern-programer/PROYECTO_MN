@@ -142,6 +142,30 @@ def generate_report(
 	story.append(HRFlowable(width="100%", thickness=1.4, color=DARK_BLUE))
 	story.append(Spacer(1, 4 * mm))
 
+	# --- Resumen ejecutivo (síntesis del hallazgo) -----------------------------
+	try:
+		from core.executive_summary import build_executive_summary
+		exec_summary = build_executive_summary(
+			metrics=metrics,
+			ef=ef,
+			territory=territory,
+			volumes=volumes,
+			phase_label=phase_label,
+		)
+		if exec_summary.get("available"):
+			story.append(Paragraph("Resumen ejecutivo", section_style))
+			for sec in exec_summary.get("sections", []):
+				story.append(Paragraph(
+					f"<b>{sec['title']}.</b> {sec['text']}",
+					body_style,
+				))
+				story.append(Spacer(1, 1.2 * mm))
+			story.append(Spacer(1, 3 * mm))
+			story.append(HRFlowable(width="100%", thickness=0.6, color=HexColor("#cccccc")))
+			story.append(Spacer(1, 4 * mm))
+	except Exception:
+		pass
+
 	story.append(Paragraph("1. Datos del estudio", section_style))
 	info_data = [
 		["Fecha informe", datetime.now().strftime("%d/%m/%Y %H:%M")],

@@ -68,6 +68,7 @@ from core.perfusion_texture import (
 )
 from core.segmental_report import SEGMENT_NAMES, build_segmental_report
 from core.stress_rest import compare_stress_rest
+from core.executive_summary import build_executive_summary
 from core.intestinal_subtraction import apply_intestinal_subtraction
 from core.ectb_lv import (
 	EF_REGRESSIONS,
@@ -334,8 +335,9 @@ class MainWindow(QMainWindow):
 		# Qué geometría de ROI alimenta la fase: el anillo circular de siempre o la
 		# pared irregular que traza el ECTb siguiendo el máximo de cuentas.
 		self.roi_source_combo = QComboBox()
+		self.roi_source_combo.addItem("Contornos Irregulares", "ectb_wall")
 		self.roi_source_combo.addItem("Anillo (ROI clásica)", "ring")
-		self.roi_source_combo.addItem("Pared ECTb (contornos irregulares)", "ectb_wall")
+		self.roi_source_combo.setCurrentIndex(0)
 
 		# El centro del VI se venía tomando como centroide de la máscara de
 		# miocardio, que se corre hacia el sector de mayor captación. Esta opción
@@ -517,8 +519,8 @@ class MainWindow(QMainWindow):
 		self.seg_method.setToolTip("auto: segmentación automática; threshold: umbral simple; manual: usa los ROIs que dibujes o pegues.")
 		self.roi_source_combo.setToolTip(
 			"Geometría que alimenta el análisis de fase.\n"
+			"Contornos Irregulares (default): traza endo/epi por ángulo con espesor variable, estilo ECTb.\n"
 			"Anillo: ROI circular clásica (centro + radio interno/externo).\n"
-			"Pared ECTb: contornos irregulares endo/epi por ángulo, con espesor variable.\n"
 			"Podés comparar ambas en 'Vista asincronía' antes de decidir."
 		)
 		self.cavity_center_check.setToolTip(
@@ -1174,6 +1176,12 @@ class MainWindow(QMainWindow):
 		self.summary_clinical.setPlaceholderText("Aquí aparecerá el resumen clínico cuando proceses un estudio.")
 		self.summary_clinical.setToolTip("Resumen clínico: lectura vs DB normal, métricas robustas, volúmenes, FEVI y territorios.")
 
+		self.summary_executive = QTextEdit()
+		self.summary_executive.setReadOnly(True)
+		self.summary_executive.setMinimumHeight(120)
+		self.summary_executive.setPlaceholderText("Aquí aparecerá el resumen ejecutivo (síntesis del hallazgo) cuando proceses un estudio.")
+		self.summary_executive.setToolTip("Resumen ejecutivo: síntesis del hallazgo en lenguaje natural (fase, territorios, función). Mismo texto que encabeza el informe PDF.")
+
 		self.summary_technical = QTextEdit()
 		self.summary_technical.setReadOnly(True)
 		self.summary_technical.setMinimumHeight(120)
@@ -1181,6 +1189,7 @@ class MainWindow(QMainWindow):
 		self.summary_technical.setToolTip("Detalle técnico: metadata DICOM, parámetros, métricas y notas de QC.")
 
 		self.summary_tabs = QTabWidget()
+		self.summary_tabs.addTab(self.summary_executive, "Resumen")
 		self.summary_tabs.addTab(self.summary_clinical, "Clínico")
 		self.summary_tabs.addTab(self.summary_technical, "Técnico")
 
@@ -4100,7 +4109,7 @@ class MainWindow(QMainWindow):
 		pixel_spacing = getattr(study, "pixel_spacing", None)
 		slice_mm = getattr(study, "z_spacing_mm", None)
 		if not pixel_spacing or slice_mm is None:
-			self._log("[WARN] Pared ECTb no aplicada: el estudio no trae spacing.")
+			self._log("[WARN] Contornos Irregulares no aplicados: el estudio no trae spacing.")
 			return False
 
 		try:
@@ -4108,22 +4117,22 @@ class MainWindow(QMainWindow):
 			result = analyze_lv_ectb(cube, seg, pixel_mm, float(slice_mm), self.ectb_config())
 			if not getattr(result, "available", False):
 				reason = str(getattr(result, "reason", "") or "sin motivo informado")
-				self._log(f"[WARN] Pared ECTb no aplicada ({reason}). Se mantiene la ROI anular.")
+				self._log(f"[WARN] Contornos Irregulares no aplicados ({reason}). Se mantiene la ROI anular.")
 				return False
 			wall_seg = wall_segmentation_from_ectb(result, seg, pixel_mm)
 		except Exception as exc:
-			self._log(f"[WARN] Pared ECTb no aplicada: {exc}. Se mantiene la ROI anular.")
+			self._log(f"[WARN] Contornos Irregulares no aplicados: {exc}. Se mantiene la ROI anular.")
 			return False
 
 		if wall_seg is None:
-			self._log("[WARN] Pared ECTb no aplicada: los contornos no generaron máscara. Se mantiene la ROI anular.")
+			self._log("[WARN] Contornos Irregulares no aplicados: los contornos no generaron máscara. Se mantiene la ROI anular.")
 			return False
 
 		ring_voxels = int(getattr(seg, "n_voxels", 0))
 		self.seg_ring_base = seg
 		self.seg = wall_seg
 		self._log(
-			f"ROI de análisis = pared ECTb (contornos irregulares): {wall_seg.n_voxels} voxels "
+			f"ROI de análisis = Contornos Irregulares: {wall_seg.n_voxels} voxels "
 			f"en {len(result.valid_slices)} de {result.n_slices_total} cortes "
 			f"(la ROI anular tenía {ring_voxels})."
 		)
@@ -5002,6 +5011,7 @@ class MainWindow(QMainWindow):
 			self.seg_method.setCurrentText("auto")
 		self.summary_clinical.clear()
 		self.summary_technical.clear()
+		self.summary_executive.clear()
 		self._refresh_readonly_results_panel()
 		for movie in list(self.preview_movies.values()):
 			movie.stop()
@@ -5474,7 +5484,7 @@ class MainWindow(QMainWindow):
 				self.seg_ring_base = self.seg
 				self._log_cavity_center_shift(self.seg)
 				if self.roi_source() == "ectb_wall":
-					self._set_progress(38, "Reemplazando ROI por la pared ECTb...")
+					self._set_progress(38, "Reemplazando ROI por Contornos Irregulares...")
 					self._apply_ectb_wall_segmentation(cube_for_segmentation)
 				self._cache_seg_sig = seg_sig
 				self._cache_phase_sig = ""
@@ -7282,6 +7292,25 @@ class MainWindow(QMainWindow):
 
 		self.summary_clinical.setPlainText("\n".join(clinical))
 		self.summary_technical.setPlainText("\n".join(technical))
+
+		# Resumen ejecutivo (síntesis del hallazgo en lenguaje natural).
+		try:
+			exec_db_eval = None
+			try:
+				_dataset, _sex, _protocol, exec_db_eval = self._normal_db_context()
+			except Exception:
+				exec_db_eval = None
+			exec_summary = build_executive_summary(
+				metrics=self.metrics,
+				ef=ef,
+				territory=self.territory,
+				volumes=vol,
+				phase_label=str(ctx.get("phase", "Estudio")),
+				db_eval=exec_db_eval,
+			)
+			self.summary_executive.setPlainText(exec_summary.get("plain_text", ""))
+		except Exception:
+			self.summary_executive.setPlainText("")
 
 	def _perfusion_image_for_cube(self, cube, ed_gate):
 		"""Imagen de perfusión 3D (n_slices,H,W) para el bull's-eye segmentario,
