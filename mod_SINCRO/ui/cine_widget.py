@@ -407,6 +407,13 @@ class RoiImageLabel(QLabel):
 		self._message = "Cargá un estudio para ver el cine"
 		self._zoom = 1.0
 
+	def set_overlay_label(self, text: str, color: str = "#facc15"):
+		"""Rótulo persistente (etapa/paciente) dibujado SOBRE la imagen, esquina
+		superior izquierda. Viaja con la imagen: el usuario siempre sabe qué cine ve."""
+		self._overlay_label = str(text or "")
+		self._overlay_label_color = str(color or "#facc15")
+		self.update()
+
 	def set_center_pick_mode(self, enabled: bool):
 		"""Modo 'fijar centro de cavidad': el clic izquierdo define solo el
 		centro del corte (no un ROI completo) y el derecho lo borra."""
@@ -577,6 +584,7 @@ class RoiImageLabel(QLabel):
 		if self._base_pixmap is None:
 			painter.setPen(QColor("#dddddd"))
 			painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
+			self._draw_overlay_label(painter)
 			return
 
 		rect = self._image_rect()
@@ -663,6 +671,33 @@ class RoiImageLabel(QLabel):
 				label = (label + " | " if label else "") + "ROI intestino: clic agrega, doble clic cierra, clic der borra"
 			if label:
 				painter.drawText(12, 22, label)
+
+		self._draw_overlay_label(painter)
+
+	def _draw_overlay_label(self, painter):
+		"""Dibuja el rótulo de etapa/paciente en la esquina superior izquierda,
+		con fondo semitransparente para que se lea sobre cualquier colormap."""
+		text = getattr(self, "_overlay_label", "")
+		if not text:
+			return
+		color = getattr(self, "_overlay_label_color", "#facc15")
+		painter.save()
+		painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+		font = painter.font()
+		font.setPointSize(max(8, font.pointSize() + 1))
+		font.setBold(True)
+		painter.setFont(font)
+		metrics = painter.fontMetrics()
+		pad_x, pad_y = 6, 3
+		tw = metrics.horizontalAdvance(text)
+		th = metrics.height()
+		bg = QRectF(4, 4, tw + 2 * pad_x, th + 2 * pad_y)
+		painter.setPen(Qt.PenStyle.NoPen)
+		painter.setBrush(QColor(0, 0, 0, 140))
+		painter.drawRoundedRect(bg, 4, 4)
+		painter.setPen(QColor(color))
+		painter.drawText(int(bg.x() + pad_x), int(bg.y() + pad_y + metrics.ascent()), text)
+		painter.restore()
 
 	def mousePressEvent(self, event):
 		if self._base_pixmap is None or self._frame_shape is None:
@@ -1550,6 +1585,10 @@ class CineWidget(QWidget):
 		"""Actualiza el rótulo de la 1ra etapa (ej. 'Esfuerzo' / 'Reposo' / '1ra. Fase')."""
 		if getattr(self, "phase_title_label", None) is not None:
 			self.phase_title_label.setText(str(text))
+
+	def set_image_overlay_label(self, text: str, color: str = "#facc15") -> None:
+		"""Rótulo persistente (etapa/paciente) dibujado SOBRE la imagen del cine."""
+		self.preview.set_overlay_label(text, color=color)
 
 	def set_debug_grid(self, enabled: bool) -> None:
 		"""Modo debug: dibuja bordes rojos de 1px alrededor de cada contenedor del

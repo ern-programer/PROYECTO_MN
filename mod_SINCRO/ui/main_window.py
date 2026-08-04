@@ -249,6 +249,10 @@ class MainWindow(QMainWindow):
 		# Plantillas de presentación del montaje.
 		self.cine_crudo_montage_template = "denso"
 		self.cine_crudo_montage_cut_zoom = 1.0
+		# Colormap y window level (percentiles) del montaje clínico.
+		self.cine_crudo_montage_cmap = "odyssey_cool"
+		self.cine_crudo_montage_win_low = 2.0
+		self.cine_crudo_montage_win_high = 99.5
 		# Ventanas por tira/eje (1-based): inicio y cantidad visible.
 		self.cine_crudo_stripe_start = {"SA": 1, "VLA": 1, "HLA": 1}
 		self.cine_crudo_stripe_count = {"SA": 999, "VLA": 999, "HLA": 999}
@@ -1210,7 +1214,11 @@ class MainWindow(QMainWindow):
 		self._update_compare_window_labels()
 		self._update_compare_axes_zoom_label()
 		self._refresh_cine_source_selector()
-		self._sidebar_layout.addWidget(compare_box)
+		# 'Comparación ejes' (lámina primitiva) fue reemplazada por el Montaje
+		# clínico: colormap, window level y export migraron a esa barra. Se
+		# mantiene construida (handlers acoplados) pero fuera del sidebar.
+		self._compare_axes_box_hidden = compare_box
+		compare_box.setVisible(False)
 
 		self.summary_clinical = QTextEdit()
 		self.summary_clinical.setReadOnly(True)
@@ -1903,6 +1911,43 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_gate_all_btn.setToolTip("Usa todos los gates para el montaje (click rápido).")
 				self.cine_crudo_gate_all_btn.clicked.connect(self._set_montage_gate_full_range)
 				toolbar7_r3.addWidget(self.cine_crudo_gate_all_btn)
+
+				# --- Migrados desde 'Comparación ejes': colormap, window level y export ---
+				toolbar7_r3.addWidget(QLabel("Colormap"))
+				self.cine_crudo_montage_cmap_combo = QComboBox()
+				self.cine_crudo_montage_cmap_combo.addItems(self._all_cmaps)
+				self.cine_crudo_montage_cmap_combo.setCurrentText(self.cine_crudo_montage_cmap)
+				self.cine_crudo_montage_cmap_combo.setToolTip("Escala de colores del montaje clínico.")
+				self.cine_crudo_montage_cmap_combo.currentTextChanged.connect(self._on_montage_cmap_changed)
+				toolbar7_r3.addWidget(self.cine_crudo_montage_cmap_combo)
+				toolbar7_r3.addWidget(QLabel("Base"))
+				self.cine_crudo_montage_win_low_spin = QDoubleSpinBox()
+				self.cine_crudo_montage_win_low_spin.setRange(0.0, 40.0)
+				self.cine_crudo_montage_win_low_spin.setSingleStep(0.5)
+				self.cine_crudo_montage_win_low_spin.setDecimals(1)
+				self.cine_crudo_montage_win_low_spin.setValue(self.cine_crudo_montage_win_low)
+				self.cine_crudo_montage_win_low_spin.setSuffix(" %")
+				self.cine_crudo_montage_win_low_spin.setMaximumWidth(72)
+				self.cine_crudo_montage_win_low_spin.setToolTip("Percentil bajo (fondo). Sube para oscurecer el fondo.")
+				self.cine_crudo_montage_win_low_spin.valueChanged.connect(self._on_montage_window_changed)
+				toolbar7_r3.addWidget(self.cine_crudo_montage_win_low_spin)
+				toolbar7_r3.addWidget(QLabel("Top"))
+				self.cine_crudo_montage_win_high_spin = QDoubleSpinBox()
+				self.cine_crudo_montage_win_high_spin.setRange(60.0, 100.0)
+				self.cine_crudo_montage_win_high_spin.setSingleStep(0.5)
+				self.cine_crudo_montage_win_high_spin.setDecimals(1)
+				self.cine_crudo_montage_win_high_spin.setValue(self.cine_crudo_montage_win_high)
+				self.cine_crudo_montage_win_high_spin.setSuffix(" %")
+				self.cine_crudo_montage_win_high_spin.setMaximumWidth(72)
+				self.cine_crudo_montage_win_high_spin.setToolTip("Percentil alto (saturación). Baja para realzar el brillo.")
+				self.cine_crudo_montage_win_high_spin.valueChanged.connect(self._on_montage_window_changed)
+				toolbar7_r3.addWidget(self.cine_crudo_montage_win_high_spin)
+				self.cine_crudo_montage_export_btn = QToolButton()
+				self.cine_crudo_montage_export_btn.setText("Guardar PNG")
+				self.cine_crudo_montage_export_btn.setToolTip("Exporta el montaje clínico actual como PNG en la ubicación que elijas.")
+				self.cine_crudo_montage_export_btn.clicked.connect(self._export_cine_crudo_montage_png)
+				self.cine_crudo_montage_export_btn.setEnabled(False)
+				toolbar7_r3.addWidget(self.cine_crudo_montage_export_btn)
 				toolbar7_r3.addStretch(1)
 			toolbar.addStretch(1)
 			tab_layout.addLayout(toolbar)
@@ -12022,6 +12067,8 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_save_axes_dcm_btn.setEnabled(True)
 			if hasattr(self, "cine_crudo_montage_btn"):
 				self.cine_crudo_montage_btn.setEnabled(True)
+			if hasattr(self, "cine_crudo_montage_export_btn"):
+				self.cine_crudo_montage_export_btn.setEnabled(True)
 			if hasattr(self, "cine_crudo_mark_rest_btn"):
 				self.cine_crudo_mark_rest_btn.setEnabled(True)
 			self._log(f"Cortes generados: SA {z0 + 1}..{z1 + 1} ({sa_cube.shape[1]} cortes, espesor {thickness}px = {cut_thickness_mm:.2f}mm). HLA/VLA visibles en comparacion_ejes. Ahora podés Procesar recon o Guardar ejes DICOM.")
@@ -12048,6 +12095,7 @@ class MainWindow(QMainWindow):
 			gate_to = int(getattr(self, "cine_crudo_gate_to", 1) or 1)
 			template_mode = str(getattr(self, "cine_crudo_montage_template", "denso") or "denso")
 			cut_zoom = float(getattr(self, "cine_crudo_montage_cut_zoom", 1.0) or 1.0)
+			montage_cmap = str(getattr(self, "cine_crudo_montage_cmap", "odyssey_cool") or "odyssey_cool")
 			layout_cfg = self.MONTAGE_LAYOUTS.get(template_mode, self.MONTAGE_LAYOUTS["denso"])
 			per_strip = layout_cfg.get("per_strip")
 
@@ -12086,8 +12134,12 @@ class MainWindow(QMainWindow):
 				g0 = int(np.clip(min(gate_from, gate_to) - 1, 0, arr4.shape[0] - 1))
 				g1 = int(np.clip(max(gate_from, gate_to) - 1, 0, arr4.shape[0] - 1))
 				v = np.asarray(arr4[g0:g1 + 1], dtype=np.float64).sum(axis=0)
-				p99 = float(np.percentile(v, 99.5)) if v.size else 1.0
-				p2 = float(np.percentile(v, 2.0)) if v.size else 0.0
+				win_lo = float(getattr(self, "cine_crudo_montage_win_low", 2.0) or 0.0)
+				win_hi = float(getattr(self, "cine_crudo_montage_win_high", 99.5) or 100.0)
+				if win_hi <= win_lo:
+					win_hi = min(100.0, win_lo + 1.0)
+				p99 = float(np.percentile(v, win_hi)) if v.size else 1.0
+				p2 = float(np.percentile(v, win_lo)) if v.size else 0.0
 				return np.clip((v - p2) / max(p99 - p2, 1e-8), 0.0, 1.0)
 
 			def _voi_bounds(nk):
@@ -12199,7 +12251,7 @@ class MainWindow(QMainWindow):
 					k = idxs[c]
 					img = vol[int(np.clip(k, 0, vol.shape[0] - 1))]
 					img = _zoom_cut(img, cut_zoom)
-					ax.imshow(img, cmap="odyssey_cool", vmin=0.0, vmax=1.0,
+					ax.imshow(img, cmap=montage_cmap, vmin=0.0, vmax=1.0,
 					          interpolation="bicubic", aspect="equal")
 					ax.set_title(f"{prefix} {k + 1}", color="white", fontsize=7, fontweight="bold", pad=1.2)
 					if c == 0:
@@ -12277,6 +12329,45 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_montage_cut_zoom = float(max(1.0, min(2.5, float(value))))
 		if self.cine_crudo_preview_mode == "sa_montage":
 			self._schedule_montage_refresh(0)
+
+	def _on_montage_cmap_changed(self, name):
+		self.cine_crudo_montage_cmap = str(name)
+		if self.cine_crudo_preview_mode == "sa_montage":
+			self._schedule_montage_refresh(0)
+
+	def _on_montage_window_changed(self, _value):
+		if hasattr(self, "cine_crudo_montage_win_low_spin"):
+			self.cine_crudo_montage_win_low = float(self.cine_crudo_montage_win_low_spin.value())
+		if hasattr(self, "cine_crudo_montage_win_high_spin"):
+			self.cine_crudo_montage_win_high = float(self.cine_crudo_montage_win_high_spin.value())
+		if self.cine_crudo_preview_mode == "sa_montage":
+			self._schedule_montage_refresh(0)
+
+	def _export_cine_crudo_montage_png(self):
+		"""Exporta el montaje clínico actual como PNG donde elija el usuario."""
+		if not self.cine_crudo_axes_for_export:
+			QMessageBox.information(self, "SINCRO", "Primero generá los cortes y el montaje ('Ver montaje').")
+			return
+		src = os.path.join(self.output_dir, "sa_montage.png")
+		if self.cine_crudo_preview_mode != "sa_montage" or not os.path.exists(src):
+			self._show_cine_crudo_sa_montage()
+		if not os.path.exists(src):
+			QMessageBox.warning(self, "SINCRO", "No hay montaje para exportar. Generalo primero con 'Ver montaje'.")
+			return
+		suggested = os.path.join(self.output_dir, "montaje_clinico.png")
+		path, _flt = QFileDialog.getSaveFileName(self, "Guardar montaje clínico", suggested, "Imagen PNG (*.png)")
+		if not path:
+			return
+		if not path.lower().endswith(".png"):
+			path += ".png"
+		try:
+			import shutil
+			shutil.copyfile(src, path)
+			self._log(f"Montaje exportado a: {path}")
+			QMessageBox.information(self, "SINCRO", f"Montaje guardado en:\n{path}")
+		except Exception as exc:
+			self._log(f"[ERROR] Export montaje: {exc}")
+			QMessageBox.warning(self, "SINCRO", f"No se pudo guardar el montaje:\n{exc}")
 
 	def _on_montage_gate_range_changed(self, _value):
 		"""Actualiza rango de gates del montaje en vivo (click-only friendly)."""
