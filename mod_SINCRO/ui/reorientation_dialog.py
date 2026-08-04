@@ -80,7 +80,7 @@ class _Handle:
 class CardiacReorientationDialog(QDialog):
     """Reorientacion oblicua interactiva del VI."""
 
-    def __init__(self, ungated_volume, gated_volume=None, source_label="", geometry=None, parent=None):
+    def __init__(self, ungated_volume, gated_volume=None, source_label="", geometry=None, parent=None, locked_voi=None, initial_orientation=None):
         super().__init__(parent)
         self.setWindowTitle("Reorientar corazón · Rec/Ref")
         self.setModal(True)
@@ -89,6 +89,11 @@ class CardiacReorientationDialog(QDialog):
         self._ung = np.asarray(ungated_volume, dtype=np.float64)
         self._gated = None if gated_volume is None else np.asarray(gated_volume, dtype=np.float64)
         self._geometry = geometry if isinstance(geometry, SpectGeometry) else None
+        self._locked_voi = locked_voi if isinstance(locked_voi, dict) else None
+        # Semilla de orientación heredada de la otra etapa (eje largo + rango de
+        # cortes + espesor). A diferencia del zoom (locked_voi), NO se bloquea:
+        # arranca con estos valores pero el usuario puede corregirlos.
+        self._init_orient = initial_orientation if isinstance(initial_orientation, dict) else None
         self.reoriented_ungated = None
         self.reoriented_gated = None
         self.result_long_axis = None
@@ -96,6 +101,8 @@ class CardiacReorientationDialog(QDialog):
         self.base_k = 0
         self.apex_k = 0
         self.thickness = 1
+        self.result_out_size = 0
+        self.result_half_length = 0.0
 
         n = int(max(self._ung.shape))
         self._N = n
@@ -128,6 +135,21 @@ class CardiacReorientationDialog(QDialog):
             self._voi_rz, self._voi_ry, self._voi_rx = float(arz), float(ary), float(arx)
             self._center = [self._voi_cz, self._voi_cy, self._voi_cx]
             cz, cy, cx = self._voi_cz, self._voi_cy, self._voi_cx
+
+        # Zoom BLOQUEADO entre etapas: si viene el VOI de la 1ra etapa, se fuerzan
+        # los semiejes de la elipse (la magnificación) para que ambas etapas usen el
+        # MISMO zoom y no se infiera una falsa dilatación del VI. El centro/orientación
+        # sí pueden diferir (anatomía real); el zoom no.
+        if self._locked_voi is not None:
+            try:
+                if self._locked_voi.get("rz") is not None:
+                    self._voi_rz = max(3.0, float(self._locked_voi["rz"]))
+                if self._locked_voi.get("ry") is not None:
+                    self._voi_ry = max(3.0, float(self._locked_voi["ry"]))
+                if self._locked_voi.get("rx") is not None:
+                    self._voi_rx = max(3.0, float(self._locked_voi["rx"]))
+            except (TypeError, ValueError):
+                pass
 
         # Colormap y ventaneo en vivo para los cortes SA/HLA/VLA.
         self._cmap = "odyssey_cool"
@@ -181,6 +203,16 @@ class CardiacReorientationDialog(QDialog):
         # Si hubo auto-orientación, coloca la línea del eje largo según el PCA.
         if self._auto is not None:
             self._set_handles_from_long_axis(self._auto["long_axis"], self._auto["half_length"])
+        # Semilla de eje largo heredada de la otra etapa (editable): pisa el auto
+        # para que ambas etapas arranquen con la MISMA orientación.
+        if self._init_orient is not None:
+            u_seed = self._init_orient.get("long_axis")
+            half_seed = self._init_orient.get("half_length")
+            if u_seed is not None and half_seed:
+                try:
+                    self._set_handles_from_long_axis(np.asarray(u_seed, dtype=np.float64), float(half_seed))
+                except (TypeError, ValueError):
+                    pass
         if self._preset_invert_ll_handles:
             self._flip_lateral_handles(redraw=False)
         # Limites base/apex en HLA (fila=k del volumen reorientado). Se ajustan
@@ -439,6 +471,17 @@ class CardiacReorientationDialog(QDialog):
         self._voi_cz, self._voi_cy, self._voi_cx = float(acz), float(acy), float(acx)
         arz, ary, arx = auto["semiaxes"]
         self._voi_rz, self._voi_ry, self._voi_rx = float(arz), float(ary), float(arx)
+        # Respetar el zoom bloqueado de la 1ra etapa (los semiejes no deben cambiar).
+        if self._locked_voi is not None:
+            try:
+                if self._locked_voi.get("rz") is not None:
+                    self._voi_rz = max(3.0, float(self._locked_voi["rz"]))
+                if self._locked_voi.get("ry") is not None:
+                    self._voi_ry = max(3.0, float(self._locked_voi["ry"]))
+                if self._locked_voi.get("rx") is not None:
+                    self._voi_rx = max(3.0, float(self._locked_voi["rx"]))
+            except (TypeError, ValueError):
+                pass
         self._set_handles_from_long_axis(auto["long_axis"], auto["half_length"])
         if self._preset_invert_ll_handles:
             self._flip_lateral_handles(redraw=False)
@@ -471,6 +514,11 @@ class CardiacReorientationDialog(QDialog):
     # ------------------------------------------------------------------ UI
     def _build_ui(self, source_label):
         root = QVBoxLayout(self)
+        _zoom_hint = (
+            "<b>rueda</b> = <span style='color:#ff9a9a'>zoom BLOQUEADO</span> (igualado a la 1ra etapa)"
+            if self._locked_voi is not None
+            else "<b>rueda</b> = zoom"
+        )
         info = QLabel(
             "El VI se detecta y orienta <b>automáticamente</b> con el movimiento del gated "
             "(elipse amarilla + eje largo verde ya colocados sobre <b>cortes tomográficos</b>). "
@@ -481,7 +529,7 @@ class CardiacReorientationDialog(QDialog):
             "(punto <span style='color:#ffe14d'>amarillo</span>) a "
             "<span style='color:#ff5a5a'>●</span> <b>ápex</b> (punto <span style='color:#ff5a5a'>rojo</span>). "
             "<b>Cuadrados amarillos</b> = centro y radios de la VOI. "
-            "<b>Arrastrá</b> cada punto a su lugar; <b>rueda</b> = zoom; los spin <b>Base/Ápex/Esp</b> "
+            "<b>Arrastrá</b> cada punto a su lugar; " + _zoom_hint + "; los spin <b>Base/Ápex/Esp</b> "
             "fijan los límites y el espesor del corte."
         )
         info.setWordWrap(True)
@@ -531,7 +579,7 @@ class CardiacReorientationDialog(QDialog):
         crow.addWidget(QLabel("Esp"))
         self.spin_thick = QSpinBox()
         self.spin_thick.setRange(1, 9)
-        self.spin_thick.setValue(1)
+        self.spin_thick.setValue(int((self._init_orient or {}).get("thickness", 1)))
         crow.addWidget(self.spin_thick)
         root.addWidget(ctrl)
 
@@ -784,8 +832,13 @@ class CardiacReorientationDialog(QDialog):
         # Límites Base/Ápex: en el primer cálculo se fijan relativos al tamaño
         # reorientado real; luego se respeta lo que ajustó el usuario (con clamp).
         if not self._limits_init:
-            self._base_k = int(round(out * 0.15))
-            self._apex_k = int(round(out * 0.85))
+            base_frac, apex_frac = 0.15, 0.85
+            if self._init_orient is not None:
+                # Rango de cortes heredado de la otra etapa (editable).
+                base_frac = float(self._init_orient.get("base_frac", base_frac))
+                apex_frac = float(self._init_orient.get("apex_frac", apex_frac))
+            self._base_k = int(round(out * base_frac))
+            self._apex_k = int(round(out * apex_frac))
             self._limits_init = True
         self._base_k = int(np.clip(self._base_k, 0, out - 1))
         self._apex_k = int(np.clip(self._apex_k, 0, out - 1))
@@ -827,7 +880,12 @@ class CardiacReorientationDialog(QDialog):
             (ap_cx, self._voi_cz), width=2.0 * ap_rx, height=2.0 * self._voi_rz,
             fill=False, edgecolor="#ffd21a", lw=1.6, ls="-"))
         self.ax_tra.plot(ap_cx, self._voi_cz, "s", color="#ffd21a", ms=7)
-        self.ax_tra.plot(ap_rx_x, self._voi_cz - self._voi_rz, "s", color="#ffd21a", ms=7)
+        if self._locked_voi is not None:
+            # Zoom bloqueado (igualado a 1ra etapa): marcador fantasma, no agarrable.
+            self.ax_tra.plot(ap_rx_x, self._voi_cz - self._voi_rz, "s",
+                             mfc="none", mec="#8a7d1a", ms=8, mew=1.2)
+        else:
+            self.ax_tra.plot(ap_rx_x, self._voi_cz - self._voi_rz, "s", color="#ffd21a", ms=7)
         ttl_ap = "Anterior (AP)" if self._ap_angle is not None else "Anterior (aprox.)"
         self.ax_tra.set_title(f"{ttl_ap} · corte tomográfico + eje largo", color="white", fontsize=9, fontweight="bold")
         self.ax_tra.set_xticks([]); self.ax_tra.set_yticks([])
@@ -857,7 +915,11 @@ class CardiacReorientationDialog(QDialog):
             (ll_cy, self._voi_cz), width=2.0 * ll_ry, height=2.0 * self._voi_rz,
             fill=False, edgecolor="#ffd21a", lw=1.6, ls="-"))
         self.ax_cor.plot(ll_cy, self._voi_cz, "s", color="#ffd21a", ms=7)
-        self.ax_cor.plot(ll_ry_x, self._voi_cz - self._voi_rz, "s", color="#ffd21a", ms=7)
+        if self._locked_voi is not None:
+            self.ax_cor.plot(ll_ry_x, self._voi_cz - self._voi_rz, "s",
+                             mfc="none", mec="#8a7d1a", ms=8, mew=1.2)
+        else:
+            self.ax_cor.plot(ll_ry_x, self._voi_cz - self._voi_rz, "s", color="#ffd21a", ms=7)
         ttl_ll = "Lateral izq." if self._ll_angle is not None else "Lateral (aprox.)"
         self.ax_cor.set_title(f"{ttl_ll} · eje largo + VOI", color="white", fontsize=9, fontweight="bold")
         self.ax_cor.set_xticks([]); self.ax_cor.set_yticks([])
@@ -944,14 +1006,18 @@ class CardiacReorientationDialog(QDialog):
             cands = [
                 self.h_tra1, self.h_tra2,
                 _Handle("voi_ap_c", self.ax_tra, self._ap_disp_from_vol_x(self._voi_cx), self._voi_cz),
-                _Handle("voi_ap_r", self.ax_tra, self._ap_disp_from_vol_x(self._voi_cx + self._voi_rx), self._voi_cz - self._voi_rz),
             ]
+            # Zoom bloqueado (2da etapa): sin handle de radio para que no se pueda
+            # reescalar la elipse por error (obligaría a reprocesar todo).
+            if self._locked_voi is None:
+                cands.append(_Handle("voi_ap_r", self.ax_tra, self._ap_disp_from_vol_x(self._voi_cx + self._voi_rx), self._voi_cz - self._voi_rz))
         elif event.inaxes is self.ax_cor:
             cands = [
                 self.h_cor1, self.h_cor2,
                 _Handle("voi_ll_c", self.ax_cor, self._ll_disp_from_vol_y(self._voi_cy), self._voi_cz),
-                _Handle("voi_ll_r", self.ax_cor, self._ll_disp_from_vol_y(self._voi_cy + self._voi_ry), self._voi_cz - self._voi_rz),
             ]
+            if self._locked_voi is None:
+                cands.append(_Handle("voi_ll_r", self.ax_cor, self._ll_disp_from_vol_y(self._voi_cy + self._voi_ry), self._voi_cz - self._voi_rz))
         elif event.inaxes is self.ax_hla:
             # limites base/apex: elegir la linea mas cercana en k (data y).
             if event.ydata is None:
@@ -1119,6 +1185,10 @@ class CardiacReorientationDialog(QDialog):
             return
 
         if event.inaxes in (self.ax_tra, self.ax_cor):
+            # Zoom bloqueado (2da etapa): la rueda no reescala la elipse para no
+            # romper la consistencia de magnificación entre etapas.
+            if self._locked_voi is not None:
+                return
             scale = (1.0 + (0.04 if event.key != "shift" else 0.02) * step)
             self._voi_rz = max(3.0, float(self._voi_rz) * scale)
             self._voi_ry = max(3.0, float(self._voi_ry) * scale)
@@ -1141,8 +1211,19 @@ class CardiacReorientationDialog(QDialog):
         self.result_long_axis = u
         self.result_center = center
         self.thickness = int(self.spin_thick.value())
-        self.base_k = int(min(self._base_k, self._apex_k))
-        self.apex_k = int(max(self._base_k, self._apex_k))
+        # Preservar la POLARIDAD elegida por el usuario (base/ápex tal cual los
+        # fijó, sin normalizar con min/max): así la semilla hereda la orientación
+        # real a la otra etapa y no invierte base↔ápex. El slicing aguas abajo
+        # (_cine_crudo_cut_bounds) ya aplica su propio min/max sobre estos valores.
+        self.base_k = int(self._base_k)
+        self.apex_k = int(self._apex_k)
+        # Datos para heredar la orientación a la otra etapa (semilla editable):
+        # largo real del eje (no normalizado) y tamaño reorientado para fracciones.
+        self.result_out_size = int(out)
+        dz = 0.5 * ((self.h_tra2.y - self.h_tra1.y) + (self.h_cor2.y - self.h_cor1.y))
+        dx = self._ap_vol_from_disp_x(self.h_tra2.x) - self._ap_vol_from_disp_x(self.h_tra1.x)
+        dy = self._ll_vol_from_disp_y(self.h_cor2.x) - self._ll_vol_from_disp_y(self.h_cor1.x)
+        self.result_half_length = 0.5 * float(np.linalg.norm([dz, dy, dx]))
         try:
             vol_voi = self._apply_voi(self._ung)
             reo_ung = reslice_from_vector(vol_voi, center, u, out, order=1)
