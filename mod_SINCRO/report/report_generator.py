@@ -227,6 +227,10 @@ def generate_report(
 			["ESV preliminar", f"{_safe_float(ef.get('esv_ml'), 2)} mL"],
 			["FEVI preliminar", f"{_safe_float(ef.get('ef_pct'), 1)}%"],
 		])
+		if ef.get("pfr_text"):
+			metrics_rows.append(["PFR (llenado pico)", str(ef.get("pfr_text"))])
+		if ef.get("tvmax_text"):
+			metrics_rows.append(["TVmáx (tiempo a pico llenado)", str(ef.get("tvmax_text"))])
 		if ef.get("myocardial_mass_g") is not None:
 			metrics_rows.append(["Masa miocárdica", f"{_safe_float(ef.get('myocardial_mass_g'), 1)} g"])
 		if ef.get("thickening_pct") is not None:
@@ -583,6 +587,7 @@ def generate_report(
 		("polar_perfusion_directa.png", "Mapa polar continuo de perfusión (apex-centro, base-borde). Uso: heterogeneidad perfusional regional continua."),
 		("polar_cine_montaje.png", "Polar cine gatillado (muestra de gates). Uso: dinámica temporal del patrón polar. Animados: polar_cine.gif / polar_cine.mp4."),
 		("bullseye_directo.png", "Bull's-eye segmentario AHA (17) de perfusión directa. Uso: resumen rápido de intensidad regional."),
+		("guia_fase_vi.png", "Guía para fase VI: bull's-eye doble (fase + perfusión/viabilidad) y tabla segmentaria AHA-17. Cruza cuándo se contrae cada segmento con cuánto capta; con estudio de comparación muestra reposo y esfuerzo (Δfase) en una imagen."),
 		("ejes_ortogonales.png", "Ejes SA/HLA/VLA."),
 		("panel_clinico_convencion.png", "Panel clínico A/B (ED/ES)."),
 		("panel_funcional_gated.png", "Panel funcional gated (ED/ES + curvas de volumen y fase)."),

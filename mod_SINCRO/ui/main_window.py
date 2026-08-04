@@ -59,11 +59,14 @@ from core.aha_segments import (
 	territory_analysis,
 )
 from core.export_manager import export_all
+from core.filling_metrics import compute_filling_metrics, format_pfr, format_tvmax
+from core.metric_explanations import explanation_tooltip
 from core.gate_dropout import analyze_gate_dropout, correct_last_gate_dropout
 from core.perfusion_texture import (
 	combine_perfusion_phase,
 	perfusion_texture_by_segment,
 )
+from core.segmental_report import SEGMENT_NAMES, build_segmental_report
 from core.stress_rest import compare_stress_rest
 from core.intestinal_subtraction import apply_intestinal_subtraction
 from core.ectb_lv import (
@@ -243,6 +246,7 @@ class MainWindow(QMainWindow):
 		self._ui_show_helpers = True
 		self._ui_enable_tooltips = True
 		self._ui_compact_controls = False
+		self._perfusion_source = self.PERFUSION_SOURCE_ED
 		self.compare_axes_preview_frames: list[QPixmap] = []
 		self.compare_axes_preview_index = 0
 		self.compare_axes_playing = False
@@ -286,6 +290,7 @@ class MainWindow(QMainWindow):
 			"comparacion_ejes",
 			"panel_funcional_gated",
 			"bullseye_directo",
+			"guia_fase_vi",
 		]
 
 		self.output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output_demo")
@@ -1229,6 +1234,7 @@ class MainWindow(QMainWindow):
 			"comparacion_stress_rest": "stress_vs_rest",
 			"panel_funcional_gated": "Panel funcional gated",
 			"bullseye_directo": "bullseye_directo",
+			"guia_fase_vi": "Guía para fase VI",
 			"ungated": "ungated",
 			"cine_crudo": "cine_crudo",
 		}
@@ -1242,6 +1248,7 @@ class MainWindow(QMainWindow):
 			"comparacion_stress_rest": "Resumen de métricas de disincronía stress vs rest (PSD/BW/Kurtosis/Entropy) e interpretación clínica.",
 			"panel_funcional_gated": "Panel funcional integrado (ED/ES, fase, amplitud y curvas) para lectura clínica rápida.",
 			"bullseye_directo": "Bull's-eye de perfusión segmentaria AHA (17): resumen compacto de intensidad regional.",
+			"guia_fase_vi": "Guía para fase VI: bull's-eye doble (fase + perfusión/viabilidad) y tabla segmentaria AHA-17 que cruza cuándo se contrae cada segmento con cuánto capta. Si hay estudio de comparación, muestra reposo y esfuerzo con Δfase en una sola imagen.",
 			"ungated": "Desgatillado (UngRaw): suma de todos los gates = perfusión total con máxima estadística. Base para cortes anatómicos y comparación contra RECON del fabricante.",
 			"cine_crudo": "Cine de proyecciones crudas SPECT: revisá el movimiento del paciente entre ángulos antes de reconstruir. Selector gated/UngGat, play/pause, velocidad y frame-by-frame.",
 		}
@@ -1255,6 +1262,7 @@ class MainWindow(QMainWindow):
 			"comparacion_stress_rest",
 			"panel_funcional_gated",
 			"bullseye_directo",
+			"guia_fase_vi",
 			"ungated",
 			"cine_crudo",
 		]:
@@ -2258,7 +2266,7 @@ class MainWindow(QMainWindow):
 		except Exception:
 			return False
 
-	def _format_async_metrics_lines(self, metrics: dict, ef_pct=None) -> list[str]:
+	def _format_async_metrics_lines(self, metrics: dict, ef_pct=None, ef: dict | None = None) -> list[str]:
 		"""Bloque de métricas de asincronía con la nomenclatura del ECTb 4.0
 		(Fase máximo, SD, Ancho de banda, Sesgo, Curtosis) + Entropy y FEVI opcional.
 		'Fase máximo' es el pico/moda del histograma (peak_phase), NO la media."""
@@ -2282,6 +2290,11 @@ class MainWindow(QMainWindow):
 				lines.append(f"<b>FEVI: {float(ef_pct):.1f} %</b>")
 			except (TypeError, ValueError):
 				pass
+		# Función diastólica (ECTb): PFR y TVmáx desde la curva de volumen.
+		if isinstance(ef, dict) and ef.get("pfr_text"):
+			lines.append(f"PFR: {ef.get('pfr_text')}")
+			if ef.get("tvmax_text"):
+				lines.append(f"TVmáx: {ef.get('tvmax_text')}")
 		return lines
 
 	def _format_async_delta_lines(self, primary: dict, compare: dict) -> list[str]:
@@ -2355,7 +2368,7 @@ class MainWindow(QMainWindow):
 				)
 				text = (
 					f"<b>{primary_label}</b><br>"
-					+ "<br>".join(self._format_async_metrics_lines(metrics, ef_pct))
+					+ "<br>".join(self._format_async_metrics_lines(metrics, ef_pct, ef))
 					+ "<br><br>"
 					+ f"<b>{compare_label}</b><br>"
 					+ "<br>".join(self._format_async_metrics_lines(compare_metrics, None))
@@ -2366,8 +2379,15 @@ class MainWindow(QMainWindow):
 				self.main_metrics_readout.setText(text)
 			else:
 				self.main_metrics_readout.setText(
-					"<br>".join(self._format_async_metrics_lines(metrics, ef_pct))
+					"<br>".join(self._format_async_metrics_lines(metrics, ef_pct, ef))
 				)
+			# Ayuda consultable (piloto): explicación de PFR/TVmáx al pasar el mouse.
+			if isinstance(ef, dict) and ef.get("pfr_text"):
+				self.main_metrics_readout.setToolTip(
+					explanation_tooltip("pfr") + "\n\n" + explanation_tooltip("tvmax")
+				)
+			else:
+				self.main_metrics_readout.setToolTip("")
 		# --- Curvas ya renderizadas ---
 		# Asincronía (histograma de fase): solo si hay resultado actual; si no,
 		# ejes vacíos para no mostrar el último gráfico que quedó.
@@ -2415,6 +2435,7 @@ class MainWindow(QMainWindow):
 			"curva_fevi": ("curva_fevi.png",),
 			"panel_funcional_gated": ("panel_funcional_gated.png",),
 			"bullseye_directo": ("bullseye_directo.png",),
+			"guia_fase_vi": ("guia_fase_vi.png",),
 			"polar_perfusion_directa": ("polar_perfusion_directa.png",),
 			"ungated": ("perfusion_ungated.png",),
 		}
@@ -2436,6 +2457,7 @@ class MainWindow(QMainWindow):
 			"curva_fevi",
 			"panel_funcional_gated",
 			"bullseye_directo",
+			"guia_fase_vi",
 			"polar_perfusion_directa",
 		}
 		tab_name = str(tab_name or "")
@@ -2754,11 +2776,14 @@ class MainWindow(QMainWindow):
 		self._ui_show_helpers = bool(self._ui_settings.value("ui/show_helpers", True, type=bool))
 		self._ui_enable_tooltips = bool(self._ui_settings.value("ui/enable_tooltips", True, type=bool))
 		self._ui_compact_controls = bool(self._ui_settings.value("ui/compact_controls", False, type=bool))
+		src = str(self._ui_settings.value("analysis/perfusion_source", self.PERFUSION_SOURCE_ED))
+		self._perfusion_source = src if src in self.PERFUSION_SOURCE_LABELS else self.PERFUSION_SOURCE_ED
 
 	def _save_global_ui_preferences(self):
 		self._ui_settings.setValue("ui/show_helpers", bool(self._ui_show_helpers))
 		self._ui_settings.setValue("ui/enable_tooltips", bool(self._ui_enable_tooltips))
 		self._ui_settings.setValue("ui/compact_controls", bool(self._ui_compact_controls))
+		self._ui_settings.setValue("analysis/perfusion_source", self.perfusion_source())
 		self._ui_settings.sync()
 
 	def _capture_global_tooltips(self):
@@ -2916,6 +2941,27 @@ class MainWindow(QMainWindow):
 		ui_l.addWidget(compact_controls)
 		root.addWidget(ui_box)
 
+		# --- Análisis: fuente de perfusión segmentaria ---
+		analysis_box = QGroupBox("Análisis")
+		analysis_l = QFormLayout(analysis_box)
+		perfusion_combo = QComboBox()
+		for pid, plabel in self.PERFUSION_SOURCE_LABELS.items():
+			perfusion_combo.addItem(plabel, pid)
+		p_idx = perfusion_combo.findData(self.perfusion_source())
+		if p_idx >= 0:
+			perfusion_combo.setCurrentIndex(p_idx)
+		perfusion_combo.setToolTip(
+			"Imagen que alimenta la perfusión y viabilidad por segmento (panel de fase VI).\n"
+			"Gate ED (fin de diástole) es el estándar de lectura de perfusión.\n"
+			"Media de gates suma cuentas (menos ruido) pero mezcla la fase del ciclo."
+		)
+		analysis_l.addRow("Fuente de perfusión:", perfusion_combo)
+		perfusion_note = QLabel("El gate ED (fin de diástole) es el estándar; cambiarlo reprocesa el panel segmentario.")
+		perfusion_note.setWordWrap(True)
+		perfusion_note.setStyleSheet("color:#6b7280; font-size:8pt;")
+		analysis_l.addRow(perfusion_note)
+		root.addWidget(analysis_box)
+
 		# --- Carpeta de salida ---
 		output_box = QGroupBox("Carpeta de salida")
 		output_l = QVBoxLayout(output_box)
@@ -2960,6 +3006,15 @@ class MainWindow(QMainWindow):
 		self._ui_compact_controls = bool(compact_controls.isChecked())
 		self._apply_global_ui_preferences()
 		self._save_global_ui_preferences()
+
+		# Análisis: fuente de perfusión segmentaria
+		chosen_source = perfusion_combo.currentData() or self.PERFUSION_SOURCE_ED
+		if chosen_source != self.perfusion_source():
+			self._perfusion_source = chosen_source
+			self._save_global_ui_preferences()
+			self._log(f"[PERFUSIÓN] Fuente del panel segmentario: {self.perfusion_source_label()}")
+			self._refresh_readonly_results_panel()
+
 		self.statusBar().showMessage("Configuración aplicada")
 
 	def closeEvent(self, event):
@@ -6395,6 +6450,25 @@ class MainWindow(QMainWindow):
 		FEVI_METHOD_THRESHOLD: "Anterior (umbral endocárdico)",
 	}
 
+	#: Fuente de la imagen de perfusión para la tabla/bull's eye segmentario.
+	#: El gate ED (fin de diástole) es el estándar de lectura de perfusión.
+	PERFUSION_SOURCE_ED = "ed_gate"
+	#: Alternativa: media de todos los gates (más cuentas, menos ruido).
+	PERFUSION_SOURCE_MEAN = "mean_gates"
+
+	PERFUSION_SOURCE_LABELS = {
+		PERFUSION_SOURCE_ED: "Gate ED (fin de diástole) — estándar",
+		PERFUSION_SOURCE_MEAN: "Media de todos los gates",
+	}
+
+	def perfusion_source(self) -> str:
+		"""Fuente de perfusión para el panel segmentario (gate ED por defecto)."""
+		src = str(getattr(self, "_perfusion_source", self.PERFUSION_SOURCE_ED))
+		return src if src in self.PERFUSION_SOURCE_LABELS else self.PERFUSION_SOURCE_ED
+
+	def perfusion_source_label(self) -> str:
+		return self.PERFUSION_SOURCE_LABELS[self.perfusion_source()]
+
 	def fevi_method(self) -> str:
 		"""Método de FEVI que alimenta resumen, gráficos e informe."""
 		method = str(getattr(self, "_fevi_method", self.FEVI_METHOD_ECTB))
@@ -6521,6 +6595,65 @@ class MainWindow(QMainWindow):
 		return payload
 		return payload
 
+	def _effective_rr_ms(self) -> float | None:
+		"""Intervalo RR medio (ms) más confiable disponible, o None.
+
+		Prioridad: RR medido en adquisición (si no es placeholder) → FC del DICOM
+		→ FC que el usuario fijó en el panel ECG. Solo devuelve valores fisiológicos.
+		"""
+		gating = getattr(self.study, "gating_info", None) or {} if self.study is not None else {}
+		rr = gating.get("rr_mean_ms")
+		if rr and not gating.get("rr_placeholder"):
+			try:
+				rr_val = float(rr)
+				if 250.0 <= rr_val <= 2500.0:
+					return rr_val
+			except (TypeError, ValueError):
+				pass
+		fc = gating.get("heart_rate") or gating.get("heart_rate_est")
+		try:
+			fc_val = int(fc) if fc else 0
+		except (TypeError, ValueError):
+			fc_val = 0
+		if not (25 <= fc_val <= 250) and hasattr(self, "ecg_fc_spin"):
+			try:
+				fc_val = int(self.ecg_fc_spin.value())
+			except Exception:
+				fc_val = 0
+		if 25 <= fc_val <= 250:
+			return 60000.0 / float(fc_val)
+		return None
+
+	def _augment_with_filling_metrics(self, ef: dict[str, object | None]) -> dict[str, object | None]:
+		"""Inyecta PFR y TVmáx (función diastólica) en el dict de FEVI.
+
+		Reutiliza la curva de volumen por gate que el estimador ya calculó, así
+		el readout, el resumen y el PDF los ven con las mismas claves 'pfr_*'/'tpfr_*'.
+		"""
+		if not ef or not bool(ef.get("available")):
+			return ef
+		try:
+			fm = compute_filling_metrics(
+				ef.get("gate_volumes_ml", []),
+				float(ef.get("edv_ml", 0.0) or 0.0),
+				int(ef.get("es_gate", 1) or 1),
+				self._effective_rr_ms(),
+			)
+		except Exception as exc:  # pragma: no cover - defensivo
+			self._log(f"[WARN] PFR/TVmáx falló: {exc}")
+			return ef
+		if fm.get("available"):
+			ef.update({
+				"pfr_edv_per_rr": fm.get("pfr_edv_per_rr"),
+				"pfr_edv_per_s": fm.get("pfr_edv_per_s"),
+				"tpfr_pct_rr": fm.get("tpfr_pct_rr"),
+				"tpfr_ms": fm.get("tpfr_ms"),
+				"pfr_gate": fm.get("pfr_gate"),
+				"pfr_text": format_pfr(fm),
+				"tvmax_text": format_tvmax(fm),
+			})
+		return ef
+
 	def _estimate_lv_ef(self) -> dict[str, object | None]:
 		"""Punto único de entrada para la FEVI del informe.
 
@@ -6528,10 +6661,10 @@ class MainWindow(QMainWindow):
 		cae al método anterior en vez de dejar el informe sin FEVI.
 		"""
 		if self.fevi_method() == self.FEVI_METHOD_THRESHOLD:
-			return self._estimate_lv_ef_preliminary()
+			return self._augment_with_filling_metrics(self._estimate_lv_ef_preliminary())
 		result = self._estimate_lv_ef_ectb()
 		if result.get("available"):
-			return result
+			return self._augment_with_filling_metrics(result)
 		fallback = self._estimate_lv_ef_preliminary()
 		if fallback.get("available"):
 			fallback["fallback_from"] = "ectb_max_counts"
@@ -6540,7 +6673,7 @@ class MainWindow(QMainWindow):
 				"[FEVI] ECTb no pudo cuantificar "
 				f"({fallback['fallback_reason']}); se usó el método anterior."
 			)
-		return fallback
+		return self._augment_with_filling_metrics(fallback)
 
 	def _harmonize_volumes_with_ef(self, vol: dict[str, float | None], ef: dict[str, object | None]) -> dict[str, float | None]:
 		"""Unifica la cavidad reportada con EDV cuando FEVI está disponible.
@@ -6972,6 +7105,10 @@ class MainWindow(QMainWindow):
 			clinical.append(f"  ESV: {float(ef['esv_ml']):.2f} mL (gate {int(ef['es_gate'])})")
 			clinical.append(f"  SV: {float(ef['sv_ml']):.2f} mL")
 			clinical.append(f"  FEVI: {float(ef['ef_pct']):.1f}%")
+			if ef.get("pfr_text"):
+				clinical.append(f"  PFR (llenado pico): {ef.get('pfr_text')}")
+			if ef.get("tvmax_text"):
+				clinical.append(f"  TVmáx (tiempo a pico llenado): {ef.get('tvmax_text')}")
 			if ef.get("ef_pct_converted") is not None:
 				clinical.append(
 					f"  Equivalente en escala {ef.get('regression_label')}: "
@@ -7146,6 +7283,238 @@ class MainWindow(QMainWindow):
 		self.summary_clinical.setPlainText("\n".join(clinical))
 		self.summary_technical.setPlainText("\n".join(technical))
 
+	def _perfusion_image_for_cube(self, cube, ed_gate):
+		"""Imagen de perfusión 3D (n_slices,H,W) para el bull's-eye segmentario,
+		según la fuente configurada en Configuración → Análisis.
+
+		- Gate ED (estándar): usa el gate de fin de diástole (mejor definición del
+		  borde endocárdico, convención de consolas clínicas).
+		- Media de gates: promedia todos los gates (mayor estadística de conteos).
+		"""
+		import numpy as _np
+		arr = _np.asarray(cube, dtype=_np.float64)
+		if arr.ndim != 4 or arr.shape[0] == 0:
+			return None
+		if self.perfusion_source() == self.PERFUSION_SOURCE_MEAN:
+			return arr.mean(axis=0)
+		g = (int(ed_gate) - 1) if ed_gate else 0
+		g = max(0, min(arr.shape[0] - 1, g))
+		return arr[g]
+
+	def _render_guia_fase_vi(self, style, primary_cube_render, active_cine_widget, ef, cmap_bullseye):
+		"""Panel "Guía para fase VI": bull's-eye doble (fase + perfusión/viabilidad)
+		y tabla segmentaria AHA-17. Si hay estudio de comparación, dibuja reposo y
+		esfuerzo en la misma imagen con Δfase. Estilo propio (panel funcional)."""
+		import numpy as _np
+		import matplotlib
+		import matplotlib.pyplot as plt
+		from matplotlib.patches import Circle, Wedge
+		from matplotlib.colors import Normalize
+
+		if not isinstance(self.phase_by_seg, dict) or self.aha is None:
+			return
+
+		def _circular_delta(cur, ref):
+			return float(((float(cur) - float(ref) + 180.0) % 360.0) - 180.0)
+
+		# --- Datos por etapa -------------------------------------------------
+		stages: list[dict] = []
+		# Etapa primaria.
+		seg_map_primary = _np.asarray(self.aha.segment_map, dtype=_np.int32)
+		perf_primary = self._perfusion_image_for_cube(primary_cube_render, ef.get("ed_gate"))
+		report_primary = build_segmental_report(
+			self.phase_by_seg, perf_primary, seg_map_primary,
+		)
+		stages.append({"label": self._guia_stage_label(is_compare=False), "report": report_primary})
+
+		# Etapa de comparación (si existe).
+		if self.compare_bundle is not None:
+			try:
+				comp_phase = self.compare_bundle.get("phase_by_seg")
+				comp_aha = self.compare_bundle.get("aha")
+				comp_study = self.compare_bundle.get("study")
+				comp_ef = getattr(self, "compare_ef", None) or {}
+				if isinstance(comp_phase, dict) and comp_aha is not None and comp_study is not None:
+					seg_map_comp = _np.asarray(comp_aha.segment_map, dtype=_np.int32)
+					perf_comp = self._perfusion_image_for_cube(comp_study.cube, comp_ef.get("ed_gate"))
+					report_comp = build_segmental_report(comp_phase, perf_comp, seg_map_comp)
+					stages.append({"label": self._guia_stage_label(is_compare=True), "report": report_comp})
+			except Exception as exc:
+				self._log(f"Guía fase VI: etapa de comparación omitida ({exc}).")
+
+		dual = len(stages) == 2
+
+		# --- Geometría del bull's-eye (AHA-17) -------------------------------
+		rings = [
+			([1, 2, 3, 4, 5, 6], 0.68, 0.98, 90.0),
+			([7, 8, 9, 10, 11, 12], 0.40, 0.68, 90.0),
+			([13, 14, 15, 16], 0.18, 0.40, 45.0),
+		]
+
+		def _draw_bullseye(ax, values_by_seg, cmap, norm, *, latest_seg=None, fmt="{:.0f}", nan_face=(0.22, 0.24, 0.28, 1.0)):
+			ax.set_xlim(-1.10, 1.10)
+			ax.set_ylim(-1.10, 1.10)
+			ax.set_aspect("equal")
+			ax.axis("off")
+
+			def _face(seg_id):
+				v = values_by_seg.get(int(seg_id), _np.nan)
+				if v is None or not _np.isfinite(v):
+					return nan_face
+				return cmap(norm(float(v)))
+
+			def _edge(seg_id):
+				return ("#ffd24a" if (latest_seg is not None and int(seg_id) == int(latest_seg)) else style["grid"])
+
+			def _lw(seg_id):
+				return 2.8 if (latest_seg is not None and int(seg_id) == int(latest_seg)) else 1.3
+
+			for seg_ids, r_in, r_out, start in rings:
+				n = len(seg_ids)
+				for i, sid in enumerate(seg_ids):
+					t1 = start - (i + 1) * (360.0 / n)
+					t2 = start - i * (360.0 / n)
+					ax.add_patch(Wedge((0.0, 0.0), r_out, t1, t2, width=r_out - r_in,
+						facecolor=_face(sid), edgecolor=_edge(sid), linewidth=_lw(sid)))
+					mid_a = _np.deg2rad((t1 + t2) * 0.5)
+					r_t = (r_in + r_out) * 0.5
+					v = values_by_seg.get(int(sid), _np.nan)
+					txt = fmt.format(float(v)) if (v is not None and _np.isfinite(v)) else "—"
+					ax.text(r_t * _np.cos(mid_a), r_t * _np.sin(mid_a), txt,
+						color=style["fg"], fontsize=7.2, ha="center", va="center", fontweight="bold")
+			# Ápice (segmento 17).
+			ax.add_patch(Circle((0.0, 0.0), radius=0.18, facecolor=_face(17),
+				edgecolor=_edge(17), linewidth=_lw(17)))
+			v17 = values_by_seg.get(17, _np.nan)
+			t17 = fmt.format(float(v17)) if (v17 is not None and _np.isfinite(v17)) else "—"
+			ax.text(0.0, 0.0, t17, color=style["fg"], fontsize=7.2, ha="center", va="center", fontweight="bold")
+
+		# --- Figura ----------------------------------------------------------
+		n_bulls = 2 * len(stages)  # fase + perfusión por etapa
+		fig = plt.figure(figsize=(6.6 if not dual else 12.6, 8.9), facecolor=style["fig_bg"])
+		gs = fig.add_gridspec(2, n_bulls, height_ratios=[1.15, 1.0], hspace=0.18, wspace=0.12)
+
+		phase_cmap = matplotlib.colormaps.get_cmap("twilight")
+		phase_norm = Normalize(vmin=0.0, vmax=360.0)
+		perf_cmap = matplotlib.colormaps.get_cmap(cmap_bullseye)
+		perf_norm = Normalize(vmin=0.0, vmax=100.0)
+
+		col = 0
+		for stage in stages:
+			rep = stage["report"]
+			phase_by = {r["segment"]: r["phase_deg"] for r in rep["rows"]}
+			perf_by = {r["segment"]: r["perfusion_pct"] for r in rep["rows"]}
+			latest = rep.get("latest_segment")
+
+			ax_ph = fig.add_subplot(gs[0, col])
+			ax_ph.set_facecolor(style["fig_bg"])
+			_draw_bullseye(ax_ph, phase_by, phase_cmap, phase_norm, latest_seg=latest, fmt="{:.0f}")
+			ax_ph.set_title(f"{stage['label']} — Fase (°)", color=style["fg"], fontsize=11, fontweight="bold", pad=6)
+			col += 1
+
+			ax_pf = fig.add_subplot(gs[0, col])
+			ax_pf.set_facecolor(style["fig_bg"])
+			_draw_bullseye(ax_pf, perf_by, perf_cmap, perf_norm, fmt="{:.0f}")
+			ax_pf.set_title(f"{stage['label']} — Perfusión (%)", color=style["fg"], fontsize=11, fontweight="bold", pad=6)
+			col += 1
+
+		# --- Tabla segmentaria ----------------------------------------------
+		ax_tbl = fig.add_subplot(gs[1, :])
+		ax_tbl.axis("off")
+		terr_colors = {"LAD": "#3a2f18", "LCx": "#18303a", "RCA": "#2a183a", "N/D": style["ax_bg"]}
+
+		rows_primary = {r["segment"]: r for r in stages[0]["report"]["rows"]}
+		rows_compare = {r["segment"]: r for r in stages[1]["report"]["rows"]} if dual else {}
+		latest_primary = stages[0]["report"].get("latest_segment")
+
+		if dual:
+			headers = ["Seg", "Nombre", "Terr.", "Fase R°", "Fase E°", "Δfase°", "Perf R%", "Perf E%", "Viab E"]
+		else:
+			headers = ["Seg", "Nombre", "Territorio", "Fase °", "Perf %", "Viabilidad"]
+
+		def _fmt_num(v, suf=""):
+			return (f"{float(v):.0f}{suf}") if (v is not None and _np.isfinite(v)) else "—"
+
+		table_rows = []
+		cell_bg = []
+		for seg_id in range(1, 18):
+			rp = rows_primary.get(seg_id, {})
+			terr = rp.get("territory", "N/D")
+			base_bg = terr_colors.get(terr, style["ax_bg"])
+			if dual:
+				rc = rows_compare.get(seg_id, {})
+				dphase = _circular_delta(rc.get("phase_deg", _np.nan), rp.get("phase_deg", _np.nan)) \
+					if (_np.isfinite(rp.get("phase_deg", _np.nan)) and _np.isfinite(rc.get("phase_deg", _np.nan))) else _np.nan
+				row = [
+					str(seg_id), rp.get("name", str(seg_id)), terr,
+					_fmt_num(rp.get("phase_deg", _np.nan)),
+					_fmt_num(rc.get("phase_deg", _np.nan)),
+					(f"{dphase:+.0f}" if _np.isfinite(dphase) else "—"),
+					_fmt_num(rp.get("perfusion_pct", _np.nan)),
+					_fmt_num(rc.get("perfusion_pct", _np.nan)),
+					rc.get("viability", "N/D"),
+				]
+			else:
+				row = [
+					str(seg_id), rp.get("name", str(seg_id)), terr,
+					_fmt_num(rp.get("phase_deg", _np.nan)),
+					_fmt_num(rp.get("perfusion_pct", _np.nan)),
+					rp.get("viability", "N/D"),
+				]
+			table_rows.append(row)
+			cell_bg.append(base_bg)
+
+		table = ax_tbl.table(cellText=table_rows, colLabels=headers, loc="center", cellLoc="center")
+		table.auto_set_font_size(False)
+		table.set_fontsize(7.6)
+		table.scale(1.0, 1.28)
+		n_cols = len(headers)
+		for (r_idx, c_idx), cell in table.get_celld().items():
+			cell.set_edgecolor(style["grid"])
+			cell.set_linewidth(0.6)
+			if r_idx == 0:
+				cell.set_facecolor(style["ax_bg"])
+				cell.set_text_props(color=style["fg"], fontweight="bold")
+			else:
+				seg_id = r_idx  # fila r_idx (1..17) → segmento
+				bg = cell_bg[r_idx - 1]
+				if latest_primary is not None and seg_id == int(latest_primary):
+					cell.set_facecolor("#4a3a12")
+					cell.set_text_props(color="#ffe9a8", fontweight="bold")
+				else:
+					cell.set_facecolor(bg)
+					cell.set_text_props(color=style["fg"])
+
+		# Título + leyenda.
+		src_label = self.perfusion_source_label()
+		fig.suptitle(
+			f"Guía para fase VI — cruce Fase × Perfusión (AHA-17)   ·   fuente perfusión: {src_label}",
+			color=style["fg"], fontsize=12.5, fontweight="bold",
+		)
+		legend = (
+			"Borde dorado = segmento de activación más tardía (fase máxima).   "
+			"Viabilidad por % del máximo segmentario: ≥70% viable · 50–70% dudosa · <50% no viable."
+		)
+		if dual:
+			legend += "   Δfase = esfuerzo − reposo (circular)."
+		fig.text(0.5, 0.012, legend, ha="center", va="bottom", color=style["subtle"], fontsize=8.2)
+
+		self._stamp_export_figure(fig, active_cine_widget)
+		fig.savefig(os.path.join(self.output_dir, "guia_fase_vi.png"), dpi=160,
+			bbox_inches="tight", facecolor=fig.get_facecolor())
+		plt.close(fig)
+
+	def _guia_stage_label(self, *, is_compare: bool) -> str:
+		"""Etiqueta de etapa (Reposo/Esfuerzo) para el panel Guía fase VI. Usa la
+		operación marcada en el visor cuando está disponible; cae a genérico."""
+		try:
+			if self.compare_bundle is None:
+				return "Estudio"
+			# Convención del módulo: la 1ra etapa suele ser reposo y la 2da esfuerzo.
+			return "Esfuerzo" if is_compare else "Reposo"
+		except Exception:
+			return "Comparación" if is_compare else "Estudio"
+
 	def _write_outputs(self, target_tabs: set[str] | None = None):
 		if self.study is None or self.phase_result is None:
 			return
@@ -7224,6 +7593,12 @@ class MainWindow(QMainWindow):
 				"visual_style": str(self.visual_style_combo.currentText()),
 				"cmap_bullseye": cmap_bullseye,
 			},
+			"guia_fase_vi": {
+				**base_payload,
+				"visual_style": str(self.visual_style_combo.currentText()),
+				"cmap_bullseye": cmap_bullseye,
+				"perfusion_source": str(self.perfusion_source()),
+			},
 			"polar_perfusion_directa": {
 				**base_payload,
 				"rotation": int(self.polar_rotation_spin.value()),
@@ -7260,6 +7635,7 @@ class MainWindow(QMainWindow):
 				"curva_fevi",
 				"panel_funcional_gated",
 				"bullseye_directo",
+				"guia_fase_vi",
 				"polar_perfusion_directa",
 			):
 				need_tab_render[heavy_tab] = False
@@ -7271,6 +7647,7 @@ class MainWindow(QMainWindow):
 				"ventriculograma.png",
 				"panel_funcional_gated.png",
 				"bullseye_directo.png",
+				"guia_fase_vi.png",
 				"polar_perfusion_directa.png",
 				"polar_cine_montaje.png",
 				"polar_cine.gif",
@@ -8035,6 +8412,15 @@ class MainWindow(QMainWindow):
 		self._stamp_export_figure(fig_b, active_cine_widget)
 		fig_b.savefig(os.path.join(self.output_dir, "bullseye_directo.png"), dpi=170, bbox_inches="tight", facecolor=fig_b.get_facecolor())
 		plt.close(fig_b)
+
+		# Guía para fase VI: bull's-eye doble (fase + perfusión/viabilidad) + tabla
+		# segmentaria AHA-17, con reposo y esfuerzo en la misma imagen si hay
+		# estudio de comparación. Diseño propio (estilo del panel funcional).
+		if need_tab_render.get("guia_fase_vi", True):
+			try:
+				self._render_guia_fase_vi(style, study_cube_render, active_cine_widget, ef, cmap_bullseye)
+			except Exception as exc:
+				self._log(f"Guía para fase VI: no se pudo renderizar ({exc}).")
 
 		# Mapa polar continuo de perfusión ("aplastado" apex->base), complementario al bull's eye por segmentos.
 		from scipy.ndimage import gaussian_filter
@@ -12149,7 +12535,7 @@ class MainWindow(QMainWindow):
 		if target_tabs is not None:
 			names = [n for n in names if n in set(target_tabs)]
 		for name in names:
-			if name in ("comparacion_stress_rest", "comparacion_ejes", "polar_perfusion_directa"):
+			if name in ("comparacion_stress_rest", "comparacion_ejes", "polar_perfusion_directa", "guia_fase_vi"):
 				continue
 			left_path = os.path.join(self.output_dir, f"{name}.png")
 			right_path = os.path.join(self.compare_output_dir, f"{name}.png")

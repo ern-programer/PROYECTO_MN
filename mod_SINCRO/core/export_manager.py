@@ -81,7 +81,7 @@ def export_json(
         "export_timestamp": datetime.now().isoformat(),
         "software": {
             "name": "GammaSync",
-            "version": "1.16.0",
+            "version": "1.22.2",
             "module": "SINCRO",
         },
         "study": study_metadata,

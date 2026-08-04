@@ -1,3 +1,3 @@
 """Versionado del módulo SINCRO."""
 
-__version__ = "1.21.2"
+__version__ = "1.22.2"
