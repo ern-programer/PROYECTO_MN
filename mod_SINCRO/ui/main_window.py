@@ -251,6 +251,7 @@ class MainWindow(QMainWindow):
 		self.compare_axes_preview_frames: list[QPixmap] = []
 		self.compare_axes_preview_index = 0
 		self.compare_axes_playing = False
+		self._compare_axes_dirty_pending = False
 		self.compare_interactive_fast_mode = False
 		self.compare_axes_cine_timer = QTimer(self)
 		self.compare_axes_cine_timer.timeout.connect(self._advance_compare_axes_frame)
@@ -4692,9 +4693,13 @@ class MainWindow(QMainWindow):
 	def _refresh_compare_axes_panel_now(self):
 		if self.study is None or self.seg is None:
 			return
+		if not self._is_tab_active("comparacion_ejes") and not bool(self.compare_axes_cine_check.isChecked()):
+			self._compare_axes_dirty_pending = True
+			return
 		try:
 			self._write_compare_axes_panel(cmap_compare=str(self.compare_axes_cmap_combo.currentText()))
 			self._load_preview("comparacion_ejes")
+			self._compare_axes_dirty_pending = False
 			self.statusBar().showMessage("Comparativa de ejes actualizada")
 		except Exception as exc:
 			self._log(f"[WARN] No se pudo actualizar comparativa de ejes: {exc}")
@@ -4706,6 +4711,8 @@ class MainWindow(QMainWindow):
 		tab_name = self._tab_name_from_title(title)
 		if tab_name:
 			self._request_lazy_tab_render(tab_name, reason="apertura de pestaña")
+		if title == "comparacion_ejes" and bool(self._compare_axes_dirty_pending):
+			self._refresh_compare_axes_panel_now()
 		if title == "comparacion_ejes" and self.compare_axes_cine_check.isChecked() and not self.compare_axes_preview_frames:
 			self._set_progress(88, "Generando cine de comparacion_ejes...")
 			try:
@@ -12795,6 +12802,8 @@ class MainWindow(QMainWindow):
 			self.compare_ef = bundle["ef"]
 			self.compare_label = bundle["label"]
 			self._refresh_cine_source_selector()
+			# Hidratar ambos cines de inmediato para que el segundo visor quede editable.
+			self._apply_cine_source("primary", preserve_position=True)
 			left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
 			right_label = self.compare_label or "Comparación"
 
