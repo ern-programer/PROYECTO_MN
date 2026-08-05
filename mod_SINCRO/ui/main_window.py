@@ -2313,6 +2313,12 @@ class MainWindow(QMainWindow):
 		"valid": ("#dcfce7", "#166534", "#86efac"),
 		"stale": ("#fef3c7", "#92400e", "#fcd34d"),
 	}
+	#: Pestaña a la que salta el clic en cada chip de paso.
+	_STEP_TABS = {
+		"crudo": "cine_crudo", "motion": "cine_crudo", "recon": "cine_crudo",
+		"reorient": "cine_crudo", "cuts": "comparacion_ejes", "render": "comparacion_ejes",
+		"segment": "slices_fase", "phase": "slices_fase",
+	}
 
 	def _build_pipeline_step_bar(self) -> QWidget:
 		"""Barra horizontal con el estado de cada paso del pipeline (Fase B)."""
@@ -2321,16 +2327,17 @@ class MainWindow(QMainWindow):
 		lay = QHBoxLayout(bar)
 		lay.setContentsMargins(8, 3, 8, 3)
 		lay.setSpacing(4)
-		self._step_chip_labels: dict[str, QLabel] = {}
+		self._step_chip_labels: dict[str, QPushButton] = {}
 		steps = self.pipeline_history.steps()
 		for i, st in enumerate(steps):
 			if i > 0:
 				sep = QLabel("›")
 				sep.setStyleSheet("color:#9ca3af; font-size:11pt;")
 				lay.addWidget(sep)
-			chip = QLabel(st.label)
-			chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-			chip.setToolTip(st.label)
+			chip = QPushButton(st.label)
+			chip.setFlat(True)
+			chip.setCursor(Qt.CursorShape.PointingHandCursor)
+			chip.clicked.connect(lambda _=False, k=st.key: self._on_step_chip_clicked(k))
 			self._step_chip_labels[st.key] = chip
 			lay.addWidget(chip)
 		lay.addStretch(1)
@@ -2385,6 +2392,18 @@ class MainWindow(QMainWindow):
 			self.statusBar().showMessage("Recalcular: no hay pasos desactualizados")
 		self._refresh_pipeline_step_bar()
 
+	def _on_step_chip_clicked(self, key: str):
+		"""Clic en un chip: salta a la vista/pestaña asociada a ese paso."""
+		st = self.pipeline_history.get(key)
+		label = st.label if st is not None else key
+		tab = self._STEP_TABS.get(key)
+		if tab:
+			try:
+				self._select_tab_by_title(tab)
+			except Exception:
+				pass
+		self.statusBar().showMessage(f"Paso: {label}")
+
 	def _refresh_pipeline_step_bar(self):
 		"""Repinta la barra de pasos según el estado de PipelineHistory."""
 		chips = getattr(self, "_step_chip_labels", None)
@@ -2396,11 +2415,12 @@ class MainWindow(QMainWindow):
 				continue
 			bg, fg, border = self._STEP_COLORS.get(st.status.value, self._STEP_COLORS["empty"])
 			chip.setStyleSheet(
-				f"background:{bg}; color:{fg}; border:1px solid {border};"
-				"border-radius:8px; padding:2px 9px; font-size:9pt; font-weight:600;"
+				f"QPushButton{{background:{bg}; color:{fg}; border:1px solid {border};"
+				"border-radius:8px; padding:2px 9px; font-size:9pt; font-weight:600;}"
+				f"QPushButton:hover{{border:1px solid #3b82f6;}}"
 			)
 			tip = {"empty": "pendiente", "valid": "al día", "stale": "desactualizado"}.get(st.status.value, "")
-			chip.setToolTip(f"{st.label} — {tip}")
+			chip.setToolTip(f"{st.label} — {tip} · clic para ver este paso")
 		hint = getattr(self, "_undo_hint_label", None)
 		if hint is not None:
 			parts = []
@@ -6111,6 +6131,7 @@ class MainWindow(QMainWindow):
 			else:
 				self._set_progress(30, "Segmentación sin cambios (cache)...")
 				self._log("Cache: segmentación reutilizada.")
+			self._mark_step_done("segment", self._cache_seg_sig)
 
 			clinical_amp_filter = float(self.phase_threshold_spin.value())
 			phase_payload = {
@@ -6195,6 +6216,7 @@ class MainWindow(QMainWindow):
 					self.territory = territory_analysis(self.phase_by_seg)
 				if not self.metrics.get("bootstrap") or not self.metrics.get("roi_sensitivity") or not self.metrics.get("segmental_aha"):
 					self._attach_robustness_metrics()
+			self._mark_step_done("phase", self._cache_phase_sig)
 			preferred_gate_idx = int(self.study.cube.shape[0] // 2)
 			preferred_slice_idx = int(self.study.cube.shape[1] // 2)
 
@@ -6250,6 +6272,7 @@ class MainWindow(QMainWindow):
 			self._select_tab_by_title("histograma")
 			self._set_progress(100, "Procesamiento completo")
 			self._log_timing_if_slow("Proceso total", t_total)
+			self._mark_step_done("render", output_sig)
 			self.statusBar().showMessage("Procesamiento completo")
 
 			# Logging estructurado
