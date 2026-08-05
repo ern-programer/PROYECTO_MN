@@ -175,6 +175,16 @@ class PipelineHistory:
 		self._redo_stack.clear()
 		self._notify()
 
+	def reset(self) -> None:
+		"""Reinicia todo: pilas vacías y todos los pasos a VACÍO (estudio nuevo)."""
+		self._undo_stack.clear()
+		self._redo_stack.clear()
+		for s in self._steps.values():
+			s.status = StepStatus.EMPTY
+			s.signature = ""
+			s.updated_at = 0.0
+		self._notify()
+
 	# ------------------------------------------------------------- listeners
 	def add_listener(self, fn: Callable[[], None]) -> None:
 		"""Suscribe un callback que se dispara ante cualquier cambio de estado."""

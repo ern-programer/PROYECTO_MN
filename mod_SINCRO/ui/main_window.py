@@ -5638,6 +5638,10 @@ class MainWindow(QMainWindow):
 		self._cache_seg_sig = ""
 		self._cache_phase_sig = ""
 		self._invalidate_output_cache()
+		# Flujo ida-y-vuelta: estudio nuevo ⇒ pila de undo y estados de pasos a cero
+		# (evita que un Ctrl+Z restaure atributos de otro estudio).
+		if hasattr(self, "pipeline_history"):
+			self.pipeline_history.reset()
 
 	def restart_workspace_state(self):
 		self._reset_session_data()
@@ -6041,6 +6045,8 @@ class MainWindow(QMainWindow):
 				self._cache_phase_sig = ""
 				self._invalidate_output_cache()
 				self._preload_acquisition_ecg()
+				# Estudio nuevo en memoria ⇒ resetear pila de undo y estados de pasos.
+				self.pipeline_history.reset()
 			# --- Modo crudo: proyecciones (no reconstruido) → panel QC + cine + gating ---
 			if not bool(getattr(self.study, "reconstructed", True)):
 				self._handle_raw_projections_loaded(path, t_total)
