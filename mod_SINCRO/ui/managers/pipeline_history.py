@@ -110,6 +110,17 @@ class PipelineHistory:
 				s.status = StepStatus.STALE
 		self._notify()
 
+	def invalidate_after(self, key: str) -> None:
+		"""Marca DESACTUALIZADOS solo los pasos POSTERIORES a `key` (no `key`)."""
+		st = self._steps.get(key)
+		if st is None:
+			return
+		for k in self._order[st.order + 1:]:
+			s = self._steps[k]
+			if s.status != StepStatus.EMPTY:
+				s.status = StepStatus.STALE
+		self._notify()
+
 	def stale_steps(self) -> list[StepState]:
 		return [s for s in self.steps() if s.status == StepStatus.STALE]
 

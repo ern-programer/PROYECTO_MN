@@ -143,6 +143,8 @@ class MainWindow(QMainWindow):
 		from ui.managers.pipeline_history import PipelineHistory
 		self.pipeline_history = PipelineHistory()
 		self._undo_suspended = False
+		self._register_pipeline_steps()
+		self.pipeline_history.add_listener(self._refresh_pipeline_step_bar)
 		self.axis_companions: dict[str, object] = {}
 		self.seg = None
 		# Copia de la segmentación ANULAR, intacta aunque `self.seg` se reemplace por
@@ -1277,6 +1279,7 @@ class MainWindow(QMainWindow):
 		right_layout = QVBoxLayout(right)
 		right_layout.setContentsMargins(0, 0, 0, 0)
 		right_layout.setSpacing(0)
+		right_layout.addWidget(self._build_pipeline_step_bar())
 		right_splitter = QSplitter(Qt.Orientation.Vertical)
 		right_splitter.setChildrenCollapsible(False)
 		right_splitter.setOpaqueResize(True)
@@ -2156,9 +2159,7 @@ class MainWindow(QMainWindow):
 		self._update_cine_active_border()
 		self._hide_sync_controls_in_main()
 		self._refresh_readonly_results_panel()
-		self._register_pipeline_steps()
 		self._install_undo_shortcuts()
-
 		if initial_path:
 			self.file_edit.setText(initial_path)
 			if self.auto_run_check.isChecked():
@@ -2304,6 +2305,74 @@ class MainWindow(QMainWindow):
 			self.statusBar().showMessage(f"Rehacer: {label}")
 		else:
 			self.statusBar().showMessage("Nada para rehacer")
+
+	# --------------------------------------------------- barra de pasos (Fase B)
+	#: Color por estado del paso: (fondo, texto, borde).
+	_STEP_COLORS = {
+		"empty": ("#e5e7eb", "#6b7280", "#d1d5db"),
+		"valid": ("#dcfce7", "#166534", "#86efac"),
+		"stale": ("#fef3c7", "#92400e", "#fcd34d"),
+	}
+
+	def _build_pipeline_step_bar(self) -> QWidget:
+		"""Barra horizontal con el estado de cada paso del pipeline (Fase B)."""
+		bar = QWidget()
+		bar.setObjectName("pipelineStepBar")
+		lay = QHBoxLayout(bar)
+		lay.setContentsMargins(8, 3, 8, 3)
+		lay.setSpacing(4)
+		self._step_chip_labels: dict[str, QLabel] = {}
+		steps = self.pipeline_history.steps()
+		for i, st in enumerate(steps):
+			if i > 0:
+				sep = QLabel("›")
+				sep.setStyleSheet("color:#9ca3af; font-size:11pt;")
+				lay.addWidget(sep)
+			chip = QLabel(st.label)
+			chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+			chip.setToolTip(st.label)
+			self._step_chip_labels[st.key] = chip
+			lay.addWidget(chip)
+		lay.addStretch(1)
+		self._undo_hint_label = QLabel("")
+		self._undo_hint_label.setStyleSheet("color:#6b7280; font-size:8pt;")
+		lay.addWidget(self._undo_hint_label)
+		self._refresh_pipeline_step_bar()
+		return bar
+
+	def _refresh_pipeline_step_bar(self):
+		"""Repinta la barra de pasos según el estado de PipelineHistory."""
+		chips = getattr(self, "_step_chip_labels", None)
+		if not chips:
+			return
+		for st in self.pipeline_history.steps():
+			chip = chips.get(st.key)
+			if chip is None:
+				continue
+			bg, fg, border = self._STEP_COLORS.get(st.status.value, self._STEP_COLORS["empty"])
+			chip.setStyleSheet(
+				f"background:{bg}; color:{fg}; border:1px solid {border};"
+				"border-radius:8px; padding:2px 9px; font-size:9pt; font-weight:600;"
+			)
+			tip = {"empty": "pendiente", "valid": "al día", "stale": "desactualizado"}.get(st.status.value, "")
+			chip.setToolTip(f"{st.label} — {tip}")
+		hint = getattr(self, "_undo_hint_label", None)
+		if hint is not None:
+			parts = []
+			if self.pipeline_history.can_undo():
+				parts.append(f"⟲ {self.pipeline_history.peek_undo_label()}")
+			if self.pipeline_history.can_redo():
+				parts.append(f"⟳ {self.pipeline_history.peek_redo_label()}")
+			hint.setText("   ".join(parts))
+
+	def _mark_step_done(self, key: str, *sig_parts):
+		"""Marca un paso como al día e invalida (desactualiza) los posteriores."""
+		try:
+			sig = self.pipeline_history.make_signature(*sig_parts) if sig_parts else ""
+			self.pipeline_history.mark_done(key, sig)
+			self.pipeline_history.invalidate_after(key)
+		except Exception:
+			pass
 
 	def _build_readonly_results_panel(self) -> QWidget:
 		"""Construye el panel de solo-lectura de la banda inferior: datos del
@@ -11517,6 +11586,8 @@ class MainWindow(QMainWindow):
 			)
 			self._set_progress(100, "Recon raw lista; definí límites de cortes")
 			self._commit_undo("Reconstrucción", self.UNDO_ATTRS_RECON, _undo_before, deep=False)
+			self._mark_step_done("crudo")
+			self._mark_step_done("recon", cfg.reconstruction_method, getattr(result.gated_volume, "shape", None))
 		except Exception as exc:
 			self._log(f"[ERROR] Recon raw falló: {exc}")
 			self._set_progress(100, "Recon raw falló")
@@ -12048,6 +12119,9 @@ class MainWindow(QMainWindow):
 			f"Reorientación aplicada: azimut/elevación oblicuos; volumen SA-alineado {self.cine_crudo_reoriented_gated.shape}; "
 			f"Base={base_1} Ápex={apex_1}. Generando cortes."
 		)
+		# Marcar reorient al día ANTES de regenerar cortes: así invalidate_after
+		# desactualiza los posteriores y luego 'cuts' se re-marca al día.
+		self._mark_step_done("reorient", getattr(self.cine_crudo_reoriented_gated, "shape", None), base_1, apex_1)
 		_prev_suspended = getattr(self, "_undo_suspended", False)
 		self._undo_suspended = True
 		try:
@@ -12193,6 +12267,7 @@ class MainWindow(QMainWindow):
 			self._log(f"Cortes generados: SA {z0 + 1}..{z1 + 1} ({sa_cube.shape[1]} cortes, espesor {thickness}px = {cut_thickness_mm:.2f}mm). HLA/VLA visibles en comparacion_ejes. Ahora podés Procesar recon o Guardar ejes DICOM.")
 			self._set_progress(100, "Cortes SA/HLA/VLA generados")
 			self._commit_undo("Generar cortes", self.UNDO_ATTRS_CUTS, _undo_before)
+			self._mark_step_done("cuts", z0, z1, thickness)
 		except Exception as exc:
 			self._log(f"[ERROR] Generar cortes falló: {exc}")
 			QMessageBox.warning(self, "SINCRO", f"No se pudieron generar los cortes:\n{exc}")
@@ -13365,6 +13440,8 @@ class MainWindow(QMainWindow):
 		self._log(f"Corazón fijado en {etapa_txt}: (y={ry:.1f}, x={rx:.1f}) — el tracking seguirá esa componente.")
 		self._set_active_cine_crudo_stage("both" if ctrl else stage)
 		self._commit_undo("Fijar corazón (motion)", self.UNDO_ATTRS_MOTION, _undo_before)
+		self._mark_step_done("crudo")
+		self._mark_step_done("motion", getattr(self, "cine_crudo_seed", None), getattr(self, "cine_crudo_band_upper", None), getattr(self, "cine_crudo_band_lower", None))
 
 	def _on_cine_crudo_image_dragged(self, event):
 		if self._cine_crudo_drag_marker not in ("upper", "lower", "compare_line"):
