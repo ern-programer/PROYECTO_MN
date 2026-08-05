@@ -2200,6 +2200,19 @@ class MainWindow(QMainWindow):
 		"cine_crudo_cut_thickness_mm_rest", "cine_crudo_rest_source_label",
 		"cine_crudo_gate_from", "cine_crudo_gate_to",
 	)
+	#: Pasos "pesados": el atributo se reemplaza entero (no se muta), así que se
+	#: guarda por referencia en vez de deepcopy para no duplicar volúmenes en RAM.
+	UNDO_ATTRS_RECON = (
+		"cine_crudo_recon_result", "cine_crudo_recon_study",
+		"cine_crudo_cut_study", "cine_crudo_cut_source_label",
+		"cine_crudo_reoriented_gated", "cine_crudo_reoriented_ungated",
+		"cine_crudo_raw_study_for_recon", "_cine_crudo_recon_stage",
+		"cine_crudo_preview_mode",
+	)
+	UNDO_ATTRS_REORIENT = (
+		"cine_crudo_reoriented_gated", "cine_crudo_reoriented_ungated",
+		"cine_crudo_reoriented_voi", "cine_crudo_cut_source_label",
+	)
 
 	def _register_pipeline_steps(self):
 		"""Registra los pasos del pipeline unificado (barra de pasos, Fase B)."""
@@ -2225,12 +2238,19 @@ class MainWindow(QMainWindow):
 		self._sc_redo2 = QShortcut(QKeySequence("Ctrl+Y"), self)
 		self._sc_redo2.activated.connect(self._redo_pipeline)
 
-	def _snapshot_attrs(self, names) -> dict:
-		"""Copia profunda de los atributos indicados (para poder restaurarlos)."""
+	def _snapshot_attrs(self, names, deep: bool = True) -> dict:
+		"""Captura los atributos indicados para poder restaurarlos.
+
+		`deep=True` copia en profundidad (pasos livianos). `deep=False` guarda
+		referencias (pasos pesados cuyo atributo se reemplaza entero, no se muta).
+		"""
 		import copy
 		snap: dict = {}
 		for n in names:
 			val = getattr(self, n, None)
+			if not deep:
+				snap[n] = val
+				continue
 			try:
 				snap[n] = copy.deepcopy(val)
 			except Exception:
@@ -2243,15 +2263,16 @@ class MainWindow(QMainWindow):
 			setattr(self, n, v)
 		self._refresh_after_undo()
 
-	def _commit_undo(self, label: str, attr_names, before):
+	def _commit_undo(self, label: str, attr_names, before, deep: bool = True):
 		"""Cierra una acción deshacible: captura el estado posterior y lo apila.
 
 		`before` es el snapshot tomado antes de la acción; si es None (acción
-		anidada o undo suspendido) no se registra nada.
+		anidada o undo suspendido) no se registra nada. `deep` debe coincidir con
+		el usado al tomar `before` (False para pasos pesados).
 		"""
 		if before is None:
 			return
-		after = self._snapshot_attrs(attr_names)
+		after = self._snapshot_attrs(attr_names, deep=deep)
 		self.pipeline_history.push(
 			label,
 			undo=lambda b=before: self._apply_attrs_snapshot(b),
@@ -11435,6 +11456,7 @@ class MainWindow(QMainWindow):
 		self._cine_crudo_recon_stage = stage
 		if getattr(self, "_cine_crudo_active_stage", "stress") == "both" and self._secondary_cine_crudo_study() is not None:
 			self._log("Selector en 'Ambas': la reconstrucción/reorientación es por etapa. Reconstruyo ESFUERZO; luego marcá como reposo o cambiá a Reposo y reconstruí la otra para el montaje.")
+		_undo_before = None if getattr(self, "_undo_suspended", False) else self._snapshot_attrs(self.UNDO_ATTRS_RECON, deep=False)
 		try:
 			from core.raw_reconstruction import reconstruct_raw_gated_pipeline
 
@@ -11494,6 +11516,7 @@ class MainWindow(QMainWindow):
 				f"volumen gated={result.gated_volume.shape}. Ajustá límites Base/Ápex y tocá Generar cortes."
 			)
 			self._set_progress(100, "Recon raw lista; definí límites de cortes")
+			self._commit_undo("Reconstrucción", self.UNDO_ATTRS_RECON, _undo_before, deep=False)
 		except Exception as exc:
 			self._log(f"[ERROR] Recon raw falló: {exc}")
 			self._set_progress(100, "Recon raw falló")
@@ -11949,6 +11972,8 @@ class MainWindow(QMainWindow):
 		except Exception as exc:
 			QMessageBox.warning(self, "SINCRO", f"No se pudo abrir la reorientación:\n{exc}")
 			return
+		_undo_group = self.UNDO_ATTRS_REORIENT + self.UNDO_ATTRS_CUTS
+		_undo_before = None if getattr(self, "_undo_suspended", False) else self._snapshot_attrs(_undo_group, deep=False)
 		result = self.cine_crudo_recon_result
 		ung_vol = np.asarray(result.ungated_volume, dtype=np.float64)
 		gated_vol = np.asarray(result.gated_volume, dtype=np.float64)
@@ -12023,7 +12048,13 @@ class MainWindow(QMainWindow):
 			f"Reorientación aplicada: azimut/elevación oblicuos; volumen SA-alineado {self.cine_crudo_reoriented_gated.shape}; "
 			f"Base={base_1} Ápex={apex_1}. Generando cortes."
 		)
-		self._generate_cine_crudo_cardiac_cuts()
+		_prev_suspended = getattr(self, "_undo_suspended", False)
+		self._undo_suspended = True
+		try:
+			self._generate_cine_crudo_cardiac_cuts()
+		finally:
+			self._undo_suspended = _prev_suspended
+		self._commit_undo("Reorientación", _undo_group, _undo_before, deep=False)
 
 	def _generate_cine_crudo_cardiac_cuts(self):
 		"""Genera los cortes cardíacos desde el volumen reconstruido; SA alimenta fase/FEVI."""
