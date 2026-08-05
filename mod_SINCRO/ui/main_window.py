@@ -139,6 +139,10 @@ class MainWindow(QMainWindow):
 		self._set_window_icon()
 
 		self.study = None
+		# Flujo ida-y-vuelta (Fase A): registro de pasos + pila deshacer/rehacer.
+		from ui.managers.pipeline_history import PipelineHistory
+		self.pipeline_history = PipelineHistory()
+		self._undo_suspended = False
 		self.axis_companions: dict[str, object] = {}
 		self.seg = None
 		# Copia de la segmentación ANULAR, intacta aunque `self.seg` se reemplace por
@@ -2152,6 +2156,8 @@ class MainWindow(QMainWindow):
 		self._update_cine_active_border()
 		self._hide_sync_controls_in_main()
 		self._refresh_readonly_results_panel()
+		self._register_pipeline_steps()
+		self._install_undo_shortcuts()
 
 		if initial_path:
 			self.file_edit.setText(initial_path)
@@ -2177,6 +2183,106 @@ class MainWindow(QMainWindow):
 		bar = getattr(self, "manual_center_bar", None)
 		if bar is not None:
 			bar.setVisible(False)
+
+	# ==================================================================
+	# Flujo ida-y-vuelta (Fase A): pasos + deshacer/rehacer (Ctrl+Z)
+	# ==================================================================
+	#: Estado que captura/restaura cada acción deshacible (por grupo de paso).
+	UNDO_ATTRS_MOTION = (
+		"cine_crudo_seed", "cine_crudo_seed_compare",
+		"cine_crudo_band_upper", "cine_crudo_band_lower",
+		"cine_crudo_compare_line_y", "cine_crudo_ref_index",
+		"cine_crudo_ref_index_compare",
+	)
+	UNDO_ATTRS_CUTS = (
+		"cine_crudo_axes_for_export", "cine_crudo_axes_for_export_stress",
+		"cine_crudo_axes_for_export_rest", "cine_crudo_cut_thickness_mm",
+		"cine_crudo_cut_thickness_mm_rest", "cine_crudo_rest_source_label",
+		"cine_crudo_gate_from", "cine_crudo_gate_to",
+	)
+
+	def _register_pipeline_steps(self):
+		"""Registra los pasos del pipeline unificado (barra de pasos, Fase B)."""
+		for key, label in (
+			("crudo", "Crudo"),
+			("motion", "Corrección de movimiento"),
+			("recon", "Reconstrucción"),
+			("reorient", "Reorientación"),
+			("cuts", "Generar cortes"),
+			("segment", "Segmentación"),
+			("phase", "Fase + métricas"),
+			("render", "Render / Montaje / Informe"),
+		):
+			self.pipeline_history.register_step(key, label)
+
+	def _install_undo_shortcuts(self):
+		"""Instala Ctrl+Z (deshacer) y Ctrl+Shift+Z / Ctrl+Y (rehacer)."""
+		from PyQt6.QtGui import QKeySequence, QShortcut
+		self._sc_undo = QShortcut(QKeySequence.StandardKey.Undo, self)
+		self._sc_undo.activated.connect(self._undo_pipeline)
+		self._sc_redo = QShortcut(QKeySequence.StandardKey.Redo, self)
+		self._sc_redo.activated.connect(self._redo_pipeline)
+		self._sc_redo2 = QShortcut(QKeySequence("Ctrl+Y"), self)
+		self._sc_redo2.activated.connect(self._redo_pipeline)
+
+	def _snapshot_attrs(self, names) -> dict:
+		"""Copia profunda de los atributos indicados (para poder restaurarlos)."""
+		import copy
+		snap: dict = {}
+		for n in names:
+			val = getattr(self, n, None)
+			try:
+				snap[n] = copy.deepcopy(val)
+			except Exception:
+				snap[n] = val  # objetos no copiables: guardar referencia
+		return snap
+
+	def _apply_attrs_snapshot(self, snapshot: dict):
+		"""Restaura atributos desde un snapshot y refresca la vista."""
+		for n, v in snapshot.items():
+			setattr(self, n, v)
+		self._refresh_after_undo()
+
+	def _commit_undo(self, label: str, attr_names, before):
+		"""Cierra una acción deshacible: captura el estado posterior y lo apila.
+
+		`before` es el snapshot tomado antes de la acción; si es None (acción
+		anidada o undo suspendido) no se registra nada.
+		"""
+		if before is None:
+			return
+		after = self._snapshot_attrs(attr_names)
+		self.pipeline_history.push(
+			label,
+			undo=lambda b=before: self._apply_attrs_snapshot(b),
+			redo=lambda a=after: self._apply_attrs_snapshot(a),
+		)
+
+	def _refresh_after_undo(self):
+		"""Refresca la vista tras un deshacer/rehacer, según el modo activo."""
+		try:
+			if getattr(self, "cine_crudo_preview_mode", None) == "sa_montage":
+				self._schedule_montage_refresh(0)
+			else:
+				self._refresh_cine_crudo_view()
+		except Exception:
+			pass
+
+	def _undo_pipeline(self):
+		label = self.pipeline_history.undo()
+		if label:
+			self._log(f"Deshacer: {label}")
+			self.statusBar().showMessage(f"Deshacer: {label}")
+		else:
+			self.statusBar().showMessage("Nada para deshacer")
+
+	def _redo_pipeline(self):
+		label = self.pipeline_history.redo()
+		if label:
+			self._log(f"Rehacer: {label}")
+			self.statusBar().showMessage(f"Rehacer: {label}")
+		else:
+			self.statusBar().showMessage("Nada para rehacer")
 
 	def _build_readonly_results_panel(self) -> QWidget:
 		"""Construye el panel de solo-lectura de la banda inferior: datos del
@@ -4946,18 +5052,9 @@ class MainWindow(QMainWindow):
 		QMessageBox.information(self, "SINCRO", f"Frames exportados en:\n{folder}")
 
 	def _refresh_compare_axes_panel_now(self):
-		if self.study is None or self.seg is None:
-			return
-		if not self._is_tab_active("comparacion_ejes") and not bool(self.compare_axes_cine_check.isChecked()):
-			self._compare_axes_dirty_pending = True
-			return
-		try:
-			self._write_compare_axes_panel(cmap_compare=str(self.compare_axes_cmap_combo.currentText()))
-			self._load_preview("comparacion_ejes")
-			self._compare_axes_dirty_pending = False
-			self.statusBar().showMessage("Comparativa de ejes actualizada")
-		except Exception as exc:
-			self._log(f"[WARN] No se pudo actualizar comparativa de ejes: {exc}")
+		# Grilla comparacion_ejes DEPRECADA (reemplazada por el Montaje clínico).
+		# No se regenera; la tab queda a cargo del montaje.
+		return
 
 	def _on_preview_tab_changed(self, index: int):
 		if index < 0 or self.study is None or self.seg is None:
@@ -4966,15 +5063,6 @@ class MainWindow(QMainWindow):
 		tab_name = self._tab_name_from_title(title)
 		if tab_name:
 			self._request_lazy_tab_render(tab_name, reason="apertura de pestaña")
-		if title == "comparacion_ejes" and bool(self._compare_axes_dirty_pending):
-			self._refresh_compare_axes_panel_now()
-		if title == "comparacion_ejes" and self.compare_axes_cine_check.isChecked() and not self.compare_axes_preview_frames:
-			self._set_progress(88, "Generando cine de comparacion_ejes...")
-			try:
-				self._write_compare_axes_panel(cmap_compare=str(self.compare_axes_cmap_combo.currentText()), build_cine=True)
-				self._load_preview("comparacion_ejes")
-			finally:
-				self._set_progress(100, "Procesamiento completo")
 
 	def _refresh_compare_axes_panel(self):
 		self._refresh_compare_axes_panel_now()
@@ -8682,9 +8770,9 @@ class MainWindow(QMainWindow):
 			plt.close(fig2)
 
 		if render_compare_axes:
-			self._write_compare_axes_panel(cmap_compare=cmap_compare, build_cine=False)
-		else:
-			self._log("Cache tab: comparacion_ejes sin cambios, se omite regeneración.")
+			# Grilla comparacion_ejes (16 cortes/eje) DEPRECADA: reemplazada por el
+			# Montaje clínico. Ya no se regenera aquí (evita render lento y mal orientado).
+			pass
 
 		ef = self._estimate_lv_ef()
 		n_gates = int(study_cube_render.shape[0])
@@ -9789,29 +9877,28 @@ class MainWindow(QMainWindow):
 			label.setText("Sin cine polar")
 
 	def _load_compare_axes_preview(self):
+		# La tab comparacion_ejes ahora aloja el Montaje clínico SA/VLA/HLA.
+		# Si hay un montaje generado, se muestra; si no, la tab queda vacía.
 		name = "comparacion_ejes"
 		label = self.preview_labels[name]
-		png_path = os.path.join(self.output_dir, "comparacion_ejes.png")
+		montage_png = os.path.join(self.output_dir, "sa_montage.png")
+		if str(getattr(self, "cine_crudo_preview_mode", "")) == "sa_montage" and os.path.isfile(montage_png):
+			pix = QPixmap(montage_png)
+			if not pix.isNull():
+				self.preview_pixmaps[name] = pix
+				self.preview_base_sizes[name] = pix.size()
+				self._apply_preview_zoom(name)
+				return
+		# Sin montaje: no mostrar nada.
 		movie = self.preview_movies.pop(name, None)
 		if movie is not None:
 			movie.stop()
-			label.clear()
 			label.setMovie(None)
-		if self.compare_axes_cine_check.isChecked() and self.compare_axes_preview_frames:
-			self._set_compare_axes_memory_frame(self.compare_axes_preview_index)
-			self._update_compare_axes_toggle_text(enabled=True)
-			return
-		if os.path.exists(png_path):
-			pix = QPixmap(png_path)
-			self.preview_pixmaps[name] = pix
-			self.preview_base_sizes[name] = pix.size()
-			self._update_compare_axes_toggle_text(enabled=False)
-			self._apply_preview_zoom(name)
-		else:
-			self.preview_pixmaps.pop(name, None)
-			self.preview_base_sizes.pop(name, None)
-			self._update_compare_axes_toggle_text(enabled=False)
-			label.setText("Sin comparativa")
+		self.preview_pixmaps.pop(name, None)
+		self.preview_base_sizes.pop(name, None)
+		self._update_compare_axes_toggle_text(enabled=False)
+		label.clear()
+		label.setText("")
 
 	def _generate_pdf_report(self):
 		if self.study is None or self.seg is None or self.metrics is None or self.territory is None:
@@ -11943,6 +12030,7 @@ class MainWindow(QMainWindow):
 		if self.cine_crudo_recon_result is None:
 			QMessageBox.information(self, "SINCRO", "Primero reconstruí el crudo con Recon raw.")
 			return
+		_undo_before = None if getattr(self, "_undo_suspended", False) else self._snapshot_attrs(self.UNDO_ATTRS_CUTS)
 		try:
 			result = self.cine_crudo_recon_result
 			raw_study = self.cine_crudo_raw_study_for_recon or self.study
@@ -12073,6 +12161,7 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_mark_rest_btn.setEnabled(True)
 			self._log(f"Cortes generados: SA {z0 + 1}..{z1 + 1} ({sa_cube.shape[1]} cortes, espesor {thickness}px = {cut_thickness_mm:.2f}mm). HLA/VLA visibles en comparacion_ejes. Ahora podés Procesar recon o Guardar ejes DICOM.")
 			self._set_progress(100, "Cortes SA/HLA/VLA generados")
+			self._commit_undo("Generar cortes", self.UNDO_ATTRS_CUTS, _undo_before)
 		except Exception as exc:
 			self._log(f"[ERROR] Generar cortes falló: {exc}")
 			QMessageBox.warning(self, "SINCRO", f"No se pudieron generar los cortes:\n{exc}")
@@ -12297,13 +12386,13 @@ class MainWindow(QMainWindow):
 			fig.savefig(out_png, dpi=150, facecolor=fig.get_facecolor())
 			plt.close(fig)
 			self.cine_crudo_preview_mode = "sa_montage"
-			for tab_name in ("comparacion_ejes", "cine_crudo"):
+			for tab_name in ("comparacion_ejes",):
 				if tab_name in self.preview_labels:
 					pix = QPixmap(out_png)
 					self.preview_pixmaps[tab_name] = pix
 					self.preview_base_sizes[tab_name] = pix.size()
 					self._apply_preview_zoom(tab_name)
-			self._select_tab_by_title("cine_crudo")
+			self._select_tab_by_title("comparacion_ejes")
 			self._log(
 				f"Montaje generado: SA {n_sa_stress} cortes · Esp {th_txt} · recorte {crop_txt} · gates {min(gate_from, gate_to)}→{max(gate_from, gate_to)} · template {template_mode}"
 				+ (" · doble fila ESFUERZO/REPOSO" if has_rest else "")
@@ -13223,6 +13312,7 @@ class MainWindow(QMainWindow):
 		if sm is None:
 			return
 		stage, ry, rx, H_stage, W_stage = sm
+		_undo_before = None if getattr(self, "_undo_suspended", False) else self._snapshot_attrs(self.UNDO_ATTRS_MOTION)
 		self.cine_crudo_seed_mode = False
 		# Despresionar el botón SIN emitir toggled(): de lo contrario
 		# _on_cine_crudo_seed_mode_toggled(False) borraría el seed recién fijado.
@@ -13243,6 +13333,7 @@ class MainWindow(QMainWindow):
 		etapa_txt = "Rest (reposo)" if stage == "rest" else "Stress (esfuerzo)"
 		self._log(f"Corazón fijado en {etapa_txt}: (y={ry:.1f}, x={rx:.1f}) — el tracking seguirá esa componente.")
 		self._set_active_cine_crudo_stage("both" if ctrl else stage)
+		self._commit_undo("Fijar corazón (motion)", self.UNDO_ATTRS_MOTION, _undo_before)
 
 	def _on_cine_crudo_image_dragged(self, event):
 		if self._cine_crudo_drag_marker not in ("upper", "lower", "compare_line"):
@@ -13817,7 +13908,6 @@ class MainWindow(QMainWindow):
 		self._compose_dual_tab_images(left_label, right_label, target_tabs=target_tabs)
 		# polar_cine ya se genera compuesto dentro de _write_outputs cuando hay compare_bundle.
 		# Evitamos recomponer de nuevo para no duplicar paneles (p.ej. Reposo repetido).
-		self._write_compare_axes_panel(cmap_compare=str(self.compare_axes_cmap_combo.currentText()), build_cine=False)
 		self._write_compare_stress_rest()
 		self.dual_mode_active = True
 		self._load_previews_selected(self._default_preview_tabs())
@@ -13859,7 +13949,6 @@ class MainWindow(QMainWindow):
 				self.compare_interactive_fast_mode = True
 				try:
 					self._write_compare_stress_rest()
-					self._write_compare_axes_panel(cmap_compare=str(self.compare_axes_cmap_combo.currentText()), build_cine=False)
 				finally:
 					self.compare_interactive_fast_mode = prev_fast
 				self.dual_mode_active = True
