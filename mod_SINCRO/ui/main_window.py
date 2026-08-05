@@ -2331,9 +2331,16 @@ class MainWindow(QMainWindow):
 		steps = self.pipeline_history.steps()
 		for i, st in enumerate(steps):
 			if i > 0:
-				sep = QLabel("›")
-				sep.setStyleSheet("color:#9ca3af; font-size:11pt;")
-				lay.addWidget(sep)
+				if st.key == "segment":
+					# Divisor Preparación | Análisis.
+					div = QLabel("┃")
+					div.setStyleSheet("color:#3b82f6; font-size:13pt; font-weight:bold; margin:0 2px;")
+					div.setToolTip("← Preparación   |   Análisis →")
+					lay.addWidget(div)
+				else:
+					sep = QLabel("›")
+					sep.setStyleSheet("color:#9ca3af; font-size:11pt;")
+					lay.addWidget(sep)
 			chip = QPushButton(st.label)
 			chip.setFlat(True)
 			chip.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2393,16 +2400,33 @@ class MainWindow(QMainWindow):
 		self._refresh_pipeline_step_bar()
 
 	def _on_step_chip_clicked(self, key: str):
-		"""Clic en un chip: salta a la vista/pestaña asociada a ese paso."""
+		"""Clic en un chip: salta a la vista/pestaña asociada a ese paso.
+
+		Es robusto: si la vista destino no está visible (pestaña avanzada en modo
+		básico, o cine_crudo movida a la ventana de Preparación) intenta habilitarla
+		antes de navegar, y si no puede avisa en la barra de estado.
+		"""
 		st = self.pipeline_history.get(key)
 		label = st.label if st is not None else key
 		tab = self._STEP_TABS.get(key)
-		if tab:
+		if not tab:
+			self.statusBar().showMessage(f"Paso: {label}")
+			return
+		# cine_crudo puede estar reubicada en la ventana de Preparación.
+		if tab == "cine_crudo" and getattr(self, "_cine_crudo_reparented", False):
 			try:
-				self._select_tab_by_title(tab)
+				self.open_preparacion_window()
+				self.statusBar().showMessage(f"Paso: {label} — en ventana de Preparación")
 			except Exception:
-				pass
-		self.statusBar().showMessage(f"Paso: {label}")
+				self.statusBar().showMessage(f"'{label}': ventana de Preparación no disponible")
+			return
+		# Si el destino es una pestaña de modo avanzado y estamos en básico, activarlo.
+		if tab in self._advanced_extra_tab_order and not self.advanced_mode_enabled:
+			self.toggle_advanced_mode()
+		if self._select_tab_by_title(tab):
+			self.statusBar().showMessage(f"Paso: {label}")
+		else:
+			self.statusBar().showMessage(f"La vista '{tab}' no está disponible en este modo")
 
 	def _refresh_pipeline_step_bar(self):
 		"""Repinta la barra de pasos según el estado de PipelineHistory."""
@@ -14184,11 +14208,12 @@ class MainWindow(QMainWindow):
 		finally:
 			self.study, self.seg = saved_study, saved_seg
 
-	def _select_tab_by_title(self, title: str):
+	def _select_tab_by_title(self, title: str) -> bool:
 		for i in range(self.tabs.count()):
 			if self.tabs.tabText(i) == title:
 				self.tabs.setCurrentIndex(i)
-				return
+				return True
+		return False
 
 	def _write_compare_stress_rest(self):
 		"""Genera comparacion_stress_rest.png: panel comparativo de métricas de
