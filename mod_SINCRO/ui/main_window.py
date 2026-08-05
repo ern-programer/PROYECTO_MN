@@ -2337,8 +2337,53 @@ class MainWindow(QMainWindow):
 		self._undo_hint_label = QLabel("")
 		self._undo_hint_label.setStyleSheet("color:#6b7280; font-size:8pt;")
 		lay.addWidget(self._undo_hint_label)
+		self._recompute_btn = QPushButton("↻ Recalcular")
+		self._recompute_btn.setToolTip("Reejecuta en cadena los pasos desactualizados (los que se puedan automáticamente).")
+		self._recompute_btn.setStyleSheet(
+			"QPushButton{background:#fef3c7; color:#92400e; border:1px solid #fcd34d;"
+			"border-radius:8px; padding:2px 10px; font-size:9pt; font-weight:600;}"
+			"QPushButton:disabled{background:#f3f4f6; color:#9ca3af; border-color:#e5e7eb;}"
+		)
+		self._recompute_btn.clicked.connect(self._recompute_stale_steps)
+		lay.addWidget(self._recompute_btn)
 		self._refresh_pipeline_step_bar()
 		return bar
+
+	#: Pasos con recómputo automático (sin diálogo). El resto requiere acción manual.
+	def _step_recomputers(self) -> dict:
+		return {
+			"recon": self._reconstruct_cine_crudo_raw,
+			"cuts": self._generate_cine_crudo_cardiac_cuts,
+		}
+
+	def _recompute_stale_steps(self):
+		"""Reejecuta en orden los pasos desactualizados con recómputo automático.
+
+		Se detiene en el primer paso desactualizado que requiere acción manual
+		(p.ej. reorientación, que abre un diálogo), avisando al usuario.
+		"""
+		recomputers = self._step_recomputers()
+		ran = 0
+		for st in self.pipeline_history.steps():
+			if st.status.value != "stale":
+				continue
+			fn = recomputers.get(st.key)
+			if fn is None:
+				self._log(f"[RECALCULAR] '{st.label}' requiere acción manual; me detengo ahí.")
+				self.statusBar().showMessage(f"Recalcular: '{st.label}' necesita acción manual")
+				break
+			self._log(f"[RECALCULAR] Reejecutando '{st.label}'...")
+			try:
+				fn()
+				ran += 1
+			except Exception as exc:
+				self._log(f"[RECALCULAR] '{st.label}' falló: {exc}")
+				break
+		if ran:
+			self.statusBar().showMessage(f"Recalcular: {ran} paso(s) reejecutado(s)")
+		elif not self.pipeline_history.stale_steps():
+			self.statusBar().showMessage("Recalcular: no hay pasos desactualizados")
+		self._refresh_pipeline_step_bar()
 
 	def _refresh_pipeline_step_bar(self):
 		"""Repinta la barra de pasos según el estado de PipelineHistory."""
@@ -2364,13 +2409,23 @@ class MainWindow(QMainWindow):
 			if self.pipeline_history.can_redo():
 				parts.append(f"⟳ {self.pipeline_history.peek_redo_label()}")
 			hint.setText("   ".join(parts))
+		btn = getattr(self, "_recompute_btn", None)
+		if btn is not None:
+			stale_keys = {s.key for s in self.pipeline_history.stale_steps()}
+			has_auto = bool(stale_keys & set(self._step_recomputers()))
+			btn.setEnabled(has_auto)
 
 	def _mark_step_done(self, key: str, *sig_parts):
-		"""Marca un paso como al día e invalida (desactualiza) los posteriores."""
+		"""Marca un paso como al día; invalida los posteriores solo si sus inputs cambiaron."""
 		try:
-			sig = self.pipeline_history.make_signature(*sig_parts) if sig_parts else ""
-			self.pipeline_history.mark_done(key, sig)
-			self.pipeline_history.invalidate_after(key)
+			new_sig = self.pipeline_history.make_signature(*sig_parts) if sig_parts else ""
+			prev = self.pipeline_history.get(key)
+			prev_sig = prev.signature if prev is not None else ""
+			self.pipeline_history.mark_done(key, new_sig)
+			# Invalidación fina: si la firma (inputs) no cambió, el output es el
+			# mismo y no hay que desactualizar la cadena posterior.
+			if sig_parts and new_sig != prev_sig:
+				self.pipeline_history.invalidate_after(key)
 		except Exception:
 			pass
 
