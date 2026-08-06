@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
 	QPushButton,
 	QPlainTextEdit,
 	QProgressBar,
+	QProgressDialog,
 	QScrollArea,
 	QSpinBox,
 	QSlider,
@@ -1761,8 +1762,29 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_nitida_check.setToolTip(
 					"NÍTIDA (OmniRes): recuperación de resolución dependiente de profundidad "
 					"(modela la respuesta colimador-detector según el DICOM). Requiere OSEM/MLEM "
-					"(si está en FBP, se fuerza OSEM). Opcional; medio-dosis/medio-tiempo.")
+					"(si está en FBP, se fuerza OSEM). Al activarla toma el control de la "
+					"reconstrucción: desactiva los filtros de proyección (para no pre-difuminar "
+					"lo que va a des-difuminar) y sube las iteraciones a 5. Opcional; medio-dosis/medio-tiempo.")
+				self.cine_crudo_nitida_check.toggled.connect(self._on_nitida_toggled)
 				toolbar6_r2.addWidget(self.cine_crudo_nitida_check)
+				self.cine_crudo_post_check = QCheckBox("Suavizar")
+				self.cine_crudo_post_check.setChecked(False)
+				self.cine_crudo_post_check.setToolTip(
+					"Post-filtro gaussiano 3D opcional (control de ruido tras la reconstrucción). "
+					"Es la contraparte de la recuperación de resolución: OSEM+NÍTIDA realza detalle "
+					"pero amplifica ruido; este único suavizado lo regula. Default OFF.")
+				self.cine_crudo_post_check.toggled.connect(self._on_post_filter_toggled)
+				toolbar6_r2.addWidget(self.cine_crudo_post_check)
+				self.cine_crudo_post_fwhm_spin = QDoubleSpinBox()
+				self.cine_crudo_post_fwhm_spin.setRange(0.0, 30.0)
+				self.cine_crudo_post_fwhm_spin.setSingleStep(0.5)
+				self.cine_crudo_post_fwhm_spin.setDecimals(1)
+				self.cine_crudo_post_fwhm_spin.setValue(8.0)
+				self.cine_crudo_post_fwhm_spin.setSuffix(" mm")
+				self.cine_crudo_post_fwhm_spin.setMaximumWidth(72)
+				self.cine_crudo_post_fwhm_spin.setEnabled(False)
+				self.cine_crudo_post_fwhm_spin.setToolTip("FWHM del suavizado gaussiano [mm]. Típico 6–10 mm.")
+				toolbar6_r2.addWidget(self.cine_crudo_post_fwhm_spin)
 				self.cine_crudo_recon_btn = QToolButton()
 				self.cine_crudo_recon_btn.setText("Recon raw")
 				self.cine_crudo_recon_btn.setToolTip("Reconstruye desde crudo gated con la corrección actual y muestra QC: UngGat + gates. No altera el procesamiento clínico principal todavía.")
@@ -11562,16 +11584,68 @@ class MainWindow(QMainWindow):
 			elif method not in {"osem", "mlem"}:
 				self._log("NÍTIDA (OmniRes) requiere OSEM/MLEM: fuerzo método OSEM para la recuperación de resolución.")
 				method = "osem"
+		rr_active = bool(nitida and psf_model is not None)
+		# Con NÍTIDA activa los filtros de proyección se anulan: pre-difuminar el
+		# sinograma peleó contra la PSF que la RR intenta des-difuminar. El control
+		# de ruido pasa al post-filtro gaussiano (perilla única).
+		if rr_active:
+			from core.raw_reconstruction import ProjectionFilterConfig
+			ungated_filter = ProjectionFilterConfig(kind="none", cutoff=0.5, order=1)
+			gated_filter = ProjectionFilterConfig(kind="none", cutoff=0.5, order=1)
+		else:
+			ungated_filter = self._cine_crudo_recon_filter_config("ungated")
+			gated_filter = self._cine_crudo_recon_filter_config("gated")
+		post_sigma_px = self._cine_crudo_post_filter_sigma_px(study)
 		return RawReconConfig(
 			reconstruction_method=method,
-			ungated_filter=self._cine_crudo_recon_filter_config("ungated"),
-			gated_filter=self._cine_crudo_recon_filter_config("gated"),
+			ungated_filter=ungated_filter,
+			gated_filter=gated_filter,
 			iterative_iterations=int(self.cine_crudo_iter_spin.value()) if hasattr(self, "cine_crudo_iter_spin") else 2,
 			osem_subsets=int(self.cine_crudo_osem_subsets_spin.value()) if hasattr(self, "cine_crudo_osem_subsets_spin") else 4,
 			display_slice_step_px=2,
-			resolution_recovery=bool(nitida and psf_model is not None),
+			resolution_recovery=rr_active,
 			psf_model=psf_model,
+			post_filter_sigma_px=post_sigma_px,
 		)
+
+	def _cine_crudo_post_filter_sigma_px(self, study=None) -> float:
+		"""Sigma en píxeles del post-filtro gaussiano segun la casilla 'Suavizar'.
+
+		Convierte el FWHM en mm (control de la UI) a sigma en píxeles usando el
+		pixel spacing del estudio. 0.0 = post-filtro desactivado.
+		"""
+		if not (hasattr(self, "cine_crudo_post_check") and self.cine_crudo_post_check is not None
+				and self.cine_crudo_post_check.isChecked()):
+			return 0.0
+		fwhm_mm = float(self.cine_crudo_post_fwhm_spin.value()) if hasattr(self, "cine_crudo_post_fwhm_spin") else 0.0
+		if fwhm_mm <= 0.0:
+			return 0.0
+		study = study or getattr(self, "cine_crudo_raw_study_for_recon", None) or self.study
+		ps = getattr(study, "pixel_spacing", None) if study is not None else None
+		pixel_mm = float(ps[0]) if ps else 6.4
+		sigma_px = (fwhm_mm / 2.354820045) / max(pixel_mm, 1e-6)
+		self._log(f"Post-filtro: suavizado gaussiano FWHM={fwhm_mm:.1f} mm -> sigma={sigma_px:.2f} px (pixel={pixel_mm:.2f} mm).")
+		return sigma_px
+
+	def _on_nitida_toggled(self, checked: bool):
+		"""NÍTIDA toma el control de la recon: desactiva filtros de proyección y sube iteraciones."""
+		proj_filter_widgets = [
+			"cine_crudo_ung_filter_combo", "cine_crudo_ung_cutoff_spin", "cine_crudo_ung_order_spin",
+			"cine_crudo_gated_filter_combo", "cine_crudo_gated_cutoff_spin", "cine_crudo_gated_order_spin",
+		]
+		for name in proj_filter_widgets:
+			w = getattr(self, name, None)
+			if w is not None:
+				w.setEnabled(not checked)
+		if checked and hasattr(self, "cine_crudo_iter_spin") and self.cine_crudo_iter_spin is not None:
+			if int(self.cine_crudo_iter_spin.value()) < 4:
+				self.cine_crudo_iter_spin.setValue(5)  # rango recomendado 4-6 para RR
+		if checked:
+			self._log("NÍTIDA activa: filtros de proyección desactivados (evita pre-difuminado); iteraciones a 5. Usá 'Suavizar' para el ruido.")
+
+	def _on_post_filter_toggled(self, checked: bool):
+		if hasattr(self, "cine_crudo_post_fwhm_spin") and self.cine_crudo_post_fwhm_spin is not None:
+			self.cine_crudo_post_fwhm_spin.setEnabled(bool(checked))
 
 	def _build_nitida_psf(self, study):
 		"""Construye el PsfModel (NÍTIDA/OmniRes) a partir del colimador y la geometría del estudio.
@@ -11786,7 +11860,42 @@ class MainWindow(QMainWindow):
 			if cfg.reconstruction_method.lower() in {"mlem", "osem"} and projections.shape[-1] >= 64:
 				self._log("[INFO] MLEM/OSEM CPU en matriz real puede tardar; para pruebas rápidas usá Iter=1-2.")
 			self._set_progress(45, f"Reconstruyendo raw ({cfg.reconstruction_method.upper()})...")
-			result = reconstruct_raw_gated_pipeline(projections, angles, motion_result=motion, config=cfg)
+
+			nitida_on = bool(getattr(cfg, "resolution_recovery", False) and getattr(cfg, "psf_model", None) is not None)
+			titulo = "NÍTIDA (OmniRes) — recuperación de resolución" if nitida_on else f"Reconstrucción {cfg.reconstruction_method.upper()}"
+			recon_dialog = QProgressDialog(
+				f"{titulo}\nEsto puede tardar según iteraciones y tamaño de matriz…",
+				None, 0, 100, self,
+			)
+			recon_dialog.setWindowTitle("SINCRO · Reconstruyendo")
+			recon_dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+			recon_dialog.setMinimumWidth(420)
+			recon_dialog.setMinimumDuration(0)
+			recon_dialog.setAutoClose(False)
+			recon_dialog.setAutoReset(False)
+			recon_dialog.setCancelButton(None)
+			recon_dialog.setValue(0)
+			recon_dialog.show()
+			QApplication.processEvents()
+
+			def _recon_progress(fraction: float, message: str = "") -> None:
+				# Mapea el avance interno (0..1) del pipeline al tramo 45-99% de la barra
+				# lateral y al diálogo modal en primer plano.
+				frac = max(0.0, min(1.0, float(fraction)))
+				pct = int(round(45 + 54 * frac))
+				msg = message or f"Reconstruyendo raw ({cfg.reconstruction_method.upper()})..."
+				self._set_progress(min(99, pct), msg)
+				recon_dialog.setLabelText(f"{titulo}\n{msg}")
+				recon_dialog.setValue(int(round(100 * frac)))
+				QApplication.processEvents()
+
+			try:
+				result = reconstruct_raw_gated_pipeline(
+					projections, angles, motion_result=motion, config=cfg, progress_callback=_recon_progress
+				)
+			finally:
+				recon_dialog.close()
+				recon_dialog.deleteLater()
 			self.cine_crudo_recon_result = result
 			out_png = self._write_cine_crudo_recon_qc(result, source_label)
 			self.cine_crudo_preview_mode = "recon_qc"

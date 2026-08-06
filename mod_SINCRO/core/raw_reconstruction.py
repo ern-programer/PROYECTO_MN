@@ -54,6 +54,9 @@ class RawReconConfig:
     # (psf_model, un core.resolution_recovery.PsfModel). No aplica a FBP.
     resolution_recovery: bool = False
     psf_model: object | None = None
+    # Post-filtro gaussiano 3D opcional (control de ruido post-recon). 0 = off.
+    # Sigma en píxeles; es la contraparte de ruido de la recuperación de resolución.
+    post_filter_sigma_px: float = 0.0
 
 
 @dataclass
@@ -151,16 +154,37 @@ def filter_projections(projections: np.ndarray, config: ProjectionFilterConfig) 
     raise ValueError("Filtro no soportado: use none, lowpass, butterworth o wiener")
 
 
+def _sub_progress(progress, index: int, count: int):
+    """Deriva un callback de progreso para el tramo [index/count, (index+1)/count].
+
+    ``progress`` es un callable(global_fraction) o None. El resultado es un
+    callable(local_fraction 0..1) que mapea el avance local del sub-bloque
+    (p.ej. un gate) al tramo global correspondiente. Devuelve None si no hay
+    progress, para que el bucle interno no haga trabajo extra.
+    """
+    if progress is None or count <= 0:
+        return None
+    start = index / count
+    span = 1.0 / count
+
+    def _inner(local_fraction: float) -> None:
+        progress(start + span * max(0.0, min(1.0, float(local_fraction))))
+
+    return _inner
+
+
 def reconstruct_fbp_volume(
     projections: np.ndarray,
     angles_deg: np.ndarray | None = None,
     *,
     projection_filter: ProjectionFilterConfig | None = None,
     fbp_filter_name: str = "ramp",
+    progress=None,
 ) -> np.ndarray:
     """Reconstruye un volumen transaxial por FBP desde proyecciones 3D.
 
     Entrada: (n_angles, H, W). Salida: (H, W, W), un corte por fila axial del detector.
+    ``progress`` (opcional): callable(local_fraction) invocado durante el bucle de cortes.
     """
     proj = np.asarray(projections, dtype=np.float64)
     if proj.ndim != 3:
@@ -179,6 +203,8 @@ def reconstruct_fbp_volume(
     for slice_idx in range(height):
         sinogram = proj[:, slice_idx, :].T
         volume[slice_idx] = _iradon_or_fallback(sinogram, theta, filter_name=str(fbp_filter_name), output_size=width)
+        if progress is not None and height:
+            progress((slice_idx + 1) / height)
     return volume
 
 
@@ -193,8 +219,11 @@ def reconstruct_projection_volume(
     subsets: int = 4,
     sensitivity_cache: dict[int, np.ndarray] | None = None,
     psf=None,
+    progress=None,
 ) -> np.ndarray:
     """Reconstruye volumen desde proyecciones 3D con FBP/MLEM/OSEM.
+
+    ``progress`` (opcional): callable(local_fraction 0..1) para reportar avance.
 
     ``sensitivity_cache`` (opcional): si se pasa (ver `_build_sensitivity_cache`),
     se reutiliza tal cual en vez de recalcularla. Sirve para compartir las
@@ -208,7 +237,8 @@ def reconstruct_projection_volume(
     method_key = str(method or "fbp").strip().lower()
     if method_key == "fbp":
         return reconstruct_fbp_volume(
-            projections, angles_deg, projection_filter=projection_filter, fbp_filter_name=fbp_filter_name
+            projections, angles_deg, projection_filter=projection_filter, fbp_filter_name=fbp_filter_name,
+            progress=progress,
         )
     if method_key not in {"mlem", "osem"}:
         raise ValueError("method debe ser 'fbp', 'mlem' u 'osem'")
@@ -248,6 +278,8 @@ def reconstruct_projection_volume(
             sensitivity_cache=sensitivity_cache,
             psf=psf,
         )
+        if progress is not None and height:
+            progress((slice_idx + 1) / height)
     return out
 
 
@@ -408,15 +440,22 @@ def reconstruct_gated_fbp_volume(
     *,
     projection_filter: ProjectionFilterConfig | None = None,
     fbp_filter_name: str = "ramp",
+    progress=None,
 ) -> np.ndarray:
     """Reconstruye cada gate por separado. Entrada (gates,angles,H,W)."""
     proj = np.asarray(projections, dtype=np.float64)
     if proj.ndim != 4:
         raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibio {proj.shape}")
-    volumes = [
-        reconstruct_fbp_volume(proj[gate], angles_deg, projection_filter=projection_filter, fbp_filter_name=fbp_filter_name)
-        for gate in range(proj.shape[0])
-    ]
+    n_gates = int(proj.shape[0])
+    volumes = []
+    for gate in range(n_gates):
+        gate_progress = _sub_progress(progress, gate, n_gates)
+        volumes.append(
+            reconstruct_fbp_volume(
+                proj[gate], angles_deg, projection_filter=projection_filter,
+                fbp_filter_name=fbp_filter_name, progress=gate_progress,
+            )
+        )
     return np.stack(volumes, axis=0)
 
 
@@ -430,11 +469,13 @@ def reconstruct_gated_projection_volume(
     iterations: int = 4,
     subsets: int = 4,
     psf=None,
+    progress=None,
 ) -> np.ndarray:
     """Reconstruye cada gate por separado con FBP/MLEM/OSEM.
 
     ``psf`` (opcional): activa la recuperación de resolución (RR) en el path
     iterativo, compartida entre todos los gates (misma geometría/colimador).
+    ``progress`` (opcional): callable(local_fraction 0..1) repartido entre gates.
     """
     proj = np.asarray(projections, dtype=np.float64)
     if proj.ndim != 4:
@@ -464,6 +505,7 @@ def reconstruct_gated_projection_volume(
             subsets=subsets,
             sensitivity_cache=sensitivity_cache,
             psf=psf,
+            progress=_sub_progress(progress, gate, int(proj.shape[0])),
         )
         for gate in range(proj.shape[0])
     ]
@@ -509,12 +551,17 @@ def reconstruct_raw_gated_pipeline(
     motion_result: dict | None = None,
     config: RawReconConfig | None = None,
     motion_kwargs: dict | None = None,
+    progress_callback=None,
 ) -> RawReconResult:
     """Ejecuta el pipeline raw gated central.
 
     Si motion_result se provee, usa sus shifts. Si no, calcula motion correction
     con motion_correct_projections(**motion_kwargs). Los mismos shifts se aplican
     al UngGat y al gated; los filtros se aplican despues y son independientes.
+
+    ``progress_callback`` (opcional): callable(fraction 0..1, message) invocado
+    durante la reconstruccion (UngGat + gates) para alimentar una barra de
+    progreso. La UI puede usarlo para mostrar avance en OSEM/MLEM y NITIDA.
     """
     cfg = _validate_config(config or RawReconConfig())
     raw = np.asarray(projections, dtype=np.float64)
@@ -546,6 +593,23 @@ def reconstruct_raw_gated_pipeline(
     rr_psf = cfg.psf_model if (getattr(cfg, "resolution_recovery", False) and method in {"osem", "mlem"}) else None
     if getattr(cfg, "resolution_recovery", False) and rr_psf is None:
         notes.append("NÍTIDA (OmniRes) pedido pero inactivo: requiere método OSEM/MLEM y un PsfModel.")
+
+    # Reparto del presupuesto de progreso: UngGat ~25%, gates ~70%, post ~5%.
+    n_gates = int(raw.shape[0])
+    method_label = ("NÍTIDA/" + method.upper()) if rr_psf is not None else method.upper()
+
+    def _ung_progress(frac: float) -> None:
+        if progress_callback is not None:
+            progress_callback(0.25 * max(0.0, min(1.0, frac)), f"Reconstruyendo UngGat ({method_label})...")
+
+    def _gated_progress(frac: float) -> None:
+        if progress_callback is not None:
+            gate_1based = min(n_gates, int(frac * n_gates) + 1)
+            progress_callback(0.25 + 0.70 * max(0.0, min(1.0, frac)), f"Reconstruyendo gate {gate_1based}/{n_gates} ({method_label})...")
+
+    ung_progress = _ung_progress if progress_callback is not None else None
+    gated_progress = _gated_progress if progress_callback is not None else None
+
     ungated_volume = reconstruct_projection_volume(
         ungated_corrected,
         angles_deg,
@@ -555,6 +619,7 @@ def reconstruct_raw_gated_pipeline(
         iterations=int(cfg.iterative_iterations),
         subsets=subsets,
         psf=rr_psf,
+        progress=ung_progress,
     )
     gated_volume = reconstruct_gated_projection_volume(
         corrected,
@@ -565,6 +630,7 @@ def reconstruct_raw_gated_pipeline(
         iterations=int(cfg.iterative_iterations),
         subsets=subsets,
         psf=rr_psf,
+        progress=gated_progress,
     )
     if rr_psf is not None:
         notes.append("NÍTIDA (OmniRes) activo: recuperación de resolución dependiente de profundidad en UngGat y gated.")
@@ -591,6 +657,23 @@ def reconstruct_raw_gated_pipeline(
         f"Orientacion L/R: sentido={'CCW' if ccw else ('CW' if ccw is False else '?')}, "
         f"flip_x={flip_x} (converge CW/CCW a orientacion canonica)."
     )
+
+    # Post-filtro gaussiano 3D (control de ruido). Contraparte de la RR: la
+    # reconstruccion iterativa con modelado de PSF amplifica el ruido; este
+    # unico suavizado opcional lo regula. Se aplica por volumen (ungated) y por
+    # gate, solo sobre los ejes espaciales.
+    post_sigma = float(getattr(cfg, "post_filter_sigma_px", 0.0) or 0.0)
+    if post_sigma > 0.05:
+        if progress_callback is not None:
+            progress_callback(0.96, "Aplicando post-filtro (suavizado)...")
+        from scipy.ndimage import gaussian_filter
+        ungated_volume = gaussian_filter(ungated_volume, sigma=post_sigma, mode="constant")
+        for g in range(gated_volume.shape[0]):
+            gated_volume[g] = gaussian_filter(gated_volume[g], sigma=post_sigma, mode="constant")
+        notes.append(f"Post-filtro gaussiano 3D aplicado (sigma={post_sigma:.2f} px) para control de ruido.")
+
+    if progress_callback is not None:
+        progress_callback(1.0, "Reconstrucción completa")
 
     phase_cube = gated_volume[:, :: int(cfg.fevi_slice_step_px)].copy()
     display_cube = make_display_cube(phase_cube, step_px=int(cfg.display_slice_step_px))
