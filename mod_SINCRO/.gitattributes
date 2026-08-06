@@ -1,0 +1,5 @@
+# Evitar normalización de EOL en binarios (corrompe PDFs/imágenes).
+*.pdf binary
+*.png binary
+*.gif binary
+*.mp4 binary
