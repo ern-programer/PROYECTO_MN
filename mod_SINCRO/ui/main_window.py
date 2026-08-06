@@ -239,6 +239,9 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_recon_result = None
 		self.cine_crudo_raw_study_for_recon = None
 		self._cine_crudo_recon_stage = "stress"
+		# Sustracción de fondo sobre el crudo (herramienta de la ventana de
+		# reconstrucción). Solo alimenta la recon cuando el impacto es "toda la cadena".
+		self._raw_bg_spec: dict[str, dict] = {}
 		self.cine_crudo_recon_study = None
 		self.cine_crudo_cut_study = None
 		self.cine_crudo_cut_source_label = ""
@@ -2005,11 +2008,14 @@ class MainWindow(QMainWindow):
 				label.wheelEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_wheel_safe(e, lbl))
 				label.mouseDoubleClickEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_double_click_safe(e, lbl))
 			if name == "comparacion_ejes":
-				# Durante preview de límites (cut_limits) también se permite drag
-				# desde esta pestaña para Base/Ápex.
+				# El montaje clínico ahora vive en esta pestaña: además del drag para
+				# Base/Ápex, hay que cablear rueda (mover tira / Ctrl+zoom) y doble
+				# click (reset de tira), igual que en cine_crudo.
 				label.mousePressEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_press_safe(e, lbl))
 				label.mouseMoveEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_move_safe(e, lbl))
 				label.mouseReleaseEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_release_safe(e, lbl))
+				label.wheelEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_wheel_safe(e, lbl))
+				label.mouseDoubleClickEvent = (lambda e, lbl=label: self._on_cine_crudo_mouse_double_click_safe(e, lbl))
 			scroller = QScrollArea()
 			scroller.setWidgetResizable(False)
 			scroller.setWidget(label)
@@ -6113,7 +6119,9 @@ class MainWindow(QMainWindow):
 			# alimenta a los dos: a diferencia de la atenuación porcentual, restar
 			# la componente DC del intestino es lo único que mejora la amplitud
 			# relativa que evalúa el filtro de amplitud de la fase.
-			cube_corrected, intestinal_sub_info = self._apply_intestinal_subtraction_to_cube(cube_corrected, self.cine)
+			cube_corrected, intestinal_sub_info = self._apply_intestinal_subtraction_to_cube(
+				cube_corrected, self.cine
+			)
 			self.intestinal_subtraction_info = intestinal_sub_info
 			self._log_intestinal_subtraction(intestinal_sub_info)
 			cube_for_segmentation = self._apply_intestinal_mask_to_cube(cube_corrected, self.cine, require_global_visual=False)
@@ -11621,13 +11629,76 @@ class MainWindow(QMainWindow):
 			return secondary, self.cine_crudo_motion_result_compare, self.cine_crudo_corrected_projections_compare, "rest"
 		return (self.cine_crudo_raw_study_for_recon or self.study), self.cine_crudo_motion_result, self.cine_crudo_corrected_projections, "stress"
 
+	# ------------------------------------------------ sustracción de fondo (crudo → cadena)
+	def set_raw_background_subtraction(self, stage: str, projections, spec: dict):
+		"""Registra una sustracción de fondo del crudo para que alimente la reconstrucción.
+
+		La invoca la ventana de reconstrucción cuando el impacto elegido es
+		"toda la cadena". ``projections`` es la imagen ungated ya restada (solo para
+		referencia visual); lo que consume la recon es ``spec`` (método, nivel,
+		polígonos), reaplicado sobre el cubo gated con el escalado por gate.
+		"""
+		if not spec:
+			return
+		self._raw_bg_spec[str(stage)] = dict(spec)
+		try:
+			self._log(
+				f"[fondo crudo→cadena] {stage}: modo={spec.get('method')} nivel={float(spec.get('level', 0.0)):.1f}. "
+				"Se aplicará al reconstruir esta etapa."
+			)
+		except Exception:
+			pass
+
+	def clear_raw_background_subtraction(self, stage: str | None = None):
+		"""Descarta la sustracción de fondo registrada (una etapa o todas)."""
+		if not getattr(self, "_raw_bg_spec", None):
+			return
+		if stage is None:
+			self._raw_bg_spec.clear()
+		else:
+			self._raw_bg_spec.pop(str(stage), None)
+
+	def _apply_raw_bg_to_recon_cube(self, projections: np.ndarray, stage: str) -> np.ndarray:
+		"""Aplica la sustracción de fondo registrada al cubo de entrada de la recon.
+
+		El nivel se midió sobre proyecciones ungated (suma de gates); para el cubo
+		gated (n_gates, n_ángulos, H, W) se resta ``nivel / n_gates`` por gate, de
+		modo que la suma sobre gates coincida con lo que se ve en el MIP crudo.
+		"""
+		spec = getattr(self, "_raw_bg_spec", {}).get(str(stage))
+		if not spec or str(spec.get("impact")) != "chain":
+			return projections
+		arr = np.asarray(projections, dtype=np.float64)
+		if arr.ndim < 2:
+			return arr
+		from core.raw_background import polygon_mask, subtract_constant, subtract_localized
+
+		level = float(spec.get("level", 0.0))
+		method = str(spec.get("method", "constant"))
+		h, w = int(arr.shape[-2]), int(arr.shape[-1])
+		if arr.ndim == 4:
+			n_gates = max(1, int(arr.shape[0]))
+			eff_level = level / n_gates
+		else:
+			eff_level = level
+		heart_poly = spec.get("heart_polygon") or []
+		if method == "localized" and len(heart_poly) >= 3:
+			heart_mask = polygon_mask((h, w), heart_poly)
+			res = subtract_localized(arr, eff_level, heart_mask, feather_px=2.0)
+		else:
+			res = subtract_constant(arr, eff_level)
+		self._log(
+			f"[fondo crudo→recon] {stage}: resta {method} nivel_efectivo={eff_level:.2f} "
+			f"sobre cubo {arr.shape} · clip {res.clipped_fraction * 100:.0f}%."
+		)
+		return res.image
+
 	def _reconstruct_cine_crudo_raw(self):
 		"""Reconstruye desde crudo la etapa seleccionada (Esfuerzo=primario / Reposo=secundario)."""
 		raw_study, motion_result, corrected, stage = self._cine_crudo_recon_target()
 		if raw_study is None:
 			QMessageBox.information(self, "SINCRO", "Cargá un estudio crudo gated en cine_crudo primero.")
-			return
-		# Fijar el estudio activo de reconstrucción para todo el pipeline downstream
+			return		# Fijar el estudio activo de reconstrucción para todo el pipeline downstream
 		# (reorientación, cortes, metadatos) según la etapa elegida.
 		self.cine_crudo_raw_study_for_recon = raw_study
 		self._cine_crudo_recon_stage = stage
@@ -11638,6 +11709,7 @@ class MainWindow(QMainWindow):
 			from core.raw_reconstruction import reconstruct_raw_gated_pipeline
 
 			projections = np.asarray(raw_study.cube, dtype=np.float64)
+			projections = self._apply_raw_bg_to_recon_cube(projections, stage)
 			angles = getattr(raw_study, "angles_deg", None)
 			cfg = self._cine_crudo_recon_config()
 			etapa_txt = "reposo" if stage == "rest" else "esfuerzo"
