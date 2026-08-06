@@ -140,8 +140,8 @@ def load_raw_projections(path: str) -> RawGatedProjections:
     n_time = _get(ds, (0x0054, 0x0071), None) or _get(ds, (0x0054, 0x0101), None)
 
     itype = " ".join(str(x) for x in _get(ds, (0x0008, 0x0008), []))
-    if "GATED TOMO" not in itype and ang_vec is None:
-        raise ValueError("No parecen proyecciones crudas gated (sin GATED TOMO ni AngularViewVector).")
+    if "TOMO" not in itype and ang_vec is None:
+        raise ValueError("No parecen proyecciones crudas tomográficas (sin TOMO ni AngularViewVector).")
 
     notes: list[str] = []
 
@@ -160,6 +160,22 @@ def load_raw_projections(path: str) -> RawGatedProjections:
         n_angles = n_frames // n_gates
         projections = arr.reshape(n_gates, n_angles, H, W)
         notes.append(f"Reshape por producto: {n_gates} gates × {n_angles} ángulos (orden asumido gate-major).")
+    elif ang_vec is not None:
+        # UNGATED: rotacional sin gatillado. 1 solo "gate", cada frame es un ángulo.
+        av = [int(v) for v in ang_vec]
+        n_gates = 1
+        if len(set(av)) == n_frames and min(av) >= 1 and max(av) <= n_frames:
+            n_angles = n_frames
+            projections = np.zeros((1, n_angles, H, W), dtype=np.float64)
+            for f in range(n_frames):
+                projections[0, av[f] - 1] = arr[f]
+        else:
+            n_angles = n_frames
+            projections = arr.reshape(1, n_frames, H, W)
+        notes.append(
+            f"UNGATED: 1 gate × {n_angles} ángulos (sin gatillado). "
+            "FEVI/asincronía/fase NO disponibles; recon/cine/QC/NITIDA sí."
+        )
     else:
         raise ValueError(
             f"No se pudo organizar el crudo: frames={n_frames}, "

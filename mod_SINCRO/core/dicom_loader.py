@@ -252,12 +252,16 @@ def _extract_gating_info(ds) -> dict:
 
 
 def _is_raw_projections(ds) -> bool:
-    """Proyecciones angulares crudas = tiene AngularViewVector y NO tiene SliceVector."""
+    """Proyecciones angulares crudas = tiene AngularViewVector y NO tiene SliceVector.
+
+    Acepta tanto GATED TOMO (gatillado) como TOMO ungated (rotacional sin gating):
+    en ambos casos son proyecciones angulares crudas, no cortes reconstruidos.
+    """
     has_angular = TAG_ANGULAR_VIEW_VECTOR in ds
     has_slices = TAG_SLICE_VECTOR in ds
     itype = list(_get(ds, (0x0008, 0x0008), []))
-    is_gated_tomo = "GATED TOMO" in " ".join(str(x) for x in itype)
-    return has_angular and not has_slices and is_gated_tomo
+    is_tomo = "TOMO" in " ".join(str(x) for x in itype)
+    return has_angular and not has_slices and is_tomo
 
 
 def _detect_montage(rows: int, cols: int) -> Optional[int]:
@@ -361,8 +365,9 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
         raw = load_raw_projections(path)
         # Devolver un GatedStudy en modo "raw": cube = proyecciones (gates, angles, H, W),
         # reconstructed=False para que la UI lo trate como crudo, no como SA reconstruido.
+        _crudo_kind = "gated" if raw.n_gates >= 2 else "ungated (sin gatillado)"
         notes.append(
-            f"CRUDO gated: {raw.n_gates} gates × {raw.n_angles} ángulos × {raw.rows}×{raw.cols}. "
+            f"CRUDO {_crudo_kind}: {raw.n_gates} gate(s) × {raw.n_angles} ángulos × {raw.rows}×{raw.cols}. "
             "Modo proyecciones: cine QC, gating y motion correction disponibles; "
             "análisis de fase requiere reconstrucción."
         )

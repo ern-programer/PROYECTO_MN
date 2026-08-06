@@ -4096,6 +4096,34 @@ class MainWindow(QMainWindow):
 			fuente="manual",
 		)
 
+	def _study_n_gates(self) -> int:
+		st = getattr(self, "study", None)
+		if st is None:
+			return 0
+		try:
+			return int(getattr(st, "n_gates", 0) or 0)
+		except (TypeError, ValueError):
+			return 0
+
+	def _apply_gated_controls_state(self):
+		"""Habilita/deshabilita los controles que exigen gatillado (>=3 gates).
+
+		En estudios ungated (FEVI/asincronía/fase no calculables) deja disponibles
+		reconstrucción, cine, QC y NITIDA, y desactiva lo clínico dependiente del gating.
+		"""
+		gated = self._study_n_gates() >= 3
+		for attr in ("asynchrony_review_btn", "ectb_window_btn"):
+			btn = getattr(self, attr, None)
+			if btn is None:
+				continue
+			if not hasattr(btn, "_orig_tooltip"):
+				btn._orig_tooltip = btn.toolTip()
+			btn.setEnabled(gated)
+			btn.setToolTip(
+				btn._orig_tooltip if gated
+				else "Requiere estudio gatillado (≥3 gates). Estudio ungated: FEVI/asincronía no disponibles."
+			)
+
 	def _handle_raw_projections_loaded(self, path: str, t_total: float):
 		"""Maneja un estudio crudo (proyecciones gated): genera panel QC y muestra info/gating."""
 		import matplotlib
@@ -6107,8 +6135,18 @@ class MainWindow(QMainWindow):
 				# Estudio nuevo en memoria ⇒ resetear pila de undo y estados de pasos.
 				self.pipeline_history.reset()
 			# --- Modo crudo: proyecciones (no reconstruido) → panel QC + cine + gating ---
+			self._apply_gated_controls_state()
 			if not bool(getattr(self.study, "reconstructed", True)):
 				self._handle_raw_projections_loaded(path, t_total)
+				return
+			if int(np.asarray(self.study.cube).shape[0]) < 3:
+				self._log("Estudio reconstruido sin gatillado suficiente (<3 gates): FEVI/asincronía/fase no disponibles.")
+				QMessageBox.information(
+					self, "SINCRO",
+					"Estudio sin gatillado suficiente (<3 gates).\n\n"
+					"FEVI, asincronía y análisis de fase no están disponibles para estudios ungated.\n"
+					"Reconstrucción, cine, QC y NITIDA sí están disponibles."
+				)
 				return
 			self.compare_gate_spin.setRange(1, max(1, int(self.study.cube.shape[0])))
 			self.compare_gate_spin.setValue(max(1, int(self.study.cube.shape[0] // 2) + 1))
