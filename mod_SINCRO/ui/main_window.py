@@ -1756,6 +1756,13 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_osem_subsets_spin.setMaximumWidth(50)
 				self.cine_crudo_osem_subsets_spin.setToolTip("Subsets para OSEM. En FBP/MLEM se ignora.")
 				toolbar6_r2.addWidget(self.cine_crudo_osem_subsets_spin)
+				self.cine_crudo_nitida_check = QCheckBox("NÍTIDA")
+				self.cine_crudo_nitida_check.setChecked(False)
+				self.cine_crudo_nitida_check.setToolTip(
+					"NÍTIDA (OmniRes): recuperación de resolución dependiente de profundidad "
+					"(modela la respuesta colimador-detector según el DICOM). Requiere OSEM/MLEM "
+					"(si está en FBP, se fuerza OSEM). Opcional; medio-dosis/medio-tiempo.")
+				toolbar6_r2.addWidget(self.cine_crudo_nitida_check)
 				self.cine_crudo_recon_btn = QToolButton()
 				self.cine_crudo_recon_btn.setText("Recon raw")
 				self.cine_crudo_recon_btn.setToolTip("Reconstruye desde crudo gated con la corrección actual y muestra QC: UngGat + gates. No altera el procesamiento clínico principal todavía.")
@@ -11536,10 +11543,25 @@ class MainWindow(QMainWindow):
 			order = int(self.cine_crudo_gated_order_spin.value()) if hasattr(self, "cine_crudo_gated_order_spin") else 10
 		return ProjectionFilterConfig(kind=kind, cutoff=cutoff, order=order)
 
-	def _cine_crudo_recon_config(self):
+	def _cine_crudo_recon_config(self, study=None):
 		from core.raw_reconstruction import RawReconConfig
 
 		method = str(self.cine_crudo_recon_method_combo.currentText()).strip().lower() if hasattr(self, "cine_crudo_recon_method_combo") else "fbp"
+		# NÍTIDA (OmniRes): recuperación de resolución dependiente de profundidad.
+		# Es una OPCIÓN de reconstrucción (modela la PSF del colimador dentro del
+		# OSEM/MLEM), NO un pre-filtro del crudo: se aplica DESPUÉS del motion
+		# correction, en el paso de reconstrucción. Si no hay colimador legible o
+		# no está el método iterativo, se auto-corrige a OSEM y se avisa.
+		nitida = bool(self.cine_crudo_nitida_check.isChecked()) if hasattr(self, "cine_crudo_nitida_check") and self.cine_crudo_nitida_check is not None else False
+		psf_model = None
+		if nitida:
+			psf_model = self._build_nitida_psf(study)
+			if psf_model is None:
+				self._log("NÍTIDA (OmniRes): no pude construir la PSF (colimador/geometría no legibles del DICOM). Reconstruyo sin RR.")
+				nitida = False
+			elif method not in {"osem", "mlem"}:
+				self._log("NÍTIDA (OmniRes) requiere OSEM/MLEM: fuerzo método OSEM para la recuperación de resolución.")
+				method = "osem"
 		return RawReconConfig(
 			reconstruction_method=method,
 			ungated_filter=self._cine_crudo_recon_filter_config("ungated"),
@@ -11547,7 +11569,48 @@ class MainWindow(QMainWindow):
 			iterative_iterations=int(self.cine_crudo_iter_spin.value()) if hasattr(self, "cine_crudo_iter_spin") else 2,
 			osem_subsets=int(self.cine_crudo_osem_subsets_spin.value()) if hasattr(self, "cine_crudo_osem_subsets_spin") else 4,
 			display_slice_step_px=2,
+			resolution_recovery=bool(nitida and psf_model is not None),
+			psf_model=psf_model,
 		)
+
+	def _build_nitida_psf(self, study):
+		"""Construye el PsfModel (NÍTIDA/OmniRes) a partir del colimador y la geometría del estudio.
+
+		Multi-fabricante: identifica el colimador vía DICOM (fabricante + nombre/tipo)
+		contra la base ``collimator_specs`` y calcula la PSF dependiente de profundidad
+		con el radio de órbita y el pixel del estudio. Devuelve None si no hay datos
+		suficientes para un modelo físico honesto.
+		"""
+		study = study or getattr(self, "cine_crudo_raw_study_for_recon", None) or self.study
+		if study is None:
+			return None
+		try:
+			from core.collimator_specs import lookup_collimator
+			from core.resolution_recovery import PsfModel
+
+			spec = lookup_collimator(
+				getattr(study, "manufacturer", "") or "",
+				getattr(study, "collimator_name", "") or "",
+				getattr(study, "collimator_type", "") or "",
+			)
+			if spec is None:
+				return None
+			# pixel: prioridad al pixel_spacing del DICOM; fallback razonable.
+			ps = getattr(study, "pixel_spacing", None)
+			pixel_mm = float(ps[0]) if ps else 6.4
+			radius_mm = getattr(study, "radius_mm", None)
+			if radius_mm is None or float(radius_mm) <= 0.0:
+				radius_mm = 250.0  # fallback conservador (órbita típica cardíaca)
+				self._log("NÍTIDA (OmniRes): radio de órbita ausente en el DICOM; uso 250 mm por defecto.")
+			psf = PsfModel.from_collimator(spec, radius_mm=float(radius_mm), pixel_mm=pixel_mm)
+			self._log(
+				f"NÍTIDA (OmniRes): colimador {spec.manufacturer} {spec.name} [{spec.geometry}] · "
+				f"radio={float(radius_mm):.0f} mm · pixel={pixel_mm:.2f} mm · FWHM_int={spec.intrinsic_fwhm_mm:.1f} mm."
+			)
+			return psf
+		except Exception as exc:  # pragma: no cover - defensivo en UI
+			self._log(f"NÍTIDA (OmniRes): error construyendo PSF ({exc}). Reconstruyo sin RR.")
+			return None
 
 	def _identity_cine_crudo_motion_result(self, projections: np.ndarray, method: str) -> dict:
 		n_angles = int(np.asarray(projections).shape[1])
@@ -11711,7 +11774,7 @@ class MainWindow(QMainWindow):
 			projections = np.asarray(raw_study.cube, dtype=np.float64)
 			projections = self._apply_raw_bg_to_recon_cube(projections, stage)
 			angles = getattr(raw_study, "angles_deg", None)
-			cfg = self._cine_crudo_recon_config()
+			cfg = self._cine_crudo_recon_config(raw_study)
 			etapa_txt = "reposo" if stage == "rest" else "esfuerzo"
 			if motion_result is not None and corrected is not None:
 				motion = dict(motion_result)

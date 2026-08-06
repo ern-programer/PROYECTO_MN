@@ -31,6 +31,14 @@ class RawGatedProjections:
     angular_step: float | None = None       # AngularStep (0018,1144)
     rotation_direction: str = ""     # CW / CC (0018,1140)
     scan_arc: float | None = None          # RadialPosition/ScanArc (0018,1143)
+    # --- Geometría física para recuperación de resolución (RR) ---
+    manufacturer: str = ""           # (0008,0070)
+    model: str = ""                  # (0008,1090)
+    collimator_name: str = ""        # (0018,1180)
+    collimator_type: str = ""        # (0018,1181) PARA/FANB/CONE
+    pixel_mm: float | None = None          # (0028,0030)
+    radius_mm: float | None = None         # (0018,1142) detector→centro
+    focal_length_mm: float | None = None   # (0018,1182)
     source_path: str = ""
     patient_name: str = ""
     patient_id: str = ""
@@ -213,6 +221,10 @@ def load_raw_projections(path: str) -> RawGatedProjections:
     from core.dicom_loader import _extract_gating_info
     gating_info = _extract_gating_info(ds)
 
+    # Geometría física (colimador, radio, pixel) para el RR multi-fabricante.
+    from core.collimator_specs import read_acquisition_geometry
+    geom = read_acquisition_geometry(ds)
+
     return RawGatedProjections(
         projections=projections,
         n_gates=int(n_gates),
@@ -226,6 +238,13 @@ def load_raw_projections(path: str) -> RawGatedProjections:
         angular_step=angular_step,
         rotation_direction=rotation_direction,
         scan_arc=scan_arc,
+        manufacturer=geom.manufacturer,
+        model=geom.model,
+        collimator_name=geom.collimator_name,
+        collimator_type=geom.collimator_type,
+        pixel_mm=geom.pixel_mm,
+        radius_mm=geom.radius_mm,
+        focal_length_mm=geom.focal_length_mm,
         source_path=path,
         patient_name=str(_get(ds, (0x0010, 0x0010), "") or ""),
         patient_id=str(_get(ds, (0x0010, 0x0020), "") or ""),

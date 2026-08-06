@@ -85,6 +85,13 @@ class GatedStudy:
     rotation_direction: str = ""     # CW / CC
     scan_arc: float | None = None
     angles_deg: np.ndarray | None = None
+    # --- Colimador/geometría física para recuperación de resolución (RR/NÍTIDA) ---
+    manufacturer: str = ""
+    model: str = ""
+    collimator_name: str = ""
+    collimator_type: str = ""
+    radius_mm: float | None = None
+    focal_length_mm: float | None = None
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -392,6 +399,12 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
             rotation_direction=getattr(raw, "rotation_direction", ""),
             scan_arc=getattr(raw, "scan_arc", None),
             angles_deg=getattr(raw, "angles_deg", None),
+            manufacturer=getattr(raw, "manufacturer", ""),
+            model=getattr(raw, "model", ""),
+            collimator_name=getattr(raw, "collimator_name", ""),
+            collimator_type=getattr(raw, "collimator_type", ""),
+            radius_mm=getattr(raw, "radius_mm", None),
+            focal_length_mm=getattr(raw, "focal_length_mm", None),
             notes=notes + raw.notes,
         )
         return study

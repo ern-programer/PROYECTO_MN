@@ -33,8 +33,9 @@ class ProjectionFilterConfig:
 class RawReconConfig:
     """Configuracion del pipeline raw gated.
 
-    reconstruction_method hoy soporta fbp. OSEM/MLEM quedan declarados para UI y
-    configuracion, pero levantan NotImplementedError hasta portar un motor iterativo.
+    reconstruction_method soporta 'fbp', 'osem' y 'mlem' (motor iterativo CPU
+    implementado en este módulo). OSEM admite recuperación de resolución (RR)
+    dependiente de profundidad pasando un PsfModel (ver core.resolution_recovery).
     """
     reconstruction_method: str = "fbp"
     fbp_filter_name: str = "ramp"
@@ -47,6 +48,12 @@ class RawReconConfig:
     osem_subsets: int = 4
     fevi_slice_step_px: int = 1
     display_slice_step_px: int = 2
+    # --- Recuperación de resolución NÍTIDA (OmniRes) ---
+    # Si resolution_recovery=True y el método es iterativo (osem/mlem), la
+    # reconstrucción modela la PSF dependiente de profundidad del colimador
+    # (psf_model, un core.resolution_recovery.PsfModel). No aplica a FBP.
+    resolution_recovery: bool = False
+    psf_model: object | None = None
 
 
 @dataclass
@@ -185,6 +192,7 @@ def reconstruct_projection_volume(
     iterations: int = 4,
     subsets: int = 4,
     sensitivity_cache: dict[int, np.ndarray] | None = None,
+    psf=None,
 ) -> np.ndarray:
     """Reconstruye volumen desde proyecciones 3D con FBP/MLEM/OSEM.
 
@@ -192,6 +200,10 @@ def reconstruct_projection_volume(
     se reutiliza tal cual en vez de recalcularla. Sirve para compartir las
     imágenes de sensibilidad entre gates cuando se reconstruye un estudio
     gated completo (mismos ángulos/geometría en todos los gates).
+
+    ``psf`` (opcional, PsfModel de core.resolution_recovery): activa la
+    recuperación de resolución (RR) dependiente de profundidad en el path
+    iterativo (OSEM/MLEM). Sin psf, el comportamiento es idéntico al previo.
     """
     method_key = str(method or "fbp").strip().lower()
     if method_key == "fbp":
@@ -222,7 +234,7 @@ def reconstruct_projection_volume(
     # resultado numérico es idéntico, solo se evita repetir el mismo cálculo.
     if sensitivity_cache is None:
         sensitivity_cache = _build_sensitivity_cache(
-            theta, subsets=effective_subsets, detector_size=width, output_size=width
+            theta, subsets=effective_subsets, detector_size=width, output_size=width, psf=psf
         )
     out = np.zeros((height, width, width), dtype=np.float64)
     for slice_idx in range(height):
@@ -234,16 +246,18 @@ def reconstruct_projection_volume(
             iterations=int(iterations),
             subsets=effective_subsets,
             sensitivity_cache=sensitivity_cache,
+            psf=psf,
         )
     return out
 
 
 def _build_sensitivity_cache(
-    theta: np.ndarray, *, subsets: int, detector_size: int, output_size: int
+    theta: np.ndarray, *, subsets: int, detector_size: int, output_size: int, psf=None
 ) -> dict[int, np.ndarray]:
     """Precalcula, una sola vez, la imagen de sensibilidad de cada subset de
     ángulos (retroproyección de un sinograma de unos). Se reutiliza para
-    todos los cortes axiales y todas las iteraciones de MLEM/OSEM."""
+    todos los cortes axiales y todas las iteraciones de MLEM/OSEM. Si ``psf``
+    se pasa, la sensibilidad incorpora la PSF (para OSEM con RR)."""
     subset_count = max(1, min(int(subsets), int(theta.size)))
     angle_indices = np.arange(theta.size)
     cache: dict[int, np.ndarray] = {}
@@ -253,7 +267,7 @@ def _build_sensitivity_cache(
             continue
         theta_sub = theta[idx]
         ones_sub = np.ones((int(detector_size), theta_sub.size), dtype=np.float64)
-        cache[subset_id] = _backproject_slice(ones_sub, theta_sub, output_size=output_size)
+        cache[subset_id] = _backproject_slice(ones_sub, theta_sub, output_size=output_size, psf=psf)
     return cache
 
 
@@ -284,11 +298,13 @@ def _ramp_filter_sinogram(sinogram: np.ndarray) -> np.ndarray:
     return np.real(np.fft.ifft(ft, axis=0))[:n_det]
 
 
-def _simple_backprojection(sinogram: np.ndarray, theta: np.ndarray, *, output_size: int) -> np.ndarray:
+def _simple_backprojection(sinogram: np.ndarray, theta: np.ndarray, *, output_size: int, psf=None) -> np.ndarray:
     """Retroproyección paralela simple (adjunto). Sin filtro rampa.
 
     Usada por el path iterativo (MLEM/OSEM, donde el adjunto NO debe filtrarse)
-    y por el fallback de FBP tras aplicar la rampa aparte.
+    y por el fallback de FBP tras aplicar la rampa aparte. Si ``psf`` (PsfModel)
+    se pasa, aplica el difuminado dependiente de profundidad (adjunto de la PSF,
+    que es simétrica) para la recuperación de resolución.
     """
     sino = np.asarray(sinogram, dtype=np.float64)
     theta = np.asarray(theta, dtype=np.float64)
@@ -304,26 +320,32 @@ def _simple_backprojection(sinogram: np.ndarray, theta: np.ndarray, *, output_si
     for idx, angle in enumerate(theta):
         profile = np.interp(x_new, x_old, sino[:, idx], left=0.0, right=0.0)
         slab = np.tile(profile.reshape(1, out_size), (out_size, 1))
+        if psf is not None:
+            from core.resolution_recovery import variable_depth_gaussian
+            slab = variable_depth_gaussian(slab, psf)
         volume += rotate(slab, angle=float(angle), reshape=False, order=1, mode="constant", cval=0.0)
     if theta.size:
         volume *= np.pi / (2.0 * float(theta.size))
     return volume
 
 
-def _forward_project_slice(image: np.ndarray, theta: np.ndarray, *, detector_size: int) -> np.ndarray:
+def _forward_project_slice(image: np.ndarray, theta: np.ndarray, *, detector_size: int, psf=None) -> np.ndarray:
     img = np.asarray(image, dtype=np.float64)
     sino = np.zeros((int(detector_size), int(theta.size)), dtype=np.float64)
     x_old = np.linspace(-1.0, 1.0, img.shape[1])
     x_new = np.linspace(-1.0, 1.0, int(detector_size))
     for idx, angle in enumerate(theta):
         rot = rotate(img, angle=-float(angle), reshape=False, order=1, mode="constant", cval=0.0)
+        if psf is not None:
+            from core.resolution_recovery import variable_depth_gaussian
+            rot = variable_depth_gaussian(rot, psf)
         prof = rot.sum(axis=0)
         sino[:, idx] = np.interp(x_new, x_old, prof, left=0.0, right=0.0)
     return sino
 
 
-def _backproject_slice(sinogram: np.ndarray, theta: np.ndarray, *, output_size: int) -> np.ndarray:
-    return _simple_backprojection(sinogram, theta, output_size=output_size)
+def _backproject_slice(sinogram: np.ndarray, theta: np.ndarray, *, output_size: int, psf=None) -> np.ndarray:
+    return _simple_backprojection(sinogram, theta, output_size=output_size, psf=psf)
 
 
 def _iterative_reconstruct_slice(
@@ -334,6 +356,7 @@ def _iterative_reconstruct_slice(
     iterations: int,
     subsets: int,
     sensitivity_cache: dict[int, np.ndarray] | None = None,
+    psf=None,
 ) -> np.ndarray:
     """MLEM/OSEM paralela simple por slice.
 
@@ -367,13 +390,13 @@ def _iterative_reconstruct_slice(
                 continue
             theta_sub = theta[idx]
             measured_sub = measured[:, idx]
-            estimated_sub = _forward_project_slice(image, theta_sub, detector_size=detector_size)
+            estimated_sub = _forward_project_slice(image, theta_sub, detector_size=detector_size, psf=psf)
             ratio = measured_sub / np.maximum(estimated_sub, eps)
-            correction = _backproject_slice(ratio, theta_sub, output_size=out_size)
+            correction = _backproject_slice(ratio, theta_sub, output_size=out_size, psf=psf)
             if sensitivity_cache is not None and subset_id in sensitivity_cache:
                 sensitivity = sensitivity_cache[subset_id]
             else:
-                sensitivity = _backproject_slice(np.ones_like(measured_sub), theta_sub, output_size=out_size)
+                sensitivity = _backproject_slice(np.ones_like(measured_sub), theta_sub, output_size=out_size, psf=psf)
             image *= correction / np.maximum(sensitivity, eps)
             image = np.clip(image, 0.0, None)
     return image
@@ -406,8 +429,13 @@ def reconstruct_gated_projection_volume(
     fbp_filter_name: str = "ramp",
     iterations: int = 4,
     subsets: int = 4,
+    psf=None,
 ) -> np.ndarray:
-    """Reconstruye cada gate por separado con FBP/MLEM/OSEM."""
+    """Reconstruye cada gate por separado con FBP/MLEM/OSEM.
+
+    ``psf`` (opcional): activa la recuperación de resolución (RR) en el path
+    iterativo, compartida entre todos los gates (misma geometría/colimador).
+    """
     proj = np.asarray(projections, dtype=np.float64)
     if proj.ndim != 4:
         raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibio {proj.shape}")
@@ -423,7 +451,7 @@ def reconstruct_gated_projection_volume(
         theta = np.linspace(0.0, 360.0, n_angles, endpoint=False) if angles_deg is None else np.asarray(angles_deg, dtype=np.float64)
         effective_subsets = int(subsets) if method_key == "osem" else 1
         sensitivity_cache = _build_sensitivity_cache(
-            theta, subsets=effective_subsets, detector_size=width, output_size=width
+            theta, subsets=effective_subsets, detector_size=width, output_size=width, psf=psf
         )
     volumes = [
         reconstruct_projection_volume(
@@ -435,6 +463,7 @@ def reconstruct_gated_projection_volume(
             iterations=iterations,
             subsets=subsets,
             sensitivity_cache=sensitivity_cache,
+            psf=psf,
         )
         for gate in range(proj.shape[0])
     ]
@@ -513,6 +542,10 @@ def reconstruct_raw_gated_pipeline(
 
     method = str(cfg.reconstruction_method).strip().lower()
     subsets = int(cfg.osem_subsets) if method == "osem" else 1
+    # RR NÍTIDA (OmniRes): solo aplica al path iterativo (osem/mlem).
+    rr_psf = cfg.psf_model if (getattr(cfg, "resolution_recovery", False) and method in {"osem", "mlem"}) else None
+    if getattr(cfg, "resolution_recovery", False) and rr_psf is None:
+        notes.append("NÍTIDA (OmniRes) pedido pero inactivo: requiere método OSEM/MLEM y un PsfModel.")
     ungated_volume = reconstruct_projection_volume(
         ungated_corrected,
         angles_deg,
@@ -521,6 +554,7 @@ def reconstruct_raw_gated_pipeline(
         fbp_filter_name=cfg.fbp_filter_name,
         iterations=int(cfg.iterative_iterations),
         subsets=subsets,
+        psf=rr_psf,
     )
     gated_volume = reconstruct_gated_projection_volume(
         corrected,
@@ -530,7 +564,10 @@ def reconstruct_raw_gated_pipeline(
         fbp_filter_name=cfg.fbp_filter_name,
         iterations=int(cfg.iterative_iterations),
         subsets=subsets,
+        psf=rr_psf,
     )
+    if rr_psf is not None:
+        notes.append("NÍTIDA (OmniRes) activo: recuperación de resolución dependiente de profundidad en UngGat y gated.")
 
     # Orientación radiológica L/R: la retroproyección produce el volumen con el
     # eje izquierda/derecha del paciente (columnas, axis -1) espejado respecto de
