@@ -92,6 +92,7 @@ class GatedStudy:
     collimator_type: str = ""
     radius_mm: float | None = None
     focal_length_mm: float | None = None
+    detector_iop: list | None = None   # (0054,0022)->(0020,0037) 6 cosenos LPS (modo crudo)
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -405,6 +406,7 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
             collimator_type=getattr(raw, "collimator_type", ""),
             radius_mm=getattr(raw, "radius_mm", None),
             focal_length_mm=getattr(raw, "focal_length_mm", None),
+            detector_iop=getattr(raw, "detector_iop", None),
             notes=notes + raw.notes,
         )
         return study

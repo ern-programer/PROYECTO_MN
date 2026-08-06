@@ -11989,8 +11989,49 @@ class MainWindow(QMainWindow):
 		sa_base = self._thickened_sa_volume(ung, int(z0), int(z0), thickness_px)[0]
 		sa_mid = self._thickened_sa_volume(ung, mid_z, mid_z, thickness_px)[0]
 		sa_apex = self._thickened_sa_volume(ung, int(z1), int(z1), thickness_px)[0]
+
+		# --- Vistas de referencia orientadas (resolvedor multi-cámara) ---
+		# Por defecto (sin metadatos de ángulo) caemos a los cortes centrales
+		# crudos, que dependen de la cámara. Con StartAngle/dir + IOP resolvemos
+		# la vista anterior (AP) y lateral izquierda reales, iguales sea cual sea
+		# la cámara. El eje vertical (z) se mantiene sin voltear para no romper el
+		# mapeo interactivo base/ápex; sólo se espeja horizontal (L/R) si hace falta.
+		title_ap = "Vista longitudinal Y · límites"
+		title_ll = "Vista longitudinal X · límites"
 		long_y = ung[:, mid_y, :]
 		long_x = ung[:, :, mid_x]
+		orient_note = None
+		try:
+			raw_study = getattr(self, "cine_crudo_raw_study_for_recon", None) or getattr(self, "study", None)
+			if raw_study is not None:
+				from core.orientation_resolver import resolve_orientation
+				from core.spect_geometry import reproject_view
+				ori = resolve_orientation(
+					manufacturer=str(getattr(raw_study, "manufacturer", "") or ""),
+					model=str(getattr(raw_study, "model", "") or ""),
+					patient_position=str(getattr(raw_study, "patient_position", "") or ""),
+					start_angle=getattr(raw_study, "start_angle", None),
+					rotation_direction=str(getattr(raw_study, "rotation_direction", "") or ""),
+					scan_arc=getattr(raw_study, "scan_arc", None),
+					detector_iop=getattr(raw_study, "detector_iop", None),
+				)
+				if ori.anterior_angle_deg is not None and ori.left_lateral_angle_deg is not None:
+					view_ap = reproject_view(ung, float(ori.anterior_angle_deg))
+					view_ll = reproject_view(ung, float(ori.left_lateral_angle_deg))
+					if ori.mirror_ap_lr:
+						view_ap = view_ap[:, ::-1]
+					if ori.mirror_ll_lr:
+						view_ll = view_ll[:, ::-1]
+					long_y = view_ap
+					long_x = view_ll
+					title_ap = f"Anterior (AP) · {ori.anterior_angle_deg:.0f}°"
+					title_ll = f"Lateral izq · {ori.left_lateral_angle_deg:.0f}°"
+					orient_note = f"Orientación: perfil '{ori.profile_key}' (fuente {ori.source})"
+					if not ori.calibrated:
+						orient_note += " — sin calibrar, verificar a ojo"
+					self._log(f"[ORIENT] {orient_note}. " + " | ".join(ori.notes))
+		except Exception as exc:
+			self._log(f"[WARN] Resolvedor de orientación no aplicado (fallback a cortes crudos): {exc}")
 
 		def _norm(img2d: np.ndarray) -> np.ndarray:
 			arr = np.asarray(img2d, dtype=np.float64)
@@ -12003,9 +12044,9 @@ class MainWindow(QMainWindow):
 			ax.set_facecolor("#0b1220")
 
 		axes[0, 0].imshow(_norm(long_y), cmap="odyssey_cool", aspect="auto")
-		axes[0, 0].set_title("Vista longitudinal Y · límites", color="white", fontsize=9, fontweight="bold")
+		axes[0, 0].set_title(title_ap, color="white", fontsize=9, fontweight="bold")
 		axes[0, 1].imshow(_norm(long_x), cmap="odyssey_cool", aspect="auto")
-		axes[0, 1].set_title("Vista longitudinal X · límites", color="white", fontsize=9, fontweight="bold")
+		axes[0, 1].set_title(title_ll, color="white", fontsize=9, fontweight="bold")
 		for ax in (axes[0, 0], axes[0, 1]):
 			ax.axis("on")
 			ax.set_xticks([])
@@ -12029,6 +12070,8 @@ class MainWindow(QMainWindow):
 			ax.text(0.03, 0.05, f"SA {int(z) + 1}", transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
 
 		axes[0, 2].text(0.5, 0.5, "Ajustá Base / Ápex / Esp\ny mirá las líneas rojas\nantes de Generar cortes", ha="center", va="center", color="white", fontsize=10, fontweight="bold")
+		if orient_note:
+			axes[0, 2].text(0.5, 0.06, orient_note, ha="center", va="bottom", color="#7cf29a", fontsize=7, wrap=True)
 		fig.patch.set_facecolor("#0b1220")
 		fig.suptitle("Selección de límites para cortes cardíacos", color="white", fontsize=11, fontweight="bold")
 		fig.tight_layout(rect=[0, 0, 1, 0.92])

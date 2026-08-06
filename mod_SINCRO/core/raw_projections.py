@@ -39,6 +39,8 @@ class RawGatedProjections:
     pixel_mm: float | None = None          # (0028,0030)
     radius_mm: float | None = None         # (0018,1142) detector→centro
     focal_length_mm: float | None = None   # (0018,1182)
+    # --- Orientacion anatomica (DetectorInformationSequence[0].ImageOrientationPatient) ---
+    detector_iop: list | None = None       # (0054,0022)->(0020,0037) 6 cosenos LPS
     source_path: str = ""
     patient_name: str = ""
     patient_id: str = ""
@@ -225,6 +227,10 @@ def load_raw_projections(path: str) -> RawGatedProjections:
     from core.collimator_specs import read_acquisition_geometry
     geom = read_acquisition_geometry(ds)
 
+    # Orientación anatómica: IOP del detector (clave para AP/lateral/cabeza-arriba).
+    from core.orientation_resolver import read_detector_iop
+    detector_iop = read_detector_iop(ds)
+
     return RawGatedProjections(
         projections=projections,
         n_gates=int(n_gates),
@@ -245,6 +251,7 @@ def load_raw_projections(path: str) -> RawGatedProjections:
         pixel_mm=geom.pixel_mm,
         radius_mm=geom.radius_mm,
         focal_length_mm=geom.focal_length_mm,
+        detector_iop=detector_iop,
         source_path=path,
         patient_name=str(_get(ds, (0x0010, 0x0010), "") or ""),
         patient_id=str(_get(ds, (0x0010, 0x0020), "") or ""),
