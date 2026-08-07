@@ -78,8 +78,9 @@ _PROFILES: tuple[CameraProfile, ...] = (
     ),
     CameraProfile(
         key="ge_cardiac", manufacturer_startswith="ge",
-        note="GE (Infinia/Millennium/Starcam/Ventri): orbita cardiaca 180 estandar.",
-        calibrated=False,
+        mirror_ap_lr=True,
+        note="GE (Infinia/Millennium/Starcam/Ventri/Xeleris): orbita cardiaca 180 estandar; AP espejado L/R (validado a ojo con estudios Xeleris).",
+        calibrated=True,
     ),
     CameraProfile(
         key="marconi_picker", manufacturer_startswith="marconi",

@@ -18,6 +18,7 @@ from __future__ import annotations
 import numpy as np
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QHBoxLayout,
@@ -46,6 +47,7 @@ from core.cardiac_reorientation import (
 from core.col_registry import available_colormaps
 from core.reorientation_presets import DEFAULT_PRESET_NAME, ReorientationPresetStore
 from core.spect_geometry import SpectGeometry, reference_views, reproject_view
+from ui.cine_widget import RangeSlider, VerticalColorStrip, render_array_rgb
 from ui.reorientation_advanced_dialog import ReorientationAdvancedDialog
 
 try:
@@ -155,10 +157,11 @@ class CardiacReorientationDialog(QDialog):
             except (TypeError, ValueError):
                 pass
 
-        # Colormap y ventaneo en vivo para los cortes SA/HLA/VLA.
+        # Motor de color unificado (LUT + ventaneo 0..200%) en vivo para TODAS
+        # las vistas (AP/LL de referencia y cortes SA/HLA/VLA).
         self._cmap = "odyssey_cool"
-        self._win_lo = 0.0   # fracción 0..1 del máximo robusto (piso)
-        self._win_hi = 1.0   # fracción 0..1 del máximo robusto (techo)
+        self._win_lo = 0.0   # fracción 0..2 del rango normalizado (piso)
+        self._win_hi = 1.0   # fracción 0..2 del rango normalizado (techo, >1 = desquema)
         self._disp_max = 1.0
         # Convención de columnas de vistas de referencia (display):
         # AP sin espejo, lateral izquierda espejada para que "mire a la izquierda".
@@ -541,7 +544,49 @@ class CardiacReorientationDialog(QDialog):
 
         self.fig = Figure(figsize=(11.4, 6.6), facecolor="#0b1220")
         self.canvas = FigureCanvas(self.fig)
-        root.addWidget(self.canvas, 1)
+        canvas_row = QHBoxLayout()
+        canvas_row.setContentsMargins(0, 0, 0, 0)
+        canvas_row.addWidget(self.canvas, 1)
+        # Motor de color: RangeSlider 200% (idéntico al cine) + tira LUT vertical
+        # (caliente arriba / frío abajo), ambos a la derecha de las imágenes.
+        self.win_slider = RangeSlider()
+        self.win_slider.set_values(int(self._win_lo * 100), int(self._win_hi * 100))
+        self.win_slider.valuesChanged.connect(self._on_window_changed)
+        # Top/Base al estilo del cine: botones que resetean (Top->100%, Base->0%)
+        # con el % en vivo al lado.
+        _btn_css = (
+            "QPushButton{font-weight:bold;font-size:8pt;border:1px solid #94a3b8;border-radius:3px;"
+            "padding:1px 4px;color:#1e293b;background:#e2e8f0;} "
+            "QPushButton:hover{background:#cbd5e1;color:#2563eb;}"
+        )
+        self.btn_top_reset = QPushButton("Top")
+        self.btn_top_reset.setToolTip("Volver Top a 100%")
+        self.btn_top_reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_top_reset.setStyleSheet(_btn_css)
+        self.btn_top_reset.clicked.connect(self._reset_window_high)
+        self.lbl_top = QLabel(f"{int(self._win_hi * 100)}%")
+        self.lbl_top.setStyleSheet("color:#8fd3ff;font-size:9px;font-weight:bold;")
+        self.btn_base_reset = QPushButton("Base")
+        self.btn_base_reset.setToolTip("Volver Base a 0%")
+        self.btn_base_reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_base_reset.setStyleSheet(_btn_css)
+        self.btn_base_reset.clicked.connect(self._reset_window_low)
+        self.lbl_base = QLabel(f"{int(self._win_lo * 100)}%")
+        self.lbl_base.setStyleSheet("color:#8fd3ff;font-size:9px;font-weight:bold;")
+        _top_row = QHBoxLayout(); _top_row.setContentsMargins(0, 0, 0, 0); _top_row.setSpacing(3)
+        _top_row.addStretch(1); _top_row.addWidget(self.btn_top_reset); _top_row.addWidget(self.lbl_top); _top_row.addStretch(1)
+        _base_row = QHBoxLayout(); _base_row.setContentsMargins(0, 0, 0, 0); _base_row.setSpacing(3)
+        _base_row.addStretch(1); _base_row.addWidget(self.btn_base_reset); _base_row.addWidget(self.lbl_base); _base_row.addStretch(1)
+        slider_box = QVBoxLayout()
+        slider_box.setContentsMargins(0, 0, 0, 0)
+        slider_box.setSpacing(2)
+        slider_box.addLayout(_top_row)
+        slider_box.addWidget(self.win_slider, 1)
+        slider_box.addLayout(_base_row)
+        canvas_row.addLayout(slider_box)
+        self.color_strip = VerticalColorStrip(self._cmap)
+        canvas_row.addWidget(self.color_strip)
+        root.addLayout(canvas_row, 1)
 
         gs = self.fig.add_gridspec(2, 3, hspace=0.22, wspace=0.12)
         self.ax_tra = self.fig.add_subplot(gs[0, 0])
@@ -603,22 +648,16 @@ class CardiacReorientationDialog(QDialog):
         self.cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
         vrow.addWidget(self.cmap_combo)
         vrow.addSpacing(16)
-        vrow.addWidget(QLabel("Ventana mín"))
-        self.slider_lo = QSlider(Qt.Orientation.Horizontal)
-        self.slider_lo.setRange(0, 100)
-        self.slider_lo.setValue(0)
-        self.slider_lo.setFixedWidth(160)
-        self.slider_lo.valueChanged.connect(self._on_window_changed)
-        vrow.addWidget(self.slider_lo)
-        vrow.addWidget(QLabel("máx"))
-        self.slider_hi = QSlider(Qt.Orientation.Horizontal)
-        self.slider_hi.setRange(0, 100)
-        self.slider_hi.setValue(100)
-        self.slider_hi.setFixedWidth(160)
-        self.slider_hi.valueChanged.connect(self._on_window_changed)
-        vrow.addWidget(self.slider_hi)
+        self.chk_strip = QCheckBox("Tira color")
+        self.chk_strip.setChecked(True)
+        self.chk_strip.setToolTip("Muestra/oculta la tira vertical del LUT (caliente arriba).")
+        self.chk_strip.toggled.connect(self._on_strip_toggled)
+        vrow.addWidget(self.chk_strip)
+        vrow.addSpacing(16)
+        vrow.addWidget(QLabel("Ventana"))
         self.lbl_window = QLabel("0–100%")
         self.lbl_window.setStyleSheet("color:#8fd3ff;")
+        self.lbl_window.setToolTip("Rango de ventana (handle superior >100% desquema la imagen).")
         vrow.addWidget(self.lbl_window)
         vrow.addStretch(1)
         root.addWidget(viz)
@@ -756,22 +795,40 @@ class CardiacReorientationDialog(QDialog):
     # ------------------------------------------------- visualización en vivo
     def _on_cmap_changed(self, name):
         self._cmap = str(name)
+        if hasattr(self, "color_strip"):
+            self.color_strip.set_cmap(self._cmap)
+        self._draw_orient_views()
         self._draw_previews()
         self.canvas.draw_idle()
 
-    def _on_window_changed(self, _=None):
-        lo = self.slider_lo.value() / 100.0
-        hi = self.slider_hi.value() / 100.0
+    def _on_window_changed(self, low=None, high=None):
+        lo = max(0.0, int(low) / 100.0)
+        hi = max(0.0, int(high) / 100.0)
         if hi <= lo:
-            hi = min(1.0, lo + 0.02)
-            self.slider_hi.blockSignals(True)
-            self.slider_hi.setValue(int(round(hi * 100)))
-            self.slider_hi.blockSignals(False)
+            hi = min(2.0, lo + 0.02)
         self._win_lo = lo
         self._win_hi = hi
         self.lbl_window.setText(f"{int(lo * 100)}–{int(hi * 100)}%")
+        if hasattr(self, "lbl_top"):
+            self.lbl_top.setText(f"{int(hi * 100)}%")
+            self.lbl_base.setText(f"{int(lo * 100)}%")
+        self._draw_orient_views()
         self._draw_previews()
         self.canvas.draw_idle()
+
+    def _on_strip_toggled(self, checked):
+        if hasattr(self, "color_strip"):
+            self.color_strip.setVisible(bool(checked))
+
+    def _reset_window_high(self):
+        """Reset Top a 100% (igual que el cine)."""
+        low, _high = self.win_slider.values()
+        self.win_slider.set_values(low, 100)
+
+    def _reset_window_low(self):
+        """Reset Base a 0% (igual que el cine)."""
+        _low, high = self.win_slider.values()
+        self.win_slider.set_values(0, high)
 
     def _on_fine_rot_changed(self, _=None):
         self._set_fine_rot_values(
@@ -862,7 +919,8 @@ class CardiacReorientationDialog(QDialog):
         # Vista Anterior (AP): fila=z, col=x. Linea de eje largo base->apex.
         self.ax_tra.clear()
         self.ax_tra.set_facecolor("#020611")
-        self.ax_tra.imshow(_norm(self._ap_view), cmap="gray", vmin=0, vmax=1,
+        self.ax_tra.imshow(render_array_rgb(self._ap_view, self._cmap,
+                           window_low=self._win_lo, window_high=self._win_hi),
                            interpolation="bicubic", aspect="auto")
         self.ax_tra.plot(
             [self.h_tra1.x, self.h_tra2.x], [self.h_tra1.y, self.h_tra2.y],
@@ -897,7 +955,8 @@ class CardiacReorientationDialog(QDialog):
         # Vista Lateral izquierda: fila=z, col=y.
         self.ax_cor.clear()
         self.ax_cor.set_facecolor("#020611")
-        self.ax_cor.imshow(_norm(self._ll_view), cmap="gray", vmin=0, vmax=1,
+        self.ax_cor.imshow(render_array_rgb(self._ll_view, self._cmap,
+                           window_low=self._win_lo, window_high=self._win_hi),
                            interpolation="bicubic", aspect="auto")
         self.ax_cor.plot(
             [self.h_cor1.x, self.h_cor2.x], [self.h_cor1.y, self.h_cor2.y],
@@ -931,8 +990,6 @@ class CardiacReorientationDialog(QDialog):
     def _draw_previews(self):
         reo = self._reo
         n = reo.shape[0]
-        cmap = self._cmap
-        vmin, vmax = self._win_bounds()
         kmid = int(np.clip((self._base_k + self._apex_k) // 2, 0, n - 1))
         jmid = n // 2
         imid = n // 2
@@ -942,7 +999,8 @@ class CardiacReorientationDialog(QDialog):
         vla = vla_slice(reo, imid)
 
         self.ax_sa.clear(); self.ax_sa.set_facecolor("#020611")
-        self.ax_sa.imshow(sa, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="bicubic")
+        self.ax_sa.imshow(render_array_rgb(sa, self._cmap, window_low=self._win_lo,
+                          window_high=self._win_hi), interpolation="bicubic")
         self.ax_sa.set_title(f"SA (k={kmid}) · ANT↑ SEP←", color="white", fontsize=9, fontweight="bold")
         # Caja guía (estilo Odyssey) para ajuste fino visual del corte SA.
         h_sa, w_sa = sa.shape[:2]
@@ -964,7 +1022,8 @@ class CardiacReorientationDialog(QDialog):
         # HLA se dibuja con APEX arriba/BASE abajo (fila k invertida). Las líneas
         # de límite deben usar la coordenada de fila invertida: k' = (n-1) - k.
         self.ax_hla.clear(); self.ax_hla.set_facecolor("#020611")
-        self.ax_hla.imshow(hla, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="bicubic", aspect="auto")
+        self.ax_hla.imshow(render_array_rgb(hla, self._cmap, window_low=self._win_lo,
+                           window_high=self._win_hi), interpolation="bicubic", aspect="auto")
         base_row = (n - 1) - self._base_k
         apex_row = (n - 1) - self._apex_k
         self.ax_hla.axhline(base_row, color="#ff3333", lw=1.6)
@@ -982,7 +1041,8 @@ class CardiacReorientationDialog(QDialog):
         # VLA: BASE izq / APEX der (eje largo horizontal). Las líneas base/ápex
         # son verticales (columnas = k).
         self.ax_vla.clear(); self.ax_vla.set_facecolor("#020611")
-        self.ax_vla.imshow(vla, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="bicubic", aspect="auto")
+        self.ax_vla.imshow(render_array_rgb(vla, self._cmap, window_low=self._win_lo,
+                           window_high=self._win_hi), interpolation="bicubic", aspect="auto")
         self.ax_vla.axvline(self._base_k, color="#ff3333", lw=1.2)
         self.ax_vla.axvline(self._apex_k, color="#ff3333", lw=1.2)
         self._fine_vla_handle = (0.95 * max(1, vla.shape[1] - 1), 0.10 * max(1, vla.shape[0] - 1))
@@ -997,7 +1057,8 @@ class CardiacReorientationDialog(QDialog):
         kb = int(np.clip(self._base_k, 0, n - 1))
         ka = int(np.clip(self._apex_k, 0, n - 1))
         strip = np.concatenate([sa_slice(reo, kb), sa_slice(reo, kmid), sa_slice(reo, ka)], axis=1)
-        self.ax_sa_stack.imshow(strip, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="bicubic", aspect="auto")
+        self.ax_sa_stack.imshow(render_array_rgb(strip, self._cmap, window_low=self._win_lo,
+                                window_high=self._win_hi), interpolation="bicubic", aspect="auto")
         self.ax_sa_stack.set_title("SA Base · Medio · Ápex", color="white", fontsize=9, fontweight="bold")
         self.ax_sa_stack.set_xticks([]); self.ax_sa_stack.set_yticks([])
 

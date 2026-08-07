@@ -84,14 +84,19 @@ def _resolve_cmap(name: str):
 		return cm.get_cmap("gray")
 
 
-def _array_to_pixmap(
+def render_array_rgb(
 	frame: np.ndarray,
 	cmap_name: str = "gray",
 	smooth_sigma: float = 0.0,
 	invert_cmap: bool = False,
 	window_low: float = 0.0,
 	window_high: float = 1.0,
-) -> QPixmap:
+) -> np.ndarray:
+	"""Normaliza + ventanea (0..200%) + aplica LUT. Devuelve uint8 HxWx3.
+
+	Fuente única del render del motor de color: la usan tanto el cine (QPixmap)
+	como cualquier superficie matplotlib (imshow del RGB resultante).
+	"""
 	data = np.asarray(frame, dtype=np.float64)
 	if smooth_sigma and smooth_sigma > 0:
 		data = gaussian_filter(data, sigma=float(smooth_sigma))
@@ -118,11 +123,64 @@ def _array_to_pixmap(
 	name = f"{cmap_name}_r" if invert_cmap else str(cmap_name)
 	cmap = _resolve_cmap(name)
 	rgb = np.asarray(cmap(np.clip(data, 0.0, 1.0))[..., :3], dtype=np.float32)
+	return np.ascontiguousarray((rgb * 255.0).astype(np.uint8))
 
-	rgb8 = (rgb * 255.0).astype(np.uint8)
+
+def _array_to_pixmap(
+	frame: np.ndarray,
+	cmap_name: str = "gray",
+	smooth_sigma: float = 0.0,
+	invert_cmap: bool = False,
+	window_low: float = 0.0,
+	window_high: float = 1.0,
+) -> QPixmap:
+	rgb8 = render_array_rgb(frame, cmap_name, smooth_sigma, invert_cmap, window_low, window_high)
 	h, w, _ = rgb8.shape
 	qimg = QImage(rgb8.data, w, h, 3 * w, QImage.Format.Format_RGB888)
 	return QPixmap.fromImage(qimg.copy())
+
+
+class VerticalColorStrip(QWidget):
+	"""Tira vertical del LUT actual: parte más caliente arriba, más fría abajo.
+
+	Leyenda de color reutilizable (estilo hot_bgr/hot_rgb pero vertical) que
+	acompaña a las imágenes. Resuelve el colormap con _resolve_cmap, por lo que
+	soporta tanto las tablas matplotlib como las .col de Odyssey/Xeleris.
+	"""
+
+	def __init__(self, cmap_name: str = "gray", parent=None):
+		super().__init__(parent)
+		self._cmap_name = str(cmap_name)
+		self._invert = False
+		self.setFixedWidth(24)
+		self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+		self._pix: QPixmap | None = None
+		self._rebuild()
+
+	def set_cmap(self, name: str, invert: bool = False) -> None:
+		self._cmap_name = str(name)
+		self._invert = bool(invert)
+		self._rebuild()
+		self.update()
+
+	def _rebuild(self) -> None:
+		name = f"{self._cmap_name}_r" if self._invert else self._cmap_name
+		cmap = _resolve_cmap(name)
+		grad = np.linspace(1.0, 0.0, 256)  # 1.0 (caliente) arriba, 0.0 (frío) abajo
+		rgb = (np.asarray(cmap(grad)[..., :3]) * 255.0).astype(np.uint8)  # (256,3)
+		rgb = np.ascontiguousarray(np.repeat(rgb[:, None, :], 10, axis=1))  # (256,10,3)
+		h, w, _ = rgb.shape
+		qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+		self._pix = QPixmap.fromImage(qimg.copy())
+
+	def paintEvent(self, event):
+		p = QPainter(self)
+		r = QRectF(self.rect()).adjusted(2, 4, -2, -4)
+		if self._pix is not None:
+			p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+			p.drawPixmap(r, self._pix, QRectF(self._pix.rect()))
+		p.setPen(QPen(QColor("#334155"), 1))
+		p.drawRect(r)
 
 
 class RangeSlider(QWidget):
