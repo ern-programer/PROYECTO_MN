@@ -1,0 +1,9 @@
+{
+  "gvi": {
+    "flip_ap": true,
+    "invert_ll_handles": true,
+    "post_ops": [],
+    "description": "Preset de usuario (estado actual de orientación)",
+    "factory": false
+  }
+}

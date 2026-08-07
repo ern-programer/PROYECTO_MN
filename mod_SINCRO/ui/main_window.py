@@ -321,6 +321,7 @@ class MainWindow(QMainWindow):
 		self._cache_output_sig = ""
 		self._cache_tab_output_sigs: dict[str, str] = {}
 		self._last_primary_path = ""
+		self._last_browse_dir = ""
 		self.advanced_mode_enabled = False
 		self._basic_tab_order = [
 			"slices_fase",
@@ -365,9 +366,24 @@ class MainWindow(QMainWindow):
 		browse_btn = QPushButton("Abrir...")
 		browse_btn.clicked.connect(self._browse_file)
 
+		# Menú de carpetas recientes / favoritas
+		self._recent_dirs_btn = QToolButton()
+		self._recent_dirs_btn.setText("▼")
+		self._recent_dirs_btn.setToolTip("Carpetas recientes y favoritas. Click en una para navegar. 'Guardar esta carpeta' la marca como favorita.")
+		self._recent_dirs_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+		self._recent_dirs_menu = QMenu(self)
+		self._recent_dirs_btn.setMenu(self._recent_dirs_menu)
+		self._rebuild_recent_dirs_menu()
+		self._favorite_dir_btn = QToolButton()
+		self._favorite_dir_btn.setText("★")
+		self._favorite_dir_btn.setToolTip("Guardar como favorita la carpeta actual (la última usada o la del estudio cargado).")
+		self._favorite_dir_btn.clicked.connect(self._favorite_current_browse_dir)
+
 		file_row = QHBoxLayout()
 		file_row.addWidget(self.file_edit, 1)
 		file_row.addWidget(browse_btn)
+		file_row.addWidget(self._recent_dirs_btn)
+		file_row.addWidget(self._favorite_dir_btn)
 		file_box = QGroupBox("Estudio")
 		file_box_layout = QVBoxLayout(file_box)
 		file_box_layout.addLayout(file_row)
@@ -1510,7 +1526,7 @@ class MainWindow(QMainWindow):
 				toolbar3.addWidget(QLabel("Radio ROI"))
 				self.cine_crudo_roi_spin = QSpinBox()
 				self.cine_crudo_roi_spin.setRange(0, 40)
-				self.cine_crudo_roi_spin.setValue(12)
+				self.cine_crudo_roi_spin.setValue(6)
 				self.cine_crudo_roi_spin.setSuffix(" px")
 				self.cine_crudo_roi_spin.setMaximumWidth(72)
 				self.cine_crudo_roi_spin.setToolTip("Radio de la ventana de tracking alrededor del corazón (tras el click). 0 = desactivado (usa componente global). 10–16 px suele aislar el corazón del hígado en matriz 64².")
@@ -2179,6 +2195,7 @@ class MainWindow(QMainWindow):
 		self._restore_window_layout()
 		self._restore_sidebar_sections_state()
 		self._restore_fevi_settings()
+		self._rebuild_recent_dirs_menu()
 
 		layout = QVBoxLayout(central)
 		layout.addWidget(splitter)
@@ -2746,6 +2763,119 @@ class MainWindow(QMainWindow):
 			f"Δ SD: {d_sd:+.1f}°   Δ Ancho banda: {d_bw:+.1f}°",
 		]
 
+	def _format_processing_info_lines(self) -> list[str]:
+		"""Genera líneas compactas con TODOS los filtros, correcciones y parámetros aplicados."""
+		study = getattr(self, "study", None)
+		if study is None:
+			return []
+		parts: list[str] = []
+
+		# --- Lectura segura de widgets ---
+		def _w(name: str):
+			return getattr(self, name, None)
+
+		def _combo_text(name: str, default: str = "") -> str:
+			w = _w(name)
+			return str(w.currentText()).strip() if w is not None else default
+
+		def _spin_val(name: str, default=0):
+			w = _w(name)
+			return w.value() if w is not None else default
+
+		recon_method = _combo_text("cine_crudo_recon_method_combo", "").upper()
+		nitida = bool(_w("cine_crudo_nitida_check") and _w("cine_crudo_nitida_check").isChecked())
+		n_iter = int(_spin_val("cine_crudo_iter_spin", 0))
+		n_sub = int(_spin_val("cine_crudo_osem_subsets_spin", 0))
+		post_on = bool(_w("cine_crudo_post_check") and _w("cine_crudo_post_check").isChecked())
+		post_fwhm = float(_spin_val("cine_crudo_post_fwhm_spin", 0.0))
+		ung_kind = _combo_text("cine_crudo_ung_filter_combo", "butterworth")
+		ung_cut = float(_spin_val("cine_crudo_ung_cutoff_spin", 0.52))
+		ung_ord = int(_spin_val("cine_crudo_ung_order_spin", 5))
+		gat_kind = _combo_text("cine_crudo_gated_filter_combo", "butterworth")
+		gat_cut = float(_spin_val("cine_crudo_gated_cutoff_spin", 0.40))
+		gat_ord = int(_spin_val("cine_crudo_gated_order_spin", 10))
+
+		reconstructed_flag = bool(getattr(study, "reconstructed", True))
+		motion = getattr(self, "cine_crudo_motion_result", None)
+		recon_from_raw = motion is not None
+
+		# --- Línea 1: Método de reconstrucción + NÍTIDA + post-filtro ---
+		recon_parts: list[str] = []
+		if not reconstructed_flag:
+			recon_parts.append("Proyecciones crudas (sin reconstruir)")
+		elif recon_from_raw:
+			if recon_method in ("OSEM", "MLEM"):
+				recon_parts.append(f"{recon_method} {n_iter}it/{n_sub}sub")
+			elif recon_method:
+				recon_parts.append(recon_method)
+			else:
+				recon_parts.append("FBP")
+		else:
+			recon_parts.append("Reconstruido (DICOM)")
+		if nitida:
+			recon_parts.append("NÍTIDA (RR)")
+		if post_on and post_fwhm > 0:
+			recon_parts.append(f"Post-filtro gaussiano {post_fwhm:.0f}mm")
+		parts.append("<b>Recon:</b> " + " · ".join(recon_parts))
+
+		# --- Línea 2: Filtros de proyección (siempre mostrar) ---
+		def _fmt_filter(kind: str, cutoff: float, order: int) -> str:
+			if not kind or kind.lower() == "none":
+				return "sin filtro"
+			return f"{kind} cutoff={cutoff:.2f} orden={order}"
+
+		ung_lbl = _fmt_filter(ung_kind, ung_cut, ung_ord)
+		gat_lbl = _fmt_filter(gat_kind, gat_cut, gat_ord)
+		filter_line = f"UngGat: {ung_lbl} · Gated: {gat_lbl}"
+		if nitida:
+			filter_line += " [anulados por NÍTIDA]"
+		parts.append(f"<b>Filtros proyección:</b> {filter_line}")
+
+		# --- Línea 3: Correcciones ---
+		corr: list[str] = []
+		if self.gate_dropout_enabled():
+			corr.append("Dropout gate: ON")
+		sub_info = getattr(self, "intestinal_subtraction_info", None)
+		if sub_info and sub_info.get("applied"):
+			sub_method = str(sub_info.get("method") or "idw").upper()
+			corr.append(f"Sustracción intestinal: {sub_method}")
+		if motion:
+			meth = str(motion.get("method_auto_selected") or motion.get("method") or "manual")
+			meth_clean = meth.replace("_", " ").title()
+			max_sy = float(motion.get("max_shift_px", 0.0) or 0.0)
+			edited = " (manual)" if motion.get("manual_edited") else ""
+			corr.append(f"Motion: {meth_clean} (máx {max_sy:.1f} px){edited}")
+		if corr:
+			parts.append("<b>Correcciones:</b> " + " · ".join(corr))
+
+		# --- Línea 4: Análisis de fase / FEVI ---
+		seg_method = str(self.seg_method.currentText()) if hasattr(self, "seg_method") else ""
+		roi_src = self.roi_source() if hasattr(self, "roi_source") else ""
+		amp = float(self.phase_threshold_spin.value()) if hasattr(self, "phase_threshold_spin") else 0.40
+		harm = int(self.harmonics_spin.value()) if hasattr(self, "harmonics_spin") else 1
+		norm = bool(self.normalize_check.isChecked()) if hasattr(self, "normalize_check") else False
+		fevi_m = self.fevi_method() if hasattr(self, "fevi_method") else ""
+		seg_parts = [
+			f"Seg: {seg_method}",
+			f"ROI: {'irregular' if 'ectb' in roi_src.lower() else 'anillo'}",
+			f"Amp filter: {amp:.2f}",
+			f"Armónicos: {harm}",
+		]
+		if norm:
+			seg_parts.append("Norm ref: ON")
+		if fevi_m:
+			fevi_lbl = "ECTb" if "ectb" in fevi_m.lower() else fevi_m
+			seg_parts.append(f"FEVI: {fevi_lbl}")
+		parts.append("<b>Fase/FEVI:</b> " + " · ".join(seg_parts))
+
+		return parts
+		if fevi_m:
+			fevi_lbl = "ECTb" if "ectb" in fevi_m.lower() else fevi_m
+			seg_parts.append(f"FEVI: {fevi_lbl}")
+		parts.append("<b>Fase/FEVI:</b> " + " · ".join(seg_parts))
+
+		return parts
+
 	def _refresh_readonly_results_panel(self) -> None:
 		"""Refresca el panel de solo-lectura de la banda inferior tras procesar."""
 		if getattr(self, "patient_data_label", None) is None:
@@ -2828,9 +2958,17 @@ class MainWindow(QMainWindow):
 				ef = self._estimate_lv_ef()
 			except Exception:
 				ef = None
+		# Bloque de pipeline aplicado (correcciones + filtros + recon).
+		proc_info = self._format_processing_info_lines()
+		proc_prefix = ("<span style='color:#6b7280;font-size:9pt;'>"
+					   + "<br>".join(proc_info)
+					   + "</span><br>") if proc_info else ""
 		metrics = getattr(self, "metrics", None)
 		if not metrics:
-			self.main_metrics_readout.setText("Sin resultados: procesá un estudio.")
+			if proc_prefix:
+				self.main_metrics_readout.setText(proc_prefix + "<i>Sin resultados aún: procesá el estudio.</i>")
+			else:
+				self.main_metrics_readout.setText("Sin resultados: procesá un estudio.")
 		else:
 			ef_pct = ef.get("ef_pct") if isinstance(ef, dict) else None
 			compare_metrics = getattr(self, "compare_metrics", None)
@@ -2849,7 +2987,8 @@ class MainWindow(QMainWindow):
 					else str(self.compare_label or "Etapa 2").strip()
 				)
 				text = (
-					f"<b>{primary_label}</b><br>"
+					proc_prefix
+					+ f"<b>{primary_label}</b><br>"
 					+ "<br>".join(self._format_async_metrics_lines(metrics, ef_pct, ef))
 					+ "<br><br>"
 					+ f"<b>{compare_label}</b><br>"
@@ -2861,7 +3000,8 @@ class MainWindow(QMainWindow):
 				self.main_metrics_readout.setText(text)
 			else:
 				self.main_metrics_readout.setText(
-					"<br>".join(self._format_async_metrics_lines(metrics, ef_pct, ef))
+					proc_prefix
+					+ "<br>".join(self._format_async_metrics_lines(metrics, ef_pct, ef))
 				)
 			# Ayuda consultable (piloto): explicación de PFR/TVmáx al pasar el mouse.
 			if isinstance(ef, dict) and ef.get("pfr_text"):
@@ -3595,6 +3735,11 @@ class MainWindow(QMainWindow):
 
 	def closeEvent(self, event):
 		self._save_window_layout()
+		if self._last_browse_dir:
+			settings = getattr(self, "_ui_settings", None)
+			if settings:
+				settings.setValue("paths/last_dicom_dir", self._last_browse_dir)
+				settings.sync()
 		if self._check_unsaved_study():
 			event.ignore()
 			return
@@ -4074,9 +4219,185 @@ class MainWindow(QMainWindow):
 		return sidebar
 
 	def _browse_file(self):
-		path, _ = QFileDialog.getOpenFileName(self, "Abrir DICOM gated", "", "DICOM (*.dcm *.dicom);;Todos (*.*)")
-		if path:
-			self.file_edit.setText(path)
+		paths = self._select_dicom_paths(
+			title="Abrir DICOM gated",
+			allow_multiple=False,
+		)
+		if paths:
+			self.file_edit.setText(paths[0])
+			if not self.preset_patient_edit.text().strip():
+				self._refresh_presets_for_current_patient()
+			if self.auto_run_check.isChecked():
+				self.process_auto()
+
+	def _default_dicom_start_dir(self) -> str:
+		"""Devuelve la carpeta inicial común para todos los diálogos DICOM."""
+		settings = getattr(self, "_ui_settings", None)
+		candidates = [
+			self._last_browse_dir,
+			str(settings.value("paths/last_dicom_dir", "")) if settings else "",
+			os.path.dirname(self.file_edit.text().strip()) if getattr(self, "file_edit", None) is not None else "",
+			getattr(self, "output_dir", ""),
+		]
+		for c in candidates:
+			if c and os.path.isdir(c):
+				return c
+		return ""
+
+	def _select_dicom_paths(
+		self,
+		*,
+		title: str,
+		allow_multiple: bool,
+		max_files: int | None = None,
+		start_dir_override: str = "",
+	) -> list[str]:
+		"""Diálogo común DICOM para todos los flujos (abrir, comparar, 1/2 estudios)."""
+		start_dir = start_dir_override if start_dir_override and os.path.isdir(start_dir_override) else self._default_dicom_start_dir()
+		flt = "DICOM (*.dcm *.DCM *.dicom *.DICOM *.ima *.IMA);;Todos (*.*)"
+		if allow_multiple:
+			paths, _ = QFileDialog.getOpenFileNames(self, title, start_dir, flt)
+		else:
+			path, _ = QFileDialog.getOpenFileName(self, title, start_dir, flt)
+			paths = [path] if path else []
+		valid_paths = [p for p in paths if p and os.path.exists(p)]
+		if max_files is not None and len(valid_paths) > int(max_files):
+			valid_paths = valid_paths[: int(max_files)]
+		if valid_paths:
+			self._record_browse_dir(os.path.dirname(valid_paths[0]))
+		return valid_paths
+
+	def _record_browse_dir(self, dirname: str):
+		"""Registra la carpeta usada y actualiza memoria + persistencia."""
+		if not dirname or not os.path.isdir(dirname):
+			return
+		self._last_browse_dir = dirname
+		settings = getattr(self, "_ui_settings", None)
+		if settings:
+			settings.setValue("paths/last_dicom_dir", dirname)
+			settings.sync()
+		# Agregar a recientes (max 10, sin duplicados, al tope)
+		recents = self._get_recent_dirs()
+		if dirname in recents:
+			recents.remove(dirname)
+		recents.insert(0, dirname)
+		recents = recents[:10]
+		self._set_recent_dirs(recents)
+		self._rebuild_recent_dirs_menu()
+
+	def _get_recent_dirs(self) -> list[str]:
+		"""Recupera la lista de carpetas recientes desde QSettings."""
+		settings = getattr(self, "_ui_settings", None)
+		if not settings:
+			return []
+		val = settings.value("paths/recent_dirs", [])
+		if isinstance(val, list):
+			return [str(v) for v in val if isinstance(v, str) and os.path.isdir(v)]
+		return []
+
+	def _set_recent_dirs(self, dirs: list[str]):
+		"""Persiste la lista de recientes."""
+		settings = getattr(self, "_ui_settings", None)
+		if settings:
+			settings.setValue("paths/recent_dirs", dirs)
+			settings.sync()
+
+	def _get_favorite_dirs(self) -> list[str]:
+		"""Recupera las carpetas favoritas desde QSettings."""
+		settings = getattr(self, "_ui_settings", None)
+		if not settings:
+			return []
+		val = settings.value("paths/favorite_dirs", [])
+		if isinstance(val, list):
+			return [str(v) for v in val if isinstance(v, str) and os.path.isdir(v)]
+		return []
+
+	def _set_favorite_dirs(self, dirs: list[str]):
+		"""Persiste las carpetas favoritas."""
+		settings = getattr(self, "_ui_settings", None)
+		if settings:
+			settings.setValue("paths/favorite_dirs", dirs)
+			settings.sync()
+
+	def _add_favorite_dir(self, dirname: str):
+		"""Marca una carpeta como favorita."""
+		if not dirname or not os.path.isdir(dirname):
+			return
+		favs = self._get_favorite_dirs()
+		if dirname not in favs:
+			favs.append(dirname)
+			self._set_favorite_dirs(favs)
+			self._rebuild_recent_dirs_menu()
+			self._log(f"Carpeta favorita: {dirname}")
+
+	def _remove_favorite_dir(self, dirname: str):
+		"""Quita una carpeta de favoritos."""
+		favs = self._get_favorite_dirs()
+		if dirname in favs:
+			favs.remove(dirname)
+			self._set_favorite_dirs(favs)
+			self._rebuild_recent_dirs_menu()
+
+	def _favorite_current_browse_dir(self):
+		"""Marca como favorita la carpeta actual sin pasar por el menú desplegable."""
+		dirname = self._last_browse_dir
+		if not dirname:
+			path_txt = self.file_edit.text().strip() if getattr(self, "file_edit", None) is not None else ""
+			dirname = os.path.dirname(path_txt) if path_txt else ""
+		if not dirname or not os.path.isdir(dirname):
+			QMessageBox.information(self, "SINCRO", "No hay carpeta válida para marcar como favorita todavía.")
+			return
+		self._add_favorite_dir(dirname)
+		self.statusBar().showMessage(f"Favorita guardada: {dirname}")
+
+	def _rebuild_recent_dirs_menu(self):
+		"""Reconstruye el menú desplegable de carpetas recientes y favoritas."""
+		self._recent_dirs_menu.clear()
+		favs = self._get_favorite_dirs()
+		recents = self._get_recent_dirs()
+		last = self._last_browse_dir
+
+		if favs:
+			for d in favs:
+				action = self._recent_dirs_menu.addAction(f"★ {d}")
+				action.setData(d)
+				action.triggered.connect(lambda checked, p=d: self._browse_to_dir(p))
+			self._recent_dirs_menu.addSeparator()
+
+		if recents:
+			for d in recents[:8]:  # max 8 en el menu
+				if d in favs:
+					continue  # ya esta arriba
+				star = " ★" if d == last else ""
+				action = self._recent_dirs_menu.addAction(f"{d}{star}")
+				action.setData(d)
+				action.triggered.connect(lambda checked, p=d: self._browse_to_dir(p))
+			self._recent_dirs_menu.addSeparator()
+
+		if last and last not in favs:
+			add_action = self._recent_dirs_menu.addAction(f"Guardar esta carpeta como favorita")
+			add_action.triggered.connect(lambda: self._add_favorite_dir(last))
+		if favs:
+			self._recent_dirs_menu.addSeparator()
+			for d in favs:
+				rm_action = self._recent_dirs_menu.addAction(f"✕ Quitar favorito: {os.path.basename(d)}")
+				rm_action.triggered.connect(lambda checked, p=d: self._remove_favorite_dir(p))
+
+		if not favs and not recents:
+			empty = self._recent_dirs_menu.addAction("(sin carpetas recientes)")
+			empty.setEnabled(False)
+
+	def _browse_to_dir(self, dirname: str):
+		"""Abre el diálogo de archivo en la carpeta indicada."""
+		if not dirname or not os.path.isdir(dirname):
+			return
+		paths = self._select_dicom_paths(
+			title="Abrir DICOM gated",
+			allow_multiple=False,
+			start_dir_override=dirname,
+		)
+		if paths:
+			self.file_edit.setText(paths[0])
 			if not self.preset_patient_edit.text().strip():
 				self._refresh_presets_for_current_patient()
 			if self.auto_run_check.isChecked():
@@ -14118,22 +14439,18 @@ class MainWindow(QMainWindow):
 			return
 		if self._check_unsaved_study():
 			return
-		path, _ = QFileDialog.getOpenFileName(
-			self,
-			"Seleccionar estudio de comparación (ej: REST)",
-			os.path.dirname(self.file_edit.text().strip() or self.output_dir),
-			"DICOM (*.dcm *.DCM *.ima *.IMA);;Todos (*.*)",
+		paths = self._select_dicom_paths(
+			title="Seleccionar estudio de comparación (ej: REST)",
+			allow_multiple=False,
 		)
-		if not path:
+		if not paths:
 			return
-		self._load_compare_study_from_path(path)
+		self._load_compare_study_from_path(paths[0])
 
 	def load_one_or_two_studies(self):
-		paths, _ = QFileDialog.getOpenFileNames(
-			self,
-			"Seleccionar uno o dos estudios (stress/rest)",
-			os.path.dirname(self.file_edit.text().strip() or self.output_dir),
-			"DICOM (*.dcm *.DCM *.ima *.IMA);;Todos (*.*)",
+		paths = self._select_dicom_paths(
+			title="Seleccionar uno o dos estudios (stress/rest)",
+			allow_multiple=True,
 		)
 		if not paths:
 			return

@@ -189,10 +189,14 @@ def default_center(volume: np.ndarray) -> tuple[float, float, float]:
 def auto_orient_lv(gated_cube, ungated_volume=None):
     """Detecta el VI automáticamente usando el movimiento del gated SPECT.
 
-    El miocardio se contrae/relaja a lo largo del ciclo cardíaco (alta
-    variabilidad temporal entre gates), mientras que el hígado y otras
-    estructuras permanecen estáticas (baja variabilidad). El mapa de
-    desviación estándar temporal aísla así el VI del hígado adyacente.
+    El miocardio se contrae/relaja una vez por ciclo cardíaco, así que su
+    señal temporal entre gates tiene un primer armónico (1x/ciclo) fuerte.
+    El hígado permanece estático y el intestino muy captante solo aporta
+    ruido de Poisson (crece con sqrt(cuentas), sin oscilación coherente).
+    La amplitud del primer armónico |FFT[1]| por vóxel aísla así el VI
+    incluso cuando hay actividad intestinal que "roba" cuentas; usar la
+    desviación estándar temporal en su lugar dejaba entrar ese ruido y
+    descentraba la VOI hacia el intestino.
 
     A partir de la máscara de movimiento se estima:
     - ``center`` (z, y, x): centro de masa ponderado por movimiento,
@@ -209,7 +213,11 @@ def auto_orient_lv(gated_cube, ungated_volume=None):
     if cube.ndim != 4 or cube.shape[0] < 3:
         return None
 
-    motion = cube.std(axis=0)  # (z, y, x): mapa de movimiento
+    # Amplitud del primer armónico (1x/ciclo) por vóxel: aísla la contracción
+    # miocárdica del ruido de Poisson del intestino captante. Misma convención
+    # que core/phase_analysis (DC removido, |FFT[1]|).
+    c = cube - cube.mean(axis=0, keepdims=True)
+    motion = np.abs(np.fft.fft(c, axis=0)[1])  # (z, y, x): mapa de movimiento
     try:  # pragma: no cover - scipy presente en el entorno
         from scipy.ndimage import gaussian_filter, label as _label
     except Exception:  # pragma: no cover

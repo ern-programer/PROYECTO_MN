@@ -579,6 +579,17 @@ class PreparacionWindow(QDialog):
 		header.setStyleSheet("color:#94a3b8;")
 		root.addWidget(header)
 
+		# --- Barra de datos del paciente / estudio ---
+		self._patient_bar = QLabel("Sin estudio cargado")
+		self._patient_bar.setWordWrap(True)
+		self._patient_bar.setTextFormat(Qt.TextFormat.RichText)
+		self._patient_bar.setStyleSheet(
+			"QLabel { background:#0f172a; color:#e2e8f0; border:1px solid #1e293b; "
+			"border-radius:4px; padding:6px 10px; font-size:12px; }"
+		)
+		self._patient_bar.setMinimumHeight(36)
+		root.addWidget(self._patient_bar)
+
 		cols = QHBoxLayout()
 		cols.setSpacing(8)
 		self.col_stress = _StageColumn(self, "stress", "Esfuerzo")
@@ -852,6 +863,7 @@ class PreparacionWindow(QDialog):
 	def refresh(self):
 		main = self._main
 		self._invalidate_on_study_change()
+		self._update_patient_bar()
 		secondary = None
 		if hasattr(main, "_secondary_cine_crudo_study"):
 			secondary = main._secondary_cine_crudo_study()
@@ -862,6 +874,62 @@ class PreparacionWindow(QDialog):
 		if not has_secondary:
 			self.col_rest.mip.clear("Sin segunda etapa cargada")
 			self.col_rest.set_state_text("crudo")
+
+	def _update_patient_bar(self):
+		"""Actualiza la barra superior con datos del paciente y estudio(s) cargados."""
+		main = self._main
+		st = getattr(main, "study", None)
+		if st is None:
+			self._patient_bar.setText("Sin estudio cargado")
+			return
+
+		def _fmt_date(raw: str) -> str:
+			raw = str(raw or "").strip()
+			if len(raw) == 8 and raw.isdigit():
+				return f"{raw[6:8]}/{raw[4:6]}/{raw[0:4]}"
+			return raw or "N/D"
+
+		def _study_info(s, label: str) -> str:
+			pname = str(getattr(s, "patient_name", "") or "").strip() or "N/D"
+			pid = str(getattr(s, "patient_id", "") or "").strip() or "N/D"
+			sdesc = str(getattr(s, "study_description", "") or "").strip()
+			serdesc = str(getattr(s, "series_description", "") or "").strip()
+			sdate = _fmt_date(getattr(s, "study_date", ""))
+			manuf = str(getattr(s, "manufacturer", "") or "").strip()
+			model = str(getattr(s, "model", "") or "").strip()
+			equip = f"{manuf} {model}".strip() or "N/D"
+			n_gates = int(getattr(s, "n_gates", 0) or 0)
+			n_sl = int(getattr(s, "n_slices", 0) or 0)
+			rows = int(getattr(s, "rows", 0) or 0)
+			cols = int(getattr(s, "cols", 0) or 0)
+			recon = "reconstruido" if getattr(s, "reconstructed", True) else "CRUDO (proyecciones)"
+			desc_line = sdesc
+			if serdesc and serdesc != sdesc:
+				desc_line = f"{sdesc} · {serdesc}" if sdesc else serdesc
+			return (
+				f"<b>{label}</b> &nbsp; {desc_line or 'N/D'} &nbsp;|&nbsp; "
+				f"{sdate} &nbsp;|&nbsp; {equip} &nbsp;|&nbsp; "
+				f"{n_gates} gates · {n_sl} sl · {rows}×{cols} &nbsp;|&nbsp; {recon}"
+			)
+
+		pname = str(getattr(st, "patient_name", "") or "").strip() or "N/D"
+		pid = str(getattr(st, "patient_id", "") or "").strip() or "N/D"
+		sex = str(getattr(st, "patient_sex", "") or "").strip()
+		sex_tag = f" &nbsp;|&nbsp; Sexo: {sex}" if sex else ""
+		line1 = f"<b>Paciente:</b> {pname} &nbsp; (ID: {pid}){sex_tag}"
+		line2 = _study_info(st, "Esfuerzo")
+
+		sec = None
+		if hasattr(main, "_secondary_cine_crudo_study"):
+			try:
+				sec = main._secondary_cine_crudo_study()
+			except Exception:
+				sec = None
+		lines = [line1, line2]
+		if sec is not None:
+			lines.append(_study_info(sec, "Reposo"))
+
+		self._patient_bar.setText("<br>".join(lines))
 
 	def _study_signature(self):
 		main = self._main
