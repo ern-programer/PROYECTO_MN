@@ -75,6 +75,9 @@ class GatedStudy:
     was_montage: bool = False
     had_summed_frame: bool = False
     reconstructed: bool = True            # False si venía crudo (proyecciones)
+    # Cubo SA paralelo (FBP) para el análisis de FASE cuando el cubo visible es
+    # NÍTIDA (RR). None si no hay pasajero. Ver "pasajero de fase" en main_window.
+    cube_phase: np.ndarray | None = None
     qc_first_harmonic: float = 0.0
     qc_passed: bool = False
     gating_info: dict = field(default_factory=dict)  # Datos ECG adquisición (3 derivaciones / gating)

@@ -80,7 +80,7 @@ class _Handle:
 class CardiacReorientationDialog(QDialog):
     """Reorientacion oblicua interactiva del VI."""
 
-    def __init__(self, ungated_volume, gated_volume=None, source_label="", geometry=None, parent=None, locked_voi=None, initial_orientation=None):
+    def __init__(self, ungated_volume, gated_volume=None, source_label="", geometry=None, parent=None, locked_voi=None, initial_orientation=None, phase_gated_volume=None):
         super().__init__(parent)
         self.setWindowTitle("Reorientar corazón · Rec/Ref")
         self.setModal(True)
@@ -88,6 +88,9 @@ class CardiacReorientationDialog(QDialog):
 
         self._ung = np.asarray(ungated_volume, dtype=np.float64)
         self._gated = None if gated_volume is None else np.asarray(gated_volume, dtype=np.float64)
+        # Volumen pasajero (FBP) para la fase: viaja por la MISMA reorientación
+        # que el gated visible, sin participar de la vista ni de la auto-orientación.
+        self._phase_gated = None if phase_gated_volume is None else np.asarray(phase_gated_volume, dtype=np.float64)
         self._geometry = geometry if isinstance(geometry, SpectGeometry) else None
         self._locked_voi = locked_voi if isinstance(locked_voi, dict) else None
         # Semilla de orientación heredada de la otra etapa (eje largo + rango de
@@ -96,6 +99,7 @@ class CardiacReorientationDialog(QDialog):
         self._init_orient = initial_orientation if isinstance(initial_orientation, dict) else None
         self.reoriented_ungated = None
         self.reoriented_gated = None
+        self.reoriented_gated_phase = None
         self.result_long_axis = None
         self.result_center = None
         self.base_k = 0
@@ -1232,6 +1236,12 @@ class CardiacReorientationDialog(QDialog):
                 cube_voi = self._apply_voi_gated(self._gated)
                 reo_g = reslice_from_vector_gated(cube_voi, center, u, out, order=1)
                 self.reoriented_gated = self._apply_post_ops_4d(reo_g)
+            # Pasajero de fase (FBP): misma VOI, mismo vector, mismo out, mismos
+            # post-ops -> queda perfectamente alineado con el gated visible.
+            if self._phase_gated is not None:
+                cube_voi_p = self._apply_voi_gated(self._phase_gated)
+                reo_p = reslice_from_vector_gated(cube_voi_p, center, u, out, order=1)
+                self.reoriented_gated_phase = self._apply_post_ops_4d(reo_p)
         except Exception:
             self.reoriented_ungated = self._reo
         self.accept()

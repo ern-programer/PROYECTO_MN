@@ -238,6 +238,9 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_motion_result = None
 		self.cine_crudo_motion_result_compare = None
 		self.cine_crudo_recon_result = None
+		# Pasajero de fase (FBP): volumen paralelo que se genera junto al nítido
+		# cuando NÍTIDA (RR) está activa; la fase se calcula sobre él (ver paso 4).
+		self.cine_crudo_recon_result_phase = None
 		self.cine_crudo_raw_study_for_recon = None
 		self._cine_crudo_recon_stage = "stress"
 		# Sustracción de fondo sobre el crudo (herramienta de la ventana de
@@ -2257,13 +2260,16 @@ class MainWindow(QMainWindow):
 	#: guarda por referencia en vez de deepcopy para no duplicar volúmenes en RAM.
 	UNDO_ATTRS_RECON = (
 		"cine_crudo_recon_result", "cine_crudo_recon_study",
+		"cine_crudo_recon_result_phase",
 		"cine_crudo_cut_study", "cine_crudo_cut_source_label",
 		"cine_crudo_reoriented_gated", "cine_crudo_reoriented_ungated",
+		"cine_crudo_reoriented_gated_phase",
 		"cine_crudo_raw_study_for_recon", "_cine_crudo_recon_stage",
 		"cine_crudo_preview_mode",
 	)
 	UNDO_ATTRS_REORIENT = (
 		"cine_crudo_reoriented_gated", "cine_crudo_reoriented_ungated",
+		"cine_crudo_reoriented_gated_phase",
 		"cine_crudo_reoriented_voi", "cine_crudo_cut_source_label",
 	)
 
@@ -5988,6 +5994,7 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_motion_result = None
 		self.cine_crudo_motion_result_compare = None
 		self.cine_crudo_recon_result = None
+		self.cine_crudo_recon_result_phase = None
 		self.cine_crudo_raw_study_for_recon = None
 		self._cine_crudo_recon_stage = "stress"
 		self._reorient_locked_voi = None
@@ -6380,6 +6387,7 @@ class MainWindow(QMainWindow):
 			"raw_voxels": int(getattr(raw_result, "n_voxels_kept", raw_phases.size)),
 			"clinical_voxels": int(getattr(clinical_result, "n_voxels_kept", 0)),
 			"total_voxels": int(getattr(raw_result, "n_voxels_total", raw_phases.size)),
+			"phase_passenger": bool(getattr(self, "phase_used_passenger", False)),
 			"warn": warn,
 		}
 
@@ -6388,6 +6396,8 @@ class MainWindow(QMainWindow):
 		if not qc:
 			return ""
 		parts = []
+		if qc.get("phase_passenger"):
+			parts.append("fase sobre FBP (pasajero)")
 		if qc.get("class_changed"):
 			parts.append(f"cambio {qc.get('raw_classification')}→{qc.get('clinical_classification')}")
 		if float(qc.get("low_confidence_tail_pct", 0.0)) >= LOW_CONFIDENCE_TAIL_WARN_PCT:
@@ -6514,6 +6524,29 @@ class MainWindow(QMainWindow):
 			self._log_intestinal_subtraction(intestinal_sub_info)
 			cube_for_segmentation = self._apply_intestinal_mask_to_cube(cube_corrected, self.cine, require_global_visual=False)
 			cube_for_analysis = cube_corrected
+			# Pasajero de fase: si el estudio trae un cubo FBP paralelo (cube_phase),
+			# la FASE se calcula sobre él (los límites normales Emory/Xeleris están
+			# calibrados sobre FBP-Butterworth, no sobre NÍTIDA/RR). La SEGMENTACIÓN
+			# y la máscara siguen saliendo del cubo visible. Se aplican las MISMAS
+			# correcciones (dropout + sustracción intestinal) al pasajero.
+			phase_passenger_active = False
+			study_cube_phase = getattr(self.study, "cube_phase", None)
+			if study_cube_phase is not None:
+				try:
+					cube_phase_base = np.asarray(study_cube_phase, dtype=np.float64)
+					if cube_phase_base.shape == np.asarray(self.study.cube).shape:
+						cube_phase_corr, _ = self._apply_gate_dropout_correction(
+							cube_phase_base, "fase (pasajero FBP)", log=False
+						)
+						cube_phase_corr, _ = self._apply_intestinal_subtraction_to_cube(
+							cube_phase_corr, self.cine
+						)
+						cube_for_analysis = cube_phase_corr
+						phase_passenger_active = True
+						self._log("Fase calculada sobre pasajero FBP (cube_phase).")
+				except Exception:
+					phase_passenger_active = False
+			self.phase_used_passenger = bool(phase_passenger_active)
 			intestinal_sig_primary = self._intestinal_signature_for_widget(self.cine)
 			intestinal_sig_primary["global_render"] = "ignored_for_segmentation"
 			seg_payload = {
@@ -6567,6 +6600,7 @@ class MainWindow(QMainWindow):
 				"clinical_amp_filter": round(clinical_amp_filter, 5),
 				"gate_dropout": bool(self.gate_dropout_enabled()),
 				"normalize_reference": bool(self.normalize_check.isChecked()),
+				"phase_passenger": bool(phase_passenger_active),
 			}
 			phase_sig = self._hash_payload(phase_payload)
 			if self.phase_result is None or phase_sig != self._cache_phase_sig:
@@ -11967,6 +12001,55 @@ class MainWindow(QMainWindow):
 			post_filter_sigma_px=post_sigma_px,
 		)
 
+	# --- Pasajero de fase (FBP) para NÍTIDA ---
+	# Cuando NÍTIDA (RR) está activa, perfusión/FEVI usan el volumen nítido, pero
+	# la FASE se calcula sobre un volumen FBP paralelo ("pasajero"): los límites
+	# normales de disincronía (Emory/Xeleris) están calibrados sobre FBP-Butterworth
+	# y la RR infla el Phase SD (medido: 8.1°→20.7°, NORMAL→MILD). Filtros semi-
+	# ocultos: se pueden sobre-escribir con presets/phase_passenger_config.json.
+	PHASE_PASSENGER_DEFAULT_UNG = ("butterworth", 0.52, 5)
+	PHASE_PASSENGER_DEFAULT_GATED = ("butterworth", 0.40, 10)
+
+	def _phase_passenger_filters(self):
+		"""(ung, gated) filtros FBP del pasajero de fase. Override opcional vía preset JSON."""
+		ung = self.PHASE_PASSENGER_DEFAULT_UNG
+		gated = self.PHASE_PASSENGER_DEFAULT_GATED
+		try:
+			path = os.path.join(self.presets_dir, "phase_passenger_config.json")
+			if os.path.isfile(path):
+				with open(path, "r", encoding="utf-8") as fh:
+					data = json.load(fh)
+
+				def _f(node, default):
+					if not isinstance(node, dict):
+						return default
+					return (
+						str(node.get("kind", default[0])),
+						float(node.get("cutoff", default[1])),
+						int(node.get("order", default[2])),
+					)
+
+				ung = _f(data.get("ungated"), ung)
+				gated = _f(data.get("gated"), gated)
+		except Exception as exc:
+			self._log(f"[WARN] phase_passenger_config.json ilegible; uso filtros default: {exc}")
+		return ung, gated
+
+	def _phase_passenger_recon_config(self, study=None):
+		"""Config FBP pura para el volumen de fase paralelo (mismo protocolo Xeleris)."""
+		from core.raw_reconstruction import RawReconConfig, ProjectionFilterConfig
+
+		ung, gated = self._phase_passenger_filters()
+		return RawReconConfig(
+			reconstruction_method="fbp",
+			ungated_filter=ProjectionFilterConfig(kind=ung[0], cutoff=ung[1], order=ung[2]),
+			gated_filter=ProjectionFilterConfig(kind=gated[0], cutoff=gated[1], order=gated[2]),
+			display_slice_step_px=2,
+			resolution_recovery=False,
+			psf_model=None,
+			post_filter_sigma_px=0.0,
+		)
+
 	def _cine_crudo_post_filter_sigma_px(self, study=None) -> float:
 		"""Sigma en píxeles del post-filtro gaussiano segun la casilla 'Suavizar'.
 
@@ -12256,6 +12339,27 @@ class MainWindow(QMainWindow):
 				recon_dialog.close()
 				recon_dialog.deleteLater()
 			self.cine_crudo_recon_result = result
+			# Pasajero de fase (FBP): con NÍTIDA activa la fase se calculará sobre un
+			# volumen FBP paralelo de la MISMA geometría (mismos shifts de motion y
+			# proyecciones bg-restadas). Perfusión/FEVI siguen usando el nítido.
+			self.cine_crudo_recon_result_phase = None
+			if nitida_on:
+				try:
+					self._set_progress(99, "Pasajero de fase (FBP)...")
+					phase_cfg = self._phase_passenger_recon_config(raw_study)
+					phase_result = reconstruct_raw_gated_pipeline(
+						projections, angles, motion_result=motion, config=phase_cfg
+					)
+					self.cine_crudo_recon_result_phase = phase_result
+					self._log(
+						"Pasajero de fase FBP generado: "
+						f"UngGat={phase_cfg.ungated_filter.kind} {phase_cfg.ungated_filter.cutoff:.2f}/{phase_cfg.ungated_filter.order}; "
+						f"Gated={phase_cfg.gated_filter.kind} {phase_cfg.gated_filter.cutoff:.2f}/{phase_cfg.gated_filter.order}; "
+						f"volumen={phase_result.gated_volume.shape}. La fase se calculará sobre este volumen."
+					)
+				except Exception as exc:
+					self.cine_crudo_recon_result_phase = None
+					self._log(f"[WARN] Pasajero de fase FBP no generado; la fase caerá al volumen NÍTIDA: {exc}")
 			out_png = self._write_cine_crudo_recon_qc(result, source_label)
 			self.cine_crudo_preview_mode = "recon_qc"
 			if "cine_crudo" in self.preview_labels:
@@ -12270,6 +12374,7 @@ class MainWindow(QMainWindow):
 			self.cine_crudo_cut_source_label = source_label
 			self.cine_crudo_reoriented_gated = None
 			self.cine_crudo_reoriented_ungated = None
+			self.cine_crudo_reoriented_gated_phase = None
 			if hasattr(self, "cine_crudo_reorient_btn"):
 				self.cine_crudo_reorient_btn.setEnabled(True)
 			if hasattr(self, "cine_crudo_process_recon_btn"):
@@ -12831,6 +12936,10 @@ class MainWindow(QMainWindow):
 			geometry=geometry, parent=self,
 			locked_voi=self._reorient_locked_voi_for_stage(),
 			initial_orientation=self._reorient_seed_for_stage(),
+			phase_gated_volume=(
+				np.asarray(self.cine_crudo_recon_result_phase.gated_volume, dtype=np.float64)
+				if getattr(self, "cine_crudo_recon_result_phase", None) is not None else None
+			),
 		)
 		if dlg.exec() != QDialog.DialogCode.Accepted or dlg.reoriented_gated is None:
 			return
@@ -12838,6 +12947,11 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_reoriented_ungated = (
 			np.asarray(dlg.reoriented_ungated, dtype=np.float64)
 			if dlg.reoriented_ungated is not None else None
+		)
+		# Pasajero de fase reorientado con la misma transformación (o None si no hubo).
+		self.cine_crudo_reoriented_gated_phase = (
+			np.asarray(dlg.reoriented_gated_phase, dtype=np.float64)
+			if getattr(dlg, "reoriented_gated_phase", None) is not None else None
 		)
 		n = int(self.cine_crudo_reoriented_gated.shape[1])
 		base_1 = int(np.clip(dlg.base_k + 1, 1, n))
@@ -12914,6 +13028,21 @@ class MainWindow(QMainWindow):
 			if sa_cube.shape[1] < 2:
 				QMessageBox.information(self, "SINCRO", "Los límites deben dejar al menos 2 cortes SA.")
 				return
+			# Pasajero de fase (FBP): mismo recorte base→ápex y mismos cortes SA que
+			# el visible. Se usa como base del análisis de FASE (ver paso 4). None si
+			# no hay pasajero (NÍTIDA off o recon sin RR).
+			sa_cube_phase = None
+			phase_vol = getattr(self, "cine_crudo_reoriented_gated_phase", None)
+			if phase_vol is None and getattr(self, "cine_crudo_recon_result_phase", None) is not None:
+				phase_vol = getattr(self.cine_crudo_recon_result_phase, "gated_volume", None)
+			if phase_vol is not None:
+				try:
+					phase_vol = np.asarray(phase_vol, dtype=np.float64)
+					if phase_vol.shape == gated_vol.shape:
+						reo_cube_p = self._thickened_sa_cube(phase_vol, z0, z1, thickness)
+						sa_cube_phase = np.ascontiguousarray(anatomical_cuts_gated(reo_cube_p)["sa"])
+				except Exception:
+					sa_cube_phase = None
 			out_png = self._write_cine_crudo_cuts_qc(ung_vol, z0, z1)
 			self.cine_crudo_preview_mode = "generated_cuts"
 			for tab_name in ("comparacion_ejes", "cine_crudo"):
@@ -12942,6 +13071,7 @@ class MainWindow(QMainWindow):
 			cut_thickness_mm = src_z_mm * float(thickness)
 			self.cine_crudo_cut_study = dicom_loader.GatedStudy(
 				cube=sa_cube,
+				cube_phase=sa_cube_phase,
 				n_gates=int(sa_cube.shape[0]),
 				n_slices=int(sa_cube.shape[1]),
 				rows=int(sa_cube.shape[2]),
