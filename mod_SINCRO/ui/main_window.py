@@ -3164,6 +3164,11 @@ class MainWindow(QMainWindow):
 		btn.clicked.connect(lambda: toolbar.toggle_near(btn))
 		if tooltip:
 			btn.setToolTip(tooltip)
+		# Guardar (barra, botón) por clave para poder abrir/cerrar por código
+		# (p.ej. tras Aplicar/Rechazar la corrección de movimiento).
+		if not hasattr(self, "_toolbar_group_menus"):
+			self._toolbar_group_menus = {}
+		self._toolbar_group_menus[key] = (toolbar, btn)
 		return btn
 
 	# ---------------------------------------------------------------------
@@ -11644,6 +11649,7 @@ class MainWindow(QMainWindow):
 			self.statusBar().showMessage("Corrección de movimiento aplicada · se usará el crudo corregido", 6000)
 		except Exception:
 			pass
+		self._start_cine_crudo_recon_flow()
 
 	def _reject_cine_crudo_motion_correction(self):
 		"""Descarta la corrección de movimiento: se vuelve al crudo original para todo el pipeline."""
@@ -11674,6 +11680,32 @@ class MainWindow(QMainWindow):
 			self.statusBar().showMessage("Corrección descartada · se sigue con el crudo original", 6000)
 		except Exception:
 			pass
+		self._start_cine_crudo_recon_flow()
+
+	def _start_cine_crudo_recon_flow(self):
+		"""Tras Aplicar/Rechazar: cierra la barra de corrección, abre la de reconstrucción
+		y lanza una FBP filtrada (la más barata/genérica) como punto de partida.
+
+		El usuario sigue ajustando los controles (filtros, NÍTIDA, etc.) desde ahí. La
+		reconstrucción trabaja sobre el crudo corregido o el original según el estado que
+		dejaron Aplicar/Rechazar (lo resuelve `_cine_crudo_recon_target`)."""
+		menus = getattr(self, "_toolbar_group_menus", {})
+		try:
+			self._select_tab_by_title("cine_crudo")
+		except Exception:
+			pass
+		corr = menus.get("cine_crudo_correccion_movimiento")
+		if corr is not None:
+			corr[0].hide()
+		# Punto de partida: FBP filtrada, sin NÍTIDA (la más barata y genérica).
+		if hasattr(self, "cine_crudo_recon_method_combo") and self.cine_crudo_recon_method_combo is not None:
+			self.cine_crudo_recon_method_combo.setCurrentText("FBP")
+		if hasattr(self, "cine_crudo_nitida_check") and self.cine_crudo_nitida_check is not None:
+			self.cine_crudo_nitida_check.setChecked(False)
+		rec = menus.get("cine_crudo_reconstruccion")
+		if rec is not None:
+			rec[0].show_near(rec[1])
+		self._reconstruct_cine_crudo_raw()
 
 	def run_stage_motion_live(self, stage: str, *, method_label: str | None = None, axis_label: str | None = None):
 		"""Ejecuta motion correction de una etapa y devuelve (proyecciones_corregidas, result).
