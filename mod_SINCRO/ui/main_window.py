@@ -293,6 +293,16 @@ class MainWindow(QMainWindow):
 		self._montage_refresh_timer = QTimer(self)
 		self._montage_refresh_timer.setSingleShot(True)
 		self._montage_refresh_timer.timeout.connect(self._show_cine_crudo_sa_montage)
+		# Fast-pass: durante la interacción se rinde a baja resolución (ágil) y al
+		# soltar se re-rinde en HQ 512px (nítido). panel px efectivo del lienzo.
+		self._montage_panel_px: int = 512
+		self._montage_hq_timer = QTimer(self)
+		self._montage_hq_timer.setSingleShot(True)
+		self._montage_hq_timer.timeout.connect(self._render_montage_hq)
+		# Recoloreo: display inmediato en FastTransformation y repaint nítido diferido.
+		self._montage_recolor_smooth_timer = QTimer(self)
+		self._montage_recolor_smooth_timer.setSingleShot(True)
+		self._montage_recolor_smooth_timer.timeout.connect(self._montage_recolor_smooth_repaint)
 		self._preview_scrollers: dict[str, QScrollArea] = {}
 		self._preview_pan_active = False
 		self._preview_pan_anchor = None
@@ -5795,6 +5805,8 @@ class MainWindow(QMainWindow):
 			"polar_cine_timer",
 			"cine_crudo_timer",
 			"_montage_refresh_timer",
+			"_montage_hq_timer",
+			"_montage_recolor_smooth_timer",
 			"compare_axes_cine_timer",
 			"compare_axes_refresh_timer",
 			"_deferred_hq_timer",
@@ -10485,7 +10497,7 @@ class MainWindow(QMainWindow):
 		self._set_progress(100, "Informes listos")
 		return True
 
-	def _apply_preview_zoom(self, name: str):
+	def _apply_preview_zoom(self, name: str, fast: bool = False):
 		label = self.preview_labels[name]
 		scroller = self._preview_scrollers.get(name)
 		anchor = None
@@ -10525,7 +10537,8 @@ class MainWindow(QMainWindow):
 		zoom = max(0.20, min(4.00, self.preview_zoom.get(name, 1.0)))
 		w = max(1, int(base_size.width() * zoom))
 		h = max(1, int(base_size.height() * zoom))
-		scaled = pix.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+		mode = Qt.TransformationMode.FastTransformation if fast else Qt.TransformationMode.SmoothTransformation
+		scaled = pix.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, mode)
 		label.setPixmap(scaled)
 		label.setMinimumSize(scaled.size())
 		label.resize(scaled.size())
@@ -13051,8 +13064,8 @@ class MainWindow(QMainWindow):
 		from PIL import Image
 		rows = max(1, len(rows_data))
 		cols = max(1, int(cols))
-		# 512px/panel: alta calidad en vivo (canvas transitorio ~30-95MB según columnas).
-		PANEL = 512
+		# Panel px: 512 en HQ (final/export), menor durante la interacción (fast-pass).
+		PANEL = max(120, int(getattr(self, "_montage_panel_px", 512)))
 		f = PANEL / 150.0
 		PAD = max(2, round(4 * f))
 		TITLE_H = round(16 * f)
@@ -13167,6 +13180,13 @@ class MainWindow(QMainWindow):
 					painter.drawText(x0 + int(tx * PANEL), y0 + int((1.0 - ty) * PANEL), str(txt))
 		painter.end()
 
+	def _montage_display_base_size(self, pix):
+		"""Tamaño base del preview normalizado al equivalente 512px: así el tamaño
+		en pantalla es el mismo en fast-pass (256) y en HQ (512), sin salto de zoom."""
+		panel = max(1, int(getattr(self, "_montage_panel_px", 512)))
+		factor = 512.0 / panel
+		return QSize(max(1, round(pix.width() * factor)), max(1, round(pix.height() * factor)))
+
 	def _recolor_montage_from_cache(self, cmap_name):
 		"""Recoloreo rápido (solo cambió el colormap): reusa el lienzo gris cacheado
 		y actualiza el preview sin re-ejecutar el pipeline del montaje."""
@@ -13174,13 +13194,23 @@ class MainWindow(QMainWindow):
 		if pix is None:
 			self._show_cine_crudo_sa_montage()
 			return
-		try:
-			pix.save(os.path.join(self.output_dir, "sa_montage.png"), "PNG")
-		except Exception:
-			pass
+		# Persistir el PNG solo en HQ: evita dejar un archivo en baja resolución en disco.
+		if int(getattr(self, "_montage_panel_px", 512)) >= 512:
+			try:
+				pix.save(os.path.join(self.output_dir, "sa_montage.png"), "PNG")
+			except Exception:
+				pass
 		if "comparacion_ejes" in self.preview_labels:
 			self.preview_pixmaps["comparacion_ejes"] = pix
-			self.preview_base_sizes["comparacion_ejes"] = pix.size()
+			self.preview_base_sizes["comparacion_ejes"] = self._montage_display_base_size(pix)
+			# Display inmediato en FastTransformation (ágil) y repaint nítido diferido.
+			self._apply_preview_zoom("comparacion_ejes", fast=True)
+			if hasattr(self, "_montage_recolor_smooth_timer"):
+				self._montage_recolor_smooth_timer.start(120)
+
+	def _montage_recolor_smooth_repaint(self):
+		"""Repaint nítido (SmoothTransformation) del montaje tras el recoloreo fast."""
+		if self.cine_crudo_preview_mode == "sa_montage" and "comparacion_ejes" in self.preview_labels:
 			self._apply_preview_zoom("comparacion_ejes")
 
 	def _show_cine_crudo_sa_montage(self):
@@ -13420,15 +13450,18 @@ class MainWindow(QMainWindow):
 			# Render en memoria (numpy RGB + QPainter): sin matplotlib ni PNG en cada cambio.
 			pix = self._composite_montage_pixmap(rows_data, int(cols), montage_cmap, suptitle)
 			self.cine_crudo_preview_mode = "sa_montage"
-			# Escribir sa_montage.png para reload al cambiar de pestaña y para "Guardar PNG".
-			try:
-				pix.save(os.path.join(self.output_dir, "sa_montage.png"), "PNG")
-			except Exception:
-				pass
+			# Escribir sa_montage.png solo en HQ (reload al cambiar de pestaña y "Guardar PNG").
+			if int(getattr(self, "_montage_panel_px", 512)) >= 512:
+				try:
+					pix.save(os.path.join(self.output_dir, "sa_montage.png"), "PNG")
+				except Exception:
+					pass
 			if "comparacion_ejes" in self.preview_labels:
 				self.preview_pixmaps["comparacion_ejes"] = pix
-				self.preview_base_sizes["comparacion_ejes"] = pix.size()
-				self._apply_preview_zoom("comparacion_ejes")
+				self.preview_base_sizes["comparacion_ejes"] = self._montage_display_base_size(pix)
+				# En fast-pass (interacción) escala rápido; el settle HQ 512 reescala nítido.
+				fast_display = int(getattr(self, "_montage_panel_px", 512)) < 512
+				self._apply_preview_zoom("comparacion_ejes", fast=fast_display)
 			self._select_tab_by_title("comparacion_ejes")
 			self._log(
 				f"Montaje generado: SA {n_sa_stress} cortes · Esp {th_txt} · recorte {crop_txt} · gates {min(gate_from, gate_to)}→{max(gate_from, gate_to)} · template {template_mode}"
@@ -13617,7 +13650,8 @@ class MainWindow(QMainWindow):
 			self.cine_crudo_montage_win_high = int(high) / 2.0
 		self._update_compare_axes_window_labels(low, high)
 		if self.cine_crudo_preview_mode == "sa_montage":
-			self._schedule_montage_refresh(0)
+			# Fast-pass: rinde baja-res al arrastrar y HQ al soltar (sin lag de debounce).
+			self._schedule_montage_refresh(0, fast=True)
 
 	def _reset_compare_axes_window_high(self):
 		slider = getattr(self, "compare_axes_range_slider", None)
@@ -13730,6 +13764,8 @@ class MainWindow(QMainWindow):
 			return
 		src = os.path.join(self.output_dir, "sa_montage.png")
 		if self.cine_crudo_preview_mode != "sa_montage" or not os.path.exists(src):
+			# Forzar HQ 512: el PNG solo se escribe en render HQ.
+			self._montage_panel_px = 512
 			self._show_cine_crudo_sa_montage()
 		if not os.path.exists(src):
 			QMessageBox.warning(self, "SINCRO", "No hay montaje para exportar. Generalo primero con 'Ver montaje'.")
@@ -13771,7 +13807,7 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_gate_from = int(g0)
 		self.cine_crudo_gate_to = int(g1)
 		if self.cine_crudo_preview_mode == "sa_montage":
-			self._schedule_montage_refresh(8)
+			self._schedule_montage_refresh(8, fast=True)
 
 	def _set_montage_gate_full_range(self):
 		"""Acceso rápido: usar todos los gates disponibles en el montaje."""
@@ -13797,7 +13833,7 @@ class MainWindow(QMainWindow):
 		if axis in self.cine_crudo_rest_offset:
 			self.cine_crudo_rest_offset[axis] = int(value)
 		if self.cine_crudo_preview_mode == "sa_montage" and self.cine_crudo_axes_for_export_rest:
-			self._schedule_montage_refresh(8)
+			self._schedule_montage_refresh(8, fast=True)
 
 	def _mark_cine_crudo_as_rest(self):
 		"""Guarda los cortes actuales como estudio de REPOSO para el montaje comparativo."""
@@ -14410,7 +14446,7 @@ class MainWindow(QMainWindow):
 					new_start = max(1, cur - dcols)
 					if axis_name in self.cine_crudo_stripe_start:
 						self.cine_crudo_stripe_start[axis_name] = int(new_start)
-					self._schedule_montage_refresh(8)
+					self._schedule_montage_refresh(8, fast=True)
 				except Exception:
 					pass
 			event.accept()
@@ -14492,7 +14528,7 @@ class MainWindow(QMainWindow):
 			axis = str(getattr(self, "cine_crudo_selected_stripe", "SA") or "SA")
 			cur = int(self.cine_crudo_stripe_start.get(axis, 1) or 1)
 			self.cine_crudo_stripe_start[axis] = max(1, cur - step)
-			self._schedule_montage_refresh(10)
+			self._schedule_montage_refresh(10, fast=True)
 			event.accept()
 		except Exception as exc:
 			self._log(f"[WARN] Rueda en montaje falló: {exc}")
@@ -14510,7 +14546,7 @@ class MainWindow(QMainWindow):
 					self.cine_crudo_stripe_start[axis] = max(1, cur + step)
 				else:
 					self.cine_crudo_stripe_start[axis] = max(1, cur - step)
-				self._schedule_montage_refresh(8)
+				self._schedule_montage_refresh(8, fast=True)
 				self.statusBar().showMessage(f"Montaje: tira {axis} start={self.cine_crudo_stripe_start.get(axis, 1)}", 1200)
 				event.accept()
 				return
@@ -14544,13 +14580,30 @@ class MainWindow(QMainWindow):
 		except Exception as exc:
 			self._log(f"[WARN] Doble click en montaje falló: {exc}")
 
-	def _schedule_montage_refresh(self, delay_ms: int = 20):
+	def _schedule_montage_refresh(self, delay_ms: int = 20, fast: bool = False):
 		if self.cine_crudo_preview_mode != "sa_montage":
 			return
+		# Fast-pass: interacción continua (rueda/ventana/drag) rinde a baja resolución
+		# y agenda un re-render HQ 512px cuando el usuario suelta (~180ms de idle).
+		if fast:
+			self._montage_panel_px = int(getattr(self, "_MONTAGE_PANEL_FAST", 256))
+			if hasattr(self, "_montage_hq_timer"):
+				self._montage_hq_timer.start(180)
+		else:
+			self._montage_panel_px = 512
+			if hasattr(self, "_montage_hq_timer"):
+				self._montage_hq_timer.stop()
 		if hasattr(self, "_montage_refresh_timer"):
 			self._montage_refresh_timer.start(max(0, int(delay_ms)))
 		else:
 			self._show_cine_crudo_sa_montage()
+
+	def _render_montage_hq(self):
+		"""Re-render nítido 512px tras terminar la interacción (fast-pass settle)."""
+		if self.cine_crudo_preview_mode != "sa_montage":
+			return
+		self._montage_panel_px = 512
+		self._show_cine_crudo_sa_montage()
 
 	def _show_cine_crudo_montage_tips(self):
 		msg = (
