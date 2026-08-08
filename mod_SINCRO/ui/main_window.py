@@ -2088,10 +2088,28 @@ class MainWindow(QMainWindow):
 		self.bottom_hsplit.setStretchFactor(2, 0)
 
 		lower_cine_panel = QWidget()
+		self._lower_cine_panel = lower_cine_panel
 		lower_cine_layout = QVBoxLayout(lower_cine_panel)
 		lower_cine_layout.setContentsMargins(0, 0, 0, 0)
 		lower_cine_layout.setSpacing(2)
+		# Header delgado con toggle para colapsar la banda (cine + resultados +
+		# curvas) y dar todo el alto a las pestañas. El right_splitter no colapsa
+		# por drag (setChildrenCollapsible(False)); el toggle lo hace por botón.
+		lower_band_header = QHBoxLayout()
+		lower_band_header.setContentsMargins(4, 0, 4, 0)
+		lower_band_header.setSpacing(6)
+		self.lower_cine_collapse_btn = QToolButton()
+		self.lower_cine_collapse_btn.setText("▾")
+		self.lower_cine_collapse_btn.setAutoRaise(True)
+		self.lower_cine_collapse_btn.setToolTip("Colapsar/expandir la banda inferior (cine, resultados y curvas).")
+		self.lower_cine_collapse_btn.clicked.connect(self._toggle_lower_cine_band)
+		lower_band_header.addWidget(self.lower_cine_collapse_btn)
+		lower_band_header.addWidget(QLabel("Cine / Resultados / Curvas"))
+		lower_band_header.addStretch(1)
+		lower_cine_layout.addLayout(lower_band_header)
 		lower_cine_layout.addWidget(self.bottom_hsplit)
+		self._lower_cine_collapsed = False
+		self._right_splitter_saved_sizes = None
 		right_splitter.addWidget(self.tabs)
 		right_splitter.addWidget(lower_cine_panel)
 		right_splitter.setStretchFactor(0, 3)
@@ -2108,6 +2126,7 @@ class MainWindow(QMainWindow):
 		# ancha porque ahora contiene las DOS imágenes (cine + cine_compare).
 		self.bottom_hsplit.setSizes([400, 260, 280])
 		self.main_splitter = splitter
+		self._right_splitter = right_splitter
 		self.right_splitter = right_splitter
 		self._ui_settings = QSettings("Gammasys", "GammaSync")
 		self._load_global_ui_preferences()
@@ -15131,6 +15150,25 @@ class MainWindow(QMainWindow):
 		self._montage_drag_start_x = None
 		self._load_cine_crudo_frames(str(source))
 		self._log(f"Cine crudo: fuente {source} ({len(self.cine_crudo_frames)} frames).")
+
+	def _toggle_lower_cine_band(self):
+		"""Colapsa/expande la banda inferior dejando solo su header delgado."""
+		splitter = getattr(self, "_right_splitter", None)
+		if splitter is None:
+			return
+		self._lower_cine_collapsed = not bool(getattr(self, "_lower_cine_collapsed", False))
+		if self._lower_cine_collapsed:
+			self._right_splitter_saved_sizes = splitter.sizes()
+			self.bottom_hsplit.setVisible(False)
+			self.lower_cine_collapse_btn.setText("▸")
+			total = sum(splitter.sizes())
+			header_h = max(28, self._lower_cine_panel.sizeHint().height())
+			splitter.setSizes([max(0, total - header_h), header_h])
+		else:
+			self.bottom_hsplit.setVisible(True)
+			self.lower_cine_collapse_btn.setText("▾")
+			if self._right_splitter_saved_sizes:
+				splitter.setSizes(self._right_splitter_saved_sizes)
 
 	def _rebuild_tabs_for_mode(self):
 		current_title = self.tabs.tabText(self.tabs.currentIndex()) if self.tabs.count() > 0 else ""
