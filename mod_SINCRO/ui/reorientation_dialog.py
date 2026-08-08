@@ -915,13 +915,24 @@ class CardiacReorientationDialog(QDialog):
         self.lbl_angles.setToolTip(self._geo_note)
         self.canvas.draw_idle()
 
+    def _smooth_rgb(self, arr):
+        # Interpola en dominio ESCALAR (upsample cubico) y despues colorea, para
+        # replicar el look nitido/suave original: antes matplotlib interpolaba los
+        # datos y luego aplicaba el LUT; hacerlo sobre el RGB ya coloreado se veia
+        # "fuera de foco". Upsample cubico + imshow nearest = nitido sin pixelar.
+        a = np.asarray(arr, dtype=np.float64)
+        if ndi is not None and a.ndim == 2 and min(a.shape) > 1:
+            a = ndi.zoom(a, 4, order=3)
+        return render_array_rgb(a, self._cmap, window_low=self._win_lo,
+                                window_high=self._win_hi)
+
     def _draw_orient_views(self):
         # Vista Anterior (AP): fila=z, col=x. Linea de eje largo base->apex.
         self.ax_tra.clear()
         self.ax_tra.set_facecolor("#020611")
-        self.ax_tra.imshow(render_array_rgb(self._ap_view, self._cmap,
-                           window_low=self._win_lo, window_high=self._win_hi),
-                           interpolation="nearest", aspect="auto")
+        self.ax_tra.imshow(self._smooth_rgb(self._ap_view),
+                           interpolation="nearest", aspect="auto",
+                           extent=(0, self._ap_view.shape[1], self._ap_view.shape[0], 0))
         self.ax_tra.plot(
             [self.h_tra1.x, self.h_tra2.x], [self.h_tra1.y, self.h_tra2.y],
             "-", color="#33ff66", lw=1.6,
@@ -955,9 +966,9 @@ class CardiacReorientationDialog(QDialog):
         # Vista Lateral izquierda: fila=z, col=y.
         self.ax_cor.clear()
         self.ax_cor.set_facecolor("#020611")
-        self.ax_cor.imshow(render_array_rgb(self._ll_view, self._cmap,
-                           window_low=self._win_lo, window_high=self._win_hi),
-                           interpolation="nearest", aspect="auto")
+        self.ax_cor.imshow(self._smooth_rgb(self._ll_view),
+                           interpolation="nearest", aspect="auto",
+                           extent=(0, self._ll_view.shape[1], self._ll_view.shape[0], 0))
         self.ax_cor.plot(
             [self.h_cor1.x, self.h_cor2.x], [self.h_cor1.y, self.h_cor2.y],
             "-", color="#33ff66", lw=1.6,
@@ -999,8 +1010,8 @@ class CardiacReorientationDialog(QDialog):
         vla = vla_slice(reo, imid)
 
         self.ax_sa.clear(); self.ax_sa.set_facecolor("#020611")
-        self.ax_sa.imshow(render_array_rgb(sa, self._cmap, window_low=self._win_lo,
-                          window_high=self._win_hi), interpolation="nearest")
+        self.ax_sa.imshow(self._smooth_rgb(sa), interpolation="nearest",
+                          extent=(0, sa.shape[1], sa.shape[0], 0))
         self.ax_sa.set_title(f"SA (k={kmid}) · ANT↑ SEP←", color="white", fontsize=9, fontweight="bold")
         # Caja guía (estilo Odyssey) para ajuste fino visual del corte SA.
         h_sa, w_sa = sa.shape[:2]
@@ -1022,8 +1033,8 @@ class CardiacReorientationDialog(QDialog):
         # HLA se dibuja con APEX arriba/BASE abajo (fila k invertida). Las líneas
         # de límite deben usar la coordenada de fila invertida: k' = (n-1) - k.
         self.ax_hla.clear(); self.ax_hla.set_facecolor("#020611")
-        self.ax_hla.imshow(render_array_rgb(hla, self._cmap, window_low=self._win_lo,
-                           window_high=self._win_hi), interpolation="nearest", aspect="auto")
+        self.ax_hla.imshow(self._smooth_rgb(hla), interpolation="nearest",
+                           aspect="auto", extent=(0, hla.shape[1], hla.shape[0], 0))
         base_row = (n - 1) - self._base_k
         apex_row = (n - 1) - self._apex_k
         self.ax_hla.axhline(base_row, color="#ff3333", lw=1.6)
@@ -1041,8 +1052,8 @@ class CardiacReorientationDialog(QDialog):
         # VLA: BASE izq / APEX der (eje largo horizontal). Las líneas base/ápex
         # son verticales (columnas = k).
         self.ax_vla.clear(); self.ax_vla.set_facecolor("#020611")
-        self.ax_vla.imshow(render_array_rgb(vla, self._cmap, window_low=self._win_lo,
-                           window_high=self._win_hi), interpolation="nearest", aspect="auto")
+        self.ax_vla.imshow(self._smooth_rgb(vla), interpolation="nearest",
+                           aspect="auto", extent=(0, vla.shape[1], vla.shape[0], 0))
         self.ax_vla.axvline(self._base_k, color="#ff3333", lw=1.2)
         self.ax_vla.axvline(self._apex_k, color="#ff3333", lw=1.2)
         self._fine_vla_handle = (0.95 * max(1, vla.shape[1] - 1), 0.10 * max(1, vla.shape[0] - 1))
@@ -1057,8 +1068,8 @@ class CardiacReorientationDialog(QDialog):
         kb = int(np.clip(self._base_k, 0, n - 1))
         ka = int(np.clip(self._apex_k, 0, n - 1))
         strip = np.concatenate([sa_slice(reo, kb), sa_slice(reo, kmid), sa_slice(reo, ka)], axis=1)
-        self.ax_sa_stack.imshow(render_array_rgb(strip, self._cmap, window_low=self._win_lo,
-                                window_high=self._win_hi), interpolation="nearest", aspect="auto")
+        self.ax_sa_stack.imshow(self._smooth_rgb(strip), interpolation="nearest",
+                                aspect="auto", extent=(0, strip.shape[1], strip.shape[0], 0))
         self.ax_sa_stack.set_title("SA Base · Medio · Ápex", color="white", fontsize=9, fontweight="bold")
         self.ax_sa_stack.set_xticks([]); self.ax_sa_stack.set_yticks([])
 
