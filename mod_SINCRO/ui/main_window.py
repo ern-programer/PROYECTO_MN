@@ -266,6 +266,11 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_montage_cmap = "odyssey_cool"
 		self.cine_crudo_montage_win_low = 2.0
 		self.cine_crudo_montage_win_high = 99.5
+		# Motor de color del cine de proyecciones (preview crudo): colormap + ventana
+		# 0..200% de p99. Default gris con ventana 0..100% = comportamiento histórico.
+		self.cine_crudo_screen_cmap = "gray"
+		self.cine_crudo_screen_win_low = 0.0
+		self.cine_crudo_screen_win_high = 100.0
 		# Modo de ventaneo del montaje: "percentil" (histórico, spinboxes) o
 		# "lineal" (motor unificado: normaliza el volumen por min/máx y aplica la
 		# ventana 0..200% del RangeSlider, idéntica al cine/diálogo). El modo lineal
@@ -799,7 +804,11 @@ class MainWindow(QMainWindow):
 		_add_cmap_row(15, "[15] stress_vs_rest", self.report_cmap_stress_rest, "Afecta el panel resumen de métricas stress vs rest.")
 		_add_cmap_row(16, "[16] polar_cine_montaje", self.report_cmap_polar_cine, "Afecta el cine polar gatillado (montaje por gate).")
 
-		self._sidebar_layout.addWidget(report_cmap_box)
+		# El grid de escalas del informe ya no vive en el sidebar: se aloja en el
+		# diálogo de Configuración (declutter). Estos selectores definen SOLO el
+		# color de cada imagen del informe PDF. Se mantiene la referencia viva.
+		self._report_cmap_box = report_cmap_box
+		report_cmap_box.setVisible(False)
 
 		preset_box = QGroupBox("Presets por paciente")
 		preset_layout = QVBoxLayout(preset_box)
@@ -1956,6 +1965,13 @@ class MainWindow(QMainWindow):
 				ce_row.addWidget(scroller, 1)
 				ce_row.addWidget(self._build_compare_axes_color_column())
 				tab_layout.addLayout(ce_row)
+			elif name == "cine_crudo":
+				# Motor de color pegado al preview: cmap + RangeSlider 0..200% + tira LUT.
+				cc_row = QHBoxLayout()
+				cc_row.setContentsMargins(0, 0, 0, 0)
+				cc_row.addWidget(scroller, 1)
+				cc_row.addWidget(self._build_cine_crudo_color_column())
+				tab_layout.addLayout(cc_row)
 			else:
 				tab_layout.addWidget(scroller)
 			self._tab_widgets[name] = tab
@@ -3571,6 +3587,19 @@ class MainWindow(QMainWindow):
 		perfusion_note.setStyleSheet("color:#6b7280; font-size:8pt;")
 		analysis_l.addRow(perfusion_note)
 		root.addWidget(analysis_box)
+
+		# --- Escalas de color de las imágenes del informe ---
+		# El grid (16 combos) vive en self._report_cmap_box; se aloja acá dentro de
+		# un scroll y se saca del diálogo al cerrar para que no se destruya con él.
+		report_cmap_scroll = QScrollArea()
+		report_cmap_scroll.setWidgetResizable(True)
+		report_cmap_scroll.setMinimumHeight(220)
+		self._report_cmap_box.setVisible(True)
+		report_cmap_scroll.setWidget(self._report_cmap_box)
+		root.addWidget(report_cmap_scroll)
+		dlg.finished.connect(
+			lambda _=0: (self._report_cmap_box.setParent(None), self._report_cmap_box.setVisible(False))
+		)
 
 		# --- Carpeta de salida ---
 		output_box = QGroupBox("Carpeta de salida")
@@ -10961,11 +10990,19 @@ class MainWindow(QMainWindow):
 		if seed_stage is None:
 			seed_stage = self._scale_seed_for_study(study_obj)
 		frames: list[QPixmap] = []
+		# Motor de color del preview crudo: colormap + ventana 0..200% de p99.
+		screen_cmap = str(getattr(self, "cine_crudo_screen_cmap", "gray") or "gray")
+		win_lo = float(getattr(self, "cine_crudo_screen_win_low", 0.0)) / 100.0 * p99
+		win_hi = float(getattr(self, "cine_crudo_screen_win_high", 100.0)) / 100.0 * p99
+		win_den = (win_hi - win_lo) if (win_hi - win_lo) > 1e-9 else 1e-9
 		try:
-			import matplotlib.cm as _cm
-			cmap = _cm.get_cmap("gray")
+			import matplotlib
+			try:
+				cmap = matplotlib.colormaps[screen_cmap]
+			except Exception:
+				cmap = matplotlib.colormaps["gray"]
 			for a in range(frames_arr.shape[0]):
-				img = np.clip(frames_arr[a] / p99, 0, 1)
+				img = np.clip((frames_arr[a] - win_lo) / win_den, 0, 1)
 				rgb = (np.asarray(cmap(img)[..., :3]) * 255).astype(np.uint8)
 				if mask_on:
 					frame_img = frames_arr[a]
@@ -11012,7 +11049,7 @@ class MainWindow(QMainWindow):
 					_vline(sx, sy - 3, sy + 3)
 
 				if corrected_frames_arr is not None:
-					img_corr = np.clip(corrected_frames_arr[a] / p99, 0, 1)
+					img_corr = np.clip((corrected_frames_arr[a] - win_lo) / win_den, 0, 1)
 					rgb_corr = (np.asarray(cmap(img_corr)[..., :3]) * 255).astype(np.uint8)
 					rgb = np.concatenate([rgb, rgb_corr], axis=1)
 				rgb = self._append_cine_crudo_sinogram_panel(rgb, frames_arr, corrected_frames_arr, a)
@@ -11020,9 +11057,9 @@ class MainWindow(QMainWindow):
 				frames.append(self._rgb_frame_to_qpixmap_raw(rgb))
 		except Exception:
 			for a in range(frames_arr.shape[0]):
-				img = (np.clip(frames_arr[a] / p99, 0, 1) * 255).astype(np.uint8)
+				img = (np.clip((frames_arr[a] - win_lo) / win_den, 0, 1) * 255).astype(np.uint8)
 				if corrected_frames_arr is not None:
-					img_corr = (np.clip(corrected_frames_arr[a] / p99, 0, 1) * 255).astype(np.uint8)
+					img_corr = (np.clip((corrected_frames_arr[a] - win_lo) / win_den, 0, 1) * 255).astype(np.uint8)
 					img = np.concatenate([img, img_corr], axis=1)
 				frames.append(self._rgb_frame_to_qpixmap_raw(img))
 		return frames, counts, matrix_txt
@@ -13662,6 +13699,132 @@ class MainWindow(QMainWindow):
 
 	def _reset_compare_axes_window_low(self):
 		slider = getattr(self, "compare_axes_range_slider", None)
+		if slider is not None:
+			_, high = slider.values()
+			slider.set_values(0, high)
+
+	def _build_cine_crudo_color_column(self) -> QWidget:
+		"""Columna de color/ventaneo pegada al preview del cine crudo (proyecciones).
+
+		cmap + RangeSlider 0..200% de p99 (con botones Top/Base) + tira vertical del
+		LUT. Solo afecta la visualización en pantalla del cine de proyecciones; no
+		toca el informe ni el montaje clínico."""
+		col = QWidget()
+		col.setMaximumWidth(132)
+		v = QVBoxLayout(col)
+		v.setContentsMargins(4, 4, 4, 4)
+		v.setSpacing(4)
+
+		v.addWidget(QLabel("Escala"))
+		self.cine_crudo_screen_cmap_combo = QComboBox()
+		self.cine_crudo_screen_cmap_combo.addItems(self._all_cmaps)
+		self.cine_crudo_screen_cmap_combo.setCurrentText(self.cine_crudo_screen_cmap)
+		# Sincronizar el estado con lo que realmente quedó seleccionado (por si "gray"
+		# no estuviera en la lista, evitar desincronización combo/estado).
+		self.cine_crudo_screen_cmap = str(self.cine_crudo_screen_cmap_combo.currentText())
+		self.cine_crudo_screen_cmap_combo.setToolTip("Escala de colores del cine de proyecciones (solo pantalla).")
+		self.cine_crudo_screen_cmap_combo.currentTextChanged.connect(self._on_cine_crudo_screen_cmap_changed)
+		v.addWidget(self.cine_crudo_screen_cmap_combo)
+
+		_btn_css = (
+			"QPushButton{font-weight:bold;font-size:8pt;border:1px solid #94a3b8;"
+			"border-radius:3px;padding:1px 3px;color:#1e293b;background:#e2e8f0;}"
+			"QPushButton:hover{background:#cbd5e1;color:#2563eb;}"
+		)
+		slider_col = QVBoxLayout()
+		slider_col.setContentsMargins(0, 0, 0, 0)
+		slider_col.setSpacing(2)
+		top_row = QHBoxLayout()
+		top_row.setContentsMargins(0, 0, 0, 0)
+		self.cine_crudo_screen_btn_top = QPushButton("Top")
+		self.cine_crudo_screen_btn_top.setStyleSheet(_btn_css)
+		self.cine_crudo_screen_btn_top.setCursor(Qt.CursorShape.PointingHandCursor)
+		self.cine_crudo_screen_btn_top.setToolTip("Volver Top a 100%")
+		self.cine_crudo_screen_btn_top.clicked.connect(self._reset_cine_crudo_screen_window_high)
+		self.cine_crudo_screen_lbl_top = QLabel("100%")
+		top_row.addStretch(1)
+		top_row.addWidget(self.cine_crudo_screen_btn_top)
+		top_row.addWidget(self.cine_crudo_screen_lbl_top)
+		top_row.addStretch(1)
+		slider_col.addLayout(top_row)
+
+		self.cine_crudo_screen_range_slider = RangeSlider()
+		self.cine_crudo_screen_range_slider.setToolTip("Ventana 0–200% de p99 (Base abajo, Top arriba; >100% oscurece).")
+		self.cine_crudo_screen_range_slider.valuesChanged.connect(self._on_cine_crudo_screen_window_changed)
+
+		base_row = QHBoxLayout()
+		base_row.setContentsMargins(0, 0, 0, 0)
+		self.cine_crudo_screen_btn_base = QPushButton("Base")
+		self.cine_crudo_screen_btn_base.setStyleSheet(_btn_css)
+		self.cine_crudo_screen_btn_base.setCursor(Qt.CursorShape.PointingHandCursor)
+		self.cine_crudo_screen_btn_base.setToolTip("Volver Base a 0%")
+		self.cine_crudo_screen_btn_base.clicked.connect(self._reset_cine_crudo_screen_window_low)
+		self.cine_crudo_screen_lbl_base = QLabel("0%")
+		base_row.addStretch(1)
+		base_row.addWidget(self.cine_crudo_screen_btn_base)
+		base_row.addWidget(self.cine_crudo_screen_lbl_base)
+		base_row.addStretch(1)
+
+		slider_row = QHBoxLayout()
+		slider_row.setContentsMargins(0, 0, 0, 0)
+		slider_col.addWidget(self.cine_crudo_screen_range_slider, 1)
+		slider_col.addLayout(base_row)
+		slider_row.addLayout(slider_col, 1)
+		self.cine_crudo_screen_color_strip = VerticalColorStrip(self.cine_crudo_screen_cmap)
+		slider_row.addWidget(self.cine_crudo_screen_color_strip)
+		v.addLayout(slider_row, 1)
+
+		self._cine_crudo_screen_slider_from_state()
+		return col
+
+	def _cine_crudo_screen_slider_from_state(self):
+		slider = getattr(self, "cine_crudo_screen_range_slider", None)
+		if slider is None:
+			return
+		lo = int(round(float(self.cine_crudo_screen_win_low)))
+		hi = int(round(float(self.cine_crudo_screen_win_high)))
+		slider.blockSignals(True)
+		slider.set_values(lo, hi)
+		slider.blockSignals(False)
+		self._update_cine_crudo_screen_labels(*slider.values())
+
+	def _update_cine_crudo_screen_labels(self, low, high):
+		if getattr(self, "cine_crudo_screen_lbl_top", None) is not None:
+			self.cine_crudo_screen_lbl_top.setText(f"{int(high)}%")
+		if getattr(self, "cine_crudo_screen_lbl_base", None) is not None:
+			self.cine_crudo_screen_lbl_base.setText(f"{int(low)}%")
+
+	def _refresh_cine_crudo_projection_colors(self):
+		"""Re-colorea SOLO el cine de proyecciones (preview crudo) tras cambiar
+		colormap/ventana; no toca montaje ni cortes generados."""
+		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
+			return
+		if self.cine_crudo_preview_mode is not None:
+			return
+		source = str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
+		self._load_cine_crudo_frames(source)
+
+	def _on_cine_crudo_screen_cmap_changed(self, name):
+		self.cine_crudo_screen_cmap = str(name)
+		strip = getattr(self, "cine_crudo_screen_color_strip", None)
+		if strip is not None:
+			strip.set_cmap(self.cine_crudo_screen_cmap)
+		self._refresh_cine_crudo_projection_colors()
+
+	def _on_cine_crudo_screen_window_changed(self, low, high):
+		self.cine_crudo_screen_win_low = float(low)
+		self.cine_crudo_screen_win_high = float(high)
+		self._update_cine_crudo_screen_labels(low, high)
+		self._refresh_cine_crudo_projection_colors()
+
+	def _reset_cine_crudo_screen_window_high(self):
+		slider = getattr(self, "cine_crudo_screen_range_slider", None)
+		if slider is not None:
+			low, _ = slider.values()
+			slider.set_values(low, 100)
+
+	def _reset_cine_crudo_screen_window_low(self):
+		slider = getattr(self, "cine_crudo_screen_range_slider", None)
 		if slider is not None:
 			_, high = slider.values()
 			slider.set_values(0, high)
