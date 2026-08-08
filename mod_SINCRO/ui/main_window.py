@@ -5613,8 +5613,18 @@ class MainWindow(QMainWindow):
 		# Montaje clínico: se renderiza al entrar (ya no hay botón "Ver montaje").
 		# El resto de acciones (layout, zoom, gates) ocurre en vivo. Va antes del
 		# guard study/seg porque el crudo puede tener cortes sin segmentación.
+		# Solo se re-renderiza si algo del montaje cambió desde el último render.
 		if tab_name == "comparacion_ejes" and self.cine_crudo_axes_for_export:
-			self._show_cine_crudo_sa_montage()
+			sig = self._montage_signature()
+			already = (
+				self.cine_crudo_preview_mode == "sa_montage"
+				and self.preview_pixmaps.get("comparacion_ejes") is not None
+				and getattr(self, "_montage_last_signature", None) == sig
+			)
+			if already:
+				self._apply_preview_zoom("comparacion_ejes")
+			else:
+				self._show_cine_crudo_sa_montage()
 			return
 		if self.study is None or self.seg is None:
 			return
@@ -13628,6 +13638,35 @@ class MainWindow(QMainWindow):
 		if self.cine_crudo_preview_mode == "sa_montage" and "comparacion_ejes" in self.preview_labels:
 			self._apply_preview_zoom("comparacion_ejes")
 
+	def _montage_signature(self):
+		"""Firma del estado que afecta el render del montaje. Si no cambia, no se
+		vuelve a renderizar al reentrar a la pestaña Montaje clínico."""
+		def _ids(d):
+			try:
+				return tuple(sorted((str(k), id(v)) for k, v in (d or {}).items()))
+			except Exception:
+				return ()
+		return (
+			_ids(self.cine_crudo_axes_for_export),
+			_ids(getattr(self, "cine_crudo_axes_for_export_stress", None)),
+			_ids(getattr(self, "cine_crudo_axes_for_export_rest", None)),
+			int(getattr(self, "cine_crudo_gate_from", 1) or 1),
+			int(getattr(self, "cine_crudo_gate_to", 1) or 1),
+			str(getattr(self, "cine_crudo_montage_template", "denso")),
+			float(getattr(self, "cine_crudo_montage_cut_zoom", 1.0) or 1.0),
+			str(getattr(self, "cine_crudo_montage_cmap", "")),
+			bool(getattr(self, "cine_crudo_montage_center_cuts", False)),
+			str(getattr(self, "cine_crudo_montage_crop_mode", "limits")),
+			str(getattr(self, "cine_crudo_montage_win_mode", "percentil")),
+			float(getattr(self, "cine_crudo_montage_win_low", 2.0) or 0.0),
+			float(getattr(self, "cine_crudo_montage_win_high", 99.5) or 0.0),
+			float(getattr(self, "cine_crudo_montage_lin_low", 0.0) or 0.0),
+			float(getattr(self, "cine_crudo_montage_lin_high", 1.0) or 0.0),
+			tuple(sorted((str(k), int(v)) for k, v in (getattr(self, "cine_crudo_rest_offset", {}) or {}).items())),
+			tuple(sorted((str(k), int(v)) for k, v in (getattr(self, "cine_crudo_stripe_start", {}) or {}).items())),
+			tuple(sorted((str(k), int(v)) for k, v in (getattr(self, "cine_crudo_stripe_count", {}) or {}).items())),
+		)
+
 	def _show_cine_crudo_sa_montage(self):
 
 		"""Montaje clínico de TODOS los cortes SA/VLA/HLA (estilo MyoVation/Xeleris).
@@ -13865,6 +13904,8 @@ class MainWindow(QMainWindow):
 			# Render en memoria (numpy RGB + QPainter): sin matplotlib ni PNG en cada cambio.
 			pix = self._composite_montage_pixmap(rows_data, int(cols), montage_cmap, suptitle)
 			self.cine_crudo_preview_mode = "sa_montage"
+			# Firma del estado ya renderizado: al reentrar no se re-renderiza si no cambió.
+			self._montage_last_signature = self._montage_signature()
 			# Escribir sa_montage.png solo en HQ (reload al cambiar de pestaña y "Guardar PNG").
 			if int(getattr(self, "_montage_panel_px", 512)) >= 512:
 				try:
