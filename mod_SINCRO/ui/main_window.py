@@ -5898,6 +5898,8 @@ class MainWindow(QMainWindow):
 		self.polar_cine_preview_frames = []
 		self.polar_cine_preview_index = 0
 		self.polar_cine_playing = False
+		self._polar_perf_cart_cache = None
+		self._polar_cine_cart_cache = None
 		self.preview_pixmaps.clear()
 		self.preview_base_sizes.clear()
 
@@ -9975,6 +9977,8 @@ class MainWindow(QMainWindow):
 
 			primary_frames: list[np.ndarray] = []
 			compare_frames: list[np.ndarray] = []
+			# Cache de mapas polares por gate para recolorear el cine en pantalla.
+			cine_cart_frames: list[list[dict]] = []
 			frame_count = int(study_cube_render.shape[0])
 			compare_cube_render = None
 			if self.compare_bundle is not None and self.compare_bundle.get("study") is not None:
@@ -9991,13 +9995,20 @@ class MainWindow(QMainWindow):
 				if p_frame is None:
 					continue
 				primary_frames.append(p_frame)
+				primary_title = f"{primary_phase_label} gate {g + 1}/{int(study_cube_render.shape[0])}"
 				if self.compare_bundle is not None and self.compare_bundle.get("study") is not None:
 					r_frame, r_pm = _render_gate_frame(compare_cube_render, self.compare_bundle["seg"], compare_apex_to_base, g, compare_phase_label)
 					if r_frame is None:
 						compare_frames.append(p_frame)
+						cine_cart_frames.append([{"pm": np.asarray(p_pm, dtype=np.float32), "title": primary_title}])
 					else:
 						gap = np.full((p_frame.shape[0], 28, 3), 12, dtype=np.uint8)
 						panels = [p_frame, gap, r_frame]
+						rest_title = f"{compare_phase_label} gate {g + 1}/{int(compare_cube_render.shape[0])}"
+						cache_panels = [
+							{"pm": np.asarray(p_pm, dtype=np.float32), "title": primary_title},
+							{"pm": np.asarray(r_pm, dtype=np.float32), "title": rest_title},
+						]
 						op_name = str(self.polar_compare_math_combo.currentText())
 						if op_name != "Ninguna" and p_pm is not None and r_pm is not None:
 							a_name = str(self.polar_compare_term_a_combo.currentText())
@@ -10009,11 +10020,15 @@ class MainWindow(QMainWindow):
 								math_label = f"{a_name} {op_name} {b_name}"
 								m_frame = _render_math_panel(pm_math, g, math_label)
 								panels.extend([gap, m_frame])
+								cache_panels.append({"pm": np.asarray(pm_math, dtype=np.float32), "title": f"{math_label} gate {g + 1}"})
 						compare_frames.append(np.concatenate(panels, axis=1))
+						cine_cart_frames.append(cache_panels)
 				else:
 					compare_frames.append(p_frame)
+					cine_cart_frames.append([{"pm": np.asarray(p_pm, dtype=np.float32), "title": primary_title}])
 
 			gate_frames = compare_frames
+			self._polar_cine_cart_cache = {"frames": cine_cart_frames, "disk_cmap": cmap_polar_perf} if cine_cart_frames else None
 
 			if gate_frames:
 				polar_cine_ms = int(self.polar_cine_speed_spin.value())
@@ -10409,6 +10424,12 @@ class MainWindow(QMainWindow):
 			movie.stop()
 			label.clear()
 			label.setMovie(None)
+		# Recolor en memoria SOLO si el cmap de pantalla difiere del que generó el GIF
+		# (informe intacto); si coinciden, cargar el GIF de disco es instantáneo.
+		_cine_cache = getattr(self, "_polar_cine_cart_cache", None)
+		if _cine_cache and str(getattr(self, "polar_perf_screen_cmap", "")) != str(_cine_cache.get("disk_cmap", "")):
+			if self._rebuild_polar_cine_frames_screen():
+				return
 		if os.path.exists(gif_path):
 			frames: list[QPixmap] = []
 			duration_ms = int(self.polar_cine_speed_spin.value())
@@ -10655,8 +10676,106 @@ class MainWindow(QMainWindow):
 		strip = getattr(self, "polar_screen_color_strip", None)
 		if strip is not None:
 			strip.set_cmap(self.polar_perf_screen_cmap)
-		if self.polar_view_mode == "perfusion":
+		if self.polar_view_mode == "cine":
+			self._rebuild_polar_cine_frames_screen()
+		else:
 			self._rerender_polar_perfusion_screen()
+
+	def _draw_polar_guides(self, ax, canvas_size: int):
+		import matplotlib.pyplot as plt
+
+		perf_grid = "#7f8a9a"
+		perf_fg = "#f3f4f6"
+		perf_subtle = "#9ca3af"
+		c = canvas_size * 0.5
+		r = canvas_size * 0.5
+		for frac in (0.25, 0.50, 0.75, 1.0):
+			ax.add_patch(plt.Circle((c, c), radius=r * frac, fill=False, color=perf_grid, linewidth=0.8, alpha=0.75))
+		ax.plot([c - r, c + r], [c, c], color=perf_grid, linewidth=0.8, alpha=0.8)
+		ax.plot([c, c], [c - r, c + r], color=perf_grid, linewidth=0.8, alpha=0.8)
+		ax.text(c, c - r * 1.03, "ANT", ha="center", va="bottom", color=perf_fg, fontsize=8, fontweight="bold")
+		ax.text(c + r * 1.03, c, "LAT", ha="left", va="center", color=perf_fg, fontsize=8, fontweight="bold")
+		ax.text(c, c + r * 1.03, "INF", ha="center", va="top", color=perf_fg, fontsize=8, fontweight="bold")
+		ax.text(c - r * 1.03, c, "SEP", ha="right", va="center", color=perf_fg, fontsize=8, fontweight="bold")
+		ax.text(c, c, "APEX", ha="center", va="center", color=perf_fg, fontsize=7, fontweight="bold")
+		ax.text(c, c + r * 0.98, "BASE", ha="center", va="top", color=perf_subtle, fontsize=7, fontweight="bold")
+
+	def _polar_pm_to_cartesian(self, pm: np.ndarray, size: int = 480) -> np.ndarray:
+		pm = np.asarray(pm, dtype=np.float64)
+		canvas = np.full((size, size), np.nan, dtype=np.float64)
+		yy, xx = np.indices((size, size), dtype=np.float64)
+		cxp = (size - 1) / 2.0
+		cyp = (size - 1) / 2.0
+		xn = (xx - cxp) / max(1.0, cxp)
+		yn = (yy - cyp) / max(1.0, cyp)
+		rr = np.sqrt(xn**2 + yn**2)
+		inside = rr <= 1.0
+		ang = (np.degrees(np.arctan2(yn, xn)) + 360.0) % 360.0
+		ri = np.clip((rr * (pm.shape[0] - 1)).astype(np.int32), 0, pm.shape[0] - 1)
+		ti = np.clip(np.floor(ang).astype(np.int32), 0, pm.shape[1] - 1)
+		canvas[inside] = pm[ri[inside], ti[inside]]
+		return canvas
+
+	def _render_polar_cart_panel(self, cart: np.ndarray, title: str, cmap_name: str) -> np.ndarray:
+		import matplotlib.pyplot as plt
+
+		perf_bg = "#000000"
+		perf_fg = "#f3f4f6"
+		fig, ax = plt.subplots(1, 1, figsize=(5.2, 5.2), facecolor=perf_bg)
+		ax.set_facecolor(perf_bg)
+		ax.set_aspect("equal")
+		ax.set_xticks([])
+		ax.set_yticks([])
+		ax.imshow(cart, cmap=cmap_name, vmin=0.0, vmax=1.0)
+		self._draw_polar_guides(ax, int(cart.shape[0]))
+		ax.set_title(title, color=perf_fg, fontsize=10, fontweight="bold")
+		fig.tight_layout()
+		fig.canvas.draw()
+		w, h = fig.canvas.get_width_height()
+		buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)[..., :3].copy()
+		plt.close(fig)
+		return buf
+
+	def _rebuild_polar_cine_frames_screen(self) -> bool:
+		"""Reconstruye los frames del cine polar EN MEMORIA con el cmap de pantalla
+		(self.polar_perf_screen_cmap), desde la cache de mapas polares por gate. No
+		toca el GIF/montaje de disco (el informe conserva su propio cmap)."""
+		cache = getattr(self, "_polar_cine_cart_cache", None)
+		if not cache or not cache.get("frames"):
+			return False
+		if "polar_perfusion_directa" not in self.preview_labels:
+			return False
+		try:
+			cmap_name = str(getattr(self, "polar_perf_screen_cmap", "odyssey_cool") or "odyssey_cool")
+			frames_out: list[QPixmap] = []
+			for panels in cache["frames"]:
+				bufs = []
+				for pnl in panels:
+					cart = self._polar_pm_to_cartesian(pnl["pm"])
+					bufs.append(self._render_polar_cart_panel(cart, str(pnl.get("title", "")), cmap_name))
+				if not bufs:
+					continue
+				if len(bufs) == 1:
+					frame_rgb = bufs[0]
+				else:
+					gap = np.full((bufs[0].shape[0], 28, 3), 12, dtype=np.uint8)
+					parts = []
+					for i, b in enumerate(bufs):
+						if i > 0:
+							parts.append(gap)
+						parts.append(b)
+					frame_rgb = np.concatenate(parts, axis=1)
+				frames_out.append(self._rgb_frame_to_qpixmap(frame_rgb))
+			if not frames_out:
+				return False
+			self.polar_cine_preview_frames = frames_out
+			self.polar_cine_preview_index = 0
+			self.polar_cine_timer.setInterval(max(40, int(self.polar_cine_speed_spin.value())))
+			self._set_polar_cine_memory_frame(0)
+			self._update_polar_cine_toggle_text(enabled=True)
+			return True
+		except Exception:
+			return False
 
 	def _rerender_polar_perfusion_screen(self) -> bool:
 		"""Recolorea en memoria el mapa polar de perfusión (vista estática) usando
@@ -10677,23 +10796,8 @@ class MainWindow(QMainWindow):
 			rotation_deg = int(cache.get("rotation_deg", 0))
 			smooth_desc = str(cache.get("smooth_desc", ""))
 			perf_bg = "#000000"
-			perf_grid = "#7f8a9a"
 			perf_fg = "#f3f4f6"
 			perf_subtle = "#9ca3af"
-
-			def _guides(ax, canvas_size: int):
-				c = canvas_size * 0.5
-				r = canvas_size * 0.5
-				for frac in (0.25, 0.50, 0.75, 1.0):
-					ax.add_patch(plt.Circle((c, c), radius=r * frac, fill=False, color=perf_grid, linewidth=0.8, alpha=0.75))
-				ax.plot([c - r, c + r], [c, c], color=perf_grid, linewidth=0.8, alpha=0.8)
-				ax.plot([c, c], [c - r, c + r], color=perf_grid, linewidth=0.8, alpha=0.8)
-				ax.text(c, c - r * 1.03, "ANT", ha="center", va="bottom", color=perf_fg, fontsize=8, fontweight="bold")
-				ax.text(c + r * 1.03, c, "LAT", ha="left", va="center", color=perf_fg, fontsize=8, fontweight="bold")
-				ax.text(c, c + r * 1.03, "INF", ha="center", va="top", color=perf_fg, fontsize=8, fontweight="bold")
-				ax.text(c - r * 1.03, c, "SEP", ha="right", va="center", color=perf_fg, fontsize=8, fontweight="bold")
-				ax.text(c, c, "APEX", ha="center", va="center", color=perf_fg, fontsize=7, fontweight="bold")
-				ax.text(c, c + r * 0.98, "BASE", ha="center", va="top", color=perf_subtle, fontsize=7, fontweight="bold")
 
 			fig_pp, axes_pp = plt.subplots(1, 2, figsize=(12.0, 6.0), facecolor=perf_bg)
 			for ax_pp, img_pp, ttl in [
@@ -10705,7 +10809,7 @@ class MainWindow(QMainWindow):
 				ax_pp.set_xticks([])
 				ax_pp.set_yticks([])
 				ax_pp.imshow(img_pp, cmap=cmap_name, vmin=0.0, vmax=1.0)
-				_guides(ax_pp, int(img_pp.shape[0]))
+				self._draw_polar_guides(ax_pp, int(img_pp.shape[0]))
 				ax_pp.set_title(ttl, color=perf_fg, fontsize=10, fontweight="bold")
 			fig_pp.suptitle(f"Mapa polar de perfusión (apex en centro, base en borde) — {label} — rotación {rotation_deg:+d}°", color=perf_fg, fontsize=11.5, fontweight="bold")
 			fig_pp.text(0.5, 0.02, "Reconstrucción polar continua desde short-axis: 'aplastado' apex->base", ha="center", color=perf_subtle, fontsize=8.6)
