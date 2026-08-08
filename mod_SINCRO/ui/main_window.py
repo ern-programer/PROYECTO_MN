@@ -96,7 +96,7 @@ from viz.polar_map import (
 	save_polar_map,
 )
 
-from ui.cine_widget import CineWidget
+from ui.cine_widget import CineWidget, RangeSlider, VerticalColorStrip
 from ui.collapsible import CollapsibleSection, slugify_section_key
 from ui.floating_toolbar import FloatingToolbar
 from ui.managers import (
@@ -266,6 +266,15 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_montage_cmap = "odyssey_cool"
 		self.cine_crudo_montage_win_low = 2.0
 		self.cine_crudo_montage_win_high = 99.5
+		# Modo de ventaneo del montaje: "percentil" (histórico, spinboxes) o
+		# "lineal" (motor unificado: normaliza el volumen por min/máx y aplica la
+		# ventana 0..200% del RangeSlider, idéntica al cine/diálogo). El modo lineal
+		# comparte escala entre cortes (norm por volumen, no por corte).
+		self.cine_crudo_montage_win_mode = "percentil"
+		self.cine_crudo_montage_lin_low = 0.0   # fracción 0..2 (handle base)
+		self.cine_crudo_montage_lin_high = 1.0  # fracción 0..2 (handle top)
+		# Centrar cada corte en su casilla (centroide → centro del panel).
+		self.cine_crudo_montage_center_cuts = False
 		# Ventanas por tira/eje (1-based): inicio y cantidad visible.
 		self.cine_crudo_stripe_start = {"SA": 1, "VLA": 1, "HLA": 1}
 		self.cine_crudo_stripe_count = {"SA": 999, "VLA": 999, "HLA": 999}
@@ -1869,144 +1878,9 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_process_recon_btn.setEnabled(False)
 				toolbar6_r3.addWidget(self.cine_crudo_process_recon_btn)
 				toolbar6_r3.addStretch(1)
-
-				# --- Fila 7 (montaje clínico SA/VLA/HLA): separada en 3 filas ---
-				toolbar7_r1 = QHBoxLayout()
-				toolbar7_r2 = QHBoxLayout()
-				toolbar7_r3 = QHBoxLayout()
-				toolbar7_r1.addWidget(QLabel("Recorte"))
-				self.cine_crudo_crop_combo = QComboBox()
-				self.cine_crudo_crop_combo.addItems(["Límites (markers)", "Elipse VOI"])
-				self.cine_crudo_crop_combo.setToolTip("Rango de cortes del montaje: por líneas Base/Ápex (markers) o por la elipse VOI de la reorientación.")
-				self.cine_crudo_crop_combo.currentIndexChanged.connect(self._on_montage_crop_mode_changed)
-				toolbar7_r1.addWidget(self.cine_crudo_crop_combo)
-				toolbar7_r1.addWidget(QLabel("Template"))
-				self.cine_crudo_montage_template_combo = QComboBox()
-				for _lay_key, _lay_cfg in self.MONTAGE_LAYOUTS.items():
-					self.cine_crudo_montage_template_combo.addItem(_lay_cfg["label"], _lay_key)
-				_cur_lay = self.cine_crudo_montage_template_combo.findData(self.cine_crudo_montage_template)
-				if _cur_lay >= 0:
-					self.cine_crudo_montage_template_combo.setCurrentIndex(_cur_lay)
-				self.cine_crudo_montage_template_combo.setToolTip("Layout de presentación del montaje: cortes por tira (SA/VLA/HLA). Denso = todos.")
-				self.cine_crudo_montage_template_combo.currentIndexChanged.connect(self._on_montage_template_changed)
-				toolbar7_r1.addWidget(self.cine_crudo_montage_template_combo)
-				self.cine_crudo_tips_btn = QToolButton()
-				self.cine_crudo_tips_btn.setText("Tips")
-				self.cine_crudo_tips_btn.setToolTip("Guía rápida de atajos y controles del montaje (click, rueda, flechas, zoom y pan).")
-				self.cine_crudo_tips_btn.clicked.connect(self._show_cine_crudo_montage_tips)
-				toolbar7_r1.addWidget(self.cine_crudo_tips_btn)
-				toolbar7_r1.addWidget(QLabel("Zoom corte"))
-				self.cine_crudo_cut_zoom_spin = QDoubleSpinBox()
-				self.cine_crudo_cut_zoom_spin.setRange(1.00, 2.50)
-				self.cine_crudo_cut_zoom_spin.setSingleStep(0.05)
-				self.cine_crudo_cut_zoom_spin.setDecimals(2)
-				self.cine_crudo_cut_zoom_spin.setValue(1.00)
-				self.cine_crudo_cut_zoom_spin.setMaximumWidth(70)
-				self.cine_crudo_cut_zoom_spin.setToolTip("Agrandar interno de cada corte (mismo factor para todos los paneles). 1.00 = original.")
-				self.cine_crudo_cut_zoom_spin.valueChanged.connect(self._on_montage_cut_zoom_changed)
-				toolbar7_r1.addWidget(self.cine_crudo_cut_zoom_spin)
-				self.cine_crudo_montage_btn = QToolButton()
-				self.cine_crudo_montage_btn.setText("Ver montaje")
-				self.cine_crudo_montage_btn.setToolTip("Montaje clínico SA/VLA/HLA (estilo Xeleris). En vivo: click selecciona tira, rueda mueve tira activa, Ctrl+rueda zoom parejo, Alt+drag o botón medio para pan, doble click resetea tira.")
-				self.cine_crudo_montage_btn.clicked.connect(self._show_cine_crudo_sa_montage)
-				self.cine_crudo_montage_btn.setEnabled(False)
-				toolbar7_r1.addWidget(self.cine_crudo_montage_btn)
-				toolbar7_r1.addStretch(1)
-
-				self.cine_crudo_mark_rest_btn = QToolButton()
-				self.cine_crudo_mark_rest_btn.setText("Marcar como reposo")
-				self.cine_crudo_mark_rest_btn.setToolTip("Opcional: copia manualmente los cortes actuales al slot de REPOSO. Normalmente NO hace falta: al reconstruir/generar la etapa Reposo, los cortes se enrutan solos al montaje.")
-				self.cine_crudo_mark_rest_btn.clicked.connect(self._mark_cine_crudo_as_rest)
-				self.cine_crudo_mark_rest_btn.setEnabled(False)
-				toolbar7_r2.addWidget(self.cine_crudo_mark_rest_btn)
-				toolbar7_r2.addWidget(QLabel("Offset SA"))
-				self.cine_crudo_rest_off_sa_spin = QSpinBox()
-				self.cine_crudo_rest_off_sa_spin.setRange(-40, 40)
-				self.cine_crudo_rest_off_sa_spin.setValue(0)
-				self.cine_crudo_rest_off_sa_spin.setMaximumWidth(52)
-				self.cine_crudo_rest_off_sa_spin.setToolTip("Desplaza los cortes SA de reposo para alinearlos con esfuerzo.")
-				self.cine_crudo_rest_off_sa_spin.valueChanged.connect(lambda v: self._on_rest_offset_changed("SA", int(v)))
-				toolbar7_r2.addWidget(self.cine_crudo_rest_off_sa_spin)
-				toolbar7_r2.addWidget(QLabel("VLA"))
-				self.cine_crudo_rest_off_vla_spin = QSpinBox()
-				self.cine_crudo_rest_off_vla_spin.setRange(-40, 40)
-				self.cine_crudo_rest_off_vla_spin.setValue(0)
-				self.cine_crudo_rest_off_vla_spin.setMaximumWidth(52)
-				self.cine_crudo_rest_off_vla_spin.setToolTip("Desplaza los cortes VLA de reposo para alinearlos con esfuerzo.")
-				self.cine_crudo_rest_off_vla_spin.valueChanged.connect(lambda v: self._on_rest_offset_changed("VLA", int(v)))
-				toolbar7_r2.addWidget(self.cine_crudo_rest_off_vla_spin)
-				toolbar7_r2.addWidget(QLabel("HLA"))
-				self.cine_crudo_rest_off_hla_spin = QSpinBox()
-				self.cine_crudo_rest_off_hla_spin.setRange(-40, 40)
-				self.cine_crudo_rest_off_hla_spin.setValue(0)
-				self.cine_crudo_rest_off_hla_spin.setMaximumWidth(52)
-				self.cine_crudo_rest_off_hla_spin.setToolTip("Desplaza los cortes HLA de reposo para alinearlos con esfuerzo.")
-				self.cine_crudo_rest_off_hla_spin.valueChanged.connect(lambda v: self._on_rest_offset_changed("HLA", int(v)))
-				toolbar7_r2.addWidget(self.cine_crudo_rest_off_hla_spin)
-				toolbar7_r2.addStretch(1)
-
-				toolbar7_r3.addWidget(QLabel("Frames"))
-				self.cine_crudo_gate_from_spin = QSpinBox()
-				self.cine_crudo_gate_from_spin.setRange(1, 1)
-				self.cine_crudo_gate_from_spin.setValue(1)
-				self.cine_crudo_gate_from_spin.setMaximumWidth(56)
-				self.cine_crudo_gate_from_spin.setEnabled(False)
-				self.cine_crudo_gate_from_spin.setToolTip("Gate inicial (1-based) para el montaje. Se aplica en vivo. También podés arrastrar/cambiar con rueda en el panel.")
-				self.cine_crudo_gate_from_spin.valueChanged.connect(self._on_montage_gate_range_changed)
-				toolbar7_r3.addWidget(self.cine_crudo_gate_from_spin)
-				toolbar7_r3.addWidget(QLabel("→"))
-				self.cine_crudo_gate_to_spin = QSpinBox()
-				self.cine_crudo_gate_to_spin.setRange(1, 1)
-				self.cine_crudo_gate_to_spin.setValue(1)
-				self.cine_crudo_gate_to_spin.setMaximumWidth(56)
-				self.cine_crudo_gate_to_spin.setEnabled(False)
-				self.cine_crudo_gate_to_spin.setToolTip("Gate final (1-based) para el montaje. Se aplica en vivo. También podés arrastrar/cambiar con rueda en el panel.")
-				self.cine_crudo_gate_to_spin.valueChanged.connect(self._on_montage_gate_range_changed)
-				toolbar7_r3.addWidget(self.cine_crudo_gate_to_spin)
-				self.cine_crudo_gate_all_btn = QToolButton()
-				self.cine_crudo_gate_all_btn.setText("Todo")
-				self.cine_crudo_gate_all_btn.setEnabled(False)
-				self.cine_crudo_gate_all_btn.setToolTip("Usa todos los gates para el montaje (click rápido).")
-				self.cine_crudo_gate_all_btn.clicked.connect(self._set_montage_gate_full_range)
-				toolbar7_r3.addWidget(self.cine_crudo_gate_all_btn)
-
-				# --- Migrados desde 'Comparación ejes': colormap, window level y export ---
-				toolbar7_r3.addWidget(QLabel("Colormap"))
-				self.cine_crudo_montage_cmap_combo = QComboBox()
-				self.cine_crudo_montage_cmap_combo.addItems(self._all_cmaps)
-				self.cine_crudo_montage_cmap_combo.setCurrentText(self.cine_crudo_montage_cmap)
-				self.cine_crudo_montage_cmap_combo.setToolTip("Escala de colores del montaje clínico.")
-				self.cine_crudo_montage_cmap_combo.currentTextChanged.connect(self._on_montage_cmap_changed)
-				toolbar7_r3.addWidget(self.cine_crudo_montage_cmap_combo)
-				toolbar7_r3.addWidget(QLabel("Base"))
-				self.cine_crudo_montage_win_low_spin = QDoubleSpinBox()
-				self.cine_crudo_montage_win_low_spin.setRange(0.0, 40.0)
-				self.cine_crudo_montage_win_low_spin.setSingleStep(0.5)
-				self.cine_crudo_montage_win_low_spin.setDecimals(1)
-				self.cine_crudo_montage_win_low_spin.setValue(self.cine_crudo_montage_win_low)
-				self.cine_crudo_montage_win_low_spin.setSuffix(" %")
-				self.cine_crudo_montage_win_low_spin.setMaximumWidth(72)
-				self.cine_crudo_montage_win_low_spin.setToolTip("Percentil bajo (fondo). Sube para oscurecer el fondo.")
-				self.cine_crudo_montage_win_low_spin.valueChanged.connect(self._on_montage_window_changed)
-				toolbar7_r3.addWidget(self.cine_crudo_montage_win_low_spin)
-				toolbar7_r3.addWidget(QLabel("Top"))
-				self.cine_crudo_montage_win_high_spin = QDoubleSpinBox()
-				self.cine_crudo_montage_win_high_spin.setRange(60.0, 100.0)
-				self.cine_crudo_montage_win_high_spin.setSingleStep(0.5)
-				self.cine_crudo_montage_win_high_spin.setDecimals(1)
-				self.cine_crudo_montage_win_high_spin.setValue(self.cine_crudo_montage_win_high)
-				self.cine_crudo_montage_win_high_spin.setSuffix(" %")
-				self.cine_crudo_montage_win_high_spin.setMaximumWidth(72)
-				self.cine_crudo_montage_win_high_spin.setToolTip("Percentil alto (saturación). Baja para realzar el brillo.")
-				self.cine_crudo_montage_win_high_spin.valueChanged.connect(self._on_montage_window_changed)
-				toolbar7_r3.addWidget(self.cine_crudo_montage_win_high_spin)
-				self.cine_crudo_montage_export_btn = QToolButton()
-				self.cine_crudo_montage_export_btn.setText("Guardar PNG")
-				self.cine_crudo_montage_export_btn.setToolTip("Exporta el montaje clínico actual como PNG en la ubicación que elijas.")
-				self.cine_crudo_montage_export_btn.clicked.connect(self._export_cine_crudo_montage_png)
-				self.cine_crudo_montage_export_btn.setEnabled(False)
-				toolbar7_r3.addWidget(self.cine_crudo_montage_export_btn)
-				toolbar7_r3.addStretch(1)
+			if name == "comparacion_ejes":
+				# Controles de acción del montaje, centralizados en esta pestaña.
+				self._build_montage_toolbar_into(toolbar)
 			toolbar.addStretch(1)
 			tab_layout.addLayout(toolbar)
 			if name == "cine_crudo":
@@ -2027,11 +1901,6 @@ class MainWindow(QMainWindow):
 					"Reconstrucción desde crudo ▾", [toolbar6_r1, toolbar6_r2, toolbar6_r3],
 					key="cine_crudo_reconstruccion",
 					tooltip="Reconstrucción FBP/MLEM/OSEM, filtros de ungated/gated, reorientación y generación de cortes de eje.",
-				))
-				groups_row.addWidget(self._build_toolbar_group_menu(
-					"Montaje clínico SA/VLA/HLA ▾", [toolbar7_r1, toolbar7_r2, toolbar7_r3],
-					key="cine_crudo_montaje",
-					tooltip="Recorte, template de montaje, marcar reposo/esfuerzo y rango de gates para el montaje.",
 				))
 				groups_row.addStretch(1)
 				tab_layout.addLayout(groups_row)
@@ -2068,7 +1937,17 @@ class MainWindow(QMainWindow):
 			scroller.setWidgetResizable(False)
 			scroller.setWidget(label)
 			self._preview_scrollers[name] = scroller
-			tab_layout.addWidget(scroller)
+			if name == "comparacion_ejes":
+				# Controles de color/ventaneo pegados al panel (antes vivían lejos,
+				# en la barra del montaje). Columna vertical a la derecha: cmap +
+				# modo Percentil/Lineal + RangeSlider 200% + tira del LUT.
+				ce_row = QHBoxLayout()
+				ce_row.setContentsMargins(0, 0, 0, 0)
+				ce_row.addWidget(scroller, 1)
+				ce_row.addWidget(self._build_compare_axes_color_column())
+				tab_layout.addLayout(ce_row)
+			else:
+				tab_layout.addWidget(scroller)
 			self._tab_widgets[name] = tab
 			self._tab_titles[name] = preview_titles.get(name, name)
 			self._tab_tooltips[name] = helptxt or ""
@@ -13206,6 +13085,28 @@ class MainWindow(QMainWindow):
 					up = np.pad(up, ((0, max(0, h - up.shape[0])), (0, max(0, w - up.shape[1]))), mode="edge")
 				return np.asarray(up[:h, :w], dtype=np.float64)
 
+			center_cuts = bool(getattr(self, "cine_crudo_montage_center_cuts", False))
+
+			def _center_cut(img2d: np.ndarray) -> np.ndarray:
+				"""Desplaza el corte para que su centroide de intensidad quede en el
+				centro del panel (roll circular, sin cambiar el tamaño)."""
+				arr = np.asarray(img2d, dtype=np.float64)
+				if arr.ndim != 2:
+					return arr
+				h, w = arr.shape
+				tot = float(arr.sum())
+				if tot <= 1e-8:
+					return arr
+				ys = np.arange(h, dtype=np.float64)
+				xs = np.arange(w, dtype=np.float64)
+				cy = float((arr.sum(axis=1) * ys).sum() / tot)
+				cx = float((arr.sum(axis=0) * xs).sum() / tot)
+				sy = int(round((h - 1) / 2.0 - cy))
+				sx = int(round((w - 1) / 2.0 - cx))
+				if sy == 0 and sx == 0:
+					return arr
+				return np.roll(np.roll(arr, sy, axis=0), sx, axis=1)
+
 			def _norm_vol(cube4d):
 				arr4 = np.asarray(cube4d, dtype=np.float64)
 				if arr4.ndim != 4 or arr4.shape[0] <= 0:
@@ -13213,6 +13114,19 @@ class MainWindow(QMainWindow):
 				g0 = int(np.clip(min(gate_from, gate_to) - 1, 0, arr4.shape[0] - 1))
 				g1 = int(np.clip(max(gate_from, gate_to) - 1, 0, arr4.shape[0] - 1))
 				v = np.asarray(arr4[g0:g1 + 1], dtype=np.float64).sum(axis=0)
+				mode = str(getattr(self, "cine_crudo_montage_win_mode", "percentil") or "percentil")
+				if mode == "lineal":
+					# Motor unificado: normaliza por min/máx del volumen (escala
+					# compartida entre cortes) y aplica la ventana 0..200% del
+					# RangeSlider, idéntica a render_array_rgb del cine/diálogo.
+					vmin = float(v.min()) if v.size else 0.0
+					vmax = float(v.max()) if v.size else 1.0
+					norm = (v - vmin) / max(vmax - vmin, 1e-8) if vmax > vmin else np.zeros_like(v)
+					w0 = max(0.0, float(getattr(self, "cine_crudo_montage_lin_low", 0.0)))
+					w1 = max(0.0, min(2.0, float(getattr(self, "cine_crudo_montage_lin_high", 1.0))))
+					if w1 <= w0:
+						w1 = min(2.0, w0 + 0.01)
+					return np.clip((norm - w0) / max(1e-8, (w1 - w0)), 0.0, 1.0)
 				win_lo = float(getattr(self, "cine_crudo_montage_win_low", 2.0) or 0.0)
 				win_hi = float(getattr(self, "cine_crudo_montage_win_high", 99.5) or 100.0)
 				if win_hi <= win_lo:
@@ -13330,6 +13244,8 @@ class MainWindow(QMainWindow):
 					k = idxs[c]
 					img = vol[int(np.clip(k, 0, vol.shape[0] - 1))]
 					img = _zoom_cut(img, cut_zoom)
+					if center_cuts:
+						img = _center_cut(img)
 					ax.imshow(img, cmap=montage_cmap, vmin=0.0, vmax=1.0,
 					          interpolation="bicubic", aspect="equal")
 					ax.set_title(f"{prefix} {k + 1}", color="white", fontsize=7, fontweight="bold", pad=1.2)
@@ -13410,7 +13326,257 @@ class MainWindow(QMainWindow):
 			self._schedule_montage_refresh(0)
 
 	def _on_montage_cmap_changed(self, name):
-		self.cine_crudo_montage_cmap = str(name)
+		self._set_montage_cmap(str(name))
+
+	def _set_montage_cmap(self, name: str):
+		"""Fija el colormap del montaje y sincroniza los dos combos (barra del
+		montaje + columna de comparacion_ejes) y la tira del LUT."""
+		name = str(name)
+		self.cine_crudo_montage_cmap = name
+		for combo_name in ("cine_crudo_montage_cmap_combo", "compare_axes_color_cmap_combo"):
+			combo = getattr(self, combo_name, None)
+			if combo is not None and combo.currentText() != name:
+				combo.blockSignals(True)
+				idx = combo.findText(name)
+				if idx >= 0:
+					combo.setCurrentIndex(idx)
+				combo.blockSignals(False)
+		strip = getattr(self, "compare_axes_color_strip", None)
+		if strip is not None:
+			strip.set_cmap(name)
+		if self.cine_crudo_preview_mode == "sa_montage":
+			self._schedule_montage_refresh(0)
+
+	def _build_compare_axes_color_column(self) -> QWidget:
+		"""Columna de controles de color/ventaneo pegada al panel de comparacion_ejes.
+
+		cmap + toggle Percentil/Lineal + RangeSlider 200% (con botones Top/Base) +
+		tira vertical del LUT. En modo Lineal, el RangeSlider maneja la ventana con
+		el mismo motor 0..200% del cine/diálogo (norm por volumen = escala compartida)."""
+		col = QWidget()
+		col.setMaximumWidth(132)
+		v = QVBoxLayout(col)
+		v.setContentsMargins(4, 4, 4, 4)
+		v.setSpacing(4)
+
+		v.addWidget(QLabel("Escala"))
+		self.compare_axes_color_cmap_combo = QComboBox()
+		self.compare_axes_color_cmap_combo.addItems(self._all_cmaps)
+		self.compare_axes_color_cmap_combo.setCurrentText(self.cine_crudo_montage_cmap)
+		self.compare_axes_color_cmap_combo.setToolTip("Escala de colores del montaje (compartida con la barra del montaje).")
+		self.compare_axes_color_cmap_combo.currentTextChanged.connect(self._on_montage_cmap_changed)
+		v.addWidget(self.compare_axes_color_cmap_combo)
+
+		self.compare_axes_win_mode_combo = QComboBox()
+		self.compare_axes_win_mode_combo.addItem("Percentil", "percentil")
+		self.compare_axes_win_mode_combo.addItem("Lineal", "lineal")
+		_mi = self.compare_axes_win_mode_combo.findData(self.cine_crudo_montage_win_mode)
+		if _mi >= 0:
+			self.compare_axes_win_mode_combo.setCurrentIndex(_mi)
+		self.compare_axes_win_mode_combo.setToolTip(
+			"Percentil: ventana por percentiles (histórico, spinboxes del montaje).\n"
+			"Lineal: normaliza por min/máx y aplica el RangeSlider 0–200% (motor unificado)."
+		)
+		self.compare_axes_win_mode_combo.currentIndexChanged.connect(self._on_compare_axes_win_mode_changed)
+		v.addWidget(self.compare_axes_win_mode_combo)
+
+		_btn_css = (
+			"QPushButton{font-weight:bold;font-size:8pt;border:1px solid #94a3b8;"
+			"border-radius:3px;padding:1px 3px;color:#1e293b;background:#e2e8f0;}"
+			"QPushButton:hover{background:#cbd5e1;color:#2563eb;}"
+		)
+		slider_col = QVBoxLayout()
+		slider_col.setContentsMargins(0, 0, 0, 0)
+		slider_col.setSpacing(2)
+		top_row = QHBoxLayout()
+		top_row.setContentsMargins(0, 0, 0, 0)
+		self.compare_axes_btn_top = QPushButton("Top")
+		self.compare_axes_btn_top.setStyleSheet(_btn_css)
+		self.compare_axes_btn_top.setCursor(Qt.CursorShape.PointingHandCursor)
+		self.compare_axes_btn_top.setToolTip("Volver Top a 100%")
+		self.compare_axes_btn_top.clicked.connect(self._reset_compare_axes_window_high)
+		self.compare_axes_lbl_top = QLabel("100%")
+		top_row.addStretch(1)
+		top_row.addWidget(self.compare_axes_btn_top)
+		top_row.addWidget(self.compare_axes_lbl_top)
+		top_row.addStretch(1)
+		slider_col.addLayout(top_row)
+
+		self.compare_axes_range_slider = RangeSlider()
+		self.compare_axes_range_slider.valuesChanged.connect(self._on_compare_axes_window_changed)
+
+		base_row = QHBoxLayout()
+		base_row.setContentsMargins(0, 0, 0, 0)
+		self.compare_axes_btn_base = QPushButton("Base")
+		self.compare_axes_btn_base.setStyleSheet(_btn_css)
+		self.compare_axes_btn_base.setCursor(Qt.CursorShape.PointingHandCursor)
+		self.compare_axes_btn_base.setToolTip("Volver Base a 0%")
+		self.compare_axes_btn_base.clicked.connect(self._reset_compare_axes_window_low)
+		self.compare_axes_lbl_base = QLabel("0%")
+		base_row.addStretch(1)
+		base_row.addWidget(self.compare_axes_btn_base)
+		base_row.addWidget(self.compare_axes_lbl_base)
+		base_row.addStretch(1)
+
+		slider_row = QHBoxLayout()
+		slider_row.setContentsMargins(0, 0, 0, 0)
+		slider_col.addWidget(self.compare_axes_range_slider, 1)
+		slider_col.addLayout(base_row)
+		slider_row.addLayout(slider_col, 1)
+		self.compare_axes_color_strip = VerticalColorStrip(self.cine_crudo_montage_cmap)
+		slider_row.addWidget(self.compare_axes_color_strip)
+		v.addLayout(slider_row, 1)
+
+		self._compare_axes_slider_from_state()
+		return col
+
+	def _on_compare_axes_win_mode_changed(self, _idx):
+		combo = getattr(self, "compare_axes_win_mode_combo", None)
+		if combo is not None:
+			self.cine_crudo_montage_win_mode = str(combo.currentData() or "percentil")
+		# Reflejar en el slider los valores guardados del modo recién activado.
+		self._compare_axes_slider_from_state()
+		if self.cine_crudo_preview_mode == "sa_montage":
+			self._schedule_montage_refresh(0)
+
+	def _compare_axes_slider_from_state(self):
+		"""Vuelca al RangeSlider los valores guardados del modo activo (sin señales) y
+		actualiza etiquetas/tooltip. Slider 0..200; en Percentil el valor es pct×2
+		(0..100), en Lineal es fracción directa (0..200%)."""
+		slider = getattr(self, "compare_axes_range_slider", None)
+		if slider is None:
+			return
+		mode = str(getattr(self, "cine_crudo_montage_win_mode", "percentil"))
+		if mode == "lineal":
+			lo = int(round(float(self.cine_crudo_montage_lin_low) * 100))
+			hi = int(round(float(self.cine_crudo_montage_lin_high) * 100))
+			tip = "Ventana lineal 0–200% (Base abajo, Top arriba; >100% desatura)."
+		else:
+			lo = int(round(float(self.cine_crudo_montage_win_low) * 2))
+			hi = int(round(float(self.cine_crudo_montage_win_high) * 2))
+			tip = "Ventana por percentiles 0–100% (Base = fondo, Top = saturación)."
+		slider.blockSignals(True)
+		slider.set_values(lo, hi)
+		slider.blockSignals(False)
+		slider.setToolTip(tip)
+		self._update_compare_axes_window_labels(*slider.values())
+
+	def _update_compare_axes_window_labels(self, low, high):
+		mode = str(getattr(self, "cine_crudo_montage_win_mode", "percentil"))
+		if mode == "lineal":
+			top_txt, base_txt = f"{int(high)}%", f"{int(low)}%"
+		else:
+			top_txt, base_txt = f"{int(high) / 2:.1f}%", f"{int(low) / 2:.1f}%"
+		if getattr(self, "compare_axes_lbl_top", None) is not None:
+			self.compare_axes_lbl_top.setText(top_txt)
+		if getattr(self, "compare_axes_lbl_base", None) is not None:
+			self.compare_axes_lbl_base.setText(base_txt)
+
+	def _on_compare_axes_window_changed(self, low, high):
+		mode = str(getattr(self, "cine_crudo_montage_win_mode", "percentil"))
+		if mode == "lineal":
+			self.cine_crudo_montage_lin_low = int(low) / 100.0
+			self.cine_crudo_montage_lin_high = int(high) / 100.0
+		else:
+			self.cine_crudo_montage_win_low = int(low) / 2.0
+			self.cine_crudo_montage_win_high = int(high) / 2.0
+		self._update_compare_axes_window_labels(low, high)
+		if self.cine_crudo_preview_mode == "sa_montage":
+			self._schedule_montage_refresh(0)
+
+	def _reset_compare_axes_window_high(self):
+		slider = getattr(self, "compare_axes_range_slider", None)
+		if slider is not None:
+			low, _ = slider.values()
+			top = 100 if str(getattr(self, "cine_crudo_montage_win_mode", "percentil")) == "lineal" else 200
+			slider.set_values(low, top)
+
+	def _reset_compare_axes_window_low(self):
+		slider = getattr(self, "compare_axes_range_slider", None)
+		if slider is not None:
+			_, high = slider.values()
+			slider.set_values(0, high)
+
+	def _build_montage_toolbar_into(self, toolbar):
+		"""Controles de acción del montaje clínico, centralizados en la pestaña
+		comparacion_ejes (antes vivían en la barra 'Montaje clínico' de cine_crudo)."""
+		self.cine_crudo_montage_btn = QToolButton()
+		self.cine_crudo_montage_btn.setText("Ver montaje")
+		self.cine_crudo_montage_btn.setToolTip("Montaje clínico SA/VLA/HLA (estilo Xeleris). En vivo: click selecciona tira, rueda mueve tira activa, Ctrl+rueda zoom parejo, Alt+drag o botón medio para pan, doble click resetea tira.")
+		self.cine_crudo_montage_btn.clicked.connect(self._show_cine_crudo_sa_montage)
+		self.cine_crudo_montage_btn.setEnabled(False)
+		toolbar.addWidget(self.cine_crudo_montage_btn)
+
+		toolbar.addWidget(QLabel("Template"))
+		self.cine_crudo_montage_template_combo = QComboBox()
+		for _lay_key, _lay_cfg in self.MONTAGE_LAYOUTS.items():
+			self.cine_crudo_montage_template_combo.addItem(_lay_cfg["label"], _lay_key)
+		_cur_lay = self.cine_crudo_montage_template_combo.findData(self.cine_crudo_montage_template)
+		if _cur_lay >= 0:
+			self.cine_crudo_montage_template_combo.setCurrentIndex(_cur_lay)
+		self.cine_crudo_montage_template_combo.setToolTip("Layout de presentación del montaje: cortes por tira (SA/VLA/HLA). Denso = todos.")
+		self.cine_crudo_montage_template_combo.currentIndexChanged.connect(self._on_montage_template_changed)
+		toolbar.addWidget(self.cine_crudo_montage_template_combo)
+
+		toolbar.addWidget(QLabel("Zoom corte"))
+		self.cine_crudo_cut_zoom_spin = QDoubleSpinBox()
+		self.cine_crudo_cut_zoom_spin.setRange(1.00, 2.50)
+		self.cine_crudo_cut_zoom_spin.setSingleStep(0.05)
+		self.cine_crudo_cut_zoom_spin.setDecimals(2)
+		self.cine_crudo_cut_zoom_spin.setValue(1.00)
+		self.cine_crudo_cut_zoom_spin.setMaximumWidth(70)
+		self.cine_crudo_cut_zoom_spin.setToolTip("Agrandar interno de cada corte (mismo factor para todos los paneles). 1.00 = original.")
+		self.cine_crudo_cut_zoom_spin.valueChanged.connect(self._on_montage_cut_zoom_changed)
+		toolbar.addWidget(self.cine_crudo_cut_zoom_spin)
+
+		toolbar.addWidget(QLabel("Frames"))
+		self.cine_crudo_gate_from_spin = QSpinBox()
+		self.cine_crudo_gate_from_spin.setRange(1, 1)
+		self.cine_crudo_gate_from_spin.setValue(1)
+		self.cine_crudo_gate_from_spin.setMaximumWidth(56)
+		self.cine_crudo_gate_from_spin.setEnabled(False)
+		self.cine_crudo_gate_from_spin.setToolTip("Gate inicial (1-based) para el montaje. Se aplica en vivo. También podés arrastrar/cambiar con rueda en el panel.")
+		self.cine_crudo_gate_from_spin.valueChanged.connect(self._on_montage_gate_range_changed)
+		toolbar.addWidget(self.cine_crudo_gate_from_spin)
+		toolbar.addWidget(QLabel("→"))
+		self.cine_crudo_gate_to_spin = QSpinBox()
+		self.cine_crudo_gate_to_spin.setRange(1, 1)
+		self.cine_crudo_gate_to_spin.setValue(1)
+		self.cine_crudo_gate_to_spin.setMaximumWidth(56)
+		self.cine_crudo_gate_to_spin.setEnabled(False)
+		self.cine_crudo_gate_to_spin.setToolTip("Gate final (1-based) para el montaje. Se aplica en vivo. También podés arrastrar/cambiar con rueda en el panel.")
+		self.cine_crudo_gate_to_spin.valueChanged.connect(self._on_montage_gate_range_changed)
+		toolbar.addWidget(self.cine_crudo_gate_to_spin)
+		self.cine_crudo_gate_all_btn = QToolButton()
+		self.cine_crudo_gate_all_btn.setText("Todo")
+		self.cine_crudo_gate_all_btn.setEnabled(False)
+		self.cine_crudo_gate_all_btn.setToolTip("Usa todos los gates para el montaje (click rápido).")
+		self.cine_crudo_gate_all_btn.clicked.connect(self._set_montage_gate_full_range)
+		toolbar.addWidget(self.cine_crudo_gate_all_btn)
+
+		self.cine_crudo_montage_center_btn = QToolButton()
+		self.cine_crudo_montage_center_btn.setText("Centrar")
+		self.cine_crudo_montage_center_btn.setCheckable(True)
+		self.cine_crudo_montage_center_btn.setChecked(bool(getattr(self, "cine_crudo_montage_center_cuts", False)))
+		self.cine_crudo_montage_center_btn.setToolTip("Centra cada corte en su casilla (centroide de intensidad → centro del panel).")
+		self.cine_crudo_montage_center_btn.toggled.connect(self._on_montage_center_toggled)
+		toolbar.addWidget(self.cine_crudo_montage_center_btn)
+
+		self.cine_crudo_montage_export_btn = QToolButton()
+		self.cine_crudo_montage_export_btn.setText("Guardar PNG")
+		self.cine_crudo_montage_export_btn.setToolTip("Exporta el montaje clínico actual como PNG en la ubicación que elijas.")
+		self.cine_crudo_montage_export_btn.clicked.connect(self._export_cine_crudo_montage_png)
+		self.cine_crudo_montage_export_btn.setEnabled(False)
+		toolbar.addWidget(self.cine_crudo_montage_export_btn)
+
+		self.cine_crudo_tips_btn = QToolButton()
+		self.cine_crudo_tips_btn.setText("Tips")
+		self.cine_crudo_tips_btn.setToolTip("Guía rápida de atajos y controles del montaje (click, rueda, flechas, zoom y pan).")
+		self.cine_crudo_tips_btn.clicked.connect(self._show_cine_crudo_montage_tips)
+		toolbar.addWidget(self.cine_crudo_tips_btn)
+
+	def _on_montage_center_toggled(self, checked):
+		self.cine_crudo_montage_center_cuts = bool(checked)
 		if self.cine_crudo_preview_mode == "sa_montage":
 			self._schedule_montage_refresh(0)
 
