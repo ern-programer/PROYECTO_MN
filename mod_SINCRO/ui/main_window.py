@@ -1333,7 +1333,7 @@ class MainWindow(QMainWindow):
 			"panel_funcional_gated": "Panel funcional gated",
 			"bullseye_directo": "bullseye_directo",
 			"guia_fase_vi": "Guía para fase VI",
-			"ungated": "ungated",
+			"ungated": "QC",
 			"cine_crudo": "cine_crudo",
 		}
 		preview_help_texts = {
@@ -2944,7 +2944,6 @@ class MainWindow(QMainWindow):
 			"bullseye_directo": ("bullseye_directo.png",),
 			"guia_fase_vi": ("guia_fase_vi.png",),
 			"polar_perfusion_directa": ("polar_perfusion_directa.png",),
-			"ungated": ("perfusion_ungated.png",),
 		}
 		return mapping.get(str(name), tuple())
 
@@ -6631,12 +6630,6 @@ class MainWindow(QMainWindow):
 			except Exception as exc:
 				self._log(f"[WARN] Exportación estructurada falló: {exc}")
 
-			# Desgatillado (UngRaw): imagen de perfusión total
-			try:
-				self._write_ungated_output()
-			except Exception as exc:
-				self._log(f"[WARN] Desgatillado falló: {exc}")
-
 			# La ventana de cuantificación ECTb, si está abierta, muestra datos
 			# del estudio anterior hasta que se le avisa.
 			try:
@@ -10311,14 +10304,13 @@ class MainWindow(QMainWindow):
 		if name == "comparacion_ejes":
 			self._load_compare_axes_preview()
 			return
-		fname = "perfusion_ungated.png" if name == "ungated" else f"{name}.png"
+		# QC (ex-ungated): conserva el panel QC crudo cargado al abrir el estudio;
+		# no se re-renderiza ni se sobrescribe con la grilla desgatillada.
+		if name == "ungated":
+			return
+		fname = f"{name}.png"
 		path = os.path.join(self.output_dir, fname)
 		label = self.preview_labels[name]
-		if name == "ungated" and not os.path.exists(path) and self.study is not None:
-			try:
-				self._write_ungated_output()
-			except Exception:
-				pass
 		if os.path.exists(path):
 			pix = QPixmap(path)
 			self.preview_pixmaps[name] = pix
@@ -13035,7 +13027,164 @@ class MainWindow(QMainWindow):
 			self._log(f"[ERROR] Generar cortes falló: {exc}")
 			QMessageBox.warning(self, "SINCRO", f"No se pudieron generar los cortes:\n{exc}")
 
+	def _montage_cmap_lut(self, name):
+		"""LUT uint8 (256,3) del colormap (incluye los .col registrados)."""
+		import matplotlib
+		try:
+			cmap = matplotlib.colormaps[str(name)]
+		except Exception:
+			try:
+				cmap = matplotlib.colormaps["gray"]
+			except Exception:
+				cmap = None
+		if cmap is None:
+			g = np.linspace(0, 255, 256).astype(np.uint8)
+			return np.stack([g, g, g], axis=1)
+		rgba = cmap(np.linspace(0.0, 1.0, 256))
+		return (np.clip(np.asarray(rgba)[:, :3], 0.0, 1.0) * 255.0).astype(np.uint8)
+
+	def _composite_montage_pixmap(self, rows_data, cols, cmap_name, suptitle):
+		"""Compone el montaje en memoria y cachea el lienzo GRIS + máscara para que
+		cambiar el colormap solo re-aplique el LUT (recoloreo casi instantáneo).
+		Interpola en gris de 1 canal (más suave y ~3x más barato que en RGB).
+		Cada corte llega ya normalizado/ventaneado a 0..1 con escala compartida."""
+		from PIL import Image
+		rows = max(1, len(rows_data))
+		cols = max(1, int(cols))
+		# 512px/panel: alta calidad en vivo (canvas transitorio ~30-95MB según columnas).
+		PANEL = 512
+		f = PANEL / 150.0
+		PAD = max(2, round(4 * f))
+		TITLE_H = round(16 * f)
+		LEFT = round(76 * f)
+		TOP = round(42 * f)
+		cell_w = PANEL + PAD
+		cell_h = TITLE_H + PANEL + PAD
+		W = LEFT + cols * cell_w + PAD
+		H = TOP + rows * cell_h + PAD
+		gray = np.zeros((H, W), dtype=np.uint8)
+		mask = np.zeros((H, W), dtype=bool)
+
+		panel_boxes = []
+		for r, row in enumerate(rows_data):
+			for p in row["panels"]:
+				c = int(p["col"])
+				if c >= cols:
+					continue
+				img = np.clip(np.asarray(p["img"], dtype=np.float32), 0.0, 1.0)
+				ih, iw = int(img.shape[0]), int(img.shape[1])
+				# Preservar relación de aspecto (evita VLA/HLA estirados); letterbox negro centrado.
+				scale = min(PANEL / max(1, iw), PANEL / max(1, ih))
+				nw = max(1, int(round(iw * scale)))
+				nh = max(1, int(round(ih * scale)))
+				try:
+					# Interpolar en float (mode 'F') evita bandas de cuantización.
+					rimg = np.asarray(Image.fromarray(img, mode="F").resize((nw, nh), Image.BICUBIC))
+				except Exception:
+					rimg = img[:nh, :nw]
+				idx8 = np.clip(np.asarray(rimg) * 255.0, 0.0, 255.0).astype(np.uint8)
+				y0 = TOP + r * cell_h + TITLE_H
+				x0 = LEFT + c * cell_w
+				oy = y0 + (PANEL - nh) // 2
+				ox = x0 + (PANEL - nw) // 2
+				gray[oy:oy + nh, ox:ox + nw] = idx8[:nh, :nw]
+				mask[oy:oy + nh, ox:ox + nw] = True
+				panel_boxes.append((x0, y0, p.get("title", ""), p.get("corners")))
+
+		rows_meta = [
+			{"tag": row["tag"], "prefix": row["prefix"], "selected": bool(row["selected"]), "used_cols": int(row["used_cols"])}
+			for row in rows_data
+		]
+		self._montage_gray_cache = {
+			"gray": gray, "mask": mask, "panel_boxes": panel_boxes, "rows_meta": rows_meta,
+			"geom": (PANEL, PAD, TITLE_H, LEFT, TOP, cell_w, cell_h, f, W, H),
+			"suptitle": str(suptitle),
+		}
+		return self._montage_pix_from_gray(cmap_name)
+
+	def _montage_pix_from_gray(self, cmap_name):
+		"""Aplica el LUT al lienzo gris cacheado y pinta rótulos. Sin pipeline ni
+		resize: recolorear el montaje cuesta solo un lookup vectorizado."""
+		cache = getattr(self, "_montage_gray_cache", None)
+		if not cache:
+			return None
+		lut = self._montage_cmap_lut(cmap_name)
+		gray = cache["gray"]
+		mask = cache["mask"]
+		H, W = gray.shape
+		rgb = np.zeros((H, W, 3), dtype=np.uint8)
+		rgb[mask] = lut[gray[mask]]
+		buf = rgb.tobytes()
+		qimg = QImage(buf, W, H, 3 * W, QImage.Format.Format_RGB888)
+		pix = QPixmap.fromImage(qimg)
+		self._paint_montage_overlays(pix, cache)
+		return pix
+
+	def _paint_montage_overlays(self, pix, cache):
+		"""Título, rótulos de eje rotados, recuadro de tira activa, títulos de panel
+		y esquinas anatómicas sobre el pixmap ya coloreado."""
+		from PyQt6.QtGui import QFont
+		from PyQt6.QtCore import QRect
+		PANEL, PAD, TITLE_H, LEFT, TOP, cell_w, cell_h, f, W, H = cache["geom"]
+		panel_boxes = cache["panel_boxes"]
+		rows_meta = cache["rows_meta"]
+		painter = QPainter(pix)
+		painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+		painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+		align_left = int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+		align_center = int(Qt.AlignmentFlag.AlignCenter)
+		align_hcenter = int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+
+		painter.setFont(QFont("Segoe UI", max(8, round(10 * f)), QFont.Weight.Bold))
+		painter.setPen(QColor("#ffffff"))
+		painter.drawText(QRect(LEFT, round(4 * f), W - LEFT - PAD, TOP - round(8 * f)), align_left, str(cache["suptitle"]))
+
+		f_panel = QFont("Segoe UI", max(7, round(8 * f)), QFont.Weight.Bold)
+		f_corner = QFont("Segoe UI", max(6, round(7 * f)), QFont.Weight.Bold)
+		f_axis = QFont("Segoe UI", max(7, round(9 * f)), QFont.Weight.Bold)
+		for r, row in enumerate(rows_meta):
+			used = max(1, int(row["used_cols"]))
+			row_top = TOP + r * cell_h
+			painter.save()
+			painter.setFont(f_axis)
+			painter.setPen(QColor("#ff4040") if row["selected"] else QColor("#7cf29a"))
+			painter.translate(round(18 * f), row_top + (TITLE_H + PANEL) / 2)
+			painter.rotate(-90)
+			painter.drawText(QRect(-PANEL // 2, round(-12 * f), PANEL, round(24 * f)), align_center, f"{row['tag']} {row['prefix']}".strip())
+			painter.restore()
+			if row["selected"]:
+				painter.setPen(QPen(QColor("#ff4040"), max(1, round(f))))
+				painter.drawRect(QRect(LEFT - 1, row_top + TITLE_H - 1, used * cell_w - PAD + 1, PANEL + 1))
+
+		for (x0, y0, title, corners) in panel_boxes:
+			painter.setFont(f_panel)
+			painter.setPen(QColor("#ffffff"))
+			painter.drawText(QRect(x0, y0 - TITLE_H, PANEL, TITLE_H), align_hcenter, str(title))
+			if corners:
+				painter.setFont(f_corner)
+				painter.setPen(QColor("#9cdcff"))
+				for (tx, ty, txt) in corners:
+					painter.drawText(x0 + int(tx * PANEL), y0 + int((1.0 - ty) * PANEL), str(txt))
+		painter.end()
+
+	def _recolor_montage_from_cache(self, cmap_name):
+		"""Recoloreo rápido (solo cambió el colormap): reusa el lienzo gris cacheado
+		y actualiza el preview sin re-ejecutar el pipeline del montaje."""
+		pix = self._montage_pix_from_gray(cmap_name)
+		if pix is None:
+			self._show_cine_crudo_sa_montage()
+			return
+		try:
+			pix.save(os.path.join(self.output_dir, "sa_montage.png"), "PNG")
+		except Exception:
+			pass
+		if "comparacion_ejes" in self.preview_labels:
+			self.preview_pixmaps["comparacion_ejes"] = pix
+			self.preview_base_sizes["comparacion_ejes"] = pix.size()
+			self._apply_preview_zoom("comparacion_ejes")
+
 	def _show_cine_crudo_sa_montage(self):
+
 		"""Montaje clínico de TODOS los cortes SA/VLA/HLA (estilo MyoVation/Xeleris).
 
 		Usa los cubos ya orientados anatómicamente por `anatomical_cuts_gated`
@@ -13206,52 +13355,11 @@ class MainWindow(QMainWindow):
 			n_blocks = 2 if has_rest else 1
 			rows = block_rows * n_blocks
 
-			# Escala real por SA Pixel Size: ancho de panel ∝ matriz*px_mm.
-			mat = int(stress_rows[0][0].shape[1]) if stress_rows[0][0].ndim == 3 else 32
-			panel_in = float(layout_cfg.get("panel_in", 1.7))
-			fig, axes = plt.subplots(rows, cols, figsize=(cols * panel_in, rows * (panel_in * 1.12)), squeeze=False)
-			fig.patch.set_facecolor("#000000")
-			for r in range(rows):
-				for c in range(cols):
-					axes[r][c].axis("off")
-					axes[r][c].set_facecolor("#000000")
-
 			corner_map = {
 				"SA": [(0.32, 0.90, "ANT"), (0.02, 0.45, "SEP"), (0.80, 0.45, "LAT"), (0.32, 0.03, "INF")],
 				"VLA": [(0.32, 0.90, "ANT"), (0.02, 0.45, "BASE"), (0.76, 0.45, "APEX"), (0.32, 0.03, "INF")],
 				"HLA": [(0.32, 0.90, "APEX"), (0.02, 0.45, "SEP"), (0.80, 0.45, "LAT"), (0.32, 0.03, "BASE")],
 			}
-
-			def _render_row(r, vol, idxs, prefix, tag):
-				# Etiqueta del eje alineada en las 3 tiras (sin corrimientos distintos).
-				selected = (str(prefix) == str(getattr(self, "cine_crudo_selected_stripe", "SA")))
-				lab_color = "#ff4040" if selected else "#7cf29a"
-				lab_size = 8.0
-				axes[r][0].text(-0.26, 0.5, f"{tag} {prefix}", color=lab_color, fontsize=lab_size,
-				                fontweight="bold", rotation=90, va="center", ha="center", transform=axes[r][0].transAxes)
-				if selected:
-					# Recuadro rojo de 1px alrededor de TODA la tira activa.
-					from matplotlib.patches import Rectangle
-					# Dibujar el rectángulo en coordenadas de figura para cubrir todas las columnas.
-					p0 = axes[r][0].get_position()
-					p1 = axes[r][max(0, min(cols - 1, max(0, len(idxs) - 1)))].get_position()
-					fig.add_artist(Rectangle((p0.x0, p0.y0), max(1e-6, p1.x1 - p0.x0), p0.y1 - p0.y0,
-					                         transform=fig.transFigure, fill=False, edgecolor="#ff4040", linewidth=1.0))
-				for c in range(cols):
-					ax = axes[r][c]
-					if c >= len(idxs):
-						continue
-					k = idxs[c]
-					img = vol[int(np.clip(k, 0, vol.shape[0] - 1))]
-					img = _zoom_cut(img, cut_zoom)
-					if center_cuts:
-						img = _center_cut(img)
-					ax.imshow(img, cmap=montage_cmap, vmin=0.0, vmax=1.0,
-					          interpolation="bicubic", aspect="equal")
-					ax.set_title(f"{prefix} {k + 1}", color="white", fontsize=7, fontweight="bold", pad=1.2)
-					if c == 0:
-						for (tx, ty, txt) in corner_map[prefix]:
-							ax.text(tx, ty, txt, color="#9cdcff", fontsize=5.5, fontweight="bold", transform=ax.transAxes)
 
 			# Orden de filas: con reposo, intercalado por eje (stress/rest juntos):
 			# ESFUERZO SA · REPOSO SA · ESFUERZO VLA · REPOSO VLA · ESFUERZO HLA · REPOSO HLA.
@@ -13263,8 +13371,30 @@ class MainWindow(QMainWindow):
 			else:
 				for s_row in stress_rows:
 					ordered_rows.append((s_row[0], s_row[1], s_row[2], ""))
-			for r, (vol, idxs, prefix, tag) in enumerate(ordered_rows):
-				_render_row(r, vol, idxs, prefix, tag)
+
+			# Cortes finales (0..1, ya ventaneados/zoom/centrados) para el compositor.
+			selected_stripe = str(getattr(self, "cine_crudo_selected_stripe", "SA"))
+			rows_data = []
+			for (vol, idxs, prefix, tag) in ordered_rows:
+				panels = []
+				for c, k in enumerate(idxs):
+					img = vol[int(np.clip(k, 0, vol.shape[0] - 1))]
+					img = _zoom_cut(img, cut_zoom)
+					if center_cuts:
+						img = _center_cut(img)
+					panels.append({
+						"col": c,
+						"img": np.asarray(img, dtype=np.float64),
+						"title": f"{prefix} {k + 1}",
+						"corners": corner_map.get(prefix) if c == 0 else None,
+					})
+				rows_data.append({
+					"prefix": prefix,
+					"tag": tag,
+					"selected": (str(prefix) == selected_stripe),
+					"used_cols": len(idxs),
+					"panels": panels,
+				})
 
 			# Metadatos para drag en vivo de tiras por eje.
 			self._montage_render_meta = {
@@ -13282,22 +13412,23 @@ class MainWindow(QMainWindow):
 			tpl_txt = f" · layout {layout_cfg.get('label', template_mode)}"
 			zoom_txt = f" · zoom corte x{cut_zoom:.2f}"
 			n_sa_stress = len(stress_rows[0][1])
-			fig.suptitle(
+			suptitle = (
 				f"Montaje clínico{bnd_txt} · Esp {th_txt}{scale_txt} · recorte {crop_txt}{gate_txt}{tpl_txt}{zoom_txt} · "
-				f"SA {n_sa_stress} cortes" + (" · ESFUERZO/REPOSO" if has_rest else ""),
-				color="white", fontsize=11, fontweight="bold",
+				f"SA {n_sa_stress} cortes" + (" · ESFUERZO/REPOSO" if has_rest else "")
 			)
-			fig.tight_layout(rect=[0.03, 0, 1, 0.95], w_pad=0.15, h_pad=0.45)
-			out_png = os.path.join(self.output_dir, "sa_montage.png")
-			fig.savefig(out_png, dpi=150, facecolor=fig.get_facecolor())
-			plt.close(fig)
+
+			# Render en memoria (numpy RGB + QPainter): sin matplotlib ni PNG en cada cambio.
+			pix = self._composite_montage_pixmap(rows_data, int(cols), montage_cmap, suptitle)
 			self.cine_crudo_preview_mode = "sa_montage"
-			for tab_name in ("comparacion_ejes",):
-				if tab_name in self.preview_labels:
-					pix = QPixmap(out_png)
-					self.preview_pixmaps[tab_name] = pix
-					self.preview_base_sizes[tab_name] = pix.size()
-					self._apply_preview_zoom(tab_name)
+			# Escribir sa_montage.png para reload al cambiar de pestaña y para "Guardar PNG".
+			try:
+				pix.save(os.path.join(self.output_dir, "sa_montage.png"), "PNG")
+			except Exception:
+				pass
+			if "comparacion_ejes" in self.preview_labels:
+				self.preview_pixmaps["comparacion_ejes"] = pix
+				self.preview_base_sizes["comparacion_ejes"] = pix.size()
+				self._apply_preview_zoom("comparacion_ejes")
 			self._select_tab_by_title("comparacion_ejes")
 			self._log(
 				f"Montaje generado: SA {n_sa_stress} cortes · Esp {th_txt} · recorte {crop_txt} · gates {min(gate_from, gate_to)}→{max(gate_from, gate_to)} · template {template_mode}"
@@ -13345,7 +13476,11 @@ class MainWindow(QMainWindow):
 		if strip is not None:
 			strip.set_cmap(name)
 		if self.cine_crudo_preview_mode == "sa_montage":
-			self._schedule_montage_refresh(0)
+			# Solo cambió el color: recolorear el lienzo gris cacheado (sin pipeline).
+			if getattr(self, "_montage_gray_cache", None):
+				self._recolor_montage_from_cache(name)
+			else:
+				self._schedule_montage_refresh(0)
 
 	def _build_compare_axes_color_column(self) -> QWidget:
 		"""Columna de controles de color/ventaneo pegada al panel de comparacion_ejes.
