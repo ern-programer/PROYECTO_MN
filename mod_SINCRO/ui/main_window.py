@@ -1351,7 +1351,7 @@ class MainWindow(QMainWindow):
 			"delta_combo": "delta_polar",
 			"histograma": "histograma",
 			"polar_perfusion_directa": "polar_perfusion_directa",
-			"comparacion_ejes": "comparacion_ejes",
+			"comparacion_ejes": "Montaje clínico",
 			"comparacion_stress_rest": "stress_vs_rest",
 			"panel_funcional_gated": "Panel funcional gated",
 			"bullseye_directo": "bullseye_directo",
@@ -5610,6 +5610,11 @@ class MainWindow(QMainWindow):
 			return
 		title = self.tabs.tabText(index)
 		tab_name = self._tab_name_from_title(title)
+		# Montaje clínico: se renderiza al entrar (ya no hay botón "Ver montaje").
+		# El resto de acciones (layout, zoom, gates) ocurre en vivo.
+		if tab_name == "comparacion_ejes" and self.cine_crudo_axes_for_export:
+			self._show_cine_crudo_sa_montage()
+			return
 		if tab_name:
 			self._request_lazy_tab_render(tab_name, reason="apertura de pestaña")
 
@@ -13435,8 +13440,6 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_process_recon_btn.setEnabled(True)
 			if hasattr(self, "cine_crudo_save_axes_dcm_btn"):
 				self.cine_crudo_save_axes_dcm_btn.setEnabled(True)
-			if hasattr(self, "cine_crudo_montage_btn"):
-				self.cine_crudo_montage_btn.setEnabled(True)
 			if hasattr(self, "cine_crudo_montage_export_btn"):
 				self.cine_crudo_montage_export_btn.setEnabled(True)
 			if hasattr(self, "cine_crudo_mark_rest_btn"):
@@ -14203,14 +14206,8 @@ class MainWindow(QMainWindow):
 
 	def _build_montage_toolbar_into(self, toolbar):
 		"""Controles de acción del montaje clínico, centralizados en la pestaña
-		comparacion_ejes (antes vivían en la barra 'Montaje clínico' de cine_crudo)."""
-		self.cine_crudo_montage_btn = QToolButton()
-		self.cine_crudo_montage_btn.setText("Ver montaje")
-		self.cine_crudo_montage_btn.setToolTip("Montaje clínico SA/VLA/HLA (estilo Xeleris). En vivo: click selecciona tira, rueda mueve tira activa, Ctrl+rueda zoom parejo, Alt+drag o botón medio para pan, doble click resetea tira.")
-		self.cine_crudo_montage_btn.clicked.connect(self._show_cine_crudo_sa_montage)
-		self.cine_crudo_montage_btn.setEnabled(False)
-		toolbar.addWidget(self.cine_crudo_montage_btn)
-
+		Montaje clínico. El montaje se renderiza al entrar a la pestaña; el resto
+		de acciones (layout, zoom, gates) ocurre en vivo."""
 		toolbar.addWidget(QLabel("Template"))
 		self.cine_crudo_montage_template_combo = QComboBox()
 		for _lay_key, _lay_cfg in self.MONTAGE_LAYOUTS.items():
@@ -15884,8 +15881,10 @@ class MainWindow(QMainWindow):
 			self.study, self.seg = saved_study, saved_seg
 
 	def _select_tab_by_title(self, title: str) -> bool:
+		# Acepta el título visible o la clave interna (p.ej. "comparacion_ejes").
+		target = self._tab_titles.get(str(title), str(title))
 		for i in range(self.tabs.count()):
-			if self.tabs.tabText(i) == title:
+			if self.tabs.tabText(i) == target:
 				self.tabs.setCurrentIndex(i)
 				return True
 		return False
