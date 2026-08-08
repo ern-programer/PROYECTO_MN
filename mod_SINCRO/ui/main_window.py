@@ -931,9 +931,6 @@ class MainWindow(QMainWindow):
 			"Corrección de movimiento, reconstrucción y reorientación por etapa, independientes. "
 			"Es no modal: se puede dejar abierta al costado."
 		)
-		self.advanced_toggle_btn = QPushButton("AVANZADO")
-		self.advanced_toggle_btn.clicked.connect(self.toggle_advanced_mode)
-		self.advanced_toggle_btn.setToolTip("Activa paneles y render pesado. En básico se prioriza velocidad para asincronía.")
 		self.ui_config_btn = QPushButton("Configuración")
 		self.ui_config_btn.clicked.connect(self.open_ui_preferences_dialog)
 		self.ui_config_btn.setToolTip(
@@ -982,16 +979,15 @@ class MainWindow(QMainWindow):
 		compare_load_row.addWidget(self.load_one_or_two_btn, 1)
 		button_row.addLayout(compare_load_row, 1, 0, 1, 3)
 		button_row.addWidget(self.preparacion_btn, 2, 0, 1, 3)
-		button_row.addWidget(self.advanced_toggle_btn, 3, 0, 1, 3)
 		ungated_config_row = QHBoxLayout()
 		ungated_config_row.setContentsMargins(0, 0, 0, 0)
 		ungated_config_row.setSpacing(4)
 		ungated_config_row.addWidget(self.export_ungated_btn, 1)
 		ungated_config_row.addWidget(self.ui_config_btn, 1)
-		button_row.addLayout(ungated_config_row, 4, 0, 1, 3)
-		button_row.addWidget(self.ectb_window_btn, 5, 0, 1, 3)
-		button_row.addWidget(self.gqc_window_btn, 6, 0, 1, 3)
-		button_row.addWidget(self.asynchrony_review_btn, 7, 0, 1, 3)
+		button_row.addLayout(ungated_config_row, 3, 0, 1, 3)
+		button_row.addWidget(self.ectb_window_btn, 4, 0, 1, 3)
+		button_row.addWidget(self.gqc_window_btn, 5, 0, 1, 3)
+		button_row.addWidget(self.asynchrony_review_btn, 6, 0, 1, 3)
 		# Ubicar Acciones justo debajo de la versión y la barra de progreso.
 		insert_at = self._sidebar_layout.indexOf(self._progress_bar) + 1
 		self._sidebar_layout.insertWidget(insert_at, button_box)
@@ -2126,7 +2122,6 @@ class MainWindow(QMainWindow):
 		# ancha porque ahora contiene las DOS imágenes (cine + cine_compare).
 		self.bottom_hsplit.setSizes([400, 260, 280])
 		self.main_splitter = splitter
-		self._right_splitter = right_splitter
 		self.right_splitter = right_splitter
 		self._ui_settings = QSettings("Gammasys", "GammaSync")
 		self._load_global_ui_preferences()
@@ -2413,9 +2408,6 @@ class MainWindow(QMainWindow):
 			except Exception:
 				self.statusBar().showMessage(f"'{label}': ventana de Preparación no disponible")
 			return
-		# Si el destino es una pestaña de modo avanzado y estamos en básico, activarlo.
-		if tab in self._advanced_extra_tab_order and not self.advanced_mode_enabled:
-			self.toggle_advanced_mode()
 		if self._select_tab_by_title(tab):
 			self.statusBar().showMessage(f"Paso: {label}")
 		else:
@@ -3011,8 +3003,6 @@ class MainWindow(QMainWindow):
 
 	def _request_lazy_tab_render(self, tab_name: str, reason: str = ""):
 		if self.study is None or self.seg is None or self.phase_result is None:
-			return
-		if not bool(self.advanced_mode_enabled):
 			return
 		heavy_tabs = {
 			"comparacion_ejes",
@@ -8916,8 +8906,10 @@ class MainWindow(QMainWindow):
 		render_delta_combo = target_tabs_set is None or "delta_combo" in target_tabs_set
 		render_histograma = target_tabs_set is None or "histograma" in target_tabs_set
 
+		# Opción A: la corrida completa (target_tabs_set is None) es rápida y omite
+		# las pesadas; el render por-pestaña (target_tabs) sí las genera al entrar.
 		advanced_mode = bool(self.advanced_mode_enabled)
-		if not advanced_mode:
+		if not advanced_mode and target_tabs_set is None:
 			for heavy_tab in (
 				"comparacion_ejes",
 				"curva_fevi",
@@ -9214,7 +9206,9 @@ class MainWindow(QMainWindow):
 		_compose_polar_combo()
 		_compose_delta_combo()
 
-		if not advanced_mode:
+		# Opción A: en la corrida completa se corta acá (rápido); el render por-pestaña
+		# (target_tabs) continúa para generar la pesada solicitada bajo demanda.
+		if not advanced_mode and target_tabs_set is None:
 			self._log("Modo básico: se omite render avanzado (ejes, panel funcional, perfusión directa y cine polar).")
 			return
 
@@ -15153,7 +15147,7 @@ class MainWindow(QMainWindow):
 
 	def _toggle_lower_cine_band(self):
 		"""Colapsa/expande la banda inferior dejando solo su header delgado."""
-		splitter = getattr(self, "_right_splitter", None)
+		splitter = getattr(self, "right_splitter", None)
 		if splitter is None:
 			return
 		self._lower_cine_collapsed = not bool(getattr(self, "_lower_cine_collapsed", False))
@@ -15174,9 +15168,10 @@ class MainWindow(QMainWindow):
 		current_title = self.tabs.tabText(self.tabs.currentIndex()) if self.tabs.count() > 0 else ""
 		while self.tabs.count() > 0:
 			self.tabs.removeTab(0)
+		# Opción A: todas las pestañas siempre visibles; las pesadas se renderizan
+		# perezosamente la primera vez que se entra en ellas (_request_lazy_tab_render).
 		order = list(self._basic_tab_order)
-		if self.advanced_mode_enabled:
-			order.extend(self._advanced_extra_tab_order)
+		order.extend(self._advanced_extra_tab_order)
 		for name in order:
 			# Si el panel cine_crudo está reubicado en la ventana de Preparación,
 			# no lo agregamos como pestaña (vive allá hasta que se cierre esa ventana).
@@ -15196,28 +15191,10 @@ class MainWindow(QMainWindow):
 					break
 
 	def toggle_advanced_mode(self):
-		self.advanced_mode_enabled = not bool(self.advanced_mode_enabled)
-		if self.advanced_mode_enabled:
-			self.advanced_toggle_btn.setText("BÁSICO")
-			self._log("Modo avanzado activado: se habilitan paneles y render pesado bajo demanda.")
-		else:
-			self.advanced_toggle_btn.setText("AVANZADO...")
-			self._log("Modo básico activado: foco en asincronía con render rápido.")
-		self._rebuild_tabs_for_mode()
-		if self.study is not None and self.phase_result is not None:
-			if self.advanced_mode_enabled:
-				self._set_progress(78, "Regenerando paneles avanzados...")
-				self.statusBar().showMessage("Regenerando avanzado con parámetros actuales...")
-				self._log("Modo avanzado: regeneración completa de pestañas/figuras para evitar vistas vacías o desactualizadas.")
-				self._write_outputs()
-				if self.compare_bundle is not None:
-					self._set_progress(84, "Regenerando comparación (reposo)...")
-					self._write_outputs_for_bundle(self.compare_bundle, self.compare_output_dir)
-					left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
-					right_label = self.compare_label or "Comparación"
-					self._compose_dual_tab_images(left_label, right_label)
-			self._load_previews()
-			self._set_progress(100, "Modo actualizado")
+		# Opción A: el modo avanzado se eliminó. Las pestañas están siempre visibles
+		# y las pesadas se renderizan bajo demanda al entrar en ellas. Este método se
+		# conserva como no-op por compatibilidad con llamadas históricas.
+		return
 
 	def _is_tab_active(self, title: str) -> bool:
 		idx = int(self.tabs.currentIndex()) if self.tabs is not None else -1
