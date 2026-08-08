@@ -10605,7 +10605,7 @@ class MainWindow(QMainWindow):
 				if base_size.isEmpty():
 					base_size = QSize(500, 320)
 				self.preview_base_sizes[name] = base_size
-			zoom = max(0.20, min(4.00, self.preview_zoom.get(name, 1.0)))
+			zoom = max(0.20, min(5.00, self.preview_zoom.get(name, 1.0)))
 			w = max(1, int(base_size.width() * zoom))
 			h = max(1, int(base_size.height() * zoom))
 			movie.setScaledSize(QSize(w, h))
@@ -10623,7 +10623,7 @@ class MainWindow(QMainWindow):
 		if base_size is None or base_size.isEmpty():
 			base_size = pix.size()
 			self.preview_base_sizes[name] = base_size
-		zoom = max(0.20, min(4.00, self.preview_zoom.get(name, 1.0)))
+		zoom = max(0.20, min(5.00, self.preview_zoom.get(name, 1.0)))
 		w = max(1, int(base_size.width() * zoom))
 		h = max(1, int(base_size.height() * zoom))
 		mode = Qt.TransformationMode.FastTransformation if fast else Qt.TransformationMode.SmoothTransformation
@@ -10649,18 +10649,29 @@ class MainWindow(QMainWindow):
 			vb.setValue(int(anchor[1]))
 
 	def _default_preview_zoom(self, name: str) -> float:
-		"""Zoom inicial por pestaña: cine_crudo arranca en 300% (se usa para
-		ver bien el movimiento del paciente cuadro a cuadro); el resto de las
-		pestañas arranca en 50% (vista general). Siempre se puede cambiar en
-		vivo con los botones +/- o el slider correspondiente."""
-		return 3.0 if name == "cine_crudo" else 0.5
+		"""Zoom inicial por pestaña. Cada vista arranca en el nivel que mejor la
+		muestra; siempre se puede cambiar en vivo con +/- o el slider."""
+		defaults = {
+			"slices_fase": 0.5,
+			"polar_combo": 0.3,
+			"delta_combo": 0.5,
+			"histograma": 0.7,
+			"ungated": 0.6,
+			"cine_crudo": 5.0,
+			"polar_perfusion_directa": 0.8,
+			"comparacion_ejes": 0.2,
+			"panel_funcional_gated": 0.5,
+			"bullseye_directo": 0.5,
+			"guia_fase_vi": 0.5,
+		}
+		return defaults.get(str(name), 0.5)
 
 	def _zoom_preview(self, name: str, delta: float):
 		current = self.preview_zoom.get(name, 1.0)
 		self._set_preview_zoom(name, current + delta)
 
 	def _set_preview_zoom(self, name: str, value: float):
-		self.preview_zoom[name] = max(0.20, min(4.00, float(value)))
+		self.preview_zoom[name] = max(0.20, min(5.00, float(value)))
 		self._apply_preview_zoom(name)
 
 	def _build_polar_screen_color_column(self) -> QWidget:
