@@ -221,6 +221,10 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_timer.timeout.connect(self._advance_cine_crudo_frame)
 		self.cine_crudo_play_btn: QToolButton | None = None
 		self.cine_crudo_correct_btn: QToolButton | None = None
+		self.cine_crudo_accept_btn: QToolButton | None = None
+		self.cine_crudo_reject_btn: QToolButton | None = None
+		# True una vez que el usuario confirma la corrección de movimiento con "Aplicar".
+		self._cine_crudo_motion_accepted = False
 		self.cine_crudo_compare_check: QCheckBox | None = None
 		self.cine_crudo_mask_check: QCheckBox | None = None
 		self.cine_crudo_seed_btn: QToolButton | None = None
@@ -1542,6 +1546,30 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_correct_btn.clicked.connect(self._apply_cine_crudo_motion_correction)
 				self.cine_crudo_correct_btn.setMinimumHeight(90)
 
+				# Aplicar / Rechazar: una vez que la corrección (p.ej. Sinusoide + ajuste
+				# fino manual) quedó como el usuario quiere, decide si el pipeline sigue
+				# con el crudo corregido (Aplicar) o vuelve al crudo original (Rechazar).
+				self.cine_crudo_accept_btn = QToolButton()
+				self.cine_crudo_accept_btn.setText("Aplicar")
+				self.cine_crudo_accept_btn.setToolTip("Confirma la corrección actual: la reconstrucción y todo el procesamiento usarán las proyecciones corregidas.")
+				self.cine_crudo_accept_btn.clicked.connect(self._accept_cine_crudo_motion_correction)
+				self.cine_crudo_reject_btn = QToolButton()
+				self.cine_crudo_reject_btn.setText("Rechazar")
+				self.cine_crudo_reject_btn.setToolTip("Descarta la corrección: se vuelve al crudo original y el procesamiento seguirá sin corrección de movimiento.")
+				self.cine_crudo_reject_btn.clicked.connect(self._reject_cine_crudo_motion_correction)
+				corr_side = QWidget()
+				corr_side_layout = QVBoxLayout(corr_side)
+				corr_side_layout.setContentsMargins(0, 0, 0, 0)
+				corr_side_layout.setSpacing(3)
+				corr_side_layout.addWidget(self.cine_crudo_correct_btn, 1)
+				corr_accept_row = QHBoxLayout()
+				corr_accept_row.setContentsMargins(0, 0, 0, 0)
+				corr_accept_row.setSpacing(3)
+				corr_accept_row.addWidget(self.cine_crudo_accept_btn)
+				corr_accept_row.addWidget(self.cine_crudo_reject_btn)
+				corr_side_layout.addLayout(corr_accept_row)
+				self.cine_crudo_correct_side = corr_side
+
 				# --- Fila 3 (selección de órgano): máscara + pick corazón + ROI ---
 				toolbar3 = QHBoxLayout()
 				self.cine_crudo_mask_check = QCheckBox("Máscara")
@@ -1914,7 +1942,7 @@ class MainWindow(QMainWindow):
 					"Corrección de movimiento ▾", [toolbar2, toolbar3, toolbar_export],
 					key="cine_crudo_correccion_movimiento",
 					tooltip="Método de corrección, ajuste manual, offsets y exportar/importar/grabar DICOM.",
-					side_widget=self.cine_crudo_correct_btn,
+					side_widget=self.cine_crudo_correct_side,
 				))
 				groups_row.addWidget(self._build_toolbar_group_menu(
 					"Reconstrucción desde crudo ▾", [toolbar6_r1, toolbar6_r2, toolbar6_r3],
@@ -11588,6 +11616,65 @@ class MainWindow(QMainWindow):
 			self._log(f"[WARN] Motion correction falló: {exc}")
 			self._set_progress(100, "Crudo cargado")
 
+	def _accept_cine_crudo_motion_correction(self):
+		"""Confirma la corrección de movimiento: la recon/procesamiento usarán el crudo corregido."""
+		has_stress = self.cine_crudo_motion_result is not None and self.cine_crudo_corrected_projections is not None
+		has_rest = (
+			getattr(self, "cine_crudo_motion_result_compare", None) is not None
+			and getattr(self, "cine_crudo_corrected_projections_compare", None) is not None
+		)
+		if not has_stress and not has_rest:
+			QMessageBox.information(
+				self, "SINCRO",
+				"No hay corrección para aplicar. Corregí primero con un método (p.ej. Sinusoide) "
+				"y, si querés, ajustá manualmente antes de aplicar.",
+			)
+			return
+		self._cine_crudo_motion_accepted = True
+		etapas = []
+		if has_stress:
+			etapas.append("esfuerzo")
+		if has_rest:
+			etapas.append("reposo")
+		self._log(
+			f"Corrección de movimiento APLICADA ({' y '.join(etapas)}): la reconstrucción y el "
+			"procesamiento usarán el crudo corregido."
+		)
+		try:
+			self.statusBar().showMessage("Corrección de movimiento aplicada · se usará el crudo corregido", 6000)
+		except Exception:
+			pass
+
+	def _reject_cine_crudo_motion_correction(self):
+		"""Descarta la corrección de movimiento: se vuelve al crudo original para todo el pipeline."""
+		had = (
+			self.cine_crudo_motion_result is not None
+			or getattr(self, "cine_crudo_motion_result_compare", None) is not None
+		)
+		if not had:
+			QMessageBox.information(
+				self, "SINCRO",
+				"No hay corrección activa para rechazar; ya se está usando el crudo original.",
+			)
+			return
+		self.cine_crudo_motion_result = None
+		self.cine_crudo_corrected_projections = None
+		self.cine_crudo_motion_result_compare = None
+		self.cine_crudo_corrected_projections_compare = None
+		self._cine_crudo_motion_accepted = False
+		self._log("Corrección de movimiento RECHAZADA: se continúa con el crudo original (sin corrección).")
+		# Recargar el cine desde el crudo original para que se vea sin la corrección.
+		source = str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
+		try:
+			self._load_cine_crudo_frames(source)
+			self._refresh_cine_crudo_view()
+		except Exception as exc:
+			self._log(f"[WARN] No se pudo recargar el cine crudo tras rechazar: {exc}")
+		try:
+			self.statusBar().showMessage("Corrección descartada · se sigue con el crudo original", 6000)
+		except Exception:
+			pass
+
 	def run_stage_motion_live(self, stage: str, *, method_label: str | None = None, axis_label: str | None = None):
 		"""Ejecuta motion correction de una etapa y devuelve (proyecciones_corregidas, result).
 
@@ -12448,6 +12535,11 @@ class MainWindow(QMainWindow):
 		# (reorientación, cortes, metadatos) según la etapa elegida.
 		self.cine_crudo_raw_study_for_recon = raw_study
 		self._cine_crudo_recon_stage = stage
+		# Detener el cine del crudo: si sigue corriendo, el timer pisaría la imagen de
+		# reconstrucción en la pestaña (incluso durante el diálogo modal por processEvents).
+		self.cine_crudo_timer.stop()
+		self.cine_crudo_playing = False
+		self._update_cine_crudo_toggle_text()
 		if getattr(self, "_cine_crudo_active_stage", "stress") == "both" and self._secondary_cine_crudo_study() is not None:
 			self._log("Selector en 'Ambas': la reconstrucción/reorientación es por etapa. Reconstruyo ESFUERZO; luego marcá como reposo o cambiá a Reposo y reconstruí la otra para el montaje.")
 		_undo_before = None if getattr(self, "_undo_suspended", False) else self._snapshot_attrs(self.UNDO_ATTRS_RECON, deep=False)
@@ -12533,6 +12625,8 @@ class MainWindow(QMainWindow):
 				pix = QPixmap(out_png)
 				self.preview_pixmaps["cine_crudo"] = pix
 				self.preview_base_sizes["cine_crudo"] = pix.size()
+				# La QC de reconstrucción se muestra al 40% (el cine crudo usa 500%).
+				self.preview_zoom["cine_crudo"] = 0.4
 				self._apply_preview_zoom("cine_crudo")
 				self._select_tab_by_title("cine_crudo")
 
@@ -14524,6 +14618,12 @@ class MainWindow(QMainWindow):
 			self.cine_crudo_playing = False
 			self._update_cine_crudo_toggle_text()
 			return
+		# Si estamos mostrando la reconstrucción, no pisar la imagen con frames del cine.
+		if str(getattr(self, "cine_crudo_preview_mode", None)) == "recon_qc":
+			self.cine_crudo_timer.stop()
+			self.cine_crudo_playing = False
+			self._update_cine_crudo_toggle_text()
+			return
 		n = len(self.cine_crudo_frames)
 		modo = str(self.cine_crudo_mode_combo.currentText()) if hasattr(self, "cine_crudo_mode_combo") else "Continuo"
 		if modo == "Rebote":
@@ -14551,6 +14651,12 @@ class MainWindow(QMainWindow):
 	def _toggle_cine_crudo(self):
 		if not self.cine_crudo_frames:
 			return
+		# Si venimos de mostrar la reconstrucción (imagen estática) y el usuario pide
+		# play, volver al cine del crudo: restaurar modo y zoom propios del cine.
+		if str(getattr(self, "cine_crudo_preview_mode", None)) == "recon_qc":
+			self.cine_crudo_preview_mode = None
+			self.preview_zoom["cine_crudo"] = self._default_preview_zoom("cine_crudo")
+			self._set_cine_crudo_frame(int(getattr(self, "cine_crudo_index", 0)))
 		self.cine_crudo_playing = not bool(self.cine_crudo_playing)
 		if self.cine_crudo_playing:
 			self.cine_crudo_timer.start()
