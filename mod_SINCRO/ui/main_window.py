@@ -202,6 +202,10 @@ class MainWindow(QMainWindow):
 		self.polar_perf_view_perf_btn: QToolButton | None = None
 		self.polar_perf_view_cine_btn: QToolButton | None = None
 		self.polar_view_mode = "perfusion"  # "perfusion" | "cine" dentro de polar_perfusion_directa
+		# Colormap de pantalla del mapa polar de perfusión (independiente del informe).
+		# Default = mismo cmap que el informe para no cambiar el look inicial.
+		self.polar_perf_screen_cmap = "odyssey_cool"
+		self._polar_perf_cart_cache = None
 		self.polar_cine_preview_frames: list[QPixmap] = []
 		self.polar_cine_preview_index = 0
 		self.polar_cine_playing = False
@@ -1972,6 +1976,13 @@ class MainWindow(QMainWindow):
 				cc_row.addWidget(scroller, 1)
 				cc_row.addWidget(self._build_cine_crudo_color_column())
 				tab_layout.addLayout(cc_row)
+			elif name == "polar_perfusion_directa":
+				# Color de pantalla del mapa polar: solo cmap + tira LUT (sin ventana).
+				pp_row = QHBoxLayout()
+				pp_row.setContentsMargins(0, 0, 0, 0)
+				pp_row.addWidget(scroller, 1)
+				pp_row.addWidget(self._build_polar_screen_color_column())
+				tab_layout.addLayout(pp_row)
 			else:
 				tab_layout.addWidget(scroller)
 			self._tab_widgets[name] = tab
@@ -9814,6 +9825,16 @@ class MainWindow(QMainWindow):
 
 			cart_raw = _polar_to_cartesian(polar_map)
 			cart_smooth = _polar_to_cartesian(polar_map_smooth)
+			# Cache para recoloreo en pantalla (cmap independiente del informe): guarda
+			# los mapas cartesianos float 0..1 ya calculados; el preview los re-rinde
+			# con self.polar_perf_screen_cmap sin regenerar el pipeline ni tocar disco.
+			self._polar_perf_cart_cache = {
+				"raw": cart_raw,
+				"smooth": cart_smooth,
+				"label": str(study_context_label),
+				"rotation_deg": int(rotation_deg),
+				"smooth_desc": f"{self.polar_perf_smooth_method_combo.currentText()} {smooth_strength:.2f}",
+			}
 
 			def _annotate_polar_guides(ax, canvas_size: int):
 				c = canvas_size * 0.5
@@ -10342,6 +10363,11 @@ class MainWindow(QMainWindow):
 		if name == "polar_perfusion_directa" and self.polar_view_mode == "cine":
 			self._load_polar_cine_preview()
 			return
+		if name == "polar_perfusion_directa" and getattr(self, "_polar_perf_cart_cache", None):
+			# Vista estática con el cmap de pantalla (independiente del informe):
+			# recolorea en memoria desde la caché en vez de cargar el PNG de disco.
+			if self._rerender_polar_perfusion_screen():
+				return
 		if name == "comparacion_ejes":
 			self._load_compare_axes_preview()
 			return
@@ -10602,6 +10628,98 @@ class MainWindow(QMainWindow):
 	def _set_preview_zoom(self, name: str, value: float):
 		self.preview_zoom[name] = max(0.20, min(4.00, float(value)))
 		self._apply_preview_zoom(name)
+
+	def _build_polar_screen_color_column(self) -> QWidget:
+		"""Columna de color pegada al preview del mapa polar de perfusión: solo cmap
+		+ tira vertical del LUT (SIN RangeSlider). Afecta únicamente la vista en
+		pantalla; el color del informe se configura aparte en 'Escalas informe'."""
+		col = QWidget()
+		col.setMaximumWidth(132)
+		v = QVBoxLayout(col)
+		v.setContentsMargins(4, 4, 4, 4)
+		v.setSpacing(4)
+		v.addWidget(QLabel("Escala"))
+		self.polar_screen_cmap_combo = QComboBox()
+		self.polar_screen_cmap_combo.addItems(self._all_cmaps)
+		self.polar_screen_cmap_combo.setCurrentText(self.polar_perf_screen_cmap)
+		self.polar_perf_screen_cmap = str(self.polar_screen_cmap_combo.currentText())
+		self.polar_screen_cmap_combo.setToolTip("Escala de colores del mapa polar en pantalla (no afecta el informe).")
+		self.polar_screen_cmap_combo.currentTextChanged.connect(self._on_polar_screen_cmap_changed)
+		v.addWidget(self.polar_screen_cmap_combo)
+		self.polar_screen_color_strip = VerticalColorStrip(self.polar_perf_screen_cmap)
+		v.addWidget(self.polar_screen_color_strip, 1)
+		return col
+
+	def _on_polar_screen_cmap_changed(self, name):
+		self.polar_perf_screen_cmap = str(name)
+		strip = getattr(self, "polar_screen_color_strip", None)
+		if strip is not None:
+			strip.set_cmap(self.polar_perf_screen_cmap)
+		if self.polar_view_mode == "perfusion":
+			self._rerender_polar_perfusion_screen()
+
+	def _rerender_polar_perfusion_screen(self) -> bool:
+		"""Recolorea en memoria el mapa polar de perfusión (vista estática) usando
+		self.polar_perf_screen_cmap, desde la caché de mapas cartesianos. No escribe
+		en disco, así que el PNG del informe (con su propio cmap) queda intacto."""
+		cache = getattr(self, "_polar_perf_cart_cache", None)
+		if not cache or "polar_perfusion_directa" not in self.preview_labels:
+			return False
+		if self.polar_view_mode != "perfusion":
+			return False
+		try:
+			import matplotlib.pyplot as plt
+
+			cmap_name = str(getattr(self, "polar_perf_screen_cmap", "odyssey_cool") or "odyssey_cool")
+			cart_raw = cache["raw"]
+			cart_smooth = cache["smooth"]
+			label = str(cache.get("label", ""))
+			rotation_deg = int(cache.get("rotation_deg", 0))
+			smooth_desc = str(cache.get("smooth_desc", ""))
+			perf_bg = "#000000"
+			perf_grid = "#7f8a9a"
+			perf_fg = "#f3f4f6"
+			perf_subtle = "#9ca3af"
+
+			def _guides(ax, canvas_size: int):
+				c = canvas_size * 0.5
+				r = canvas_size * 0.5
+				for frac in (0.25, 0.50, 0.75, 1.0):
+					ax.add_patch(plt.Circle((c, c), radius=r * frac, fill=False, color=perf_grid, linewidth=0.8, alpha=0.75))
+				ax.plot([c - r, c + r], [c, c], color=perf_grid, linewidth=0.8, alpha=0.8)
+				ax.plot([c, c], [c - r, c + r], color=perf_grid, linewidth=0.8, alpha=0.8)
+				ax.text(c, c - r * 1.03, "ANT", ha="center", va="bottom", color=perf_fg, fontsize=8, fontweight="bold")
+				ax.text(c + r * 1.03, c, "LAT", ha="left", va="center", color=perf_fg, fontsize=8, fontweight="bold")
+				ax.text(c, c + r * 1.03, "INF", ha="center", va="top", color=perf_fg, fontsize=8, fontweight="bold")
+				ax.text(c - r * 1.03, c, "SEP", ha="right", va="center", color=perf_fg, fontsize=8, fontweight="bold")
+				ax.text(c, c, "APEX", ha="center", va="center", color=perf_fg, fontsize=7, fontweight="bold")
+				ax.text(c, c + r * 0.98, "BASE", ha="center", va="top", color=perf_subtle, fontsize=7, fontweight="bold")
+
+			fig_pp, axes_pp = plt.subplots(1, 2, figsize=(12.0, 6.0), facecolor=perf_bg)
+			for ax_pp, img_pp, ttl in [
+				(axes_pp[0], cart_raw, "Perfusión polar directa (crudo)"),
+				(axes_pp[1], cart_smooth, f"Perfusión polar directa ({smooth_desc})"),
+			]:
+				ax_pp.set_facecolor(perf_bg)
+				ax_pp.set_aspect("equal")
+				ax_pp.set_xticks([])
+				ax_pp.set_yticks([])
+				ax_pp.imshow(img_pp, cmap=cmap_name, vmin=0.0, vmax=1.0)
+				_guides(ax_pp, int(img_pp.shape[0]))
+				ax_pp.set_title(ttl, color=perf_fg, fontsize=10, fontweight="bold")
+			fig_pp.suptitle(f"Mapa polar de perfusión (apex en centro, base en borde) — {label} — rotación {rotation_deg:+d}°", color=perf_fg, fontsize=11.5, fontweight="bold")
+			fig_pp.text(0.5, 0.02, "Reconstrucción polar continua desde short-axis: 'aplastado' apex->base", ha="center", color=perf_subtle, fontsize=8.6)
+			fig_pp.canvas.draw()
+			w, h = fig_pp.canvas.get_width_height()
+			buf = np.frombuffer(fig_pp.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)[..., :3].copy()
+			plt.close(fig_pp)
+			pix = self._rgb_frame_to_qpixmap(buf)
+			self.preview_pixmaps["polar_perfusion_directa"] = pix
+			self.preview_base_sizes["polar_perfusion_directa"] = pix.size()
+			self._apply_preview_zoom("polar_perfusion_directa")
+			return True
+		except Exception:
+			return False
 
 	def _set_polar_view_mode(self, mode: str):
 		mode = "cine" if mode == "cine" else "perfusion"
