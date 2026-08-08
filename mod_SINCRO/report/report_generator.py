@@ -602,8 +602,43 @@ def generate_report(
 
 	story.append(PageBreak())
 	story.append(Paragraph("4. Visualizaciones", section_style))
+
+	# Estudio en crudo: MIP AP / OAI 45° / Lateral izq, en una fila compacta.
+	mip_specs = [("raw_ap_mip.png", "AP"), ("raw_oai_mip.png", "OAI 45°"), ("raw_ll_mip.png", "Lat. izq")]
+	mip_cells = [
+		_scaled_image(os.path.join(output_dir, fn), max_width=54 * mm, max_height=72 * mm)
+		for fn, _lbl in mip_specs
+		if os.path.exists(os.path.join(output_dir, fn))
+	]
+	if mip_cells:
+		mip_table = Table([mip_cells], colWidths=[56 * mm] * len(mip_cells))
+		mip_table.setStyle(TableStyle([
+			("ALIGN", (0, 0), (-1, -1), "CENTER"),
+			("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+		]))
+		mip_table.hAlign = "CENTER"
+		story.append(mip_table)
+		story.append(Paragraph(
+			"Estudio en crudo — proyecciones planares de adquisición: anterior (AP), oblicua anterior izquierda (45°) y lateral izquierda. Panorama del trazador (tórax completo) antes de la reorientación.",
+			ParagraphStyle("MipCap", parent=small_style, alignment=1, spaceAfter=4 * mm),
+		))
+
+	# Montaje clínico: destacado, en formato vertical (sin página dedicada).
+	montage_path = os.path.join(output_dir, "sa_montage.png")
+	if os.path.exists(montage_path):
+		story.append(Paragraph(
+			"Montaje clínico (cortes SA/HLA/VLA reorientados)",
+			ParagraphStyle("MontTit", parent=section_style, fontSize=12),
+		))
+		mont_img = _scaled_image(montage_path, max_width=170 * mm, max_height=210 * mm)
+		mont_img.hAlign = "CENTER"
+		story.append(mont_img)
+		story.append(Paragraph(
+			"Montaje clínico: cortes de eje corto (SA) y ejes largos (HLA/VLA) reorientados, base→ápex.",
+			ParagraphStyle("MontCap", parent=small_style, alignment=1, spaceAfter=4 * mm),
+		))
+
 	img_files = [
-		("slices_fase.png", "Slice medio con máscara y fase superpuesta."),
 		("polar_map.png", "Mapa polar de fase AHA (17): muestra distribución regional de activación mecánica. Uso: patrón/extensión de disincronía."),
 		("polar_clinico.png", "Panel polar clínico (histograma + bullseye) con PSD/PHB para lectura rápida estilo estación clínica."),
 		("polar_map_delta_signed.png", "Delta con signo (esfuerzo - reposo), circular: conserva dirección del cambio (adelanto/atraso relativo)."),
@@ -615,7 +650,6 @@ def generate_report(
 		("ejes_ortogonales.png", "Ejes SA/HLA/VLA."),
 		("panel_clinico_convencion.png", "Panel clínico A/B (ED/ES)."),
 		("panel_funcional_gated.png", "Panel funcional gated (ED/ES + curvas de volumen y fase)."),
-		("ventriculograma.png", "Panel funcional gated (ED/ES + curvas de volumen y fase)."),
 		("comparacion_ejes.png", "Comparación original vs reconstruido."),
 		("comparacion_stress_rest.png", "Comparación de disincronía entre estudios (stress vs rest): PSD, BW, Kurtosis, Entropy con Δ e interpretación de stunning."),
 		("curva_tac.png", "Curva de actividad por gate."),

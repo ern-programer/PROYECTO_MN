@@ -9419,23 +9419,23 @@ class MainWindow(QMainWindow):
 			ax.set_xticks([])
 			ax.set_yticks([])
 
-		axes4[0, 0].imshow(sa_ed, cmap=cmap_panel_axes)
+		axes4[0, 0].imshow(sa_ed, cmap=cmap_panel_axes, interpolation="bicubic")
 		axes4[0, 0].set_title(f"A) ED - SHORT AXIS (Gate {ed_gate + 1})", fontsize=10)
 		_annotate_axis(axes4[0, 0], "ANT", "INF", "SEP", "LAT")
-		axes4[0, 1].imshow(hla_ed, cmap=cmap_panel_axes, aspect="equal")
+		axes4[0, 1].imshow(hla_ed, cmap=cmap_panel_axes, aspect="equal", interpolation="bicubic")
 		axes4[0, 1].set_title("A) ED - HORIZONTAL AXIS (HLA)", fontsize=10)
 		_annotate_axis(axes4[0, 1], "BASE", "APEX", "ANT", "INF")
-		axes4[0, 2].imshow(vla_ed, cmap=cmap_panel_axes, aspect="equal")
+		axes4[0, 2].imshow(vla_ed, cmap=cmap_panel_axes, aspect="equal", interpolation="bicubic")
 		axes4[0, 2].set_title("A) ED - VERTICAL AXIS (VLA)", fontsize=10)
 		_annotate_axis(axes4[0, 2], "BASE", "APEX", "SEP", "LAT")
 
-		axes4[1, 0].imshow(sa_es, cmap=cmap_panel_axes)
+		axes4[1, 0].imshow(sa_es, cmap=cmap_panel_axes, interpolation="bicubic")
 		axes4[1, 0].set_title(f"B) ES - SHORT AXIS (Gate {es_gate + 1})", fontsize=10)
 		_annotate_axis(axes4[1, 0], "ANT", "INF", "SEP", "LAT")
-		axes4[1, 1].imshow(hla_es, cmap=cmap_panel_axes, aspect="equal")
+		axes4[1, 1].imshow(hla_es, cmap=cmap_panel_axes, aspect="equal", interpolation="bicubic")
 		axes4[1, 1].set_title("B) ES - HORIZONTAL AXIS (HLA)", fontsize=10)
 		_annotate_axis(axes4[1, 1], "BASE", "APEX", "ANT", "INF")
-		axes4[1, 2].imshow(vla_es, cmap=cmap_panel_axes, aspect="equal")
+		axes4[1, 2].imshow(vla_es, cmap=cmap_panel_axes, aspect="equal", interpolation="bicubic")
 		axes4[1, 2].set_title("B) ES - VERTICAL AXIS (VLA)", fontsize=10)
 		_annotate_axis(axes4[1, 2], "BASE", "APEX", "SEP", "LAT")
 
@@ -10551,6 +10551,110 @@ class MainWindow(QMainWindow):
 		label.clear()
 		label.setText("")
 
+	def _write_raw_mip_views_for_pdf(self):
+		"""Genera tres proyecciones planares del estudio EN CRUDO (tórax completo) para
+		el informe: anterior (AP), oblicua anterior izquierda (OAI 45°) y lateral
+		izquierda. Cuando hay datos crudos usa los frames de adquisición reales
+		(proyecciones por ángulo); si sólo hay volumen reconstruido, reproyecta.
+		Robusto: si falla, no interrumpe el PDF."""
+		if self.study is None:
+			return
+		try:
+			import matplotlib
+			matplotlib.use("Agg")
+			import matplotlib.pyplot as plt
+			raw = getattr(self, "cine_crudo_raw_study_for_recon", None) or self.study
+			cube = np.asarray(getattr(raw, "cube", None), dtype=np.float64)
+			if cube.size == 0:
+				return
+			start = getattr(raw, "start_angle", None)
+			step = getattr(raw, "angular_step", None)
+			rot = str(getattr(raw, "rotation_direction", "") or "")
+			arc = getattr(raw, "scan_arc", None)
+			is_raw_proj = (not bool(getattr(raw, "reconstructed", True))) and cube.ndim == 4
+
+			if is_raw_proj:
+				# Crudo real: cada frame por ángulo es una proyección planar del tórax.
+				from core.raw_projections import ungate_projections
+				ung = ungate_projections(cube)  # (angles, H, W)
+				n_ang = int(ung.shape[0])
+				# Grados por frame, avanzando en el sentido de giro.
+				if step:
+					deg_per_frame = abs(float(step))
+				elif arc and n_ang > 1:
+					deg_per_frame = abs(float(arc)) / float(n_ang - 1)
+				else:
+					deg_per_frame = 180.0 / max(1, n_ang - 1)
+
+				def _frame(offset_deg):
+					idx = int(round(float(offset_deg) / max(deg_per_frame, 1e-6)))
+					return ung[int(np.clip(idx, 0, n_ang - 1))]
+
+				# Offsets desde StartAngle (RAO 45°), avanzando en el sentido de giro:
+				# AP=+45°, OAI 45° (LAO 45°)=+90°, lateral izq (LAO 90°)=+135°.
+				specs = [
+					(_frame(45.0), "raw_ap_mip.png", "AP (anterior)"),
+					(_frame(90.0), "raw_oai_mip.png", "OAI 45°"),
+					(_frame(135.0), "raw_ll_mip.png", "Lateral izq"),
+				]
+			else:
+				# Sólo volumen reconstruido: reproyectar a los ángulos anatómicos.
+				ung = cube.mean(axis=0) if cube.ndim == 4 else cube  # (z, y, x)
+				from core.spect_geometry import reproject_view
+				sign = -1.0 if rot.upper().startswith("CW") else 1.0
+				if start is not None and ung.ndim == 3:
+					ap = reproject_view(ung, (float(start) + sign * 45.0) % 360.0)
+					oai = reproject_view(ung, (float(start) + sign * 90.0) % 360.0)
+					ll = reproject_view(ung, (float(start) + sign * 135.0) % 360.0)
+				else:
+					ap = ung.sum(axis=1) if ung.ndim == 3 else ung
+					oai = ap
+					ll = ung.sum(axis=2) if ung.ndim == 3 else ung
+				specs = [
+					(ap, "raw_ap_mip.png", "AP (anterior)"),
+					(oai, "raw_oai_mip.png", "OAI 45°"),
+					(ll, "raw_ll_mip.png", "Lateral izq"),
+				]
+
+			cmap_axes = str(self.report_cmap_axes.currentText())
+			for arr, fname, title in specs:
+				a = np.asarray(arr, dtype=np.float64)
+				p99 = float(np.percentile(a, 99.0)) if a.size else 0.0
+				a = np.clip(a / max(p99, 1e-8), 0.0, 1.0)
+				fig, axm = plt.subplots(figsize=(3.2, 4.4))
+				axm.set_facecolor("#020611")
+				axm.imshow(a, cmap=cmap_axes, interpolation="bicubic", aspect="equal")
+				axm.set_title(title, fontsize=10, fontweight="bold")
+				axm.set_xticks([])
+				axm.set_yticks([])
+				fig.tight_layout()
+				fig.savefig(os.path.join(self.output_dir, fname), dpi=150, bbox_inches="tight")
+				plt.close(fig)
+		except Exception as exc:
+			self._log(f"[WARN] Proyecciones AP/OAI/Lateral no generadas para PDF: {exc}")
+
+	def _ensure_pdf_extra_images(self):
+		"""Fuerza las imágenes que en modo básico no se generan en la corrida rápida
+		pero deben ir sí o sí al PDF (guía fase VI, perfusión polar directa), genera
+		las MIP AP/Lateral y persiste el montaje clínico si está en memoria."""
+		self._write_raw_mip_views_for_pdf()
+		try:
+			self._write_outputs(target_tabs={"guia_fase_vi", "polar_perfusion_directa"})
+		except Exception as exc:
+			self._log(f"[WARN] No se pudieron generar imágenes pesadas para PDF: {exc}")
+		# Montaje clínico: si hay pixmap en memoria (pestaña ya vista), persistirlo.
+		try:
+			mont_pix = self.preview_pixmaps.get("comparacion_ejes")
+			mont_png = os.path.join(self.output_dir, "sa_montage.png")
+			if (
+				mont_pix is not None
+				and not mont_pix.isNull()
+				and str(getattr(self, "cine_crudo_preview_mode", "")) == "sa_montage"
+			):
+				mont_pix.save(mont_png, "PNG")
+		except Exception:
+			pass
+
 	def _generate_pdf_report(self):
 		if self.study is None or self.seg is None or self.metrics is None or self.territory is None:
 			return
@@ -10610,6 +10714,10 @@ class MainWindow(QMainWindow):
 				)
 		except Exception as exc:
 			self._log(f"Comparación stress-rest no disponible para PDF: {exc}")
+		try:
+			self._ensure_pdf_extra_images()
+		except Exception as exc:
+			self._log(f"[WARN] Imágenes extra del PDF no generadas: {exc}")
 		try:
 			generate_report(
 				output_pdf=pdf_path,
@@ -12344,6 +12452,11 @@ class MainWindow(QMainWindow):
 		from core.raw_reconstruction import RawReconConfig, ProjectionFilterConfig
 
 		ung, gated = self._phase_passenger_filters()
+		# El pasajero debe reproducir el FBP standalone: hereda el MISMO post-filtro
+		# gaussiano que la recon visible (perilla 'Suavizar'). Si no, el FBP del
+		# pasajero queda sin suavizar y el Phase SD se infla (medido 11°→27.6°,
+		# NORMAL→MILD), rompiendo el objetivo de que NÍTIDA iguale al FBP en fase.
+		post_sigma_px = self._cine_crudo_post_filter_sigma_px(study)
 		return RawReconConfig(
 			reconstruction_method="fbp",
 			ungated_filter=ProjectionFilterConfig(kind=ung[0], cutoff=ung[1], order=ung[2]),
@@ -12351,7 +12464,7 @@ class MainWindow(QMainWindow):
 			display_slice_step_px=2,
 			resolution_recovery=False,
 			psf_model=None,
-			post_filter_sigma_px=0.0,
+			post_filter_sigma_px=post_sigma_px,
 		)
 
 	def _cine_crudo_post_filter_sigma_px(self, study=None) -> float:
@@ -12664,6 +12777,7 @@ class MainWindow(QMainWindow):
 						"Pasajero de fase FBP generado: "
 						f"UngGat={phase_cfg.ungated_filter.kind} {phase_cfg.ungated_filter.cutoff:.2f}/{phase_cfg.ungated_filter.order}; "
 						f"Gated={phase_cfg.gated_filter.kind} {phase_cfg.gated_filter.cutoff:.2f}/{phase_cfg.gated_filter.order}; "
+						f"post-filtro sigma={phase_cfg.post_filter_sigma_px:.2f}px; "
 						f"volumen={phase_result.gated_volume.shape}. La fase se calculará sobre este volumen."
 					)
 				except Exception as exc:
