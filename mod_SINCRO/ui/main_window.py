@@ -5606,14 +5606,17 @@ class MainWindow(QMainWindow):
 		return
 
 	def _on_preview_tab_changed(self, index: int):
-		if index < 0 or self.study is None or self.seg is None:
+		if index < 0:
 			return
 		title = self.tabs.tabText(index)
 		tab_name = self._tab_name_from_title(title)
 		# Montaje clínico: se renderiza al entrar (ya no hay botón "Ver montaje").
-		# El resto de acciones (layout, zoom, gates) ocurre en vivo.
+		# El resto de acciones (layout, zoom, gates) ocurre en vivo. Va antes del
+		# guard study/seg porque el crudo puede tener cortes sin segmentación.
 		if tab_name == "comparacion_ejes" and self.cine_crudo_axes_for_export:
 			self._show_cine_crudo_sa_montage()
+			return
+		if self.study is None or self.seg is None:
 			return
 		if tab_name:
 			self._request_lazy_tab_render(tab_name, reason="apertura de pestaña")
