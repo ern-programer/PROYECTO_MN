@@ -39,6 +39,9 @@ class RawReconConfig:
     """
     reconstruction_method: str = "fbp"
     fbp_filter_name: str = "ramp"
+    # Método independiente para la rama gated. Si es None, la rama gated usa
+    # reconstruction_method (que es el método de la rama ungated/perfusión).
+    gated_method: str | None = None
     # Calcado de Xeleris ECToolbox (FBP) para este protocolo cardiaco:
     # ungated Butterworth cutoff 0.52 / orden 5; gated cutoff 0.40 / orden 10
     # (cutoff en fraccion de Nyquist).
@@ -96,6 +99,8 @@ def _validate_config(config: RawReconConfig) -> RawReconConfig:
     method = str(config.reconstruction_method or "fbp").strip().lower()
     if method not in {"fbp", "osem", "mlem"}:
         raise ValueError("reconstruction_method debe ser 'fbp', 'osem' o 'mlem'")
+    if config.gated_method is not None and str(config.gated_method).strip().lower() not in {"fbp", "osem", "mlem"}:
+        raise ValueError("gated_method debe ser 'fbp', 'osem', 'mlem' o None")
     if int(config.iterative_iterations) < 1:
         raise ValueError("iterative_iterations debe ser >= 1")
     if int(config.osem_subsets) < 1:
@@ -594,9 +599,15 @@ def reconstruct_raw_gated_pipeline(
     if getattr(cfg, "resolution_recovery", False) and rr_psf is None:
         notes.append("NÍTIDA (OmniRes) pedido pero inactivo: requiere método OSEM/MLEM y un PsfModel.")
 
+    # Método independiente de la rama gated (None => hereda el de la rama ungated).
+    gated_method = str(cfg.gated_method or method).strip().lower()
+    gated_subsets = int(cfg.osem_subsets) if gated_method == "osem" else 1
+    gated_rr_psf = cfg.psf_model if (getattr(cfg, "resolution_recovery", False) and gated_method in {"osem", "mlem"}) else None
+
     # Reparto del presupuesto de progreso: UngGat ~25%, gates ~70%, post ~5%.
     n_gates = int(raw.shape[0])
     method_label = ("NÍTIDA/" + method.upper()) if rr_psf is not None else method.upper()
+    gated_method_label = ("NÍTIDA/" + gated_method.upper()) if gated_rr_psf is not None else gated_method.upper()
 
     def _ung_progress(frac: float) -> None:
         if progress_callback is not None:
@@ -605,7 +616,7 @@ def reconstruct_raw_gated_pipeline(
     def _gated_progress(frac: float) -> None:
         if progress_callback is not None:
             gate_1based = min(n_gates, int(frac * n_gates) + 1)
-            progress_callback(0.25 + 0.70 * max(0.0, min(1.0, frac)), f"Reconstruyendo gate {gate_1based}/{n_gates} ({method_label})...")
+            progress_callback(0.25 + 0.70 * max(0.0, min(1.0, frac)), f"Reconstruyendo gate {gate_1based}/{n_gates} ({gated_method_label})...")
 
     ung_progress = _ung_progress if progress_callback is not None else None
     gated_progress = _gated_progress if progress_callback is not None else None
@@ -624,16 +635,18 @@ def reconstruct_raw_gated_pipeline(
     gated_volume = reconstruct_gated_projection_volume(
         corrected,
         angles_deg,
-        method=method,
+        method=gated_method,
         projection_filter=cfg.gated_filter,
         fbp_filter_name=cfg.fbp_filter_name,
         iterations=int(cfg.iterative_iterations),
-        subsets=subsets,
-        psf=rr_psf,
+        subsets=gated_subsets,
+        psf=gated_rr_psf,
         progress=gated_progress,
     )
-    if rr_psf is not None:
-        notes.append("NÍTIDA (OmniRes) activo: recuperación de resolución dependiente de profundidad en UngGat y gated.")
+    if rr_psf is not None or gated_rr_psf is not None:
+        notes.append("NÍTIDA (OmniRes) activo: recuperación de resolución dependiente de profundidad.")
+    if gated_method != method:
+        notes.append(f"Método por rama: UngGat={method.upper()}, gated={gated_method.upper()}.")
 
     # Orientación radiológica L/R: la retroproyección produce el volumen con el
     # eje izquierda/derecha del paciente (columnas, axis -1) espejado respecto de

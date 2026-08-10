@@ -288,6 +288,10 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_montage_lin_high = 1.0  # fracción 0..2 (handle top)
 		# Centrar cada corte en su casilla (centroide → centro del panel).
 		self.cine_crudo_montage_center_cuts = False
+		# Filtro visual del montaje clínico (idéntico a la vista de cortes): tipo de
+		# interpolación de display + gaussiano extra. No altera datos ni análisis.
+		self.cine_crudo_montage_interp = "Bilineal"
+		self.cine_crudo_montage_smooth = 0.0
 		# Ventanas por tira/eje (1-based): inicio y cantidad visible.
 		self.cine_crudo_stripe_start = {"SA": 1, "VLA": 1, "HLA": 1}
 		self.cine_crudo_stripe_count = {"SA": 999, "VLA": 999, "HLA": 999}
@@ -473,7 +477,7 @@ class MainWindow(QMainWindow):
 		self.sigma_spin = QDoubleSpinBox()
 		self.sigma_spin.setRange(0.0, 6.0)
 		self.sigma_spin.setSingleStep(0.1)
-		self.sigma_spin.setValue(1.0)
+		self.sigma_spin.setValue(0.0)
 
 		self.harmonics_spin = QSpinBox()
 		self.harmonics_spin.setRange(1, 4)
@@ -1776,12 +1780,12 @@ class MainWindow(QMainWindow):
 				toolbar6_r1 = QHBoxLayout()
 				toolbar6_r2 = QHBoxLayout()
 				toolbar6_r3 = QHBoxLayout()
-				toolbar6_r1.addWidget(QLabel("Recon"))
+				toolbar6_r1.addWidget(QLabel("Recon Ung"))
 				self.cine_crudo_recon_method_combo = QComboBox()
 				self.cine_crudo_recon_method_combo.addItems(["FBP", "MLEM", "OSEM"])
 				self.cine_crudo_recon_method_combo.setCurrentText("FBP")
 				self.cine_crudo_recon_method_combo.setMaximumWidth(74)
-				self.cine_crudo_recon_method_combo.setToolTip("Método de reconstrucción desde crudo corregido. MLEM/OSEM son CPU de referencia para validar el flujo.")
+				self.cine_crudo_recon_method_combo.setToolTip("Método de reconstrucción de la rama UngGat/perfusión. La rama gated tiene su propio método (combo 'Gated'). MLEM/OSEM son CPU de referencia.")
 				toolbar6_r1.addWidget(self.cine_crudo_recon_method_combo)
 				toolbar6_r1.addWidget(QLabel("Ung"))
 				self.cine_crudo_ung_filter_combo = QComboBox()
@@ -1805,6 +1809,12 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_ung_order_spin.setToolTip("Orden del filtro UngGat.")
 				toolbar6_r1.addWidget(self.cine_crudo_ung_order_spin)
 				toolbar6_r1.addWidget(QLabel("Gated"))
+				self.cine_crudo_gated_method_combo = QComboBox()
+				self.cine_crudo_gated_method_combo.addItems(["FBP", "MLEM", "OSEM"])
+				self.cine_crudo_gated_method_combo.setCurrentText("FBP")
+				self.cine_crudo_gated_method_combo.setMaximumWidth(74)
+				self.cine_crudo_gated_method_combo.setToolTip("Método de reconstrucción de la rama gated (independiente del ungated). FBP/MLEM/OSEM.")
+				toolbar6_r1.addWidget(self.cine_crudo_gated_method_combo)
 				self.cine_crudo_gated_filter_combo = QComboBox()
 				self.cine_crudo_gated_filter_combo.addItems(["none", "lowpass", "butterworth", "wiener"])
 				self.cine_crudo_gated_filter_combo.setCurrentText("butterworth")
@@ -1832,9 +1842,11 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_ung_filter_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
 				self.cine_crudo_ung_cutoff_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
 				self.cine_crudo_ung_order_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
+				self.cine_crudo_recon_method_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
 				self.cine_crudo_gated_filter_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
 				self.cine_crudo_gated_cutoff_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
 				self.cine_crudo_gated_order_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
+				self.cine_crudo_gated_method_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
 
 				toolbar6_r2.addWidget(QLabel("Iter"))
 				self.cine_crudo_iter_spin = QSpinBox()
@@ -1916,6 +1928,32 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_cut_thickness_spin.setToolTip("Espesor de corte en píxeles. Cada SA se genera promediando este espesor alrededor del plano seleccionado.")
 				self.cine_crudo_cut_thickness_spin.valueChanged.connect(self._preview_cine_crudo_cut_limits)
 				toolbar6_r2.addWidget(self.cine_crudo_cut_thickness_spin)
+				toolbar6_r2.addWidget(QLabel("Interp cortes"))
+				self.cine_crudo_cuts_interp_combo = QComboBox()
+				# Continuo nítido→suave (interpolación de display, NO altera datos).
+				# Etiqueta visible -> método matplotlib.
+				self.cine_crudo_cuts_interp_combo.addItems(["Píxel", "Bilineal", "Bicúbico", "Hanning", "Lanczos"])
+				self.cine_crudo_cuts_interp_combo.setCurrentText("Bilineal")
+				self.cine_crudo_cuts_interp_combo.setMaximumWidth(90)
+				self.cine_crudo_cuts_interp_combo.setToolTip(
+					"Tipo de interpolación de VISUALIZACIÓN de los cortes (no altera datos ni análisis).\n"
+					"Píxel = vóxel crudo (bloques). Bilineal = intermedio fiel (recomendado).\n"
+					"Bicúbico/Hanning/Lanczos = progresivamente más suaves.")
+				self.cine_crudo_cuts_interp_combo.currentIndexChanged.connect(lambda *_: self._refresh_cine_crudo_cuts_smoothing())
+				toolbar6_r2.addWidget(self.cine_crudo_cuts_interp_combo)
+				toolbar6_r2.addWidget(QLabel("Suav. cortes"))
+				self.cine_crudo_cuts_smooth_spin = QDoubleSpinBox()
+				self.cine_crudo_cuts_smooth_spin.setRange(0.0, 3.0)
+				self.cine_crudo_cuts_smooth_spin.setSingleStep(0.2)
+				self.cine_crudo_cuts_smooth_spin.setDecimals(1)
+				self.cine_crudo_cuts_smooth_spin.setValue(0.0)
+				self.cine_crudo_cuts_smooth_spin.setMaximumWidth(56)
+				self.cine_crudo_cuts_smooth_spin.setToolTip(
+					"Suavizado gaussiano EXTRA [px] de los cortes (post-filtro de display, no altera datos).\n"
+					"0.0 = solo la interpolación elegida. >0 = agrega difuminado gaussiano encima.\n"
+					"Independiente del tipo de interpolación: combinalos a gusto del médico.")
+				self.cine_crudo_cuts_smooth_spin.valueChanged.connect(lambda *_: self._refresh_cine_crudo_cuts_smoothing())
+				toolbar6_r2.addWidget(self.cine_crudo_cuts_smooth_spin)
 				toolbar6_r2.addStretch(1)
 
 				self.cine_crudo_preview_limits_btn = QToolButton()
@@ -12408,6 +12446,11 @@ class MainWindow(QMainWindow):
 				self._log("NÍTIDA (OmniRes) requiere OSEM/MLEM: fuerzo método OSEM para la recuperación de resolución.")
 				method = "osem"
 		rr_active = bool(nitida and psf_model is not None)
+		# Método independiente de la rama gated. Con NÍTIDA activa se fuerza a OSEM
+		# (la RR requiere path iterativo), igual que el método ungated.
+		gated_method = str(self.cine_crudo_gated_method_combo.currentText()).strip().lower() if hasattr(self, "cine_crudo_gated_method_combo") and self.cine_crudo_gated_method_combo is not None else method
+		if rr_active and gated_method not in {"osem", "mlem"}:
+			gated_method = "osem"
 		# Con NÍTIDA activa los filtros de proyección se anulan: pre-difuminar el
 		# sinograma peleó contra la PSF que la RR intenta des-difuminar. El control
 		# de ruido pasa al post-filtro gaussiano (perilla única).
@@ -12421,6 +12464,7 @@ class MainWindow(QMainWindow):
 		post_sigma_px = self._cine_crudo_post_filter_sigma_px(study)
 		return RawReconConfig(
 			reconstruction_method=method,
+			gated_method=gated_method,
 			ungated_filter=ungated_filter,
 			gated_filter=gated_filter,
 			iterative_iterations=int(self.cine_crudo_iter_spin.value()) if hasattr(self, "cine_crudo_iter_spin") else 2,
@@ -12509,6 +12553,8 @@ class MainWindow(QMainWindow):
 		proj_filter_widgets = [
 			"cine_crudo_ung_filter_combo", "cine_crudo_ung_cutoff_spin", "cine_crudo_ung_order_spin",
 			"cine_crudo_gated_filter_combo", "cine_crudo_gated_cutoff_spin", "cine_crudo_gated_order_spin",
+			# NÍTIDA fuerza OSEM en ambas ramas: los selectores de método no aplican.
+			"cine_crudo_recon_method_combo", "cine_crudo_gated_method_combo",
 		]
 		for name in proj_filter_widgets:
 			w = getattr(self, name, None)
@@ -12574,91 +12620,6 @@ class MainWindow(QMainWindow):
 			"max_shift_px": 0.0,
 		}
 
-	def _write_cine_crudo_recon_qc(self, result, source_label: str) -> str:
-		import matplotlib.pyplot as plt
-
-		ung = np.asarray(result.ungated_volume, dtype=np.float64)
-		gated = np.asarray(result.gated_volume, dtype=np.float64)
-		mid_slice = int(np.clip(ung.shape[0] // 2, 0, ung.shape[0] - 1))
-		mid_y = int(np.clip(ung.shape[1] // 2, 0, ung.shape[1] - 1))
-		mid_x = int(np.clip(ung.shape[2] // 2, 0, ung.shape[2] - 1))
-		# Gates clave del ciclo: ED por convención (gate 1) y ES por mínima cavidad.
-		ed_gate = 0
-		es_gate = self._detect_es_gate(gated)
-
-		def _norm(img2d: np.ndarray) -> np.ndarray:
-			arr = np.asarray(img2d, dtype=np.float64)
-			p99 = float(np.percentile(arr, 99.0)) if arr.size else 0.0
-			if p99 <= 0.0:
-				p99 = float(np.max(arr)) if arr.size else 1.0
-			return np.clip(arr / max(p99, 1e-8), 0.0, 1.0)
-
-		def _axis_triplet(vol3d: np.ndarray) -> dict[str, np.ndarray]:
-			vol = np.asarray(vol3d, dtype=np.float64)
-			sa = vol[mid_slice]
-			hla = np.fliplr(np.rot90(vol[:, mid_y, :], k=1))
-			vla = np.flipud(np.rot90(vol[:, :, mid_x], k=-1))
-			return {"SA": sa, "HLA": hla, "VLA": vla}
-
-		# Columnas en paralelo: UngGat (perfusión) | Gated ED | Gated ES. Filas = planos.
-		columns = [
-			("UngGat", ung),
-			(f"Gated ED (#{ed_gate + 1})", gated[ed_gate]),
-			(f"Gated ES (#{es_gate + 1})", gated[es_gate]),
-		]
-		planes_order = ["SA", "HLA", "VLA"]
-		plane_tag = {"SA": f"z={mid_slice + 1}", "HLA": f"y={mid_y + 1}", "VLA": f"x={mid_x + 1}"}
-		fig, axes = plt.subplots(3, 3, figsize=(11.5, 10.6))
-		for col_idx, (col_label, vol) in enumerate(columns):
-			triplet = _axis_triplet(vol)
-			for row_idx, plane in enumerate(planes_order):
-				ax = axes[row_idx, col_idx]
-				img = triplet[plane]
-				ax.imshow(_norm(img), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="equal" if plane == "SA" else "auto")
-				ax.axis("off")
-				ax.set_facecolor("#0b1220")
-				if row_idx == 0:
-					ax.set_title(col_label, color="white", fontsize=10, fontweight="bold")
-				if col_idx == 0:
-					ax.text(-0.06, 0.5, plane, transform=ax.transAxes, color="#9fd0ff", fontsize=11,
-						fontweight="bold", rotation=90, va="center", ha="center")
-				ax.text(0.03, 0.05, plane_tag[plane], transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
-		cfg = result.config
-		fig.patch.set_facecolor("#0b1220")
-		fig.suptitle(
-			f"Recon raw {cfg.reconstruction_method.upper()} · UngGat vs Gated (ED/ES) | fuente: {source_label}\n"
-			f"Ung={cfg.ungated_filter.kind} {cfg.ungated_filter.cutoff:.2f}/{cfg.ungated_filter.order}   ·   "
-			f"Gated={cfg.gated_filter.kind} {cfg.gated_filter.cutoff:.2f}/{cfg.gated_filter.order}",
-			color="white", fontsize=10.5, fontweight="bold",
-		)
-		fig.tight_layout(rect=[0, 0, 1, 0.90])
-		out_png = os.path.join(self.output_dir, "raw_reconstruction_qc.png")
-		fig.savefig(out_png, dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
-		plt.close(fig)
-		return out_png
-
-	def _detect_es_gate(self, gated_volume) -> int:
-		"""Gate de fin de sístole (ES) por máxima concentración central (mínima cavidad).
-
-		Sobre el gated ya reconstruido, mide el conteo en un VOI central del VI:
-		en ES las paredes convergen hacia el centro y el conteo del núcleo es máximo
-		(cavidad mínima). Devuelve índice 0-based. Cae a mitad de ciclo si degenera.
-		"""
-		gated = np.asarray(gated_volume, dtype=np.float64)
-		if gated.ndim != 4 or gated.shape[0] <= 1:
-			return 0
-		n_gates, nz, ny, nx = gated.shape
-		z0, z1 = nz // 4, max(nz // 4 + 1, (3 * nz) // 4)
-		y0, y1 = (3 * ny) // 8, max((3 * ny) // 8 + 1, (5 * ny) // 8)
-		x0, x1 = (3 * nx) // 8, max((3 * nx) // 8 + 1, (5 * nx) // 8)
-		core_counts = gated[:, z0:z1, y0:y1, x0:x1].sum(axis=(1, 2, 3))
-		if not np.any(np.isfinite(core_counts)) or float(np.ptp(core_counts)) <= 0.0:
-			return int(np.clip(n_gates // 2, 1, n_gates - 1))
-		es = int(np.argmax(core_counts))
-		if es == 0:  # no debe coincidir con ED (gate 1): buscar máximo en el resto
-			es = int(np.argmax(core_counts[1:])) + 1
-		return es
-
 	def _schedule_recon_branch_recompute(self, branch: str) -> None:
 		"""Dispara (con debounce) el recompute de una rama tras cambiar su filtro."""
 		if getattr(self, "cine_crudo_recon_result", None) is None:
@@ -12679,12 +12640,12 @@ class MainWindow(QMainWindow):
 		self._recompute_recon_branch("gated")
 
 	def _recompute_recon_branch(self, branch: str) -> None:
-		"""Recomputa SOLO una rama (ungated o gated) con el filtro actual de la UI.
+		"""Recomputa SOLO una rama (ungated o gated) con el filtro/método actual de la UI.
 
 		Reutiliza las proyecciones ya corregidas por motion correction guardadas en
 		``result`` (no rehace el pipeline entero) y reaplica el mismo flip L/R y
-		post-filtro que el pipeline, para que la rama recomputada sea consistente
-		con la otra. Refresca el QC de 3 columnas al terminar.
+		post-filtro que el pipeline. Cada rama tiene su propio método (FBP/MLEM/OSEM).
+		Refresca la vista dual de límites al terminar.
 		"""
 		from dataclasses import replace as _dc_replace
 
@@ -12694,7 +12655,11 @@ class MainWindow(QMainWindow):
 		cfg = result.config
 		if bool(getattr(cfg, "resolution_recovery", False)):
 			return  # NÍTIDA: filtros de proyección desactivados por diseño
-		method = str(cfg.reconstruction_method).strip().lower()
+		# Método propio de la rama desde su combo.
+		if branch == "ungated":
+			method = str(self.cine_crudo_recon_method_combo.currentText()).strip().lower() if hasattr(self, "cine_crudo_recon_method_combo") else "fbp"
+		else:
+			method = str(self.cine_crudo_gated_method_combo.currentText()).strip().lower() if hasattr(self, "cine_crudo_gated_method_combo") else "fbp"
 		if method not in {"fbp", "mlem", "osem"}:
 			return
 		from scipy.ndimage import gaussian_filter
@@ -12724,7 +12689,7 @@ class MainWindow(QMainWindow):
 				if post_sigma > 0.05:
 					vol = gaussian_filter(vol, sigma=post_sigma, mode="constant")
 				result.ungated_volume = vol
-				result.config = _dc_replace(cfg, ungated_filter=new_filter)
+				result.config = _dc_replace(cfg, reconstruction_method=method, ungated_filter=new_filter)
 			else:
 				gated = reconstruct_gated_projection_volume(
 					np.asarray(result.corrected_projections, dtype=np.float64), angles,
@@ -12737,35 +12702,15 @@ class MainWindow(QMainWindow):
 					for g in range(gated.shape[0]):
 						gated[g] = gaussian_filter(gated[g], sigma=post_sigma, mode="constant")
 				result.gated_volume = gated
-				result.config = _dc_replace(cfg, gated_filter=new_filter)
+				result.config = _dc_replace(cfg, gated_method=method, gated_filter=new_filter)
 		except Exception as exc:
 			self._log(f"[WARN] Recompute rama {branch} falló: {exc}")
 			return
 		self._log(
-			f"Recompute {branch}: filtro={new_filter.kind} {new_filter.cutoff:.2f}/{new_filter.order} "
-			f"({method.upper()}). La otra rama se conserva."
+			f"Recompute {branch}: {method.upper()} · filtro={new_filter.kind} {new_filter.cutoff:.2f}/{new_filter.order}. "
+			"La otra rama se conserva."
 		)
-		self._refresh_cine_crudo_recon_qc()
-
-	def _refresh_cine_crudo_recon_qc(self) -> None:
-		"""Regenera el PNG del QC de recon y lo muestra sin recomputar volúmenes."""
-		result = getattr(self, "cine_crudo_recon_result", None)
-		if result is None:
-			return
-		source_label = getattr(self, "cine_crudo_cut_source_label", "") or "recon"
-		try:
-			out_png = self._write_cine_crudo_recon_qc(result, source_label)
-		except Exception as exc:
-			self._log(f"[WARN] No pude refrescar el QC de reconstrucción: {exc}")
-			return
-		self.cine_crudo_preview_mode = "recon_qc"
-		if "cine_crudo" in self.preview_labels:
-			pix = QPixmap(out_png)
-			self.preview_pixmaps["cine_crudo"] = pix
-			self.preview_base_sizes["cine_crudo"] = pix.size()
-			self.preview_zoom["cine_crudo"] = 0.4
-			self._apply_preview_zoom("cine_crudo")
-			self._select_tab_by_title("cine_crudo")
+		self._preview_cine_crudo_cut_limits()
 
 
 	def _cine_crudo_recon_target(self):
@@ -12939,16 +12884,6 @@ class MainWindow(QMainWindow):
 				except Exception as exc:
 					self.cine_crudo_recon_result_phase = None
 					self._log(f"[WARN] Pasajero de fase FBP no generado; la fase caerá al volumen NÍTIDA: {exc}")
-			out_png = self._write_cine_crudo_recon_qc(result, source_label)
-			self.cine_crudo_preview_mode = "recon_qc"
-			if "cine_crudo" in self.preview_labels:
-				pix = QPixmap(out_png)
-				self.preview_pixmaps["cine_crudo"] = pix
-				self.preview_base_sizes["cine_crudo"] = pix.size()
-				# La QC de reconstrucción se muestra al 40% (el cine crudo usa 500%).
-				self.preview_zoom["cine_crudo"] = 0.4
-				self._apply_preview_zoom("cine_crudo")
-				self._select_tab_by_title("cine_crudo")
 
 			self.cine_crudo_recon_study = None
 			self.cine_crudo_cut_study = None
@@ -13028,29 +12963,23 @@ class MainWindow(QMainWindow):
 		import matplotlib.pyplot as plt
 
 		ung = np.asarray(result.ungated_volume, dtype=np.float64)
+		gated_all = np.asarray(result.gated_volume, dtype=np.float64)
+		# Panel gated: gate ED (fin de diástole = gate 1) por convención.
+		gated_ed = gated_all[0] if (gated_all.ndim == 4 and gated_all.shape[0] > 0) else ung
 		mid_y = int(np.clip(ung.shape[1] // 2, 0, ung.shape[1] - 1))
 		mid_x = int(np.clip(ung.shape[2] // 2, 0, ung.shape[2] - 1))
 		mid_z = int(np.clip((int(z0) + int(z1)) // 2, 0, ung.shape[0] - 1))
-		sa_base = self._thickened_sa_volume(ung, int(z0), int(z0), thickness_px)[0]
-		sa_mid = self._thickened_sa_volume(ung, mid_z, mid_z, thickness_px)[0]
-		sa_apex = self._thickened_sa_volume(ung, int(z1), int(z1), thickness_px)[0]
 
-		# --- Vistas de referencia orientadas (resolvedor multi-cámara) ---
-		# Por defecto (sin metadatos de ángulo) caemos a los cortes centrales
-		# crudos, que dependen de la cámara. Con StartAngle/dir + IOP resolvemos
-		# la vista anterior (AP) y lateral izquierda reales, iguales sea cual sea
-		# la cámara. El eje vertical (z) se mantiene sin voltear para no romper el
-		# mapeo interactivo base/ápex; sólo se espeja horizontal (L/R) si hace falta.
+		# --- Vistas de referencia orientadas (resolvedor multi-cámara), resueltas
+		# una sola vez y reutilizadas para ambas ramas (misma geometría). ---
 		title_ap = "Vista longitudinal Y · límites"
 		title_ll = "Vista longitudinal X · límites"
-		long_y = ung[:, mid_y, :]
-		long_x = ung[:, :, mid_x]
+		ori = None
 		orient_note = None
 		try:
 			raw_study = getattr(self, "cine_crudo_raw_study_for_recon", None) or getattr(self, "study", None)
 			if raw_study is not None:
 				from core.orientation_resolver import resolve_orientation
-				from core.spect_geometry import reproject_view
 				ori = resolve_orientation(
 					manufacturer=str(getattr(raw_study, "manufacturer", "") or ""),
 					model=str(getattr(raw_study, "model", "") or ""),
@@ -13061,38 +12990,68 @@ class MainWindow(QMainWindow):
 					detector_iop=getattr(raw_study, "detector_iop", None),
 				)
 				if ori.anterior_angle_deg is not None and ori.left_lateral_angle_deg is not None:
-					view_ap = reproject_view(ung, float(ori.anterior_angle_deg))
-					view_ll = reproject_view(ung, float(ori.left_lateral_angle_deg))
-					if ori.mirror_ap_lr:
-						view_ap = view_ap[:, ::-1]
-					if ori.mirror_ll_lr:
-						view_ll = view_ll[:, ::-1]
-					long_y = view_ap
-					long_x = view_ll
 					title_ap = f"Anterior (AP) · {ori.anterior_angle_deg:.0f}°"
 					title_ll = f"Lateral izq · {ori.left_lateral_angle_deg:.0f}°"
 					orient_note = f"Orientación: perfil '{ori.profile_key}' (fuente {ori.source})"
 					if not ori.calibrated:
 						orient_note += " — sin calibrar, verificar a ojo"
 					self._log(f"[ORIENT] {orient_note}. " + " | ".join(ori.notes))
+				else:
+					ori = None
 		except Exception as exc:
+			ori = None
 			self._log(f"[WARN] Resolvedor de orientación no aplicado (fallback a cortes crudos): {exc}")
+
+		def _long_views(vol3d: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+			v = np.asarray(vol3d, dtype=np.float64)
+			ly = v[:, mid_y, :]
+			lx = v[:, :, mid_x]
+			if ori is not None:
+				from core.spect_geometry import reproject_view
+				va = reproject_view(v, float(ori.anterior_angle_deg))
+				vl = reproject_view(v, float(ori.left_lateral_angle_deg))
+				if ori.mirror_ap_lr:
+					va = va[:, ::-1]
+				if ori.mirror_ll_lr:
+					vl = vl[:, ::-1]
+				ly, lx = va, vl
+			return ly, lx
 
 		def _norm(img2d: np.ndarray) -> np.ndarray:
 			arr = np.asarray(img2d, dtype=np.float64)
 			p99 = float(np.percentile(arr, 99.0)) if arr.size else 0.0
 			return np.clip(arr / max(p99, 1e-8), 0.0, 1.0)
 
-		fig, axes = plt.subplots(2, 3, figsize=(11.5, 7.2))
+		ung_ly, ung_lx = _long_views(ung)
+		g_ly, g_lx = _long_views(gated_ed)
+		ung_sa_base = self._thickened_sa_volume(ung, int(z0), int(z0), thickness_px)[0]
+		ung_sa_mid = self._thickened_sa_volume(ung, mid_z, mid_z, thickness_px)[0]
+		ung_sa_apex = self._thickened_sa_volume(ung, int(z1), int(z1), thickness_px)[0]
+		g_sa_base = self._thickened_sa_volume(gated_ed, int(z0), int(z0), thickness_px)[0]
+		g_sa_mid = self._thickened_sa_volume(gated_ed, mid_z, mid_z, thickness_px)[0]
+		g_sa_apex = self._thickened_sa_volume(gated_ed, int(z1), int(z1), thickness_px)[0]
+
+		cfg = result.config
+		ung_method = str(cfg.reconstruction_method).upper()
+		gated_method = str(getattr(cfg, "gated_method", None) or cfg.reconstruction_method).upper()
+
+		# Ungated (cols 0-2) | Gated ED (cols 3-5). Fila 0 = longitudinales + info;
+		# fila 1 = SA Base/medio/Ápex.
+		fig, axes = plt.subplots(2, 6, figsize=(20.5, 7.2))
 		for ax in axes.ravel():
 			ax.axis("off")
 			ax.set_facecolor("#0b1220")
 
-		axes[0, 0].imshow(_norm(long_y), cmap="odyssey_cool", aspect="auto")
-		axes[0, 0].set_title(title_ap, color="white", fontsize=9, fontweight="bold")
-		axes[0, 1].imshow(_norm(long_x), cmap="odyssey_cool", aspect="auto")
-		axes[0, 1].set_title(title_ll, color="white", fontsize=9, fontweight="bold")
-		for ax in (axes[0, 0], axes[0, 1]):
+		axes[0, 0].imshow(_norm(ung_ly), cmap="odyssey_cool", aspect="auto")
+		axes[0, 0].set_title(f"UngGat · {title_ap}", color="white", fontsize=9, fontweight="bold")
+		axes[0, 1].imshow(_norm(ung_lx), cmap="odyssey_cool", aspect="auto")
+		axes[0, 1].set_title(f"UngGat · {title_ll}", color="white", fontsize=9, fontweight="bold")
+		axes[0, 3].imshow(_norm(g_ly), cmap="odyssey_cool", aspect="auto")
+		axes[0, 3].set_title(f"Gated ED · {title_ap}", color="#9fd0ff", fontsize=9, fontweight="bold")
+		axes[0, 4].imshow(_norm(g_lx), cmap="odyssey_cool", aspect="auto")
+		axes[0, 4].set_title(f"Gated ED · {title_ll}", color="#9fd0ff", fontsize=9, fontweight="bold")
+
+		for ax in (axes[0, 0], axes[0, 1], axes[0, 3], axes[0, 4]):
 			ax.axis("on")
 			ax.set_xticks([])
 			ax.set_yticks([])
@@ -13105,33 +13064,44 @@ class MainWindow(QMainWindow):
 			ax.axhline(mid_z, color="#66ff66", linewidth=1.2, linestyle="--")
 			ax.text(0.02, 0.05, f"Base {z0 + 1}  Ápex {z1 + 1}  Esp {thickness_px}px", transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
 
-		for ax, title, img, z in [
-			(axes[1, 0], "SA Base", sa_base, z0),
-			(axes[1, 1], "SA medio", sa_mid, mid_z),
-			(axes[1, 2], "SA Ápex", sa_apex, z1),
-		]:
+		sa_panels = [
+			(axes[1, 0], "SA Base", ung_sa_base, z0), (axes[1, 1], "SA medio", ung_sa_mid, mid_z), (axes[1, 2], "SA Ápex", ung_sa_apex, z1),
+			(axes[1, 3], "SA Base", g_sa_base, z0), (axes[1, 4], "SA medio", g_sa_mid, mid_z), (axes[1, 5], "SA Ápex", g_sa_apex, z1),
+		]
+		for ax, title, img, z in sa_panels:
 			ax.imshow(_norm(img), cmap="odyssey_cool", vmin=0.0, vmax=1.0)
 			ax.set_title(title, color="white", fontsize=9, fontweight="bold")
 			ax.text(0.03, 0.05, f"SA {int(z) + 1}", transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
 
-		axes[0, 2].text(0.5, 0.5, "Ajustá Base / Ápex / Esp\ny mirá las líneas rojas\nantes de Generar cortes", ha="center", va="center", color="white", fontsize=10, fontweight="bold")
+		axes[0, 2].text(0.5, 0.62, f"UNGATED\n{ung_method} · {cfg.ungated_filter.kind}\n{cfg.ungated_filter.cutoff:.2f}/{cfg.ungated_filter.order}",
+			ha="center", va="center", color="white", fontsize=9, fontweight="bold")
+		axes[0, 2].text(0.5, 0.20, "Ajustá Base / Ápex / Esp\ny mirá las líneas rojas", ha="center", va="center", color="#7cf29a", fontsize=8)
 		if orient_note:
-			axes[0, 2].text(0.5, 0.06, orient_note, ha="center", va="bottom", color="#7cf29a", fontsize=7, wrap=True)
+			axes[0, 2].text(0.5, 0.02, orient_note, ha="center", va="bottom", color="#7cf29a", fontsize=6.5, wrap=True)
+		axes[0, 5].text(0.5, 0.62, f"GATED (ED)\n{gated_method} · {cfg.gated_filter.kind}\n{cfg.gated_filter.cutoff:.2f}/{cfg.gated_filter.order}",
+			ha="center", va="center", color="#9fd0ff", fontsize=9, fontweight="bold")
+		axes[0, 5].text(0.5, 0.20, "Elegí método/filtro gated:\nactualiza en vivo", ha="center", va="center", color="#7cf29a", fontsize=8)
+
 		fig.patch.set_facecolor("#0b1220")
-		fig.suptitle("Selección de límites para cortes cardíacos", color="white", fontsize=11, fontweight="bold")
+		fig.suptitle("Selección de límites para cortes cardíacos — UngGat | Gated ED", color="white", fontsize=11, fontweight="bold")
 		fig.tight_layout(rect=[0, 0, 1, 0.92])
-		# Metadatos geométricos exactos de los paneles interactivos (fila superior)
-		# en coordenadas normalizadas de la figura, para mapear mouse->slice.
-		p_left = axes[0, 0].get_position().bounds
-		p_mid = axes[0, 1].get_position().bounds
+		# Metadatos geométricos exactos de los paneles longitudinales interactivos
+		# (fila superior, ambas ramas) en coordenadas normalizadas de figura, para
+		# mapear mouse->slice. Se puede arrastrar Base/Ápex sobre cualquiera de los 4.
+		def _bounds(ax) -> dict:
+			b = ax.get_position().bounds
+			return {"x0": float(b[0]), "y0": float(b[1]), "w": float(b[2]), "h": float(b[3])}
+
 		meta = {
 			"n_slices": int(ung.shape[0]),
 			"z0": int(z0),
 			"z1": int(z1),
 			"thickness": int(thickness_px),
 			"top_axes": {
-				"left": {"x0": float(p_left[0]), "y0": float(p_left[1]), "w": float(p_left[2]), "h": float(p_left[3])},
-				"mid": {"x0": float(p_mid[0]), "y0": float(p_mid[1]), "w": float(p_mid[2]), "h": float(p_mid[3])},
+				"left": _bounds(axes[0, 0]),
+				"mid": _bounds(axes[0, 1]),
+				"gleft": _bounds(axes[0, 3]),
+				"gmid": _bounds(axes[0, 4]),
 			},
 		}
 		out_png = os.path.join(self.output_dir, "raw_cut_limits_qc.png")
@@ -13140,6 +13110,7 @@ class MainWindow(QMainWindow):
 		fig.savefig(out_png, dpi=150, facecolor=fig.get_facecolor())
 		plt.close(fig)
 		return out_png, meta
+
 
 	def _preview_cine_crudo_cut_limits(self, active_marker: str | None = None):
 		if self.cine_crudo_recon_result is None:
@@ -13213,7 +13184,7 @@ class MainWindow(QMainWindow):
 		in_top_axis = False
 		y0_match = 0.0
 		h_match = 1.0
-		for ax in ("left", "mid"):
+		for ax in top.keys():
 			r = top.get(ax, {})
 			x0 = float(r.get("x0", 0.0)); y0 = float(r.get("y0", 0.0))
 			w = float(r.get("w", 0.0)); h = float(r.get("h", 0.0))
@@ -13312,6 +13283,19 @@ class MainWindow(QMainWindow):
 		z1 = int(np.clip(z1, 0, n_slices - 1))
 		mid_slice = int(np.clip((z0 + z1) // 2, 0, n_slices - 1))
 		thickness = self._cine_crudo_cut_thickness_px()
+		# Guarda los argumentos para re-render en vivo al mover "Suav. cortes".
+		self._cine_crudo_cuts_qc_args = (np.array(vol, copy=True), int(z0), int(z1))
+
+		# Interpolación de VISUALIZACIÓN (no toca datos) y gaussiano extra, ambos
+		# independientes: el combo da el continuo nítido→suave, el spin agrega
+		# difuminado gaussiano encima si el médico lo quiere.
+		_interp_map = {"Píxel": "nearest", "Bilineal": "bilinear", "Bicúbico": "bicubic", "Hanning": "hanning", "Lanczos": "lanczos"}
+		interp = "bilinear"
+		if hasattr(self, "cine_crudo_cuts_interp_combo") and self.cine_crudo_cuts_interp_combo is not None:
+			interp = _interp_map.get(self.cine_crudo_cuts_interp_combo.currentText(), "bilinear")
+		cuts_smooth = 0.0
+		if hasattr(self, "cine_crudo_cuts_smooth_spin") and self.cine_crudo_cuts_smooth_spin is not None:
+			cuts_smooth = float(self.cine_crudo_cuts_smooth_spin.value())
 
 		try:
 			from scipy.ndimage import gaussian_filter
@@ -13320,8 +13304,8 @@ class MainWindow(QMainWindow):
 
 		def _norm(img2d: np.ndarray) -> np.ndarray:
 			arr = np.asarray(img2d, dtype=np.float64)
-			if gaussian_filter is not None and arr.ndim == 2:
-				arr = gaussian_filter(arr, sigma=0.6)
+			if gaussian_filter is not None and arr.ndim == 2 and cuts_smooth > 0.0:
+				arr = gaussian_filter(arr, sigma=cuts_smooth)
 			p99 = float(np.percentile(arr, 99.5)) if arr.size else 0.0
 			p5 = float(np.percentile(arr, 5.0)) if arr.size else 0.0
 			return np.clip((arr - p5) / max(p99 - p5, 1e-8), 0.0, 1.0)
@@ -13350,7 +13334,7 @@ class MainWindow(QMainWindow):
 			ax.set_facecolor("#020611")
 
 		# Fila superior: localización SA + límites en los ejes largos (líneas rojas base/ápex).
-		axes[0, 0].imshow(_norm(sa_crop), cmap="odyssey_cool", vmin=0.0, vmax=1.0, interpolation="bicubic")
+		axes[0, 0].imshow(_norm(sa_crop), cmap="odyssey_cool", vmin=0.0, vmax=1.0, interpolation=interp)
 		axes[0, 0].set_title("Localización SA", color="white", fontsize=9, fontweight="bold")
 		axes[0, 0].axhline((sa_crop.shape[0] - 1) / 2.0, color="#40ff5a", linewidth=1.0)
 		axes[0, 0].axvline((sa_crop.shape[1] - 1) / 2.0, color="#40ff5a", linewidth=1.0)
@@ -13358,7 +13342,7 @@ class MainWindow(QMainWindow):
 
 		nk = int(vol.shape[0])
 		# VLA: base→ápex en columnas (BASE izq / APEX der) → líneas verticales.
-		axes[0, 1].imshow(_norm(vla_view), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="auto", interpolation="bicubic")
+		axes[0, 1].imshow(_norm(vla_view), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="auto", interpolation=interp)
 		axes[0, 1].set_title("VLA limits · ANT↑ BASE←", color="white", fontsize=9, fontweight="bold")
 		axes[0, 1].axvline(z0, color="#ff3333", linewidth=1.6)
 		axes[0, 1].axvline(z1, color="#ff3333", linewidth=1.6)
@@ -13366,7 +13350,7 @@ class MainWindow(QMainWindow):
 		axes[0, 1].text(0.03, 0.05, f"Base {z0 + 1}  Ápex {z1 + 1}  Esp {thickness}px", transform=axes[0, 1].transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
 		# HLA: APEX arriba / BASE abajo (fila k invertida) → líneas horizontales
 		# en coordenada de fila invertida k' = (nk-1) - k.
-		axes[0, 2].imshow(_norm(hla_view), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="auto", interpolation="bicubic")
+		axes[0, 2].imshow(_norm(hla_view), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="auto", interpolation=interp)
 		axes[0, 2].set_title("HLA limits · APEX↑ SEP←", color="white", fontsize=9, fontweight="bold")
 		axes[0, 2].axhline((nk - 1) - z0, color="#ff3333", linewidth=1.6)
 		axes[0, 2].axhline((nk - 1) - z1, color="#ff3333", linewidth=1.6)
@@ -13379,7 +13363,7 @@ class MainWindow(QMainWindow):
 			(axes[1, 1], "HLA", hla_cut, "APEX↑ · SEP← LAT→"),
 			(axes[1, 2], "SA", sa_crop, "ANT↑ · SEP← LAT→"),
 		]:
-			ax.imshow(_norm(img), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="auto" if title != "SA" else "equal", interpolation="bicubic")
+			ax.imshow(_norm(img), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="auto" if title != "SA" else "equal", interpolation=interp)
 			ax.set_title(title, color="white", fontsize=10, fontweight="bold")
 			ax.text(0.03, 0.05, marker, transform=ax.transAxes, color="#e8f5e9", fontsize=8, fontweight="bold")
 		fig.patch.set_facecolor("#0b1220")
@@ -13393,6 +13377,31 @@ class MainWindow(QMainWindow):
 		fig.savefig(out_png, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
 		plt.close(fig)
 		return out_png
+
+	def _refresh_cine_crudo_cuts_smoothing(self) -> None:
+		"""Re-renderiza el QC de cortes al mover 'Suav. cortes' (solo display).
+
+		No recomputa el volumen ni el análisis: reusa los cortes ya generados y
+		aplica el post-filtro de visualización elegido. Silencioso si aún no hay
+		cortes generados en pantalla.
+		"""
+		if getattr(self, "cine_crudo_preview_mode", None) != "generated_cuts":
+			return
+		args = getattr(self, "_cine_crudo_cuts_qc_args", None)
+		if not args:
+			return
+		ung_vol, z0, z1 = args
+		try:
+			out_png = self._write_cine_crudo_cuts_qc(np.asarray(ung_vol, dtype=np.float64), int(z0), int(z1))
+		except Exception as exc:
+			self._log(f"[WARN] Re-render de suavizado de cortes falló: {exc}")
+			return
+		for tab_name in ("comparacion_ejes", "cine_crudo"):
+			if tab_name in self.preview_labels:
+				pix = QPixmap(out_png)
+				self.preview_pixmaps[tab_name] = pix
+				self.preview_base_sizes[tab_name] = pix.size()
+				self._apply_preview_zoom(tab_name)
 
 	def _reorient_locked_voi_for_stage(self):
 		"""Devuelve el VOI (semiejes) bloqueado si otra etapa ya reorientó, o None.
@@ -13762,6 +13771,20 @@ class MainWindow(QMainWindow):
 		from PIL import Image
 		rows = max(1, len(rows_data))
 		cols = max(1, int(cols))
+		# Filtro visual del montaje (idéntico a la vista de cortes): interpolación de
+		# resample + gaussiano extra. Solo display, no altera datos ni análisis.
+		_pil_resample = {
+			"Píxel": Image.NEAREST, "Bilineal": Image.BILINEAR, "Bicúbico": Image.BICUBIC,
+			"Hanning": Image.HAMMING, "Lanczos": Image.LANCZOS,
+		}
+		resample = _pil_resample.get(str(getattr(self, "cine_crudo_montage_interp", "Bilineal")), Image.BILINEAR)
+		montage_smooth = float(getattr(self, "cine_crudo_montage_smooth", 0.0) or 0.0)
+		_gauss = None
+		if montage_smooth > 0.0:
+			try:
+				from scipy.ndimage import gaussian_filter as _gauss
+			except Exception:
+				_gauss = None
 		# Panel px: 512 en HQ (final/export), menor durante la interacción (fast-pass).
 		PANEL = max(120, int(getattr(self, "_montage_panel_px", 512)))
 		f = PANEL / 150.0
@@ -13783,6 +13806,8 @@ class MainWindow(QMainWindow):
 				if c >= cols:
 					continue
 				img = np.clip(np.asarray(p["img"], dtype=np.float32), 0.0, 1.0)
+				if _gauss is not None:
+					img = np.clip(_gauss(img, sigma=montage_smooth), 0.0, 1.0).astype(np.float32)
 				ih, iw = int(img.shape[0]), int(img.shape[1])
 				# Preservar relación de aspecto (evita VLA/HLA estirados); letterbox negro centrado.
 				scale = min(PANEL / max(1, iw), PANEL / max(1, ih))
@@ -13790,7 +13815,7 @@ class MainWindow(QMainWindow):
 				nh = max(1, int(round(ih * scale)))
 				try:
 					# Interpolar en float (mode 'F') evita bandas de cuantización.
-					rimg = np.asarray(Image.fromarray(img, mode="F").resize((nw, nh), Image.BICUBIC))
+					rimg = np.asarray(Image.fromarray(img, mode="F").resize((nw, nh), resample))
 				except Exception:
 					rimg = img[:nh, :nw]
 				idx8 = np.clip(np.asarray(rimg) * 255.0, 0.0, 255.0).astype(np.uint8)
@@ -13929,6 +13954,8 @@ class MainWindow(QMainWindow):
 			float(getattr(self, "cine_crudo_montage_cut_zoom", 1.0) or 1.0),
 			str(getattr(self, "cine_crudo_montage_cmap", "")),
 			bool(getattr(self, "cine_crudo_montage_center_cuts", False)),
+			str(getattr(self, "cine_crudo_montage_interp", "Bilineal")),
+			float(getattr(self, "cine_crudo_montage_smooth", 0.0) or 0.0),
 			str(getattr(self, "cine_crudo_montage_crop_mode", "limits")),
 			str(getattr(self, "cine_crudo_montage_win_mode", "percentil")),
 			float(getattr(self, "cine_crudo_montage_win_low", 2.0) or 0.0),
@@ -14580,6 +14607,30 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_montage_center_btn.toggled.connect(self._on_montage_center_toggled)
 		toolbar.addWidget(self.cine_crudo_montage_center_btn)
 
+		toolbar.addWidget(QLabel("Interp"))
+		self.cine_crudo_montage_interp_combo = QComboBox()
+		self.cine_crudo_montage_interp_combo.addItems(["Píxel", "Bilineal", "Bicúbico", "Hanning", "Lanczos"])
+		self.cine_crudo_montage_interp_combo.setCurrentText(str(getattr(self, "cine_crudo_montage_interp", "Bilineal")))
+		self.cine_crudo_montage_interp_combo.setMaximumWidth(90)
+		self.cine_crudo_montage_interp_combo.setToolTip(
+			"Interpolación de VISUALIZACIÓN del montaje del informe (no altera datos ni análisis).\n"
+			"Píxel = vóxel crudo. Bilineal = intermedio fiel (recomendado).\n"
+			"Bicúbico/Hanning/Lanczos = progresivamente más suaves.")
+		self.cine_crudo_montage_interp_combo.currentIndexChanged.connect(self._on_montage_interp_changed)
+		toolbar.addWidget(self.cine_crudo_montage_interp_combo)
+		toolbar.addWidget(QLabel("Suav."))
+		self.cine_crudo_montage_smooth_spin = QDoubleSpinBox()
+		self.cine_crudo_montage_smooth_spin.setRange(0.0, 3.0)
+		self.cine_crudo_montage_smooth_spin.setSingleStep(0.2)
+		self.cine_crudo_montage_smooth_spin.setDecimals(1)
+		self.cine_crudo_montage_smooth_spin.setValue(float(getattr(self, "cine_crudo_montage_smooth", 0.0)))
+		self.cine_crudo_montage_smooth_spin.setMaximumWidth(56)
+		self.cine_crudo_montage_smooth_spin.setToolTip(
+			"Suavizado gaussiano EXTRA [px] del montaje (post-filtro de display, no altera datos).\n"
+			"0.0 = solo la interpolación elegida. >0 = agrega difuminado gaussiano encima.")
+		self.cine_crudo_montage_smooth_spin.valueChanged.connect(self._on_montage_smooth_changed)
+		toolbar.addWidget(self.cine_crudo_montage_smooth_spin)
+
 		self.cine_crudo_montage_export_btn = QToolButton()
 		self.cine_crudo_montage_export_btn.setText("Guardar PNG")
 		self.cine_crudo_montage_export_btn.setToolTip("Exporta el montaje clínico actual como PNG en la ubicación que elijas.")
@@ -14595,6 +14646,17 @@ class MainWindow(QMainWindow):
 
 	def _on_montage_center_toggled(self, checked):
 		self.cine_crudo_montage_center_cuts = bool(checked)
+		if self.cine_crudo_preview_mode == "sa_montage":
+			self._schedule_montage_refresh(0)
+
+	def _on_montage_interp_changed(self, _idx):
+		if hasattr(self, "cine_crudo_montage_interp_combo"):
+			self.cine_crudo_montage_interp = str(self.cine_crudo_montage_interp_combo.currentText())
+		if self.cine_crudo_preview_mode == "sa_montage":
+			self._schedule_montage_refresh(0)
+
+	def _on_montage_smooth_changed(self, value):
+		self.cine_crudo_montage_smooth = float(value)
 		if self.cine_crudo_preview_mode == "sa_montage":
 			self._schedule_montage_refresh(0)
 
