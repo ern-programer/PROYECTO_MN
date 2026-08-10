@@ -268,7 +268,7 @@ class MainWindow(QMainWindow):
 		# Recorte del montaje: "limits" (markers base/ápex) o "voi" (elipse VOI).
 		self.cine_crudo_montage_crop_mode = "limits"
 		# Plantillas de presentación del montaje.
-		self.cine_crudo_montage_template = "denso"
+		self.cine_crudo_montage_template = "nueve"
 		self.cine_crudo_montage_cut_zoom = 1.0
 		# Colormap y window level (percentiles) del montaje clínico.
 		self.cine_crudo_montage_cmap = "odyssey_cool"
@@ -316,6 +316,15 @@ class MainWindow(QMainWindow):
 		self._montage_recolor_smooth_timer = QTimer(self)
 		self._montage_recolor_smooth_timer.setSingleShot(True)
 		self._montage_recolor_smooth_timer.timeout.connect(self._montage_recolor_smooth_repaint)
+		# Recompute por rama del QC de reconstrucción: al cambiar un filtro se
+		# recomputa SOLO esa rama (ungated o gated) sobre las proyecciones ya
+		# corregidas, con debounce para no recalcular en cada tecla del spin.
+		self._recon_recompute_ung_timer = QTimer(self)
+		self._recon_recompute_ung_timer.setSingleShot(True)
+		self._recon_recompute_ung_timer.timeout.connect(self._recompute_recon_branch_ungated)
+		self._recon_recompute_gated_timer = QTimer(self)
+		self._recon_recompute_gated_timer.setSingleShot(True)
+		self._recon_recompute_gated_timer.timeout.connect(self._recompute_recon_branch_gated)
 		self._preview_scrollers: dict[str, QScrollArea] = {}
 		self._preview_pan_active = False
 		self._preview_pan_anchor = None
@@ -1817,6 +1826,15 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_gated_order_spin.setToolTip("Orden del filtro gated. Xeleris FBP: 10.")
 				toolbar6_r1.addWidget(self.cine_crudo_gated_order_spin)
 				toolbar6_r1.addStretch(1)
+
+				# Auto-recompute por rama: al cambiar un filtro se recomputa SOLO esa
+				# rama del QC (la otra se conserva), con debounce vía QTimer.
+				self.cine_crudo_ung_filter_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
+				self.cine_crudo_ung_cutoff_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
+				self.cine_crudo_ung_order_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
+				self.cine_crudo_gated_filter_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
+				self.cine_crudo_gated_cutoff_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
+				self.cine_crudo_gated_order_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
 
 				toolbar6_r2.addWidget(QLabel("Iter"))
 				self.cine_crudo_iter_spin = QSpinBox()
@@ -6003,7 +6021,7 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_cut_thickness_mm = 0.0
 		self.cine_crudo_cut_thickness_mm_rest = 0.0
 		self.cine_crudo_montage_crop_mode = "limits"
-		self.cine_crudo_montage_template = "denso"
+		self.cine_crudo_montage_template = "nueve"
 		self.cine_crudo_montage_cut_zoom = 1.0
 		self.cine_crudo_stripe_start = {"SA": 1, "VLA": 1, "HLA": 1}
 		self.cine_crudo_stripe_count = {"SA": 999, "VLA": 999, "HLA": 999}
@@ -12564,7 +12582,9 @@ class MainWindow(QMainWindow):
 		mid_slice = int(np.clip(ung.shape[0] // 2, 0, ung.shape[0] - 1))
 		mid_y = int(np.clip(ung.shape[1] // 2, 0, ung.shape[1] - 1))
 		mid_x = int(np.clip(ung.shape[2] // 2, 0, ung.shape[2] - 1))
-		mid_gate = int(np.clip(gated.shape[0] // 2, 0, gated.shape[0] - 1))
+		# Gates clave del ciclo: ED por convención (gate 1) y ES por mínima cavidad.
+		ed_gate = 0
+		es_gate = self._detect_es_gate(gated)
 
 		def _norm(img2d: np.ndarray) -> np.ndarray:
 			arr = np.asarray(img2d, dtype=np.float64)
@@ -12573,44 +12593,180 @@ class MainWindow(QMainWindow):
 				p99 = float(np.max(arr)) if arr.size else 1.0
 			return np.clip(arr / max(p99, 1e-8), 0.0, 1.0)
 
-		def _axis_triplet(vol3d: np.ndarray) -> list[tuple[str, np.ndarray]]:
+		def _axis_triplet(vol3d: np.ndarray) -> dict[str, np.ndarray]:
 			vol = np.asarray(vol3d, dtype=np.float64)
 			sa = vol[mid_slice]
 			hla = np.fliplr(np.rot90(vol[:, mid_y, :], k=1))
 			vla = np.flipud(np.rot90(vol[:, :, mid_x], k=-1))
-			return [("SA", sa), ("HLA", hla), ("VLA", vla)]
+			return {"SA": sa, "HLA": hla, "VLA": vla}
 
-		rows = [
-			("UngGat", _axis_triplet(ung)),
-			(f"Gate {mid_gate + 1}", _axis_triplet(gated[mid_gate])),
+		# Columnas en paralelo: UngGat (perfusión) | Gated ED | Gated ES. Filas = planos.
+		columns = [
+			("UngGat", ung),
+			(f"Gated ED (#{ed_gate + 1})", gated[ed_gate]),
+			(f"Gated ES (#{es_gate + 1})", gated[es_gate]),
 		]
-		fig, axes = plt.subplots(2, 3, figsize=(11.5, 7.2))
-		for row_idx, (row_label, planes) in enumerate(rows):
-			for col_idx, (axis_name, img) in enumerate(planes):
+		planes_order = ["SA", "HLA", "VLA"]
+		plane_tag = {"SA": f"z={mid_slice + 1}", "HLA": f"y={mid_y + 1}", "VLA": f"x={mid_x + 1}"}
+		fig, axes = plt.subplots(3, 3, figsize=(11.5, 10.6))
+		for col_idx, (col_label, vol) in enumerate(columns):
+			triplet = _axis_triplet(vol)
+			for row_idx, plane in enumerate(planes_order):
 				ax = axes[row_idx, col_idx]
-				ax.imshow(_norm(img), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="auto" if axis_name != "SA" else "equal")
-				ax.set_title(f"{row_label} · {axis_name}", color="white", fontsize=9, fontweight="bold")
+				img = triplet[plane]
+				ax.imshow(_norm(img), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="equal" if plane == "SA" else "auto")
 				ax.axis("off")
 				ax.set_facecolor("#0b1220")
-				if axis_name == "SA":
-					ax.text(0.03, 0.05, f"z={mid_slice + 1}", transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
-				elif axis_name == "HLA":
-					ax.text(0.03, 0.05, f"y={mid_y + 1}", transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
-				else:
-					ax.text(0.03, 0.05, f"x={mid_x + 1}", transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
+				if row_idx == 0:
+					ax.set_title(col_label, color="white", fontsize=10, fontweight="bold")
+				if col_idx == 0:
+					ax.text(-0.06, 0.5, plane, transform=ax.transAxes, color="#9fd0ff", fontsize=11,
+						fontweight="bold", rotation=90, va="center", ha="center")
+				ax.text(0.03, 0.05, plane_tag[plane], transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
 		cfg = result.config
 		fig.patch.set_facecolor("#0b1220")
 		fig.suptitle(
-			f"Recon raw {cfg.reconstruction_method.upper()} · cortes SA/HLA/VLA | fuente: {source_label} | "
-			f"Ung={cfg.ungated_filter.kind} {cfg.ungated_filter.cutoff:.2f}/{cfg.ungated_filter.order} | "
+			f"Recon raw {cfg.reconstruction_method.upper()} · UngGat vs Gated (ED/ES) | fuente: {source_label}\n"
+			f"Ung={cfg.ungated_filter.kind} {cfg.ungated_filter.cutoff:.2f}/{cfg.ungated_filter.order}   ·   "
 			f"Gated={cfg.gated_filter.kind} {cfg.gated_filter.cutoff:.2f}/{cfg.gated_filter.order}",
 			color="white", fontsize=10.5, fontweight="bold",
 		)
-		fig.tight_layout(rect=[0, 0, 1, 0.91])
+		fig.tight_layout(rect=[0, 0, 1, 0.90])
 		out_png = os.path.join(self.output_dir, "raw_reconstruction_qc.png")
 		fig.savefig(out_png, dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
 		plt.close(fig)
 		return out_png
+
+	def _detect_es_gate(self, gated_volume) -> int:
+		"""Gate de fin de sístole (ES) por máxima concentración central (mínima cavidad).
+
+		Sobre el gated ya reconstruido, mide el conteo en un VOI central del VI:
+		en ES las paredes convergen hacia el centro y el conteo del núcleo es máximo
+		(cavidad mínima). Devuelve índice 0-based. Cae a mitad de ciclo si degenera.
+		"""
+		gated = np.asarray(gated_volume, dtype=np.float64)
+		if gated.ndim != 4 or gated.shape[0] <= 1:
+			return 0
+		n_gates, nz, ny, nx = gated.shape
+		z0, z1 = nz // 4, max(nz // 4 + 1, (3 * nz) // 4)
+		y0, y1 = (3 * ny) // 8, max((3 * ny) // 8 + 1, (5 * ny) // 8)
+		x0, x1 = (3 * nx) // 8, max((3 * nx) // 8 + 1, (5 * nx) // 8)
+		core_counts = gated[:, z0:z1, y0:y1, x0:x1].sum(axis=(1, 2, 3))
+		if not np.any(np.isfinite(core_counts)) or float(np.ptp(core_counts)) <= 0.0:
+			return int(np.clip(n_gates // 2, 1, n_gates - 1))
+		es = int(np.argmax(core_counts))
+		if es == 0:  # no debe coincidir con ED (gate 1): buscar máximo en el resto
+			es = int(np.argmax(core_counts[1:])) + 1
+		return es
+
+	def _schedule_recon_branch_recompute(self, branch: str) -> None:
+		"""Dispara (con debounce) el recompute de una rama tras cambiar su filtro."""
+		if getattr(self, "cine_crudo_recon_result", None) is None:
+			return
+		# NÍTIDA anula los filtros de proyección: no hay recompute por filtro.
+		cfg = getattr(self.cine_crudo_recon_result, "config", None)
+		if cfg is not None and bool(getattr(cfg, "resolution_recovery", False)):
+			return
+		if branch == "ungated":
+			self._recon_recompute_ung_timer.start(350)
+		else:
+			self._recon_recompute_gated_timer.start(350)
+
+	def _recompute_recon_branch_ungated(self) -> None:
+		self._recompute_recon_branch("ungated")
+
+	def _recompute_recon_branch_gated(self) -> None:
+		self._recompute_recon_branch("gated")
+
+	def _recompute_recon_branch(self, branch: str) -> None:
+		"""Recomputa SOLO una rama (ungated o gated) con el filtro actual de la UI.
+
+		Reutiliza las proyecciones ya corregidas por motion correction guardadas en
+		``result`` (no rehace el pipeline entero) y reaplica el mismo flip L/R y
+		post-filtro que el pipeline, para que la rama recomputada sea consistente
+		con la otra. Refresca el QC de 3 columnas al terminar.
+		"""
+		from dataclasses import replace as _dc_replace
+
+		result = getattr(self, "cine_crudo_recon_result", None)
+		if result is None:
+			return
+		cfg = result.config
+		if bool(getattr(cfg, "resolution_recovery", False)):
+			return  # NÍTIDA: filtros de proyección desactivados por diseño
+		method = str(cfg.reconstruction_method).strip().lower()
+		if method not in {"fbp", "mlem", "osem"}:
+			return
+		from scipy.ndimage import gaussian_filter
+		from core.raw_reconstruction import (
+			reconstruct_projection_volume,
+			reconstruct_gated_projection_volume,
+			_detect_rotation_ccw,
+			_FLIP_X_ON_CCW,
+		)
+
+		raw_study = getattr(self, "cine_crudo_raw_study_for_recon", None) or getattr(self, "study", None)
+		angles = getattr(raw_study, "angles_deg", None) if raw_study is not None else None
+		subsets = int(cfg.osem_subsets) if method == "osem" else 1
+		ccw = _detect_rotation_ccw(angles)
+		flip_x = True if ccw is None else (bool(ccw) == _FLIP_X_ON_CCW)
+		post_sigma = float(getattr(cfg, "post_filter_sigma_px", 0.0) or 0.0)
+		new_filter = self._cine_crudo_recon_filter_config(branch)
+		try:
+			if branch == "ungated":
+				vol = reconstruct_projection_volume(
+					np.asarray(result.ungated_projections, dtype=np.float64), angles,
+					method=method, projection_filter=new_filter, fbp_filter_name=cfg.fbp_filter_name,
+					iterations=int(cfg.iterative_iterations), subsets=subsets,
+				)
+				if flip_x:
+					vol = np.ascontiguousarray(np.flip(vol, axis=-1))
+				if post_sigma > 0.05:
+					vol = gaussian_filter(vol, sigma=post_sigma, mode="constant")
+				result.ungated_volume = vol
+				result.config = _dc_replace(cfg, ungated_filter=new_filter)
+			else:
+				gated = reconstruct_gated_projection_volume(
+					np.asarray(result.corrected_projections, dtype=np.float64), angles,
+					method=method, projection_filter=new_filter, fbp_filter_name=cfg.fbp_filter_name,
+					iterations=int(cfg.iterative_iterations), subsets=subsets,
+				)
+				if flip_x:
+					gated = np.ascontiguousarray(np.flip(gated, axis=-1))
+				if post_sigma > 0.05:
+					for g in range(gated.shape[0]):
+						gated[g] = gaussian_filter(gated[g], sigma=post_sigma, mode="constant")
+				result.gated_volume = gated
+				result.config = _dc_replace(cfg, gated_filter=new_filter)
+		except Exception as exc:
+			self._log(f"[WARN] Recompute rama {branch} falló: {exc}")
+			return
+		self._log(
+			f"Recompute {branch}: filtro={new_filter.kind} {new_filter.cutoff:.2f}/{new_filter.order} "
+			f"({method.upper()}). La otra rama se conserva."
+		)
+		self._refresh_cine_crudo_recon_qc()
+
+	def _refresh_cine_crudo_recon_qc(self) -> None:
+		"""Regenera el PNG del QC de recon y lo muestra sin recomputar volúmenes."""
+		result = getattr(self, "cine_crudo_recon_result", None)
+		if result is None:
+			return
+		source_label = getattr(self, "cine_crudo_cut_source_label", "") or "recon"
+		try:
+			out_png = self._write_cine_crudo_recon_qc(result, source_label)
+		except Exception as exc:
+			self._log(f"[WARN] No pude refrescar el QC de reconstrucción: {exc}")
+			return
+		self.cine_crudo_preview_mode = "recon_qc"
+		if "cine_crudo" in self.preview_labels:
+			pix = QPixmap(out_png)
+			self.preview_pixmaps["cine_crudo"] = pix
+			self.preview_base_sizes["cine_crudo"] = pix.size()
+			self.preview_zoom["cine_crudo"] = 0.4
+			self._apply_preview_zoom("cine_crudo")
+			self._select_tab_by_title("cine_crudo")
+
 
 	def _cine_crudo_recon_target(self):
 		"""Devuelve (study, motion_result, corrected, stage) de la etapa a reconstruir.
@@ -13355,10 +13511,13 @@ class MainWindow(QMainWindow):
 			except Exception as exc:
 				self._log(f"[WARN] No se pudo derivar geometría de adquisición: {exc}")
 				geometry = None
+		_reo_px = getattr(raw_study, "pixel_spacing", None) if raw_study is not None else None
+		_reo_voxel_mm = float(_reo_px[0]) if _reo_px else None
 		dlg = CardiacReorientationDialog(
 			ung_vol, gated_volume=gated_vol,
 			source_label=self.cine_crudo_cut_source_label or "raw recon",
 			geometry=geometry, parent=self,
+			voxel_mm=_reo_voxel_mm,
 			locked_voi=self._reorient_locked_voi_for_stage(),
 			initial_orientation=self._reorient_seed_for_stage(),
 			phase_gated_volume=(
