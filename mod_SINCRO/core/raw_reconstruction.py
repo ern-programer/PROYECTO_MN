@@ -60,6 +60,18 @@ class RawReconConfig:
     # Post-filtro gaussiano 3D opcional (control de ruido post-recon). 0 = off.
     # Sigma en píxeles; es la contraparte de ruido de la recuperación de resolución.
     post_filter_sigma_px: float = 0.0
+    # --- NITIDA II: denoiser temporal/espaciotemporal por armónicos ---
+    # Denoiser gated de bajo conteo aplicado post-recon SOLO al volumen gated
+    # (core.nitida2). Preserva el movimiento cardíaco (bandas de baja frecuencia)
+    # y elimina el ruido de banda alta. Modos:
+    #   "none"          -> desactivado.
+    #   "temporal"      -> filtro temporal por armónicos (conserva DC..H_n).
+    #   "spatiotemporal"-> además suaviza espacialmente DC (fuerte) y H1-2 (suave).
+    nitida2_mode: str = "none"
+    nitida2_harmonics: int = 2
+    nitida2_band_sigma: float = 0.7
+    nitida2_dc_radius: int = 2
+    nitida2_dc_eps: float = 0.01
 
 
 @dataclass
@@ -109,6 +121,9 @@ def _validate_config(config: RawReconConfig) -> RawReconConfig:
         raise ValueError("fevi_slice_step_px debe ser 1 para calcular FEVI con todos los cortes reconstruidos")
     if int(config.display_slice_step_px) < 1:
         raise ValueError("display_slice_step_px debe ser >= 1")
+    nitida2_mode = str(getattr(config, "nitida2_mode", "none") or "none").strip().lower()
+    if nitida2_mode not in {"none", "temporal", "spatiotemporal"}:
+        raise ValueError("nitida2_mode debe ser 'none', 'temporal' o 'spatiotemporal'")
     return config
 
 
@@ -684,6 +699,32 @@ def reconstruct_raw_gated_pipeline(
         for g in range(gated_volume.shape[0]):
             gated_volume[g] = gaussian_filter(gated_volume[g], sigma=post_sigma, mode="constant")
         notes.append(f"Post-filtro gaussiano 3D aplicado (sigma={post_sigma:.2f} px) para control de ruido.")
+
+    # NITIDA II: denoiser gated temporal/espaciotemporal por armónicos. Solo toca
+    # el volumen gated (el ungated ya es de alto conteo). Preserva el movimiento
+    # (bandas de baja frecuencia) y elimina el ruido de banda alta.
+    nitida2_mode = str(getattr(cfg, "nitida2_mode", "none") or "none").strip().lower()
+    if nitida2_mode in {"temporal", "spatiotemporal"} and gated_volume.shape[0] >= 3:
+        if progress_callback is not None:
+            progress_callback(0.98, f"Aplicando NITIDA II ({nitida2_mode})...")
+        from core.nitida2 import denoise_spatiotemporal, temporal_harmonic_filter
+        n_harm = int(getattr(cfg, "nitida2_harmonics", 2))
+        if nitida2_mode == "temporal":
+            gated_volume = temporal_harmonic_filter(gated_volume, n_harmonics=n_harm)
+            notes.append(f"NITIDA II temporal (armónicos 0..{n_harm}) aplicado al gated.")
+        else:
+            gated_volume = denoise_spatiotemporal(
+                gated_volume,
+                n_harmonics=n_harm,
+                dc_radius=int(getattr(cfg, "nitida2_dc_radius", 2)),
+                dc_eps=float(getattr(cfg, "nitida2_dc_eps", 0.01)),
+                band_sigma=float(getattr(cfg, "nitida2_band_sigma", 0.7)),
+                guide_volume=ungated_volume / gated_volume.shape[0],
+            )
+            notes.append(
+                f"NITIDA II espaciotemporal (armónicos 0..{n_harm}, "
+                f"band_sigma={float(getattr(cfg, 'nitida2_band_sigma', 0.7)):.2f}) aplicado al gated."
+            )
 
     if progress_callback is not None:
         progress_callback(1.0, "Reconstrucción completa")
