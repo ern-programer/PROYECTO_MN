@@ -1783,7 +1783,7 @@ class MainWindow(QMainWindow):
 				toolbar6_r1.addWidget(QLabel("Recon Ung"))
 				self.cine_crudo_recon_method_combo = QComboBox()
 				self.cine_crudo_recon_method_combo.addItems(["FBP", "MLEM", "OSEM"])
-				self.cine_crudo_recon_method_combo.setCurrentText("FBP")
+				self.cine_crudo_recon_method_combo.setCurrentText("OSEM")
 				self.cine_crudo_recon_method_combo.setMaximumWidth(74)
 				self.cine_crudo_recon_method_combo.setToolTip("Método de reconstrucción de la rama UngGat/perfusión. La rama gated tiene su propio método (combo 'Gated'). MLEM/OSEM son CPU de referencia.")
 				toolbar6_r1.addWidget(self.cine_crudo_recon_method_combo)
@@ -1811,7 +1811,7 @@ class MainWindow(QMainWindow):
 				toolbar6_r1.addWidget(QLabel("Gated"))
 				self.cine_crudo_gated_method_combo = QComboBox()
 				self.cine_crudo_gated_method_combo.addItems(["FBP", "MLEM", "OSEM"])
-				self.cine_crudo_gated_method_combo.setCurrentText("FBP")
+				self.cine_crudo_gated_method_combo.setCurrentText("OSEM")
 				self.cine_crudo_gated_method_combo.setMaximumWidth(74)
 				self.cine_crudo_gated_method_combo.setToolTip("Método de reconstrucción de la rama gated (independiente del ungated). FBP/MLEM/OSEM.")
 				toolbar6_r1.addWidget(self.cine_crudo_gated_method_combo)
@@ -11895,9 +11895,9 @@ class MainWindow(QMainWindow):
 		corr = menus.get("cine_crudo_correccion_movimiento")
 		if corr is not None:
 			corr[0].hide()
-		# Punto de partida: FBP filtrada, sin NÍTIDA (la más barata y genérica).
+		# Punto de partida: OSEM (fondo limpio, sin halo ni streaks del FBP), sin NÍTIDA.
 		if hasattr(self, "cine_crudo_recon_method_combo") and self.cine_crudo_recon_method_combo is not None:
-			self.cine_crudo_recon_method_combo.setCurrentText("FBP")
+			self.cine_crudo_recon_method_combo.setCurrentText("OSEM")
 		if hasattr(self, "cine_crudo_nitida_check") and self.cine_crudo_nitida_check is not None:
 			self.cine_crudo_nitida_check.setChecked(False)
 		rec = menus.get("cine_crudo_reconstruccion")

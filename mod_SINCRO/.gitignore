@@ -17,6 +17,9 @@ output_demo/
 *.xlsx
 !README*.png
 
+# Logs de harness de I+D (regenerables)
+_xel3_out/*.txt
+
 # PDFs de referencia clinica (Emory) que SÍ se versionan
 docs/MANUALES EMORY/*.pdf
 docs/MANUALES EMORY/*.txt

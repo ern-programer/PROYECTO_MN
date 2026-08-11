@@ -82,11 +82,18 @@ class _Handle:
 class CardiacReorientationDialog(QDialog):
     """Reorientacion oblicua interactiva del VI."""
 
-    def __init__(self, ungated_volume, gated_volume=None, source_label="", geometry=None, parent=None, locked_voi=None, initial_orientation=None, phase_gated_volume=None):
+    def __init__(self, ungated_volume, gated_volume=None, source_label="", geometry=None, parent=None, locked_voi=None, initial_orientation=None, phase_gated_volume=None, voxel_mm=None):
         super().__init__(parent)
         self.setWindowTitle("Reorientar corazón · Rec/Ref")
         self.setModal(True)
         self.resize(1180, 820)
+
+        # Tamaño de vóxel isotrópico (mm) del volumen reconstruido, para expresar
+        # las medidas de la VOI en mm además de vóxeles. None si no se conoce.
+        try:
+            self._voxel_mm = float(voxel_mm) if voxel_mm and float(voxel_mm) > 0 else None
+        except (TypeError, ValueError):
+            self._voxel_mm = None
 
         self._ung = np.asarray(ungated_volume, dtype=np.float64)
         self._gated = None if gated_volume is None else np.asarray(gated_volume, dtype=np.float64)
@@ -612,6 +619,11 @@ class CardiacReorientationDialog(QDialog):
         self.lbl_angles = QLabel("Azimut 0° · Elevación 0°")
         self.lbl_angles.setStyleSheet("color:#7cf29a;font-weight:bold;")
         crow.addWidget(self.lbl_angles)
+        self.lbl_voi = QLabel("")
+        self.lbl_voi.setStyleSheet("color:#ffd21a;background-color:#0a1526;border:1px solid #ffd21a;border-radius:3px;padding:1px 6px;font-weight:bold;")
+        self.lbl_voi.setToolTip("Dimensiones de la VOI elíptica (heart box): diámetros L-R (ancho), A-P (profundidad), C-C (alto) y centro.")
+        crow.addSpacing(12)
+        crow.addWidget(self.lbl_voi)
         crow.addStretch(1)
         crow.addWidget(QLabel("Base"))
         self.spin_base = QSpinBox()
@@ -913,7 +925,24 @@ class CardiacReorientationDialog(QDialog):
         brief = f"Inclinación {tilt:+.0f}° · Ajustes: {self._ops_note()} · {self._fine_rot_note()}"
         self.lbl_angles.setText(brief)
         self.lbl_angles.setToolTip(self._geo_note)
+        if hasattr(self, "lbl_voi"):
+            self.lbl_voi.setText(self._voi_metrics_text())
         self.canvas.draw_idle()
+
+    def _voi_metrics_text(self):
+        """Dimensiones de la VOI elíptica: diámetros por eje + centro, en vóxeles y mm."""
+        rz, ry, rx = self._voi_semiaxes()
+        dz, dy, dx = 2.0 * rz, 2.0 * ry, 2.0 * rx  # alto (C-C), profundidad (A-P), ancho (L-R)
+        vx = self._voxel_mm
+        if vx:
+            def _mm(vox):
+                return f"{vox:.0f} vox ({vox * vx:.0f} mm)"
+        else:
+            def _mm(vox):
+                return f"{vox:.0f} vox"
+        centro = f"centro z={self._voi_cz:.0f} y={self._voi_cy:.0f} x={self._voi_cx:.0f}"
+        return (f"VOI Ø  ancho(L-R) {_mm(dx)} · prof.(A-P) {_mm(dy)} · "
+                f"alto(C-C) {_mm(dz)} | {centro}")
 
     def _smooth_rgb(self, arr):
         # Interpola en dominio ESCALAR (upsample cubico) y despues colorea, para

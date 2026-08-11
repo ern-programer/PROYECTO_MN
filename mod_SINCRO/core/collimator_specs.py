@@ -74,9 +74,12 @@ _GENERIC_LEHR = CollimatorSpec(
 
 _TABLE: tuple[CollimatorSpec, ...] = (
     # --- GE ---
-    CollimatorSpec("LEHR", "GE", hole_diameter_mm=1.5, hole_length_mm=35.0, septal_mm=0.2,
+    # hole_length = largo EFECTIVO (31 mm), no el geométrico (35 mm): calibrado a la
+    # resolución de sistema publicada del GE LEHR, 7.4 mm FWHM @ 100 mm. Usar L=35
+    # daba 6.9 mm (7% optimista) porque el modelo ignora la penetración septal.
+    CollimatorSpec("LEHR", "GE", hole_diameter_mm=1.5, hole_length_mm=31.0, septal_mm=0.2,
                    intrinsic_fwhm_mm=3.8, aliases=("le_hr", "lehr_par", "gelehr"),
-                   notes="GE LEHR baja energía alta resolución (Tc-99m)."),
+                   notes="GE LEHR baja energía alta resolución (Tc-99m). L_eff=31mm cal. a 7.4mm@10cm."),
     CollimatorSpec("LEGP", "GE", hole_diameter_mm=1.9, hole_length_mm=35.0, septal_mm=0.2,
                    intrinsic_fwhm_mm=3.8, aliases=("leap", "le_gp", "gap"),
                    notes="GE LEGP/LEAP baja energía propósito general."),

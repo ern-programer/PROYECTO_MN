@@ -126,6 +126,17 @@ def render_array_rgb(
 	return np.ascontiguousarray((rgb * 255.0).astype(np.uint8))
 
 
+# Interpolaciones de mayor orden que NO existen en el escalado nativo de QPixmap
+# (solo hay nearest/bilineal). Para ofrecer en el cine el mismo set que en cortes y
+# montaje, se pre-amplía el frame con PIL usando el filtro elegido; luego Qt sólo
+# ajusta al tamaño del widget. Píxel/Bilineal usan el escalado nativo de Qt.
+_DISPLAY_PIL_RESAMPLE = {
+	"Bicúbico": "BICUBIC",
+	"Hanning": "HAMMING",
+	"Lanczos": "LANCZOS",
+}
+
+
 def _array_to_pixmap(
 	frame: np.ndarray,
 	cmap_name: str = "gray",
@@ -133,8 +144,24 @@ def _array_to_pixmap(
 	invert_cmap: bool = False,
 	window_low: float = 0.0,
 	window_high: float = 1.0,
+	display_interp: str = "Bilineal",
 ) -> QPixmap:
 	rgb8 = render_array_rgb(frame, cmap_name, smooth_sigma, invert_cmap, window_low, window_high)
+	pil_name = _DISPLAY_PIL_RESAMPLE.get(str(display_interp))
+	if pil_name is not None:
+		try:
+			from PIL import Image
+			h0, w0 = rgb8.shape[:2]
+			longest = max(int(h0), int(w0))
+			factor = max(1, int(round(384 / longest))) if longest > 0 else 1
+			if factor > 1:
+				resample = getattr(Image.Resampling, pil_name)
+				im = Image.fromarray(rgb8, mode="RGB").resize(
+					(int(w0) * factor, int(h0) * factor), resample
+				)
+				rgb8 = np.ascontiguousarray(np.asarray(im, dtype=np.uint8))
+		except Exception:
+			pass
 	h, w, _ = rgb8.shape
 	qimg = QImage(rgb8.data, w, h, 3 * w, QImage.Format.Format_RGB888)
 	return QPixmap.fromImage(qimg.copy())
@@ -464,6 +491,16 @@ class RoiImageLabel(QLabel):
 		self._manual_centers: dict[int, tuple[float, float]] = {}
 		self._message = "Cargá un estudio para ver el cine"
 		self._zoom = 1.0
+		# Tipo de interpolación al escalar la imagen en pantalla (mismo set que
+		# cortes/montaje). 'Píxel' = nearest (sin suavizado); el resto usa bilineal
+		# de Qt sobre el frame ya pre-amplificado con el filtro elegido.
+		self._display_interp = "Bilineal"
+
+	def set_display_interp(self, name: str):
+		"""Cambia la interpolación de escalado. No re-renderiza por sí solo: el
+		CineWidget vuelve a llamar set_frame con el frame actual."""
+		self._display_interp = str(name or "Bilineal")
+		self.update()
 
 	def set_overlay_label(self, text: str, color: str = "#facc15"):
 		"""Rótulo persistente (etapa/paciente) dibujado SOBRE la imagen, esquina
@@ -511,6 +548,7 @@ class RoiImageLabel(QLabel):
 			invert_cmap=invert_cmap,
 			window_low=window_low,
 			window_high=window_high,
+			display_interp=self._display_interp,
 		)
 		self._frame_shape = tuple(frame.shape[:2])
 		self.update()
@@ -648,6 +686,11 @@ class RoiImageLabel(QLabel):
 		rect = self._image_rect()
 		if rect is None:
 			return
+		# 'Píxel' = nearest (pixelado nítido); el resto = escalado suave de Qt.
+		painter.setRenderHint(
+			QPainter.RenderHint.SmoothPixmapTransform,
+			self._display_interp != "Píxel",
+		)
 		painter.drawPixmap(rect.toRect(), self._base_pixmap)
 
 		# ROI de referencia del asa intestinal limpia (de donde sale el nivel de
@@ -960,6 +1003,7 @@ class CineWidget(QWidget):
 		self._current_slice = 0
 		self._playing = False
 		self._smooth_sigma = 0.0
+		self._display_interp = "Bilineal"
 		self._window_low = 0.0
 		self._window_high = 1.0
 		self._auto_roi_method = "robusto"
@@ -1233,6 +1277,17 @@ class CineWidget(QWidget):
 		self.smooth_label = QLabel("0.0")
 		self.smooth_slider.setToolTip("Smooth visual de la imagen en la preview (no altera el motor).")
 
+		# Interpolación de escalado (mismo set que cortes/montaje). 'Píxel' = nearest.
+		self.interp_combo = QComboBox()
+		self.interp_combo.addItems(["Píxel", "Bilineal", "Bicúbico", "Hanning", "Lanczos"])
+		self.interp_combo.setCurrentText(self._display_interp)
+		self.interp_combo.setMaximumWidth(96)
+		self.interp_combo.setToolTip(
+			"Tipo de interpolación al escalar la imagen (mismo set que cortes/montaje).\n"
+			"Píxel = sin suavizado; Bilineal/Bicúbico/Hanning/Lanczos = más suave."
+		)
+		self.interp_combo.currentTextChanged.connect(self._on_interp_change)
+
 		# Ventana (Base/Top): en el visor compacto UN SOLO slider de dos handles
 		# (RangeSlider, 0-200%) para ahorrar ancho; en el completo, dos QSlider.
 		if self._compact_viewer:
@@ -1355,6 +1410,8 @@ class CineWidget(QWidget):
 			nav_grid.addWidget(self.smooth_slider, 3, 2)
 			nav_grid.addWidget(self.smooth_next_btn, 3, 3)
 			nav_grid.addWidget(self.smooth_label, 3, 4)
+			nav_grid.addWidget(QLabel("Interp"), 3, 5, _lbl_align)
+			nav_grid.addWidget(self.interp_combo, 3, 6)
 			nav_grid.setColumnStretch(2, 1)
 			nav_grid.setColumnStretch(6, 1)
 
@@ -1603,6 +1660,17 @@ class CineWidget(QWidget):
 				_gs_w.setLayout(_gs_row)
 				_gs_w.setFixedWidth(_gs_total)
 				layout.addWidget(_gs_w, 0)
+				# Fila de interpolación de escalado (mismo set que cortes/montaje).
+				_interp_row = QHBoxLayout()
+				_interp_row.setContentsMargins(0, 0, 0, 0)
+				_interp_row.setSpacing(4)
+				_interp_row.addWidget(QLabel("Interpolación:"))
+				_interp_row.addWidget(self.interp_combo)
+				_interp_row.addStretch(1)
+				_interp_w = QWidget()
+				_interp_w.setLayout(_interp_row)
+				_interp_w.setFixedWidth(_gs_total)
+				layout.addWidget(_interp_w, 0)
 			self.help_label.setVisible(False)
 		else:
 			layout.addLayout(preview_row)
@@ -2507,6 +2575,25 @@ class CineWidget(QWidget):
 		self.smooth_slider.setValue(int(round(self._smooth_sigma * 10.0)))
 		self.smooth_slider.blockSignals(False)
 		self.smooth_label.setText(f"{self._smooth_sigma:.1f}")
+		self._update_view()
+
+	def display_interp(self) -> str:
+		return str(self._display_interp)
+
+	def set_display_interp(self, name: str):
+		"""Fija la interpolación de escalado y re-renderiza el frame actual.
+		Usado también para sincronizar visores (asincronía: cine_main -> cine_wall)."""
+		value = str(name or "Bilineal")
+		self._display_interp = value
+		self.interp_combo.blockSignals(True)
+		self.interp_combo.setCurrentText(value)
+		self.interp_combo.blockSignals(False)
+		self.preview.set_display_interp(value)
+		self._update_view()
+
+	def _on_interp_change(self, name: str):
+		self._display_interp = str(name or "Bilineal")
+		self.preview.set_display_interp(self._display_interp)
 		self._update_view()
 
 	def toggle_playback(self):

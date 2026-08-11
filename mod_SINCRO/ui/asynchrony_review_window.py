@@ -540,6 +540,7 @@ class AsynchronyReviewWindow(QWidget):
 		self.cine_main.cmap_combo.currentTextChanged.connect(self._sync_visual_from_main)
 		self.cine_main.invert_cmap_check.toggled.connect(self._sync_visual_from_main)
 		self.cine_main.smooth_slider.valueChanged.connect(self._sync_visual_from_main)
+		self.cine_main.interp_combo.currentTextChanged.connect(self._sync_visual_from_main)
 		self.cine_main.window_low_slider.valueChanged.connect(self._sync_visual_from_main)
 		self.cine_main.window_high_slider.valueChanged.connect(self._sync_visual_from_main)
 
@@ -624,6 +625,7 @@ class AsynchronyReviewWindow(QWidget):
 			self.cine_wall._window_low = float(self.cine_main._window_low)
 			self.cine_wall._window_high = float(self.cine_main._window_high)
 			self.cine_wall._smooth_sigma = float(self.cine_main._smooth_sigma)
+			self.cine_wall.set_display_interp(self.cine_main.display_interp())
 			self.cine_wall._update_view()
 		finally:
 			self._syncing = False
