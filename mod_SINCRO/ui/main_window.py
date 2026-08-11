@@ -1869,7 +1869,8 @@ class MainWindow(QMainWindow):
 					"(modela la respuesta colimador-detector según el DICOM). Requiere OSEM/MLEM "
 					"(si está en FBP, se fuerza OSEM). Al activarla toma el control de la "
 					"reconstrucción: desactiva los filtros de proyección (para no pre-difuminar "
-					"lo que va a des-difuminar) y sube las iteraciones a 5. Opcional; medio-dosis/medio-tiempo.")
+					"lo que va a des-difuminar) y enciende 'Suavizar' (post-filtro que regula el "
+					"ruido que amplifica la recuperación de resolución). Opcional; medio-dosis/medio-tiempo.")
 				self.cine_crudo_nitida_check.toggled.connect(self._on_nitida_toggled)
 				toolbar6_r2.addWidget(self.cine_crudo_nitida_check)
 				self.cine_crudo_post_check = QCheckBox("Suavizar")
@@ -1890,6 +1891,18 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_post_fwhm_spin.setEnabled(False)
 				self.cine_crudo_post_fwhm_spin.setToolTip("FWHM del suavizado gaussiano [mm]. Típico 6–10 mm.")
 				toolbar6_r2.addWidget(self.cine_crudo_post_fwhm_spin)
+				toolbar6_r2.addWidget(QLabel("NITIDA II"))
+				self.cine_crudo_nitida2_combo = QComboBox()
+				self.cine_crudo_nitida2_combo.addItem("Off", "none")
+				self.cine_crudo_nitida2_combo.addItem("Temporal", "temporal")
+				self.cine_crudo_nitida2_combo.addItem("Espaciotemporal", "spatiotemporal")
+				self.cine_crudo_nitida2_combo.setMaximumWidth(120)
+				self.cine_crudo_nitida2_combo.setToolTip(
+					"NITIDA II: denoiser gated por armónicos temporales (post-recon, solo el gated). "
+					"'Temporal' conserva el movimiento cardíaco exacto (bandas de baja frecuencia) y "
+					"elimina el ruido de banda alta. 'Espaciotemporal' además limpia el granulado "
+					"espacial de la media y suaviza levemente el movimiento. Independiente de NÍTIDA (RR).")
+				toolbar6_r2.addWidget(self.cine_crudo_nitida2_combo)
 				self.cine_crudo_recon_btn = QToolButton()
 				self.cine_crudo_recon_btn.setText("Recon raw")
 				self.cine_crudo_recon_btn.setToolTip("Reconstruye desde crudo gated con la corrección actual y muestra QC: UngGat + gates. No altera el procesamiento clínico principal todavía.")
@@ -2098,6 +2111,9 @@ class MainWindow(QMainWindow):
 		)
 		self.cine.speed_slider.valueChanged.connect(
 			self.cine_compare.speed_slider.setValue
+		)
+		self.cine.interp_combo.currentTextChanged.connect(
+			self.cine_compare.set_display_interp
 		)
 		self.cine.playStateChanged.connect(
 			self._sync_cine_compare_playback
@@ -12462,6 +12478,11 @@ class MainWindow(QMainWindow):
 			ungated_filter = self._cine_crudo_recon_filter_config("ungated")
 			gated_filter = self._cine_crudo_recon_filter_config("gated")
 		post_sigma_px = self._cine_crudo_post_filter_sigma_px(study)
+		# NITIDA II: denoiser gated temporal/espaciotemporal por armónicos (post-recon).
+		# Independiente de NÍTIDA (RR). Combo opcional; si no existe, queda desactivado.
+		nitida2_mode = "none"
+		if getattr(self, "cine_crudo_nitida2_combo", None) is not None:
+			nitida2_mode = str(self.cine_crudo_nitida2_combo.currentData() or "none")
 		return RawReconConfig(
 			reconstruction_method=method,
 			gated_method=gated_method,
@@ -12473,6 +12494,7 @@ class MainWindow(QMainWindow):
 			resolution_recovery=rr_active,
 			psf_model=psf_model,
 			post_filter_sigma_px=post_sigma_px,
+			nitida2_mode=nitida2_mode,
 		)
 
 	# --- Pasajero de fase (FBP) para NÍTIDA ---
@@ -12549,7 +12571,7 @@ class MainWindow(QMainWindow):
 		return sigma_px
 
 	def _on_nitida_toggled(self, checked: bool):
-		"""NÍTIDA toma el control de la recon: desactiva filtros de proyección y sube iteraciones."""
+		"""NÍTIDA toma el control de la recon: desactiva filtros de proyección y enciende 'Suavizar'."""
 		proj_filter_widgets = [
 			"cine_crudo_ung_filter_combo", "cine_crudo_ung_cutoff_spin", "cine_crudo_ung_order_spin",
 			"cine_crudo_gated_filter_combo", "cine_crudo_gated_cutoff_spin", "cine_crudo_gated_order_spin",
@@ -12560,11 +12582,15 @@ class MainWindow(QMainWindow):
 			w = getattr(self, name, None)
 			if w is not None:
 				w.setEnabled(not checked)
-		if checked and hasattr(self, "cine_crudo_iter_spin") and self.cine_crudo_iter_spin is not None:
-			if int(self.cine_crudo_iter_spin.value()) < 4:
-				self.cine_crudo_iter_spin.setValue(5)  # rango recomendado 4-6 para RR
+		if checked and hasattr(self, "cine_crudo_post_check") and self.cine_crudo_post_check is not None:
+			# En bajo conteo (5s) OSEM+RR sin post-filtro sale ruidoso/manchado. La receta
+			# validada (iteraciones bajas + suavizado ~8 mm) iguala la calidad del 10s; subir
+			# iteraciones solo amplifica más ruido. Por eso NÍTIDA enciende 'Suavizar' y NO
+			# toca las iteraciones (quedan en el valor del usuario, default 2).
+			if not self.cine_crudo_post_check.isChecked():
+				self.cine_crudo_post_check.setChecked(True)
 		if checked:
-			self._log("NÍTIDA activa: filtros de proyección desactivados (evita pre-difuminado); iteraciones a 5. Usá 'Suavizar' para el ruido.")
+			self._log("NÍTIDA activa: filtros de proyección desactivados (evita pre-difuminado); post-filtro 'Suavizar' encendido para regular el ruido de la recuperación de resolución.")
 
 	def _on_post_filter_toggled(self, checked: bool):
 		if hasattr(self, "cine_crudo_post_fwhm_spin") and self.cine_crudo_post_fwhm_spin is not None:
