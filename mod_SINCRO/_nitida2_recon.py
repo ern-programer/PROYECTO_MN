@@ -22,7 +22,11 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.dicom_loader import load
-from core.nitida2 import denoise_gates_with_guide, temporal_harmonic_filter
+from core.nitida2 import (
+    denoise_gates_with_guide,
+    denoise_spatiotemporal,
+    temporal_harmonic_filter,
+)
 from core.raw_reconstruction import reconstruct_gated_projection_volume
 
 BASE = r"D:\- GAMMASYS\estudios evolution\New Folder\1.2.840.113619.2.265.1.2.0.9092025113215781.32146"
@@ -48,14 +52,23 @@ def harmonic_power(cube: np.ndarray, sig: np.ndarray) -> np.ndarray:
     return power / (power[0] + 1e-12) * 100.0
 
 
+def roughness(cube: np.ndarray, sig: np.ndarray) -> float:
+    """Granulado espacial en el miocardio: std del Laplaciano por gate (↓ mejor)."""
+    from scipy.ndimage import laplace
+    vals = []
+    for g in range(cube.shape[0]):
+        lap = laplace(cube[g])
+        vals.append(float(np.std(lap[sig])))
+    return float(np.mean(vals))
+
+
 def report(name: str, cube: np.ndarray, sig: np.ndarray, bg: np.ndarray) -> None:
     p = harmonic_power(cube, sig)
     mov = p[1] + p[2]
     noi = p[3] + p[4]
-    snr_mov = mov / (noi + 1e-9)
-    print(f"  {name:20s}: ruido_bg={noise_std(cube, bg):7.3f}  "
-          f"H1-2(mov)={mov:7.2f}%  H3-4(ruido)={noi:7.3f}%  mov/ruido={snr_mov:6.1f}  "
-          f"[H1={p[1]:.2f} H2={p[2]:.2f} H3={p[3]:.3f} H4={p[4]:.3f}]")
+    print(f"  {name:20s}: ruido_bg={noise_std(cube, bg):7.3f}  granulado={roughness(cube, sig):7.3f}  "
+          f"H1-2(mov)={mov:7.2f}%  H3-4={noi:6.3f}%  "
+          f"[H1={p[1]:.2f} H2={p[2]:.2f}]")
 
 
 def recon(cube_proj: np.ndarray, angles) -> np.ndarray:
@@ -85,6 +98,12 @@ def main() -> None:
     print("\n=== NITIDA II · temporal armónico (5s) ===")
     report("temporal keep=2", temporal_harmonic_filter(v5, n_harmonics=2), sig5, bg5)
     report("temporal keep=1", temporal_harmonic_filter(v5, n_harmonics=1), sig5, bg5)
+
+    print("\n=== NITIDA II · espaciotemporal por bandas (Ingrediente 2, 5s) ===")
+    report("spatiotemp s0.7", denoise_spatiotemporal(v5, n_harmonics=2, guide_volume=ung5 / v5.shape[0],
+                                                      dc_radius=2, dc_eps=0.01, band_sigma=0.7), sig5, bg5)
+    report("spatiotemp s1.0", denoise_spatiotemporal(v5, n_harmonics=2, guide_volume=ung5 / v5.shape[0],
+                                                      dc_radius=2, dc_eps=0.005, band_sigma=1.0), sig5, bg5)
 
     print("\n=== comparación: guided-ungated (5s) ===")
     report("guided r1 eps.02", denoise_gates_with_guide(v5, guide_volume=ung5, radius=1, eps=0.02), sig5, bg5)

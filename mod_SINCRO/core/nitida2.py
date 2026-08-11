@@ -32,7 +32,7 @@ USO
 from __future__ import annotations
 
 import numpy as np
-from scipy.ndimage import uniform_filter
+from scipy.ndimage import gaussian_filter, uniform_filter
 
 
 def _box_mean(vol: np.ndarray, size) -> np.ndarray:
@@ -162,4 +162,65 @@ def temporal_harmonic_filter(
         idx[axis] = slice(keep, None)
         spec[tuple(idx)] = 0.0
     out = np.fft.irfft(spec, n=n_gates, axis=axis)
+    return np.clip(out, 0.0, None)
+
+
+def denoise_spatiotemporal(
+    gated_cube: np.ndarray,
+    *,
+    n_harmonics: int = 2,
+    dc_radius: int = 2,
+    dc_eps: float = 0.01,
+    band_sigma: float = 0.7,
+    guide_volume: np.ndarray | None = None,
+) -> np.ndarray:
+    """Denoiser espaciotemporal por bandas de armónicos (NITIDA II, Ingrediente 2).
+
+    Descompone la señal temporal (FFT a lo largo de los gates) en:
+      - DC (media = ungated/N): sin movimiento -> denoising espacial FUERTE,
+        guiado por la anatomía (guided filter, preserva bordes).
+      - H1..H_n (mapas complejos de amplitud): movimiento cardíaco, espacialmente
+        coherente -> suavizado espacial GAUSSIANO SUAVE (promedia el movimiento
+        vecino coherente sin regresarlo a cero; NO usar guided aquí porque los
+        mapas son con signo y no correlacionan con la anatomía).
+      - H_{n+1}..: ruido de banda alta -> se descartan.
+    Luego reconstruye por IFFT. El movimiento (bandas H1-2) se conserva porque solo
+    se promedia espacialmente entre vecinos coherentes, nunca entre gates.
+
+    Parameters
+    ----------
+    gated_cube : (n_gates, n_slices, H, W).
+    n_harmonics : armónicos de movimiento a conservar además del DC (típico 2).
+    dc_radius, dc_eps : guided filter de la media (fuerte).
+    band_sigma : sigma (px) del gaussiano espacial de los mapas H1..H_n (suave).
+    guide_volume : anatomía-guía (ungated). Si None usa el DC (auto-guiado).
+
+    Returns
+    -------
+    Cubo denoisado, misma forma, no negativo.
+    """
+    cube = np.asarray(gated_cube, dtype=np.float64)
+    if cube.ndim != 4:
+        raise ValueError(f"gated_cube debe ser 4D (gates,slices,H,W); recibió {cube.shape}")
+
+    n_gates = cube.shape[0]
+    spec = np.fft.rfft(cube, axis=0)
+    n_bins = spec.shape[0]
+    keep = int(max(0, min(n_harmonics, n_bins - 1)))
+
+    dc = spec[0].real
+    guide_src = dc if guide_volume is None else np.asarray(guide_volume, dtype=np.float64) * n_gates
+    guide_n = _normalize_guide(guide_src)
+
+    spec[0] = guided_filter(guide_n, dc, radius=dc_radius, eps=dc_eps).astype(spec.dtype)
+    # Suavizado espacial (por slice, no entre slices) de los mapas de movimiento.
+    sig = (0.0, float(band_sigma), float(band_sigma))
+    for k in range(1, keep + 1):
+        re = gaussian_filter(spec[k].real, sigma=sig, mode="nearest")
+        im = gaussian_filter(spec[k].imag, sigma=sig, mode="nearest")
+        spec[k] = re + 1j * im
+    for k in range(keep + 1, n_bins):
+        spec[k] = 0.0
+
+    out = np.fft.irfft(spec, n=n_gates, axis=0)
     return np.clip(out, 0.0, None)
