@@ -60,6 +60,14 @@ class RawReconConfig:
     # Post-filtro gaussiano 3D opcional (control de ruido post-recon). 0 = off.
     # Sigma en píxeles; es la contraparte de ruido de la recuperación de resolución.
     post_filter_sigma_px: float = 0.0
+    # --- Feta axial (cilindro del corazón) ---
+    # Rango de cortes axiales (z = fila del detector) a reconstruir, inclusive:
+    # (z0, z1). None = volumen completo. En SPECT paralelo cada corte z se
+    # reconstruye independiente de su fila del sinograma, así que limitar la
+    # banda es EXACTO (no aproxima) y más rápido: las lonjas fuera de la banda
+    # quedan en cero (feta). Los cortes dentro de la banda son idénticos a los
+    # del volumen completo.
+    recon_slice_range: tuple[int, int] | None = None
     # --- NITIDA II: denoiser temporal/espaciotemporal por armónicos ---
     # Denoiser gated de bajo conteo aplicado post-recon SOLO al volumen gated
     # (core.nitida2). Preserva el movimiento cardíaco (bandas de baja frecuencia)
@@ -72,6 +80,22 @@ class RawReconConfig:
     nitida2_band_sigma: float = 0.7
     nitida2_dc_radius: int = 2
     nitida2_dc_eps: float = 0.01
+    # --- FBP_CLEAN: denoise Poisson en sinograma + realce por resta ---
+    # Denoise bilateral de las proyecciones ANTES del FBP (ataca las estrías en
+    # la raíz, banco 023/025) + realce de cavidad/bordes restando una fracción
+    # de la versión muy suavizada (unsharp mask, idea del usuario, banco 026/027).
+    # Aplica solo a la rama FBP. 0 = desactivado.
+    fbp_clean_sigma_color: float = 0.0   # 0=off; 0.04 calibrado (banco 025)
+    fbp_clean_sharpen_k: float = 0.5     # factor de realce (0.3–0.7, default 0.5)
+    fbp_clean_blur_sigma_color: float = 0.24  # versión muy suavizada para la resta
+    # --- Descuento de fondo automático (pre-recon, sobre el sinograma) ---
+    # Resta un piso de cuentas medido automáticamente en la zona de bajo fondo
+    # (pulmón/tejido blando; excluye el aire por umbral de cuerpo y las
+    # vísceras calientes por percentil bajo, ver core.raw_background). Se resta
+    # de TODAS las proyecciones, incluido el corazón: el fondo (scatter +
+    # actividad difusa) es aditivo y también está debajo del miocardio.
+    # Aumenta el contraste cavidad/pared. OFF por defecto.
+    background_subtract: bool = False
 
 
 @dataclass
@@ -193,18 +217,35 @@ def _sub_progress(progress, index: int, count: int):
     return _inner
 
 
+def _resolve_slice_range(slice_range: tuple[int, int] | None, height: int) -> tuple[int, int]:
+    """Normaliza (z0, z1) inclusive a [0, height-1]. None => banda completa."""
+    if slice_range is None:
+        return 0, height - 1
+    z0, z1 = int(slice_range[0]), int(slice_range[1])
+    if z0 > z1:
+        z0, z1 = z1, z0
+    z0 = max(0, min(z0, height - 1))
+    z1 = max(0, min(z1, height - 1))
+    return z0, z1
+
+
 def reconstruct_fbp_volume(
     projections: np.ndarray,
     angles_deg: np.ndarray | None = None,
     *,
     projection_filter: ProjectionFilterConfig | None = None,
     fbp_filter_name: str = "ramp",
+    slice_range: tuple[int, int] | None = None,
+    output_size: int | None = None,
     progress=None,
 ) -> np.ndarray:
     """Reconstruye un volumen transaxial por FBP desde proyecciones 3D.
 
-    Entrada: (n_angles, H, W). Salida: (H, W, W), un corte por fila axial del detector.
-    ``progress`` (opcional): callable(local_fraction) invocado durante el bucle de cortes.
+    Entrada: (n_angles, H, W). Salida: (H, out, out), un corte por fila axial del detector.
+    ``slice_range`` (opcional): (z0, z1) inclusive; solo reconstruye esa banda
+    axial (feta), el resto queda en cero. ``output_size`` (opcional): tamaño de
+    la matriz de salida en el plano (default = ancho del detector W). >W =
+    matriz fina (voxel más chico) para resolver la cavidad. ``progress``: callable.
     """
     proj = np.asarray(projections, dtype=np.float64)
     if proj.ndim != 3:
@@ -212,6 +253,7 @@ def reconstruct_fbp_volume(
     if projection_filter is not None:
         proj = filter_projections(proj, projection_filter)
     n_angles, height, width = proj.shape
+    out_size = int(output_size) if output_size else width
     if angles_deg is None:
         theta = np.linspace(0.0, 360.0, n_angles, endpoint=False)
     else:
@@ -219,12 +261,14 @@ def reconstruct_fbp_volume(
         if theta.size != n_angles:
             raise ValueError(f"angles_deg debe tener {n_angles} valores; recibio {theta.size}")
 
-    volume = np.zeros((height, width, width), dtype=np.float64)
-    for slice_idx in range(height):
+    volume = np.zeros((height, out_size, out_size), dtype=np.float64)
+    z0, z1 = _resolve_slice_range(slice_range, height)
+    n_band = z1 - z0 + 1
+    for done, slice_idx in enumerate(range(z0, z1 + 1), start=1):
         sinogram = proj[:, slice_idx, :].T
-        volume[slice_idx] = _iradon_or_fallback(sinogram, theta, filter_name=str(fbp_filter_name), output_size=width)
-        if progress is not None and height:
-            progress((slice_idx + 1) / height)
+        volume[slice_idx] = _iradon_or_fallback(sinogram, theta, filter_name=str(fbp_filter_name), output_size=out_size)
+        if progress is not None and n_band:
+            progress(done / n_band)
     return volume
 
 
@@ -239,6 +283,7 @@ def reconstruct_projection_volume(
     subsets: int = 4,
     sensitivity_cache: dict[int, np.ndarray] | None = None,
     psf=None,
+    slice_range: tuple[int, int] | None = None,
     progress=None,
 ) -> np.ndarray:
     """Reconstruye volumen desde proyecciones 3D con FBP/MLEM/OSEM.
@@ -258,7 +303,7 @@ def reconstruct_projection_volume(
     if method_key == "fbp":
         return reconstruct_fbp_volume(
             projections, angles_deg, projection_filter=projection_filter, fbp_filter_name=fbp_filter_name,
-            progress=progress,
+            slice_range=slice_range, progress=progress,
         )
     if method_key not in {"mlem", "osem"}:
         raise ValueError("method debe ser 'fbp', 'mlem' u 'osem'")
@@ -287,7 +332,9 @@ def reconstruct_projection_volume(
             theta, subsets=effective_subsets, detector_size=width, output_size=width, psf=psf
         )
     out = np.zeros((height, width, width), dtype=np.float64)
-    for slice_idx in range(height):
+    z0, z1 = _resolve_slice_range(slice_range, height)
+    n_band = z1 - z0 + 1
+    for done, slice_idx in enumerate(range(z0, z1 + 1), start=1):
         sinogram = proj[:, slice_idx, :].T
         out[slice_idx] = _iterative_reconstruct_slice(
             sinogram,
@@ -298,8 +345,8 @@ def reconstruct_projection_volume(
             sensitivity_cache=sensitivity_cache,
             psf=psf,
         )
-        if progress is not None and height:
-            progress((slice_idx + 1) / height)
+        if progress is not None and n_band:
+            progress(done / n_band)
     return out
 
 
@@ -460,6 +507,7 @@ def reconstruct_gated_fbp_volume(
     *,
     projection_filter: ProjectionFilterConfig | None = None,
     fbp_filter_name: str = "ramp",
+    slice_range: tuple[int, int] | None = None,
     progress=None,
 ) -> np.ndarray:
     """Reconstruye cada gate por separado. Entrada (gates,angles,H,W)."""
@@ -473,7 +521,7 @@ def reconstruct_gated_fbp_volume(
         volumes.append(
             reconstruct_fbp_volume(
                 proj[gate], angles_deg, projection_filter=projection_filter,
-                fbp_filter_name=fbp_filter_name, progress=gate_progress,
+                fbp_filter_name=fbp_filter_name, slice_range=slice_range, progress=gate_progress,
             )
         )
     return np.stack(volumes, axis=0)
@@ -489,6 +537,7 @@ def reconstruct_gated_projection_volume(
     iterations: int = 4,
     subsets: int = 4,
     psf=None,
+    slice_range: tuple[int, int] | None = None,
     progress=None,
 ) -> np.ndarray:
     """Reconstruye cada gate por separado con FBP/MLEM/OSEM.
@@ -525,6 +574,7 @@ def reconstruct_gated_projection_volume(
             subsets=subsets,
             sensitivity_cache=sensitivity_cache,
             psf=psf,
+            slice_range=slice_range,
             progress=_sub_progress(progress, gate, int(proj.shape[0])),
         )
         for gate in range(proj.shape[0])
@@ -636,8 +686,40 @@ def reconstruct_raw_gated_pipeline(
     ung_progress = _ung_progress if progress_callback is not None else None
     gated_progress = _gated_progress if progress_callback is not None else None
 
+    # Descuento de fondo automático: se mide el piso en la imagen ungated media
+    # y se resta de TODAS las proyecciones (incluido el VI: el fondo es aditivo
+    # y también está debajo del miocardio). Al gated se le resta nivel/n_gates
+    # por gate, así la suma de gates coincide con el ungated. Va ANTES del
+    # denoise FBP_CLEAN: el fondo es señal aditiva del sinograma, no ruido.
+    if getattr(cfg, "background_subtract", False):
+        from core.raw_background import auto_background_level, subtract_constant
+        bg_level = auto_background_level(ungated_corrected.mean(axis=0))
+        if bg_level > 0.0:
+            ungated_corrected = subtract_constant(ungated_corrected, bg_level).image
+            corrected = subtract_constant(corrected, bg_level / max(n_gates, 1)).image
+            notes.append(
+                f"Descuento de fondo automático: nivel {bg_level:.1f} restado de todas "
+                f"las proyecciones (gated: {bg_level / max(n_gates, 1):.2f}/gate)."
+            )
+        else:
+            notes.append("Descuento de fondo automático: nivel medido 0 (sin efecto).")
+
+    # FBP_CLEAN: denoise Poisson del sinograma ANTES del FBP (ataca las estrías
+    # en la raíz). Aplica solo a la rama FBP (ungated y/o gated según método).
+    fbc_sigma = float(getattr(cfg, "fbp_clean_sigma_color", 0.0) or 0.0)
+    ungated_src, gated_src = ungated_corrected, corrected
+    if fbc_sigma > 0.0 and method == "fbp":
+        from core.fbp_clean import denoise_projections_bilateral
+        ungated_src = denoise_projections_bilateral(ungated_corrected, sigma_color=fbc_sigma)
+        notes.append(f"FBP_CLEAN: denoise bilateral de proyecciones UngGat (σc={fbc_sigma:.3f}).")
+    gated_fbc = fbc_sigma > 0.0 and str(cfg.gated_method or method).strip().lower() == "fbp"
+    if gated_fbc:
+        from core.fbp_clean import denoise_projections_bilateral
+        gated_src = denoise_projections_bilateral(corrected, sigma_color=fbc_sigma)
+        notes.append(f"FBP_CLEAN: denoise bilateral de proyecciones gated (σc={fbc_sigma:.3f}).")
+
     ungated_volume = reconstruct_projection_volume(
-        ungated_corrected,
+        ungated_src,
         angles_deg,
         method=method,
         projection_filter=cfg.ungated_filter,
@@ -645,10 +727,11 @@ def reconstruct_raw_gated_pipeline(
         iterations=int(cfg.iterative_iterations),
         subsets=subsets,
         psf=rr_psf,
+        slice_range=cfg.recon_slice_range,
         progress=ung_progress,
     )
     gated_volume = reconstruct_gated_projection_volume(
-        corrected,
+        gated_src,
         angles_deg,
         method=gated_method,
         projection_filter=cfg.gated_filter,
@@ -656,12 +739,36 @@ def reconstruct_raw_gated_pipeline(
         iterations=int(cfg.iterative_iterations),
         subsets=gated_subsets,
         psf=gated_rr_psf,
+        slice_range=cfg.recon_slice_range,
         progress=gated_progress,
     )
     if rr_psf is not None or gated_rr_psf is not None:
         notes.append("NÍTIDA (OmniRes) activo: recuperación de resolución dependiente de profundidad.")
     if gated_method != method:
         notes.append(f"Método por rama: UngGat={method.upper()}, gated={gated_method.upper()}.")
+
+    # FBP_CLEAN paso 2: realce de cavidad/bordes por resta de una fracción de la
+    # versión muy suavizada (unsharp mask, idea del usuario). out = nítido − k×difuso.
+    # Se aplica a los volúmenes ya reconstruidos (ungated y gated) si FBP_CLEAN
+    # está activo. La versión difusa se obtiene con un bilateral fuerte (σc_blur)
+    # sobre las mismas proyecciones ya denoised, reconstruida igual.
+    if fbc_sigma > 0.0:
+        from core.fbp_clean import denoise_projections_bilateral, sharpen_by_subtraction
+        k = float(getattr(cfg, "fbp_clean_sharpen_k", 0.5))
+        blur_sc = float(getattr(cfg, "fbp_clean_blur_sigma_color", 0.24))
+        if method == "fbp":
+            ung_blur = reconstruct_projection_volume(
+                denoise_projections_bilateral(ungated_corrected, sigma_color=blur_sc),
+                angles_deg, method="fbp", projection_filter=cfg.ungated_filter,
+                fbp_filter_name=cfg.fbp_filter_name, slice_range=cfg.recon_slice_range)
+            ungated_volume = sharpen_by_subtraction(ungated_volume, ung_blur, k)
+        if gated_fbc:
+            gated_blur = reconstruct_gated_projection_volume(
+                denoise_projections_bilateral(corrected, sigma_color=blur_sc),
+                angles_deg, method="fbp", projection_filter=cfg.gated_filter,
+                fbp_filter_name=cfg.fbp_filter_name, slice_range=cfg.recon_slice_range)
+            gated_volume = sharpen_by_subtraction(gated_volume, gated_blur, k)
+        notes.append(f"FBP_CLEAN: realce por resta (k={k:.2f}, difuso σc={blur_sc:.2f}).")
 
     # Orientación radiológica L/R: la retroproyección produce el volumen con el
     # eje izquierda/derecha del paciente (columnas, axis -1) espejado respecto de

@@ -70,6 +70,14 @@ class CardiacReorientationTests(unittest.TestCase):
         out = reslice_from_vector_gated(cube, default_center(v), np.array([1.0, 0.1, 0.0]), 24)
         self.assertEqual(out.shape, (3, 24, 24, 24))
 
+    def test_reslice_from_vector_supports_finer_sampling(self):
+        v = _shell_volume(32)
+        c = default_center(v)
+        u = np.array([0.0, 0.2, 1.0])
+        out = reslice_from_vector(v, c, u, 32, sample_scale=0.5)
+        self.assertEqual(out.shape, (32, 32, 32))
+        self.assertGreater(float(out.max()), 0.4)
+
     def test_reslice_from_vector_zero_vector_falls_back(self):
         v = _shell_volume(16)
         out = reslice_from_vector(v, default_center(v), np.array([0.0, 0.0, 0.0]), 16)

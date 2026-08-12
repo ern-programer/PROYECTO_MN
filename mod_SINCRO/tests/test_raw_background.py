@@ -9,6 +9,7 @@ from __future__ import annotations
 import numpy as np
 
 from core.raw_background import (
+    auto_background_level,
     measure_background_level,
     polygon_mask,
     subtract_constant,
@@ -57,6 +58,24 @@ def test_subtract_constant_clips_at_zero():
     assert res.clipped_fraction == 0.5
     # No modifica la entrada.
     assert img[0, 0] == 10.0
+
+
+def test_auto_background_level_ignores_air_and_hot_viscera():
+    # Proyección sintética: 45% aire (0), 35% pulmón/tejido (10),
+    # 10% corazón (100), 10% hígado/intestino (200).
+    img = np.zeros((20, 20), dtype=np.float64)
+    img[:9, :] = 0.0      # aire (45%)
+    img[9:16, :] = 10.0   # pulmón / tejido blando (35%)
+    img[16:18, :] = 100.0  # corazón (10%)
+    img[18:, :] = 200.0   # hígado / intestino / vesícula (10%)
+    level = auto_background_level(img)
+    # El nivel debe medir el fondo pulmonar (~10): ni el aire (0)
+    # ni las vísceras calientes (>=100).
+    assert level == 10.0
+
+
+def test_auto_background_level_zero_image():
+    assert auto_background_level(np.zeros((10, 10))) == 0.0
 
 
 def test_subtract_constant_negative_level_is_clamped():

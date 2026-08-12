@@ -94,6 +94,40 @@ def measure_background_level(image: np.ndarray, mask: np.ndarray, *, stat: str =
     return float(np.median(vals))
 
 
+def auto_background_level(
+    image: np.ndarray,
+    *,
+    body_frac: float = 0.02,
+    bg_pct: float = 20.0,
+) -> float:
+    """Nivel de fondo automático de una proyección (o imagen media), sin ROI.
+
+    Doble protección contra los dos errores típicos de la medición automática:
+
+    - **Aire** fuera del cuerpo (~0 cuentas): se excluye con un umbral de
+      cuerpo (``body_frac`` × p99). Si se midiera el aire se subestimaría el
+      fondo intra-corporal real (scatter + actividad difusa de tejido).
+    - **Vísceras calientes** (hígado, intestino, vesícula) y el corazón: se
+      excluyen tomando un percentil BAJO (``bg_pct``) de los píxeles del
+      cuerpo. En MIBI esas zonas son de las más brillantes, así que nunca
+      entran en la medición.
+
+    El resultado cae típicamente en pulmón / tejido blando de baja captación,
+    que es el fondo fisiológico que se quiere restar.
+    """
+    arr = np.asarray(image, dtype=np.float64)
+    vals = arr[np.isfinite(arr)]
+    if vals.size == 0:
+        return 0.0
+    peak = float(np.percentile(vals, 99.0))
+    if peak <= 0.0:
+        return 0.0
+    body = vals[vals > float(body_frac) * peak]
+    if body.size == 0:
+        return 0.0
+    return float(np.percentile(body, float(bg_pct)))
+
+
 def _feathered_weight(mask: np.ndarray, feather_px: float) -> np.ndarray:
     """Peso [0..1] a partir de una máscara con borde suavizado ``feather_px`` píxeles."""
     weight = np.asarray(mask, dtype=np.float64)

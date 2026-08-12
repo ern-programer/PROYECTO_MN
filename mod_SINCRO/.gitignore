@@ -20,6 +20,13 @@ output_demo/
 # Logs de harness de I+D (regenerables)
 _xel3_out/*.txt
 
+# Scripts de diagnostico / harness I+D (regenerables, NO versionar)
+_diag*.py
+_check_*.py
+_test_*.py
+_proto_*.py
+_xel3_out/
+
 # PDFs de referencia clinica (Emory) que SÍ se versionan
 docs/MANUALES EMORY/*.pdf
 docs/MANUALES EMORY/*.txt

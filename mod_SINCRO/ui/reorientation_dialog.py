@@ -170,6 +170,12 @@ class CardiacReorientationDialog(QDialog):
         self._win_lo = 0.0   # fracción 0..2 del rango normalizado (piso)
         self._win_hi = 1.0   # fracción 0..2 del rango normalizado (techo, >1 = desquema)
         self._disp_max = 1.0
+        # Muestreo del reslice SIN zoom: sample_scale=1.0 conserva el FOV y el
+        # tamaño del corazón. El "píxel fino" se logra en el DISPLAY (upsample
+        # lineal en _smooth_rgb), no escalando la matriz del reslice (eso daba
+        # zoom excesivo). La matriz fina de reconstrucción (Camino A) quedó en
+        # pausa: a 128 el FBP solo achica y mete más estrías, no mejora la pared.
+        self._reformat_sample_scale = 1.0
         # Convención de columnas de vistas de referencia (display):
         # AP sin espejo, lateral izquierda espejada para que "mire a la izquierda".
         self._ap_col_sign = +1
@@ -798,8 +804,25 @@ class CardiacReorientationDialog(QDialog):
         return np.asarray(cube, dtype=np.float64) * m[None, ...]
 
     def _voi_out_size(self):
+        """Tamaño del cubo que CONTIENE el corazón (campo físico correcto)."""
         rz, ry, rx = self._voi_semiaxes()
         return int(np.clip(round(2.0 * max(rz, ry, rx) * 1.25), 16, self._N))
+
+    def _reformat_out_and_scale(self):
+        """(out_size, sample_scale) para el reslice con PÍXEL FINO sin zoom.
+
+        Para que el SA tenga más píxeles cubriendo el MISMO campo físico (pared
+        suave y fina, look Xeleris) sin agrandar el corazón: usamos un cubo de
+        salida más grande (out = out_ref / sample_scale) y una matriz M escalada
+        por sample_scale (<1). El producto conserva el FOV: out x sample_scale =
+        out_ref => el corazón mantiene su tamaño, solo con píxeles más finos.
+        """
+        out_ref = self._voi_out_size()
+        scale = float(getattr(self, "_reformat_sample_scale", 1.0) or 1.0)
+        if not (0.0 < scale <= 1.0):
+            scale = 1.0
+        out = int(np.clip(round(out_ref / scale), 16, self._N * 4))
+        return out, scale
 
     def _voi_center(self):
         return (float(self._voi_cz), float(self._voi_cy), float(self._voi_cx))
@@ -893,10 +916,11 @@ class CardiacReorientationDialog(QDialog):
         # el centro de la VOI (excluye hígado a otra profundidad).
         self._ap_view, self._ll_view = self._slab_views()
         vol_voi = self._apply_voi(self._ung)
-        out = self._voi_out_size()
+        out, sample_scale = self._reformat_out_and_scale()
         self._out = out
         try:
-            reo0 = reslice_from_vector(vol_voi, center, u, out, order=1)
+            reo0 = reslice_from_vector(vol_voi, center, u, out, order=1,
+                                      sample_scale=sample_scale)
             self._reo = self._apply_post_ops_3d(reo0)
         except Exception:
             self._reo = np.zeros((out, out, out))
@@ -945,13 +969,15 @@ class CardiacReorientationDialog(QDialog):
                 f"alto(C-C) {_mm(dz)} | {centro}")
 
     def _smooth_rgb(self, arr):
-        # Interpola en dominio ESCALAR (upsample cubico) y despues colorea, para
-        # replicar el look nitido/suave original: antes matplotlib interpolaba los
-        # datos y luego aplicaba el LUT; hacerlo sobre el RGB ya coloreado se veia
-        # "fuera de foco". Upsample cubico + imshow nearest = nitido sin pixelar.
+        # Upsample LINEAL x4 (order=1) para quitar el pixelado SIN el globo del
+        # cúbico (order=3, que hace overshoot en los bordes). El lineal suaviza
+        # las transiciones de forma fiel (no inventa valores por encima de los
+        # vecinos), como el display interpolado de Xeleris (VolumetrixMI). El
+        # extent en cada imshow usa el shape ORIGINAL, asi que las coordenadas
+        # de handles/lineas siguen alineadas aunque se upsamplee.
         a = np.asarray(arr, dtype=np.float64)
         if ndi is not None and a.ndim == 2 and min(a.shape) > 1:
-            a = ndi.zoom(a, 4, order=3)
+            a = ndi.zoom(a, 4, order=1)
         return render_array_rgb(a, self._cmap, window_low=self._win_lo,
                                 window_high=self._win_hi)
 
@@ -1312,7 +1338,7 @@ class CardiacReorientationDialog(QDialog):
     def _accept(self):
         u = self._long_axis_vector()
         center = self._voi_center()
-        out = self._voi_out_size()
+        out, sample_scale = self._reformat_out_and_scale()
         self.result_long_axis = u
         self.result_center = center
         self.thickness = int(self.spin_thick.value())
@@ -1331,17 +1357,20 @@ class CardiacReorientationDialog(QDialog):
         self.result_half_length = 0.5 * float(np.linalg.norm([dz, dy, dx]))
         try:
             vol_voi = self._apply_voi(self._ung)
-            reo_ung = reslice_from_vector(vol_voi, center, u, out, order=1)
+            reo_ung = reslice_from_vector(vol_voi, center, u, out, order=1,
+                                         sample_scale=sample_scale)
             self.reoriented_ungated = self._apply_post_ops_3d(reo_ung)
             if self._gated is not None:
                 cube_voi = self._apply_voi_gated(self._gated)
-                reo_g = reslice_from_vector_gated(cube_voi, center, u, out, order=1)
+                reo_g = reslice_from_vector_gated(cube_voi, center, u, out, order=1,
+                                                 sample_scale=sample_scale)
                 self.reoriented_gated = self._apply_post_ops_4d(reo_g)
             # Pasajero de fase (FBP): misma VOI, mismo vector, mismo out, mismos
             # post-ops -> queda perfectamente alineado con el gated visible.
             if self._phase_gated is not None:
                 cube_voi_p = self._apply_voi_gated(self._phase_gated)
-                reo_p = reslice_from_vector_gated(cube_voi_p, center, u, out, order=1)
+                reo_p = reslice_from_vector_gated(cube_voi_p, center, u, out, order=1,
+                                                 sample_scale=sample_scale)
                 self.reoriented_gated_phase = self._apply_post_ops_4d(reo_p)
         except Exception:
             self.reoriented_ungated = self._reo

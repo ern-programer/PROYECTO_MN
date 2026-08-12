@@ -93,7 +93,26 @@ def _basis_from_long_axis(u: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.nda
     return u, e_j, e_i
 
 
-def reslice_oblique(volume: np.ndarray, params: ReorientationParams, order: int = 1) -> np.ndarray:
+def _reslice_matrix(u: np.ndarray, e_j: np.ndarray, e_i: np.ndarray, sample_scale: float = 1.0) -> np.ndarray:
+    """Matriz de reslice con control de muestreo fino/grueso.
+
+    ``sample_scale < 1`` hace que el mismo volumen físico ocupe más píxeles del
+    cubo de salida, reduciendo la apariencia de pared engrosada en la SA. Es el
+    ajuste que reproduce el look más limpio de Xeleris/Odyssey sin cambiar el
+    tamaño del cubo final.
+    """
+    scale = float(sample_scale)
+    if not np.isfinite(scale) or scale <= 0.0:
+        scale = 1.0
+    return np.stack([u, e_j, e_i], axis=1) * scale
+
+
+def reslice_oblique(
+    volume: np.ndarray,
+    params: ReorientationParams,
+    order: int = 1,
+    sample_scale: float = 1.0,
+) -> np.ndarray:
     """Reslicea ``volume`` (z, y, x) al marco de eje corto -> ``out[k, j, i]``.
 
     ``out[k]`` es un corte SA (perpendicular al eje largo). ``k`` recorre base->apex.
@@ -104,7 +123,7 @@ def reslice_oblique(volume: np.ndarray, params: ReorientationParams, order: int 
     u = long_axis_vector(params.theta, params.phi)
     u, e_j, e_i = _basis_from_long_axis(u)
     # Columnas de M en orden de salida (k, j, i) expresadas en (z, y, x).
-    M = np.stack([u, e_j, e_i], axis=1)
+    M = _reslice_matrix(u, e_j, e_i, sample_scale=sample_scale)
     n = int(params.out_size)
     out_shape = (n, n, n)
     oc = (np.array(out_shape, dtype=np.float64) - 1.0) / 2.0
@@ -116,10 +135,15 @@ def reslice_oblique(volume: np.ndarray, params: ReorientationParams, order: int 
     )
 
 
-def reslice_oblique_gated(cube: np.ndarray, params: ReorientationParams, order: int = 1) -> np.ndarray:
+def reslice_oblique_gated(
+    cube: np.ndarray,
+    params: ReorientationParams,
+    order: int = 1,
+    sample_scale: float = 1.0,
+) -> np.ndarray:
     """Aplica :func:`reslice_oblique` por gate. ``cube`` es ``(g, z, y, x)``."""
     cube = np.asarray(cube, dtype=np.float64)
-    gates = [reslice_oblique(cube[g], params, order=order) for g in range(cube.shape[0])]
+    gates = [reslice_oblique(cube[g], params, order=order, sample_scale=sample_scale) for g in range(cube.shape[0])]
     return np.stack(gates, axis=0)
 
 
@@ -129,6 +153,7 @@ def reslice_from_vector(
     long_axis: np.ndarray,
     out_size: int,
     order: int = 1,
+    sample_scale: float = 1.0,
 ) -> np.ndarray:
     """Reslicea ``volume`` (z, y, x) usando directamente un vector de eje largo.
 
@@ -143,7 +168,7 @@ def reslice_from_vector(
     if np.linalg.norm(u) <= 0:
         u = np.array([1.0, 0.0, 0.0])
     u, e_j, e_i = _basis_from_long_axis(u)
-    M = np.stack([u, e_j, e_i], axis=1)
+    M = _reslice_matrix(u, e_j, e_i, sample_scale=sample_scale)
     n = int(out_size)
     out_shape = (n, n, n)
     oc = (np.array(out_shape, dtype=np.float64) - 1.0) / 2.0
@@ -161,10 +186,11 @@ def reslice_from_vector_gated(
     long_axis: np.ndarray,
     out_size: int,
     order: int = 1,
+    sample_scale: float = 1.0,
 ) -> np.ndarray:
     """Aplica :func:`reslice_from_vector` por gate. ``cube`` es ``(g, z, y, x)``."""
     cube = np.asarray(cube, dtype=np.float64)
-    gates = [reslice_from_vector(cube[g], center, long_axis, out_size, order=order) for g in range(cube.shape[0])]
+    gates = [reslice_from_vector(cube[g], center, long_axis, out_size, order=order, sample_scale=sample_scale) for g in range(cube.shape[0])]
     return np.stack(gates, axis=0)
 
 

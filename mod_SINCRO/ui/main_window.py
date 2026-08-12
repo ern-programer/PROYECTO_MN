@@ -1891,6 +1891,38 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_post_fwhm_spin.setEnabled(False)
 				self.cine_crudo_post_fwhm_spin.setToolTip("FWHM del suavizado gaussiano [mm]. Típico 6–10 mm.")
 				toolbar6_r2.addWidget(self.cine_crudo_post_fwhm_spin)
+				# --- FBP_CLEAN: denoise Poisson en sinograma + realce por resta ---
+				# (banco 023/025/026/027; idea del usuario). Ver core.fbp_clean.
+				self.cine_crudo_fbpclean_check = QCheckBox("FBP CLEAN")
+				self.cine_crudo_fbpclean_check.setChecked(False)
+				self.cine_crudo_fbpclean_check.setToolTip(
+					"FBP_CLEAN: denoise Poisson del SINOGRAMA (bilateral σc=0.04) antes del FBP "
+					"(ataca las estrías en la raíz, no en la imagen) + realce de cavidad/bordes "
+					"por resta de una fracción de la versión muy suavizada (unsharp mask). "
+					"Para estudios de mitad de tiempo/dosis. Default OFF.")
+				toolbar6_r2.addWidget(self.cine_crudo_fbpclean_check)
+				toolbar6_r2.addWidget(QLabel("realce"))
+				self.cine_crudo_fbpclean_slider = QSlider(Qt.Orientation.Horizontal)
+				self.cine_crudo_fbpclean_slider.setRange(30, 70)  # k = 0.30..0.70
+				self.cine_crudo_fbpclean_slider.setValue(50)      # default k=0.50
+				self.cine_crudo_fbpclean_slider.setMaximumWidth(80)
+				self.cine_crudo_fbpclean_slider.setToolTip("Factor de realce k (0.30–0.70). Más k = más realce de cavidad/bordes pero más ruido de fondo. Default 0.50.")
+				toolbar6_r2.addWidget(self.cine_crudo_fbpclean_slider)
+				self.cine_crudo_fbpclean_lbl = QLabel("0.50")
+				self.cine_crudo_fbpclean_lbl.setMaximumWidth(36)
+				toolbar6_r2.addWidget(self.cine_crudo_fbpclean_lbl)
+				self.cine_crudo_fbpclean_slider.valueChanged.connect(
+					lambda v: self.cine_crudo_fbpclean_lbl.setText(f"{v/100.0:.2f}"))
+				self.cine_crudo_bg_check = QCheckBox("Fondo")
+				self.cine_crudo_bg_check.setChecked(False)
+				self.cine_crudo_bg_check.setToolTip(
+					"Descuento de fondo automático (pre-recon, en el sinograma). "
+					"Mide el piso de cuentas en la zona de bajo fondo (pulmón/tejido blando; "
+					"excluye el aire por umbral de cuerpo y las vísceras calientes por "
+					"percentil bajo) y lo resta de TODA la imagen, incluido el VI: el fondo "
+					"también está debajo del miocardio. Aumenta el contraste cavidad/pared. "
+					"Default OFF.")
+				toolbar6_r2.addWidget(self.cine_crudo_bg_check)
 				toolbar6_r2.addWidget(QLabel("NITIDA II"))
 				self.cine_crudo_nitida2_combo = QComboBox()
 				self.cine_crudo_nitida2_combo.addItem("Off", "none")
@@ -1908,6 +1940,11 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_recon_btn.setToolTip("Reconstruye desde crudo gated con la corrección actual y muestra QC: UngGat + gates. No altera el procesamiento clínico principal todavía.")
 				self.cine_crudo_recon_btn.clicked.connect(self._reconstruct_cine_crudo_raw)
 				toolbar6_r2.addWidget(self.cine_crudo_recon_btn)
+				self.cine_crudo_recon_feta_btn = QToolButton()
+				self.cine_crudo_recon_feta_btn.setText("Reconstruir selección")
+				self.cine_crudo_recon_feta_btn.setToolTip("Reconstruye SOLO la banda axial (feta) entre las líneas Base/Ápex de esta pantalla. Flujo: 1) 'Recon raw' (FBP rápido) para ver el corazón; 2) ajustá Base/Ápex sobre las líneas rojas; 3) 'Reconstruir selección'. Excluye la actividad extracardíaca de arriba/abajo, es más rápido, y es el volumen con el que se reorienta y analiza de aquí en más.")
+				self.cine_crudo_recon_feta_btn.clicked.connect(lambda: self._reconstruct_cine_crudo_raw(feta_only=True))
+				toolbar6_r2.addWidget(self.cine_crudo_recon_feta_btn)
 				self.cine_crudo_reorient_btn = QToolButton()
 				self.cine_crudo_reorient_btn.setText("Reorientar")
 				self.cine_crudo_reorient_btn.setToolTip("Abre la reorientación oblicua interactiva (Rec/Ref estilo Xeleris): definí eje largo del VI en vistas anterior/lateral, ROI y límites Base/Ápex, con preview SA/HLA/VLA en vivo.")
@@ -12478,8 +12515,26 @@ class MainWindow(QMainWindow):
 			ungated_filter = self._cine_crudo_recon_filter_config("ungated")
 			gated_filter = self._cine_crudo_recon_filter_config("gated")
 		post_sigma_px = self._cine_crudo_post_filter_sigma_px(study)
+		# FBP_CLEAN: denoise en sinograma + realce por resta. Es una cadena
+		# autocontenida (FBP + Butterworth + denoise + realce): NO debe sumarse al
+		# post-filtro gaussiano ("Suavizar") ni pelear con OSEM. Si está activa,
+		# anulamos el post-gaussiano (que difumina/engorda) y forzamos FBP. Solo
+		# NITIDA II puede coexistir (actúa post-recon en el gated, otra capa).
+		fbc_on = bool(getattr(self, "cine_crudo_fbpclean_check", None) is not None
+					and self.cine_crudo_fbpclean_check.isChecked())
+		if fbc_on:
+			if method not in {"fbp"}:
+				self._log("FBP_CLEAN es una cadena FBP: fuerzo método FBP (ignoro OSEM/MLEM).")
+				method = "fbp"
+				if str(gated_method).lower() in {"osem", "mlem"}:
+					gated_method = "fbp"
+			if post_sigma_px > 0.0:
+				self._log("FBP_CLEAN activa: anulo el post-filtro gaussiano 'Suavizar' (el realce ya controla el ruido).")
+				post_sigma_px = 0.0
+		fbc_sigma = 0.04 if (fbc_on and method == "fbp") else 0.0
+		fbc_k = float(self.cine_crudo_fbpclean_slider.value()) / 100.0 if getattr(self, "cine_crudo_fbpclean_slider", None) is not None else 0.5
 		# NITIDA II: denoiser gated temporal/espaciotemporal por armónicos (post-recon).
-		# Independiente de NÍTIDA (RR). Combo opcional; si no existe, queda desactivado.
+		# Independiente de NÍTIDA (RR) y compatible con FBP_CLEAN (otra capa, gated).
 		nitida2_mode = "none"
 		if getattr(self, "cine_crudo_nitida2_combo", None) is not None:
 			nitida2_mode = str(self.cine_crudo_nitida2_combo.currentData() or "none")
@@ -12495,6 +12550,10 @@ class MainWindow(QMainWindow):
 			psf_model=psf_model,
 			post_filter_sigma_px=post_sigma_px,
 			nitida2_mode=nitida2_mode,
+			fbp_clean_sigma_color=fbc_sigma,
+			fbp_clean_sharpen_k=fbc_k,
+			background_subtract=bool(getattr(self, "cine_crudo_bg_check", None) is not None
+								and self.cine_crudo_bg_check.isChecked()),
 		)
 
 	# --- Pasajero de fase (FBP) para NÍTIDA ---
@@ -12816,8 +12875,13 @@ class MainWindow(QMainWindow):
 		)
 		return res.image
 
-	def _reconstruct_cine_crudo_raw(self):
-		"""Reconstruye desde crudo la etapa seleccionada (Esfuerzo=primario / Reposo=secundario)."""
+	def _reconstruct_cine_crudo_raw(self, feta_only: bool = False):
+		"""Reconstruye desde crudo la etapa seleccionada (Esfuerzo=primario / Reposo=secundario).
+
+		``feta_only``: si True, reconstruye SOLO la banda axial (feta) delimitada por
+		los markers Base/Ápex — excluye actividad extracardíaca de arriba/abajo y es
+		más rápido. El volumen resultante es el de trabajo (reorientación/análisis).
+		"""
 		raw_study, motion_result, corrected, stage = self._cine_crudo_recon_target()
 		if raw_study is None:
 			QMessageBox.information(self, "SINCRO", "Cargá un estudio crudo gated en cine_crudo primero.")
@@ -12840,13 +12904,28 @@ class MainWindow(QMainWindow):
 			projections = self._apply_raw_bg_to_recon_cube(projections, stage)
 			angles = getattr(raw_study, "angles_deg", None)
 			cfg = self._cine_crudo_recon_config(raw_study)
+			feta_txt = ""
+			if feta_only:
+				# La feta se define con los markers Base/Ápex de ESTA pantalla, que
+				# operan sobre el eje axial z de la recon (= altura del detector).
+				# Requiere una recon previa (FBP default) para tener las líneas rojas.
+				if self.cine_crudo_recon_result is None:
+					QMessageBox.information(self, "SINCRO", "Reconstruir selección: primero tocá 'Recon raw' (FBP rápido), ajustá las líneas Base/Ápex sobre el corazón y recién ahí reconstruí la selección.")
+					self._set_progress(100, "Reconstruir selección: falta recon base")
+					return
+				height = int(projections.shape[2])
+				z0, z1 = self._cine_crudo_cut_bounds(height)
+				from dataclasses import replace as _dc_replace
+				cfg = _dc_replace(cfg, recon_slice_range=(z0, z1))
+				feta_txt = f" · feta z=[{z0},{z1}]/{height}"
+				self._log(f"Reconstruir selección: feta axial z=[{z0},{z1}] de {height} (markers Base/Ápex).")
 			etapa_txt = "reposo" if stage == "rest" else "esfuerzo"
 			if motion_result is not None and corrected is not None:
 				motion = dict(motion_result)
-				source_label = f"{etapa_txt} · corregido por motion correction"
+				source_label = f"{etapa_txt} · corregido por motion correction{feta_txt}"
 			else:
 				motion = self._identity_cine_crudo_motion_result(projections, "sin_correccion")
-				source_label = f"{etapa_txt} · crudo original sin correccion"
+				source_label = f"{etapa_txt} · crudo original sin correccion{feta_txt}"
 
 			if cfg.reconstruction_method.lower() in {"mlem", "osem"} and projections.shape[-1] >= 64:
 				self._log("[INFO] MLEM/OSEM CPU en matriz real puede tardar; para pruebas rápidas usá Iter=1-2.")
@@ -12888,6 +12967,11 @@ class MainWindow(QMainWindow):
 				recon_dialog.close()
 				recon_dialog.deleteLater()
 			self.cine_crudo_recon_result = result
+			if feta_only:
+				try:
+					self._dump_feta_for_harness(result, raw_study, angles, cfg, z0, z1, stage)
+				except Exception as exc:
+					self._log(f"[WARN] No pude volcar la feta para el harness: {exc}")
 			# Pasajero de fase (FBP): con NÍTIDA activa la fase se calculará sobre un
 			# volumen FBP paralelo de la MISMA geometría (mismos shifts de motion y
 			# proyecciones bg-restadas). Perfusión/FEVI siguen usando el nítido.
@@ -12896,6 +12980,9 @@ class MainWindow(QMainWindow):
 				try:
 					self._set_progress(99, "Pasajero de fase (FBP)...")
 					phase_cfg = self._phase_passenger_recon_config(raw_study)
+					if getattr(cfg, "recon_slice_range", None) is not None:
+						from dataclasses import replace as _dc_replace
+						phase_cfg = _dc_replace(phase_cfg, recon_slice_range=cfg.recon_slice_range)
 					phase_result = reconstruct_raw_gated_pipeline(
 						projections, angles, motion_result=motion, config=phase_cfg
 					)
@@ -12927,8 +13014,11 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_cut_apex_spin.setEnabled(True)
 				self.cine_crudo_cut_base_spin.setRange(1, max(1, n_slices))
 				self.cine_crudo_cut_apex_spin.setRange(1, max(1, n_slices))
-				self.cine_crudo_cut_base_spin.setValue(1)
-				self.cine_crudo_cut_apex_spin.setValue(max(1, n_slices))
+				# Con feta, preservar la selección Base/Ápex del usuario (la feta se
+				# reconstruyó justo en esa banda); solo resetear a full en Recon raw.
+				if not feta_only:
+					self.cine_crudo_cut_base_spin.setValue(1)
+					self.cine_crudo_cut_apex_spin.setValue(max(1, n_slices))
 			if hasattr(self, "cine_crudo_cut_thickness_spin"):
 				self.cine_crudo_cut_thickness_spin.setEnabled(True)
 			if hasattr(self, "cine_crudo_preview_limits_btn"):
@@ -12950,6 +13040,75 @@ class MainWindow(QMainWindow):
 			self._log(f"[ERROR] Recon raw falló: {exc}")
 			self._set_progress(100, "Recon raw falló")
 			QMessageBox.warning(self, "SINCRO", f"No se pudo reconstruir desde crudo:\n{exc}")
+
+	def _dump_feta_for_harness(self, result, raw_study, angles, cfg, z0: int, z1: int, stage: str) -> None:
+		"""Vuelca la feta reconstruida + proyecciones corregidas + geometría a disco.
+
+		El harness de NÍTIDA (proceso aparte) lee estos archivos para re-reconstruir
+		la MISMA banda con distintos prefiltros/iteraciones/post-filtros y comparar,
+		sin depender de re-hacer el motion correction ni de adivinar la banda.
+		"""
+		import json
+		out_dir = os.path.join(self.output_dir, "_feta_harness")
+		os.makedirs(out_dir, exist_ok=True)
+		ung_proj = np.asarray(result.ungated_projections, dtype=np.float32)
+		corr_proj = np.asarray(result.corrected_projections, dtype=np.float32)
+		ung_vol = np.asarray(result.ungated_volume, dtype=np.float32)
+		gated_vol = np.asarray(result.gated_volume, dtype=np.float32)
+		ang_src = angles if angles is not None else getattr(raw_study, "angles_deg", None)
+		ang = np.asarray(ang_src, dtype=np.float64)
+		np.save(os.path.join(out_dir, "ungated_projections.npy"), ung_proj)
+		np.save(os.path.join(out_dir, "corrected_projections.npy"), corr_proj)
+		np.save(os.path.join(out_dir, "ungated_volume.npy"), ung_vol)
+		np.save(os.path.join(out_dir, "gated_volume.npy"), gated_vol)
+		np.save(os.path.join(out_dir, "angles_deg.npy"), ang)
+		px = getattr(raw_study, "pixel_mm", None)
+		meta = {
+			"z0": int(z0), "z1": int(z1), "stage": str(stage),
+			"pixel_mm": float(px) if px else None,
+			"radius_mm": float(getattr(raw_study, "radius_mm", 0.0) or 0.0) or None,
+			"manufacturer": str(getattr(raw_study, "manufacturer", "") or ""),
+			"collimator_name": str(getattr(raw_study, "collimator_name", "") or ""),
+			"collimator_type": str(getattr(raw_study, "collimator_type", "") or ""),
+			"ungated_shape": list(ung_proj.shape),
+			"gated_shape": list(gated_vol.shape),
+			"method": str(cfg.reconstruction_method),
+			"iterations": int(cfg.iterative_iterations),
+			"subsets": int(cfg.osem_subsets),
+		}
+		with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as fh:
+			json.dump(meta, fh, ensure_ascii=False, indent=2)
+		self._log(f"Feta volcada para harness -> {out_dir}  (z=[{z0},{z1}], ung_proj {ung_proj.shape})")
+
+	def _dump_reorient_for_harness(self, dlg) -> None:
+		"""Vuelca la orientación REAL aprobada por el usuario (eje largo + centro) y
+		los volúmenes ya reorientados, para que el harness compare FBP vs NÍTIDA
+		sobre la dona SA que el usuario definió (no sobre un eje automático).
+		"""
+		import json
+		out_dir = os.path.join(self.output_dir, "_feta_harness")
+		os.makedirs(out_dir, exist_ok=True)
+		u = getattr(dlg, "result_long_axis", None)
+		center = getattr(dlg, "result_center", None)
+		try:
+			rz, ry, rx = dlg._voi_semiaxes()
+		except Exception:
+			rz = ry = rx = None
+		payload = {
+			"long_axis": ([float(x) for x in np.asarray(u, dtype=np.float64).ravel()[:3]] if u is not None else None),
+			"center": ([float(x) for x in np.asarray(center, dtype=np.float64).ravel()[:3]] if center is not None else None),
+			"base_k": int(getattr(dlg, "base_k", 0)),
+			"apex_k": int(getattr(dlg, "apex_k", 0)),
+			"thickness": int(getattr(dlg, "thickness", 1)),
+			"out_size": int(getattr(dlg, "result_out_size", 0)),
+			"voi_semiaxes": ([float(rz), float(ry), float(rx)] if rz is not None else None),
+		}
+		if getattr(self, "cine_crudo_reoriented_ungated", None) is not None:
+			np.save(os.path.join(out_dir, "reoriented_ungated.npy"),
+					np.asarray(self.cine_crudo_reoriented_ungated, dtype=np.float32))
+		with open(os.path.join(out_dir, "reorient.json"), "w", encoding="utf-8") as fh:
+			json.dump(payload, fh, ensure_ascii=False, indent=2)
+		self._log(f"Reorientación volcada para harness -> {out_dir}\\reorient.json  (eje={payload['long_axis']})")
 
 	def _cine_crudo_cut_bounds(self, n_slices: int) -> tuple[int, int]:
 		base = int(self.cine_crudo_cut_base_spin.value()) if hasattr(self, "cine_crudo_cut_base_spin") else 1
@@ -13601,6 +13760,13 @@ class MainWindow(QMainWindow):
 		# Semilla de orientación (eje largo + rango de cortes + espesor): la 2da
 		# etapa arrancará igual que esta, pero podrá corregirla si hace falta.
 		self._register_reorient_seed(dlg)
+		# Opción A del harness NÍTIDA: volcar el eje largo + centro + volúmenes
+		# reorientados a disco, para que el diagnóstico use la orientación REAL
+		# aprobada por el usuario (no un eje automático).
+		try:
+			self._dump_reorient_for_harness(dlg)
+		except Exception as exc:
+			self._log(f"[WARN] No pude volcar la reorientación para el harness: {exc}")
 		self.cine_crudo_cut_source_label = (self.cine_crudo_cut_source_label or "raw recon") + " · reorientado"
 		self._log(
 			f"Reorientación aplicada: azimut/elevación oblicuos; volumen SA-alineado {self.cine_crudo_reoriented_gated.shape}; "
