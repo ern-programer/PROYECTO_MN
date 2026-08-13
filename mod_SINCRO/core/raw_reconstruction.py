@@ -55,11 +55,20 @@ class RawReconConfig:
     # Si resolution_recovery=True y el método es iterativo (osem/mlem), la
     # reconstrucción modela la PSF dependiente de profundidad del colimador
     # (psf_model, un core.resolution_recovery.PsfModel). No aplica a FBP.
+    # Por rama: rr_ungated / rr_gated permiten NÍTIDA solo en una rama (p.ej.
+    # ungated nítido para perfusión, gated FBP/NITIDA III para movimiento).
+    # `resolution_recovery` global se mantiene por compatibilidad: si es True y
+    # las por-rama no se setearon, aplica a ambas.
     resolution_recovery: bool = False
+    rr_ungated: bool | None = None   # None = hereda resolution_recovery
+    rr_gated: bool | None = None     # None = hereda resolution_recovery
     psf_model: object | None = None
     # Post-filtro gaussiano 3D opcional (control de ruido post-recon). 0 = off.
     # Sigma en píxeles; es la contraparte de ruido de la recuperación de resolución.
+    # Por rama: si las por-rama son None, se usa post_filter_sigma_px (global).
     post_filter_sigma_px: float = 0.0
+    post_filter_sigma_ungated_px: float | None = None
+    post_filter_sigma_gated_px: float | None = None
     # --- Feta axial (cilindro del corazón) ---
     # Rango de cortes axiales (z = fila del detector) a reconstruir, inclusive:
     # (z0, z1). None = volumen completo. En SPECT paralelo cada corte z se
@@ -80,6 +89,17 @@ class RawReconConfig:
     nitida2_band_sigma: float = 0.7
     nitida2_dc_radius: int = 2
     nitida2_dc_eps: float = 0.01
+    # --- NITIDA III: MAP-OSEM gated con Pilar C (SNR adaptativa) ---
+    # Reconstruye el GATED con un prior de suavidad Huber cuyo beta es ESPACIAL
+    # (fuerte donde la SNR es alta = pared, flojo donde la señal ES el
+    # movimiento/ruido). Limpia la pared sin aplastar la oscilación cardíaca
+    # (H1). Medido en el estudio 5s real: SNR x1.49 conservando H1 x0.88.
+    # OFF por defecto. Es una RECONSTRUCCIÓN del gated (no un post-filtro):
+    # reemplaza al OSEM/FBP del gated cuando está activa.
+    nitida3_enabled: bool = False
+    nitida3_beta0: float = 0.6     # tope de beta espacial (pared)
+    nitida3_iterations: int = 2
+    nitida3_subsets: int = 4
     # --- FBP_CLEAN: denoise Poisson en sinograma + realce por resta ---
     # Denoise bilateral de las proyecciones ANTES del FBP (ataca las estrías en
     # la raíz, banco 023/025) + realce de cavidad/bordes restando una fracción
@@ -88,6 +108,14 @@ class RawReconConfig:
     fbp_clean_sigma_color: float = 0.0   # 0=off; 0.04 calibrado (banco 025)
     fbp_clean_sharpen_k: float = 0.5     # factor de realce (0.3–0.7, default 0.5)
     fbp_clean_blur_sigma_color: float = 0.24  # versión muy suavizada para la resta
+    # --- Denoise+ UNGATED: denoise de sinograma + realce por resta ---
+    # El ungated (alto conteo) también sufre scatter/fondo que RELLENA la cavidad
+    # (medido: contraste cav/pared 0.68 vs 0.79 con Denoise+, harness 037). Este
+    # paso aplica al ungated el MISMO tratamiento que FBP_CLEAN al gated: denoise
+    # bilateral del sinograma + realce por resta (k=0.5). Abre la cavidad y afina
+    # la pared. OFF por defecto. Independiente de FBP_CLEAN (que es gated).
+    ungated_denoise_plus: bool = False
+    ungated_denoise_plus_k: float = 0.20  # óptimo medido 0.20 (abre cavidad sin comer pared)
     # --- Descuento de fondo automático (pre-recon, sobre el sinograma) ---
     # Resta un piso de cuentas medido automáticamente en la zona de bajo fondo
     # (pulmón/tejido blando; excluye el aire por umbral de cuerpo y las
@@ -285,6 +313,11 @@ def reconstruct_projection_volume(
     psf=None,
     slice_range: tuple[int, int] | None = None,
     progress=None,
+    map_beta: float = 0.0,
+    map_prior: str = "none",
+    map_prior_size: int = 3,
+    map_adaptive: bool = False,
+    map_beta0: float = 0.4,
 ) -> np.ndarray:
     """Reconstruye volumen desde proyecciones 3D con FBP/MLEM/OSEM.
 
@@ -298,6 +331,10 @@ def reconstruct_projection_volume(
     ``psf`` (opcional, PsfModel de core.resolution_recovery): activa la
     recuperación de resolución (RR) dependiente de profundidad en el path
     iterativo (OSEM/MLEM). Sin psf, el comportamiento es idéntico al previo.
+
+    ``map_beta``/``map_prior``/``map_prior_size`` (opcionales): MAP-OSEM (Green
+    OSL) con prior edge-preserving dentro del update (NÍTIDA III). 0/"none" =
+    OSEM puro (comportamiento previo).
     """
     method_key = str(method or "fbp").strip().lower()
     if method_key == "fbp":
@@ -344,6 +381,11 @@ def reconstruct_projection_volume(
             subsets=effective_subsets,
             sensitivity_cache=sensitivity_cache,
             psf=psf,
+            map_beta=map_beta,
+            map_prior=map_prior,
+            map_prior_size=map_prior_size,
+            map_adaptive=map_adaptive,
+            map_beta0=map_beta0,
         )
         if progress is not None and n_band:
             progress(done / n_band)
@@ -456,6 +498,11 @@ def _iterative_reconstruct_slice(
     subsets: int,
     sensitivity_cache: dict[int, np.ndarray] | None = None,
     psf=None,
+    map_beta: float = 0.0,
+    map_prior: str = "none",
+    map_prior_size: int = 3,
+    map_adaptive: bool = False,
+    map_beta0: float = 0.4,
 ) -> np.ndarray:
     """MLEM/OSEM paralela simple por slice.
 
@@ -468,7 +515,17 @@ def _iterative_reconstruct_slice(
     en tests), pero el caller de producción (`reconstruct_projection_volume`)
     siempre las precalcula una vez para evitar recomputarlas por cada corte e
     iteración.
-    """
+
+    MAP-OSEM (Green OSL, opcional): si ``map_beta`` > 0 y ``map_prior`` != "none",
+    divide el update por ``(1 + beta * dU)`` con ``dU`` el gradiente del prior
+    edge-preserving (mediana: x − mediana(x)). Es local (no impone valor temporal
+    fijo), así que controla el ruido de la recon sin aplastar el movimiento
+    cardíaco en gated (a diferencia de una guía ungated por-gate). beta típico
+    0.2-0.5; 0 desactiva (OSEM puro, comportamiento idéntico al previo).
+    Pilar C (SNR adaptativa): si ``map_beta_map`` (array (H,W)) se pasa, se usa
+    como campo beta ESPACIAL con el prior de suavidad Huber (nitida3): el freno
+    es fuerte donde la SNR es alta (pared) y débil donde domina el movimiento /
+    ruido. Tiene prioridad sobre map_beta/map_prior escalares.    """
     measured = np.clip(np.asarray(sinogram, dtype=np.float64), 0.0, None)
     theta = np.asarray(theta, dtype=np.float64)
     detector_size = int(measured.shape[0])
@@ -482,6 +539,18 @@ def _iterative_reconstruct_slice(
     subset_count = max(1, min(int(subsets), int(theta.size)))
     angle_indices = np.arange(theta.size)
     eps = 1e-6
+    use_map = float(map_beta) > 0.0 and str(map_prior).lower() not in ("none", "")
+    if use_map:
+        from core.nitida3 import edge_preserving_prior
+    if map_adaptive:
+        from core.nitida3 import local_snr_map, matched_recovery_weight, huber_prior_grad
+
+    def _prior_grad(img: np.ndarray) -> np.ndarray:
+        ref = edge_preserving_prior(img, kind=str(map_prior), size=int(map_prior_size))
+        # Gradiente del prior (local): cuánto se desvía cada voxel de la referencia
+        # suavizada. Positivo donde x > referencia -> baja; negativo donde x < ref.
+        return img - ref
+
     for _iter in range(max(1, int(iterations))):
         for subset_id in range(subset_count):
             idx = angle_indices[subset_id::subset_count]
@@ -496,7 +565,18 @@ def _iterative_reconstruct_slice(
                 sensitivity = sensitivity_cache[subset_id]
             else:
                 sensitivity = _backproject_slice(np.ones_like(measured_sub), theta_sub, output_size=out_size, psf=psf)
-            image *= correction / np.maximum(sensitivity, eps)
+            denom = np.maximum(sensitivity, eps)
+            if map_adaptive:
+                # Pilar C: beta espacial (SNR local) x gradiente Huber (suavidad,
+                # no mata el movimiento). denom * (1 + beta0 * w(snr) * dU_huber).
+                snr = local_snr_map(image)
+                w = matched_recovery_weight(snr)
+                denom = np.maximum(denom * (1.0 + float(map_beta0) * w * huber_prior_grad(image)), 1e-3)
+            elif use_map:
+                # Green OSL: la sensibilidad queda atenuada por (1 + beta * dU).
+                # Clamp a un piso positivo para evitar división por ~0 / negativo.
+                denom = np.maximum(denom * (1.0 + float(map_beta) * _prior_grad(image)), 1e-3)
+            image *= correction / denom
             image = np.clip(image, 0.0, None)
     return image
 
@@ -539,12 +619,20 @@ def reconstruct_gated_projection_volume(
     psf=None,
     slice_range: tuple[int, int] | None = None,
     progress=None,
+    map_beta: float = 0.0,
+    map_prior: str = "none",
+    map_prior_size: int = 3,
+    map_adaptive: bool = False,
+    map_beta0: float = 0.4,
 ) -> np.ndarray:
     """Reconstruye cada gate por separado con FBP/MLEM/OSEM.
 
     ``psf`` (opcional): activa la recuperación de resolución (RR) en el path
     iterativo, compartida entre todos los gates (misma geometría/colimador).
     ``progress`` (opcional): callable(local_fraction 0..1) repartido entre gates.
+    ``map_beta``/``map_prior``/``map_prior_size`` (opcionales): MAP-OSEM (Green
+    OSL) con prior edge-preserving dentro del update (NÍTIDA III). 0/"none" =
+    OSEM puro (comportamiento previo).
     """
     proj = np.asarray(projections, dtype=np.float64)
     if proj.ndim != 4:
@@ -576,6 +664,11 @@ def reconstruct_gated_projection_volume(
             psf=psf,
             slice_range=slice_range,
             progress=_sub_progress(progress, gate, int(proj.shape[0])),
+            map_beta=map_beta,
+            map_prior=map_prior,
+            map_prior_size=map_prior_size,
+            map_adaptive=map_adaptive,
+            map_beta0=map_beta0,
         )
         for gate in range(proj.shape[0])
     ]
@@ -659,15 +752,19 @@ def reconstruct_raw_gated_pipeline(
 
     method = str(cfg.reconstruction_method).strip().lower()
     subsets = int(cfg.osem_subsets) if method == "osem" else 1
-    # RR NÍTIDA (OmniRes): solo aplica al path iterativo (osem/mlem).
-    rr_psf = cfg.psf_model if (getattr(cfg, "resolution_recovery", False) and method in {"osem", "mlem"}) else None
-    if getattr(cfg, "resolution_recovery", False) and rr_psf is None:
-        notes.append("NÍTIDA (OmniRes) pedido pero inactivo: requiere método OSEM/MLEM y un PsfModel.")
+    # RR NÍTIDA (OmniRes) por rama: rr_ungated/rr_gated (None = hereda el global
+    # resolution_recovery). Solo aplica al path iterativo (osem/mlem).
+    _rr_global = bool(getattr(cfg, "resolution_recovery", False))
+    rr_ung = _rr_global if getattr(cfg, "rr_ungated", None) is None else bool(cfg.rr_ungated)
+    rr_gat = _rr_global if getattr(cfg, "rr_gated", None) is None else bool(cfg.rr_gated)
+    rr_psf = cfg.psf_model if (rr_ung and method in {"osem", "mlem"}) else None
+    if rr_ung and rr_psf is None:
+        notes.append("NÍTIDA (OmniRes) ungated pedido pero inactivo: requiere método OSEM/MLEM y un PsfModel.")
 
     # Método independiente de la rama gated (None => hereda el de la rama ungated).
     gated_method = str(cfg.gated_method or method).strip().lower()
     gated_subsets = int(cfg.osem_subsets) if gated_method == "osem" else 1
-    gated_rr_psf = cfg.psf_model if (getattr(cfg, "resolution_recovery", False) and gated_method in {"osem", "mlem"}) else None
+    gated_rr_psf = cfg.psf_model if (rr_gat and gated_method in {"osem", "mlem"}) else None
 
     # Reparto del presupuesto de progreso: UngGat ~25%, gates ~70%, post ~5%.
     n_gates = int(raw.shape[0])
@@ -747,6 +844,59 @@ def reconstruct_raw_gated_pipeline(
     if gated_method != method:
         notes.append(f"Método por rama: UngGat={method.upper()}, gated={gated_method.upper()}.")
 
+    # Denoise+ UNGATED: denoise bilateral del sinograma ungated + realce por resta.
+    # Abre la cavidad y afina la pared (el ungated también sufre scatter/fondo).
+    # Se aplica sobre el volumen ungated ya reconstruido, restando una fracción
+    # de la versión muy suavizada (misma idea que el realce de FBP_CLEAN).
+    if getattr(cfg, "ungated_denoise_plus", False):
+        from core.fbp_clean import denoise_projections_bilateral, sharpen_by_subtraction
+        k_u = float(getattr(cfg, "ungated_denoise_plus_k", 0.20))
+        blur_sc = float(getattr(cfg, "fbp_clean_blur_sigma_color", 0.24))
+        ung_blur = reconstruct_projection_volume(
+            denoise_projections_bilateral(ungated_corrected, sigma_color=blur_sc),
+            angles_deg, method=method, projection_filter=cfg.ungated_filter,
+            fbp_filter_name=cfg.fbp_filter_name, iterations=int(cfg.iterative_iterations),
+            subsets=subsets, psf=rr_psf, slice_range=cfg.recon_slice_range)
+        ungated_volume = sharpen_by_subtraction(ungated_volume, ung_blur, k_u)
+        notes.append(f"Denoise+ ungated: realce por resta (k={k_u:.2f}, difuso σc={blur_sc:.2f}).")
+
+    # NITIDA III: reconstruye el GATED con MAP-OSEM Pilar C (SNR adaptativa).
+    # Es una reconstrucción (reemplaza al gated FBP/OSEM de arriba): prior de
+    # suavidad Huber con beta espacial por SNR local -> limpia la pared sin
+    # aplastar el movimiento. Reescalado por gate para conservar cuentas (FEVI).
+    if getattr(cfg, "nitida3_enabled", False) and gated_volume.shape[0] >= 3:
+        from core.nitida3 import nitida3_map_osem_gated_adaptive
+        _n3_gates = int(gated_volume.shape[0])
+
+        def _n3_progress(frac: float, msg: str = "") -> None:
+            if progress_callback is not None:
+                # Barra propia de NITIDA III: mapea su avance interno (0..1) al
+                # tramo 0.90-0.97 de la barra global. El progress interno solo
+                # pasa la fracción (no mensaje), así que el gate se deriva de ella.
+                f = max(0.0, min(1.0, float(frac)))
+                gate_1b = min(_n3_gates, int(f * _n3_gates) + 1)
+                text = msg or f"NITIDA III (MAP-OSEM Pilar C) gate {gate_1b}/{_n3_gates}..."
+                progress_callback(0.90 + 0.07 * f, text)
+
+        # Referencia de cuentas para el reescalado = el gated YA reconstruido
+        # arriba (evita una 2da reconstrucción OSEM completa -> ~2x más rápido).
+        gated_volume = nitida3_map_osem_gated_adaptive(
+            gated_src,
+            angles_deg,
+            iterations=int(getattr(cfg, "nitida3_iterations", 2)),
+            subsets=int(getattr(cfg, "nitida3_subsets", 4)),
+            beta0=float(getattr(cfg, "nitida3_beta0", 0.6)),
+            psf=gated_rr_psf,
+            slice_range=cfg.recon_slice_range,
+            rescale=True,
+            ref_volume=gated_volume,
+            progress_callback=_n3_progress,
+        )
+        notes.append(
+            f"NITIDA III: gated reconstruido con MAP-OSEM Pilar C "
+            f"(Huber por SNR, beta0={float(getattr(cfg, 'nitida3_beta0', 0.6)):.2f})."
+        )
+
     # FBP_CLEAN paso 2: realce de cavidad/bordes por resta de una fracción de la
     # versión muy suavizada (unsharp mask, idea del usuario). out = nítido − k×difuso.
     # Se aplica a los volúmenes ya reconstruidos (ungated y gated) si FBP_CLEAN
@@ -793,19 +943,25 @@ def reconstruct_raw_gated_pipeline(
         f"flip_x={flip_x} (converge CW/CCW a orientacion canonica)."
     )
 
-    # Post-filtro gaussiano 3D (control de ruido). Contraparte de la RR: la
-    # reconstruccion iterativa con modelado de PSF amplifica el ruido; este
-    # unico suavizado opcional lo regula. Se aplica por volumen (ungated) y por
-    # gate, solo sobre los ejes espaciales.
-    post_sigma = float(getattr(cfg, "post_filter_sigma_px", 0.0) or 0.0)
-    if post_sigma > 0.05:
+    # Post-filtro gaussiano 3D (control de ruido) POR RAMA. Contraparte de la RR:
+    # la recon iterativa con PSF amplifica el ruido; este suavizado lo regula.
+    # Si las sigmas por rama son None, se usa la global post_filter_sigma_px.
+    from scipy.ndimage import gaussian_filter as _gf
+    _post_global = float(getattr(cfg, "post_filter_sigma_px", 0.0) or 0.0)
+    post_ung = _post_global if getattr(cfg, "post_filter_sigma_ungated_px", None) is None else float(cfg.post_filter_sigma_ungated_px)
+    post_gat = _post_global if getattr(cfg, "post_filter_sigma_gated_px", None) is None else float(cfg.post_filter_sigma_gated_px)
+    if post_ung > 0.05 or post_gat > 0.05:
         if progress_callback is not None:
             progress_callback(0.96, "Aplicando post-filtro (suavizado)...")
-        from scipy.ndimage import gaussian_filter
-        ungated_volume = gaussian_filter(ungated_volume, sigma=post_sigma, mode="constant")
-        for g in range(gated_volume.shape[0]):
-            gated_volume[g] = gaussian_filter(gated_volume[g], sigma=post_sigma, mode="constant")
-        notes.append(f"Post-filtro gaussiano 3D aplicado (sigma={post_sigma:.2f} px) para control de ruido.")
+        if post_ung > 0.05:
+            ungated_volume = _gf(ungated_volume, sigma=post_ung, mode="constant")
+        if post_gat > 0.05:
+            for g in range(gated_volume.shape[0]):
+                gated_volume[g] = _gf(gated_volume[g], sigma=post_gat, mode="constant")
+        notes.append(
+            f"Post-filtro gaussiano 3D por rama: ungated sigma={post_ung:.2f}px, "
+            f"gated sigma={post_gat:.2f}px."
+        )
 
     # NITIDA II: denoiser gated temporal/espaciotemporal por armónicos. Solo toca
     # el volumen gated (el ungated ya es de alto conteo). Preserva el movimiento

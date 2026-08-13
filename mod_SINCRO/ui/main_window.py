@@ -258,10 +258,16 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_cut_study = None
 		self.cine_crudo_cut_source_label = ""
 		self.cine_crudo_axes_for_export: dict[str, np.ndarray] = {}
+		self.cine_crudo_axes_for_export_ungated: dict[str, np.ndarray] = {}
+		# Fuente del montaje clínico: "ungated" (perfusión estática, con Denoise+;
+		# la imagen del informe) o "gated" (cine en movimiento). Default ungated.
+		self.cine_crudo_montage_source: str = "ungated"
 		# Slots duales por etapa para el montaje comparativo stress/rest. El montaje
 		# usa estos (no el genérico axes_for_export, que es la etapa mostrada).
 		self.cine_crudo_axes_for_export_stress: dict[str, np.ndarray] = {}
 		self.cine_crudo_axes_for_export_rest: dict[str, np.ndarray] = {}
+		self.cine_crudo_axes_for_export_ungated_stress: dict[str, np.ndarray] = {}
+		self.cine_crudo_axes_for_export_ungated_rest: dict[str, np.ndarray] = {}
 		self.cine_crudo_rest_source_label = ""
 		self.cine_crudo_cut_thickness_mm = 0.0
 		self.cine_crudo_cut_thickness_mm_rest = 0.0
@@ -292,6 +298,16 @@ class MainWindow(QMainWindow):
 		# interpolación de display + gaussiano extra. No altera datos ni análisis.
 		self.cine_crudo_montage_interp = "Bilineal"
 		self.cine_crudo_montage_smooth = 0.0
+		# Cine del montaje clínico (solo con fuente Gated): recorre los gates en
+		# vivo. Default 40 ms (configurable). Independiente del cine de proyecciones.
+		self.cine_crudo_montage_cine_playing: bool = False
+		self.cine_crudo_montage_cine_frame: int = 0
+		self._montage_cine_timer = QTimer(self)
+		self._montage_cine_timer.timeout.connect(self._advance_montage_cine_frame)
+		# Caché de frames pre-renderizados del cine del montaje: se generan TODOS
+		# al dar Play (preload) y luego el timer solo blit-ea el QPixmap (instantáneo).
+		self._montage_cine_frames: list = []
+		self._montage_cine_frames_sig = None
 		# Ventanas por tira/eje (1-based): inicio y cantidad visible.
 		self.cine_crudo_stripe_start = {"SA": 1, "VLA": 1, "HLA": 1}
 		self.cine_crudo_stripe_count = {"SA": 999, "VLA": 999, "HLA": 999}
@@ -1783,7 +1799,7 @@ class MainWindow(QMainWindow):
 				toolbar6_r1.addWidget(QLabel("Recon Ung"))
 				self.cine_crudo_recon_method_combo = QComboBox()
 				self.cine_crudo_recon_method_combo.addItems(["FBP", "MLEM", "OSEM"])
-				self.cine_crudo_recon_method_combo.setCurrentText("OSEM")
+				self.cine_crudo_recon_method_combo.setCurrentText("FBP")
 				self.cine_crudo_recon_method_combo.setMaximumWidth(74)
 				self.cine_crudo_recon_method_combo.setToolTip("Método de reconstrucción de la rama UngGat/perfusión. La rama gated tiene su propio método (combo 'Gated'). MLEM/OSEM son CPU de referencia.")
 				toolbar6_r1.addWidget(self.cine_crudo_recon_method_combo)
@@ -1811,7 +1827,7 @@ class MainWindow(QMainWindow):
 				toolbar6_r1.addWidget(QLabel("Gated"))
 				self.cine_crudo_gated_method_combo = QComboBox()
 				self.cine_crudo_gated_method_combo.addItems(["FBP", "MLEM", "OSEM"])
-				self.cine_crudo_gated_method_combo.setCurrentText("OSEM")
+				self.cine_crudo_gated_method_combo.setCurrentText("FBP")
 				self.cine_crudo_gated_method_combo.setMaximumWidth(74)
 				self.cine_crudo_gated_method_combo.setToolTip("Método de reconstrucción de la rama gated (independiente del ungated). FBP/MLEM/OSEM.")
 				toolbar6_r1.addWidget(self.cine_crudo_gated_method_combo)
@@ -1862,6 +1878,25 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_osem_subsets_spin.setMaximumWidth(50)
 				self.cine_crudo_osem_subsets_spin.setToolTip("Subsets para OSEM. En FBP/MLEM se ignora.")
 				toolbar6_r2.addWidget(self.cine_crudo_osem_subsets_spin)
+				# Fondo: preprocesado del sinograma COMÚN a todo el estudio (ungated +
+				# gated comparten las proyecciones crudas). No es de una rama: va acá.
+				self.cine_crudo_bg_check = QCheckBox("Fondo")
+				self.cine_crudo_bg_check.setChecked(False)
+				self.cine_crudo_bg_check.setToolTip(
+					"Descuento de fondo automático (pre-recon, en el sinograma, aplica a "
+					"TODO el estudio: ungated + gated). Mide el piso en la zona de bajo "
+					"fondo (pulmón/tejido; excluye aire y vísceras calientes) y lo resta "
+					"de TODA la imagen, incluido el VI. Aumenta el contraste cavidad/pared. "
+					"Default OFF.")
+				toolbar6_r2.addWidget(self.cine_crudo_bg_check)
+				# --- Filtros por rama en DOS filas (ungated / gated): la fila única se
+				# iba de pantalla y no permitía activar un filtro en una rama y otro en
+				# la otra. UNGATED = perfusión estática (alto conteo) -> NÍTIDA(RR) para
+				# nitidez. GATED = movimiento (bajo conteo/gate) -> FBP CLEAN / NITIDA
+				# III / NITIDA II. Fondo y las acciones van en las comunes (r2).
+				toolbar6_r_filters = QHBoxLayout()   # fila UNGATED
+				toolbar6_r_filters_g = QHBoxLayout()  # fila GATED
+				toolbar6_r_filters.addWidget(QLabel("<b>Ungated:</b>"))
 				self.cine_crudo_nitida_check = QCheckBox("NÍTIDA")
 				self.cine_crudo_nitida_check.setChecked(False)
 				self.cine_crudo_nitida_check.setToolTip(
@@ -1872,7 +1907,7 @@ class MainWindow(QMainWindow):
 					"lo que va a des-difuminar) y enciende 'Suavizar' (post-filtro que regula el "
 					"ruido que amplifica la recuperación de resolución). Opcional; medio-dosis/medio-tiempo.")
 				self.cine_crudo_nitida_check.toggled.connect(self._on_nitida_toggled)
-				toolbar6_r2.addWidget(self.cine_crudo_nitida_check)
+				toolbar6_r_filters.addWidget(self.cine_crudo_nitida_check)
 				self.cine_crudo_post_check = QCheckBox("Suavizar")
 				self.cine_crudo_post_check.setChecked(False)
 				self.cine_crudo_post_check.setToolTip(
@@ -1880,7 +1915,7 @@ class MainWindow(QMainWindow):
 					"Es la contraparte de la recuperación de resolución: OSEM+NÍTIDA realza detalle "
 					"pero amplifica ruido; este único suavizado lo regula. Default OFF.")
 				self.cine_crudo_post_check.toggled.connect(self._on_post_filter_toggled)
-				toolbar6_r2.addWidget(self.cine_crudo_post_check)
+				toolbar6_r_filters.addWidget(self.cine_crudo_post_check)
 				self.cine_crudo_post_fwhm_spin = QDoubleSpinBox()
 				self.cine_crudo_post_fwhm_spin.setRange(0.0, 30.0)
 				self.cine_crudo_post_fwhm_spin.setSingleStep(0.5)
@@ -1889,8 +1924,36 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_post_fwhm_spin.setSuffix(" mm")
 				self.cine_crudo_post_fwhm_spin.setMaximumWidth(72)
 				self.cine_crudo_post_fwhm_spin.setEnabled(False)
-				self.cine_crudo_post_fwhm_spin.setToolTip("FWHM del suavizado gaussiano [mm]. Típico 6–10 mm.")
-				toolbar6_r2.addWidget(self.cine_crudo_post_fwhm_spin)
+				self.cine_crudo_post_fwhm_spin.setToolTip("FWHM del suavizado gaussiano UNGATED [mm]. Típico 6–10 mm.")
+				toolbar6_r_filters.addWidget(self.cine_crudo_post_fwhm_spin)
+				# Denoise+ UNGATED: denoise de sinograma + realce por resta (abre la
+				# cavidad y afina la pared; el ungated también sufre scatter/fondo).
+				self.cine_crudo_denoise_plus_check = QCheckBox("Denoise+")
+				self.cine_crudo_denoise_plus_check.setChecked(False)
+				self.cine_crudo_denoise_plus_check.setToolTip(
+					"Denoise+ UNGATED: denoise bilateral del sinograma + realce por resta "
+					"(misma idea que FBP_CLEAN pero para el ungated de alto conteo). Abre "
+					"la cavidad y afina la pared (el ungated también sufre scatter/fondo "
+					"que la rellena). Medido: contraste cavidad/pared 0.68 -> 0.79. Default OFF.")
+				toolbar6_r_filters.addWidget(self.cine_crudo_denoise_plus_check)
+				toolbar6_r_filters.addWidget(QLabel("k"))
+				self.cine_crudo_denoise_plus_slider = QSlider(Qt.Orientation.Horizontal)
+				self.cine_crudo_denoise_plus_slider.setRange(0, 50)   # k = 0.00..0.50
+				self.cine_crudo_denoise_plus_slider.setValue(20)       # óptimo medido k=0.20
+				self.cine_crudo_denoise_plus_slider.setMaximumWidth(80)
+				self.cine_crudo_denoise_plus_slider.setToolTip(
+					"Factor de realce k del Denoise+ ungated (0.00–0.50). "
+					"ÓPTIMO medido ~0.20: abre la cavidad sin comer la pared. "
+					"Más de ~0.5 empieza a comer la pared.")
+				toolbar6_r_filters.addWidget(self.cine_crudo_denoise_plus_slider)
+				self.cine_crudo_denoise_plus_lbl = QLabel("0.20")
+				self.cine_crudo_denoise_plus_lbl.setMaximumWidth(36)
+				toolbar6_r_filters.addWidget(self.cine_crudo_denoise_plus_lbl)
+				self.cine_crudo_denoise_plus_slider.valueChanged.connect(
+					lambda v: self.cine_crudo_denoise_plus_lbl.setText(f"{v/100.0:.2f}"))
+				toolbar6_r_filters.addStretch(1)
+				# --- Fila GATED ---
+				toolbar6_r_filters_g.addWidget(QLabel("<b>Gated:</b>"))
 				# --- FBP_CLEAN: denoise Poisson en sinograma + realce por resta ---
 				# (banco 023/025/026/027; idea del usuario). Ver core.fbp_clean.
 				self.cine_crudo_fbpclean_check = QCheckBox("FBP CLEAN")
@@ -1900,30 +1963,43 @@ class MainWindow(QMainWindow):
 					"(ataca las estrías en la raíz, no en la imagen) + realce de cavidad/bordes "
 					"por resta de una fracción de la versión muy suavizada (unsharp mask). "
 					"Para estudios de mitad de tiempo/dosis. Default OFF.")
-				toolbar6_r2.addWidget(self.cine_crudo_fbpclean_check)
-				toolbar6_r2.addWidget(QLabel("realce"))
+				toolbar6_r_filters_g.addWidget(self.cine_crudo_fbpclean_check)
+				toolbar6_r_filters_g.addWidget(QLabel("realce"))
 				self.cine_crudo_fbpclean_slider = QSlider(Qt.Orientation.Horizontal)
 				self.cine_crudo_fbpclean_slider.setRange(30, 70)  # k = 0.30..0.70
 				self.cine_crudo_fbpclean_slider.setValue(50)      # default k=0.50
 				self.cine_crudo_fbpclean_slider.setMaximumWidth(80)
 				self.cine_crudo_fbpclean_slider.setToolTip("Factor de realce k (0.30–0.70). Más k = más realce de cavidad/bordes pero más ruido de fondo. Default 0.50.")
-				toolbar6_r2.addWidget(self.cine_crudo_fbpclean_slider)
+				toolbar6_r_filters_g.addWidget(self.cine_crudo_fbpclean_slider)
 				self.cine_crudo_fbpclean_lbl = QLabel("0.50")
 				self.cine_crudo_fbpclean_lbl.setMaximumWidth(36)
-				toolbar6_r2.addWidget(self.cine_crudo_fbpclean_lbl)
+				toolbar6_r_filters_g.addWidget(self.cine_crudo_fbpclean_lbl)
 				self.cine_crudo_fbpclean_slider.valueChanged.connect(
 					lambda v: self.cine_crudo_fbpclean_lbl.setText(f"{v/100.0:.2f}"))
-				self.cine_crudo_bg_check = QCheckBox("Fondo")
-				self.cine_crudo_bg_check.setChecked(False)
-				self.cine_crudo_bg_check.setToolTip(
-					"Descuento de fondo automático (pre-recon, en el sinograma). "
-					"Mide el piso de cuentas en la zona de bajo fondo (pulmón/tejido blando; "
-					"excluye el aire por umbral de cuerpo y las vísceras calientes por "
-					"percentil bajo) y lo resta de TODA la imagen, incluido el VI: el fondo "
-					"también está debajo del miocardio. Aumenta el contraste cavidad/pared. "
-					"Default OFF.")
-				toolbar6_r2.addWidget(self.cine_crudo_bg_check)
-				toolbar6_r2.addWidget(QLabel("NITIDA II"))
+				# FBP_CLEAN es una cadena autocontenida (FBP + Butterworth + denoise +
+				# realce): anula los filtros de proyección, el método iterativo y el
+				# post-gaussiano. Los grisamos visualmente; el ÚNICO que sigue activo
+				# es NITIDA II (post-recon gated, otra capa compatible).
+				self.cine_crudo_fbpclean_check.toggled.connect(self._refresh_fbpclean_filter_lock)
+				self.cine_crudo_nitida3_check = QCheckBox("NITIDA III")
+				self.cine_crudo_nitida3_check.setChecked(False)
+				self.cine_crudo_nitida3_check.setToolTip(
+					"NITIDA III: reconstrucción MAP-OSEM del GATED con Pilar C "
+					"(prior de suavidad Huber con beta adaptativo por SNR local). "
+					"Limpia la pared (ruido) SIN aplastar el movimiento cardíaco (H1): "
+					"medido en estudio real 5s, SNR x1.5 conservando el movimiento. "
+					"Para gated de bajo conteo. Es OSEM CPU: tarda más. Default OFF.")
+				toolbar6_r_filters_g.addWidget(self.cine_crudo_nitida3_check)
+				self.cine_crudo_nitida3_iter_spin = QSpinBox()
+				self.cine_crudo_nitida3_iter_spin.setRange(2, 8)
+				self.cine_crudo_nitida3_iter_spin.setValue(2)
+				self.cine_crudo_nitida3_iter_spin.setMaximumWidth(46)
+				self.cine_crudo_nitida3_iter_spin.setToolTip(
+					"Iteraciones OSEM de NITIDA III. Con 2 queda granulado/pixelado "
+					"(OSEM poco convergente en bajo conteo). Subilo a 4-6 para una recon "
+					"más suave. Más iteraciones = más tiempo de cómputo.")
+				toolbar6_r_filters_g.addWidget(self.cine_crudo_nitida3_iter_spin)
+				toolbar6_r_filters_g.addWidget(QLabel("NITIDA II"))
 				self.cine_crudo_nitida2_combo = QComboBox()
 				self.cine_crudo_nitida2_combo.addItem("Off", "none")
 				self.cine_crudo_nitida2_combo.addItem("Temporal", "temporal")
@@ -1934,7 +2010,26 @@ class MainWindow(QMainWindow):
 					"'Temporal' conserva el movimiento cardíaco exacto (bandas de baja frecuencia) y "
 					"elimina el ruido de banda alta. 'Espaciotemporal' además limpia el granulado "
 					"espacial de la media y suaviza levemente el movimiento. Independiente de NÍTIDA (RR).")
-				toolbar6_r2.addWidget(self.cine_crudo_nitida2_combo)
+				toolbar6_r_filters_g.addWidget(self.cine_crudo_nitida2_combo)
+				# Suavizar GATED (post-filtro por rama, independiente del ungated).
+				self.cine_crudo_post_gated_check = QCheckBox("Suavizar")
+				self.cine_crudo_post_gated_check.setChecked(False)
+				self.cine_crudo_post_gated_check.setToolTip(
+					"Post-filtro gaussiano 3D del GATED (control de ruido tras la recon). "
+					"Independiente del 'Suavizar' del ungated. Default OFF.")
+				self.cine_crudo_post_gated_check.toggled.connect(self._on_post_filter_gated_toggled)
+				toolbar6_r_filters_g.addWidget(self.cine_crudo_post_gated_check)
+				self.cine_crudo_post_gated_fwhm_spin = QDoubleSpinBox()
+				self.cine_crudo_post_gated_fwhm_spin.setRange(0.0, 30.0)
+				self.cine_crudo_post_gated_fwhm_spin.setSingleStep(0.5)
+				self.cine_crudo_post_gated_fwhm_spin.setDecimals(1)
+				self.cine_crudo_post_gated_fwhm_spin.setValue(8.0)
+				self.cine_crudo_post_gated_fwhm_spin.setSuffix(" mm")
+				self.cine_crudo_post_gated_fwhm_spin.setMaximumWidth(72)
+				self.cine_crudo_post_gated_fwhm_spin.setEnabled(False)
+				self.cine_crudo_post_gated_fwhm_spin.setToolTip("FWHM del suavizado gaussiano GATED [mm].")
+				toolbar6_r_filters_g.addWidget(self.cine_crudo_post_gated_fwhm_spin)
+				toolbar6_r_filters_g.addStretch(1)
 				self.cine_crudo_recon_btn = QToolButton()
 				self.cine_crudo_recon_btn.setText("Recon raw")
 				self.cine_crudo_recon_btn.setToolTip("Reconstruye desde crudo gated con la corrección actual y muestra QC: UngGat + gates. No altera el procesamiento clínico principal todavía.")
@@ -2051,7 +2146,7 @@ class MainWindow(QMainWindow):
 					side_widget=self.cine_crudo_correct_side,
 				))
 				groups_row.addWidget(self._build_toolbar_group_menu(
-					"Reconstrucción desde crudo ▾", [toolbar6_r1, toolbar6_r2, toolbar6_r3],
+					"Reconstrucción desde crudo ▾", [toolbar6_r1, toolbar6_r2, toolbar6_r_filters, toolbar6_r_filters_g, toolbar6_r3],
 					key="cine_crudo_reconstruccion",
 					tooltip="Reconstrucción FBP/MLEM/OSEM, filtros de ungated/gated, reorientación y generación de cortes de eje.",
 				))
@@ -6013,6 +6108,7 @@ class MainWindow(QMainWindow):
 		for timer_name in (
 			"polar_cine_timer",
 			"cine_crudo_timer",
+			"_montage_cine_timer",
 			"_montage_refresh_timer",
 			"_montage_hq_timer",
 			"_montage_recolor_smooth_timer",
@@ -6077,6 +6173,7 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_index = 0
 		self.cine_crudo_playing = False
 		self.cine_crudo_direction = 1
+		self._stop_montage_cine()
 		self.cine_crudo_matrix_txt = ""
 		self.cine_crudo_seed = None
 		self.cine_crudo_seed_compare = None
@@ -6106,8 +6203,11 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_cut_study = None
 		self.cine_crudo_cut_source_label = ""
 		self.cine_crudo_axes_for_export = {}
+		self.cine_crudo_axes_for_export_ungated = {}
 		self.cine_crudo_axes_for_export_stress = {}
 		self.cine_crudo_axes_for_export_rest = {}
+		self.cine_crudo_axes_for_export_ungated_stress = {}
+		self.cine_crudo_axes_for_export_ungated_rest = {}
 		self.cine_crudo_rest_source_label = ""
 		self.cine_crudo_cut_thickness_mm = 0.0
 		self.cine_crudo_cut_thickness_mm_rest = 0.0
@@ -6127,6 +6227,7 @@ class MainWindow(QMainWindow):
 		self._montage_render_meta = {}
 		self.cine_crudo_selected_stripe = "SA"
 		self.cine_crudo_preview_mode = None
+		self._last_cine_crudo_preview_mode = None
 		self._cine_crudo_dual_render_meta = {}
 		self._cine_crudo_cut_limits_meta = None
 		self._preview_pan_active = False
@@ -12496,25 +12597,27 @@ class MainWindow(QMainWindow):
 				self._log("NÍTIDA (OmniRes): no pude construir la PSF (colimador/geometría no legibles del DICOM). Reconstruyo sin RR.")
 				nitida = False
 			elif method not in {"osem", "mlem"}:
-				self._log("NÍTIDA (OmniRes) requiere OSEM/MLEM: fuerzo método OSEM para la recuperación de resolución.")
+				self._log("NÍTIDA (OmniRes) requiere OSEM/MLEM en el UNGATED: fuerzo método OSEM para la recuperación de resolución.")
 				method = "osem"
+		# NÍTIDA es SOLO-UNGATED (perfusión estática nítida). El gated NO la usa:
+		# en bajo conteo/gate la RR amplifica ruido; para gated está NITIDA III.
 		rr_active = bool(nitida and psf_model is not None)
-		# Método independiente de la rama gated. Con NÍTIDA activa se fuerza a OSEM
-		# (la RR requiere path iterativo), igual que el método ungated.
+		# Método independiente de la rama gated. NÍTIDA ya NO fuerza OSEM en gated
+		# (es solo-ungated): el gated conserva su propio método/filtro.
 		gated_method = str(self.cine_crudo_gated_method_combo.currentText()).strip().lower() if hasattr(self, "cine_crudo_gated_method_combo") and self.cine_crudo_gated_method_combo is not None else method
-		if rr_active and gated_method not in {"osem", "mlem"}:
-			gated_method = "osem"
-		# Con NÍTIDA activa los filtros de proyección se anulan: pre-difuminar el
-		# sinograma peleó contra la PSF que la RR intenta des-difuminar. El control
-		# de ruido pasa al post-filtro gaussiano (perilla única).
+		# Con NÍTIDA activa solo se anula el filtro UNGATED (pre-difuminar el
+		# sinograma peleó contra la PSF). El filtro GATED se conserva (NÍTIDA no
+		# toca el gated).
 		if rr_active:
 			from core.raw_reconstruction import ProjectionFilterConfig
 			ungated_filter = ProjectionFilterConfig(kind="none", cutoff=0.5, order=1)
-			gated_filter = ProjectionFilterConfig(kind="none", cutoff=0.5, order=1)
+			gated_filter = self._cine_crudo_recon_filter_config("gated")
 		else:
 			ungated_filter = self._cine_crudo_recon_filter_config("ungated")
 			gated_filter = self._cine_crudo_recon_filter_config("gated")
-		post_sigma_px = self._cine_crudo_post_filter_sigma_px(study)
+		# Suavizar POR RAMA: ungated y gated independientes.
+		post_sigma_ung = self._cine_crudo_post_filter_sigma_px(study)
+		post_sigma_gat = self._cine_crudo_post_filter_gated_sigma_px(study)
 		# FBP_CLEAN: denoise en sinograma + realce por resta. Es una cadena
 		# autocontenida (FBP + Butterworth + denoise + realce): NO debe sumarse al
 		# post-filtro gaussiano ("Suavizar") ni pelear con OSEM. Si está activa,
@@ -12528,9 +12631,9 @@ class MainWindow(QMainWindow):
 				method = "fbp"
 				if str(gated_method).lower() in {"osem", "mlem"}:
 					gated_method = "fbp"
-			if post_sigma_px > 0.0:
-				self._log("FBP_CLEAN activa: anulo el post-filtro gaussiano 'Suavizar' (el realce ya controla el ruido).")
-				post_sigma_px = 0.0
+			if post_sigma_gat > 0.0:
+				self._log("FBP_CLEAN activa: anulo el post-filtro gaussiano GATED (el realce ya controla el ruido).")
+				post_sigma_gat = 0.0
 		fbc_sigma = 0.04 if (fbc_on and method == "fbp") else 0.0
 		fbc_k = float(self.cine_crudo_fbpclean_slider.value()) / 100.0 if getattr(self, "cine_crudo_fbpclean_slider", None) is not None else 0.5
 		# NITIDA II: denoiser gated temporal/espaciotemporal por armónicos (post-recon).
@@ -12546,14 +12649,25 @@ class MainWindow(QMainWindow):
 			iterative_iterations=int(self.cine_crudo_iter_spin.value()) if hasattr(self, "cine_crudo_iter_spin") else 2,
 			osem_subsets=int(self.cine_crudo_osem_subsets_spin.value()) if hasattr(self, "cine_crudo_osem_subsets_spin") else 4,
 			display_slice_step_px=2,
-			resolution_recovery=rr_active,
+			resolution_recovery=False,
+			rr_ungated=rr_active,
+			rr_gated=False,
 			psf_model=psf_model,
-			post_filter_sigma_px=post_sigma_px,
+			post_filter_sigma_px=0.0,
+			post_filter_sigma_ungated_px=post_sigma_ung,
+			post_filter_sigma_gated_px=post_sigma_gat,
 			nitida2_mode=nitida2_mode,
 			fbp_clean_sigma_color=fbc_sigma,
 			fbp_clean_sharpen_k=fbc_k,
 			background_subtract=bool(getattr(self, "cine_crudo_bg_check", None) is not None
 								and self.cine_crudo_bg_check.isChecked()),
+			nitida3_enabled=bool(getattr(self, "cine_crudo_nitida3_check", None) is not None
+							and self.cine_crudo_nitida3_check.isChecked()),
+			nitida3_iterations=int(self.cine_crudo_nitida3_iter_spin.value()) if getattr(self, "cine_crudo_nitida3_iter_spin", None) is not None else 2,
+			ungated_denoise_plus=bool(getattr(self, "cine_crudo_denoise_plus_check", None) is not None
+								and self.cine_crudo_denoise_plus_check.isChecked()),
+			ungated_denoise_plus_k=(float(self.cine_crudo_denoise_plus_slider.value()) / 100.0
+								if getattr(self, "cine_crudo_denoise_plus_slider", None) is not None else 0.20),
 		)
 
 	# --- Pasajero de fase (FBP) para NÍTIDA ---
@@ -12629,31 +12743,75 @@ class MainWindow(QMainWindow):
 		self._log(f"Post-filtro: suavizado gaussiano FWHM={fwhm_mm:.1f} mm -> sigma={sigma_px:.2f} px (pixel={pixel_mm:.2f} mm).")
 		return sigma_px
 
+	def _cine_crudo_post_filter_gated_sigma_px(self, study=None) -> float:
+		"""Sigma en píxeles del post-filtro gaussiano GATED (checkbox 'Suavizar' gated)."""
+		if not (hasattr(self, "cine_crudo_post_gated_check") and self.cine_crudo_post_gated_check is not None
+				and self.cine_crudo_post_gated_check.isChecked()):
+			return 0.0
+		fwhm_mm = float(self.cine_crudo_post_gated_fwhm_spin.value()) if hasattr(self, "cine_crudo_post_gated_fwhm_spin") else 0.0
+		if fwhm_mm <= 0.0:
+			return 0.0
+		study = study or getattr(self, "cine_crudo_raw_study_for_recon", None) or self.study
+		ps = getattr(study, "pixel_spacing", None) if study is not None else None
+		pixel_mm = float(ps[0]) if ps else 6.4
+		return (fwhm_mm / 2.354820045) / max(pixel_mm, 1e-6)
+
 	def _on_nitida_toggled(self, checked: bool):
-		"""NÍTIDA toma el control de la recon: desactiva filtros de proyección y enciende 'Suavizar'."""
-		proj_filter_widgets = [
+		"""NÍTIDA (solo-ungated) toma el control de la rama UNGATED: desactiva su
+		filtro de proyección y su selector de método, y enciende 'Suavizar' ungated.
+		El GATED queda intacto (NÍTIDA no lo toca; para gated está NITIDA III)."""
+		ungated_widgets = [
 			"cine_crudo_ung_filter_combo", "cine_crudo_ung_cutoff_spin", "cine_crudo_ung_order_spin",
-			"cine_crudo_gated_filter_combo", "cine_crudo_gated_cutoff_spin", "cine_crudo_gated_order_spin",
-			# NÍTIDA fuerza OSEM en ambas ramas: los selectores de método no aplican.
-			"cine_crudo_recon_method_combo", "cine_crudo_gated_method_combo",
+			# NÍTIDA fuerza OSEM en el ungated: su selector de método no aplica.
+			"cine_crudo_recon_method_combo",
 		]
-		for name in proj_filter_widgets:
+		for name in ungated_widgets:
 			w = getattr(self, name, None)
 			if w is not None:
 				w.setEnabled(not checked)
 		if checked and hasattr(self, "cine_crudo_post_check") and self.cine_crudo_post_check is not None:
-			# En bajo conteo (5s) OSEM+RR sin post-filtro sale ruidoso/manchado. La receta
-			# validada (iteraciones bajas + suavizado ~8 mm) iguala la calidad del 10s; subir
-			# iteraciones solo amplifica más ruido. Por eso NÍTIDA enciende 'Suavizar' y NO
-			# toca las iteraciones (quedan en el valor del usuario, default 2).
+			# OSEM+RR sin post-filtro sale ruidoso/manchado. La receta validada
+			# (iteraciones bajas + suavizado ~8 mm) iguala la calidad; por eso NÍTIDA
+			# enciende 'Suavizar' ungated y NO toca las iteraciones.
 			if not self.cine_crudo_post_check.isChecked():
 				self.cine_crudo_post_check.setChecked(True)
 		if checked:
-			self._log("NÍTIDA activa: filtros de proyección desactivados (evita pre-difuminado); post-filtro 'Suavizar' encendido para regular el ruido de la recuperación de resolución.")
+			self._log("NÍTIDA activa (ungated): filtro de proyección ungated desactivado; 'Suavizar' ungated encendido. El gated conserva su método/filtro.")
 
 	def _on_post_filter_toggled(self, checked: bool):
 		if hasattr(self, "cine_crudo_post_fwhm_spin") and self.cine_crudo_post_fwhm_spin is not None:
 			self.cine_crudo_post_fwhm_spin.setEnabled(bool(checked))
+
+	def _on_post_filter_gated_toggled(self, checked: bool):
+		if hasattr(self, "cine_crudo_post_gated_fwhm_spin") and self.cine_crudo_post_gated_fwhm_spin is not None:
+			self.cine_crudo_post_gated_fwhm_spin.setEnabled(bool(checked))
+
+	def _refresh_fbpclean_filter_lock(self):
+		"""Grisa los controles GATED cuando FBP_CLEAN está activo.
+
+		FBP_CLEAN es una cadena autocontenida del GATED (FBP + Butterworth + denoise
+		+ realce): anula el filtro de proyección gated, fuerza FBP gated y anula el
+		post-gaussiano gated. Esos controles quedan deshabilitados. El UNGATED no se
+		toca (FBP_CLEAN no lo afecta). NITIDA II y NITIDA III quedan habilitados
+		(otra capa gated, compatibles). 'Fondo' también (preprocesado del sinograma).
+		"""
+		fbc_on = bool(getattr(self, "cine_crudo_fbpclean_check", None) is not None
+					and self.cine_crudo_fbpclean_check.isChecked())
+		for name in (
+			"cine_crudo_gated_method_combo",
+			"cine_crudo_gated_filter_combo", "cine_crudo_gated_cutoff_spin", "cine_crudo_gated_order_spin",
+			"cine_crudo_post_gated_check",
+		):
+			w = getattr(self, name, None)
+			if w is not None:
+				w.setEnabled(not fbc_on)
+		post_g_spin = getattr(self, "cine_crudo_post_gated_fwhm_spin", None)
+		if post_g_spin is not None:
+			post_g_spin.setEnabled(
+				(not fbc_on)
+				and bool(getattr(self, "cine_crudo_post_gated_check", None) is not None
+						 and self.cine_crudo_post_gated_check.isChecked())
+			)
 
 	def _build_nitida_psf(self, study):
 		"""Construye el PsfModel (NÍTIDA/OmniRes) a partir del colimador y la geometría del estudio.
@@ -12709,10 +12867,15 @@ class MainWindow(QMainWindow):
 		"""Dispara (con debounce) el recompute de una rama tras cambiar su filtro."""
 		if getattr(self, "cine_crudo_recon_result", None) is None:
 			return
-		# NÍTIDA anula los filtros de proyección: no hay recompute por filtro.
+		# NÍTIDA anula el filtro de proyección de SU rama: no hay recompute por filtro
+		# en esa rama. Con NÍTIDA solo-ungated, el gated SÍ puede recomputar.
 		cfg = getattr(self.cine_crudo_recon_result, "config", None)
-		if cfg is not None and bool(getattr(cfg, "resolution_recovery", False)):
-			return
+		if cfg is not None:
+			_rr_g = bool(getattr(cfg, "resolution_recovery", False))
+			_rr_ung = _rr_g if getattr(cfg, "rr_ungated", None) is None else bool(cfg.rr_ungated)
+			_rr_gat = _rr_g if getattr(cfg, "rr_gated", None) is None else bool(cfg.rr_gated)
+			if (branch == "ungated" and _rr_ung) or (branch == "gated" and _rr_gat):
+				return
 		if branch == "ungated":
 			self._recon_recompute_ung_timer.start(350)
 		else:
@@ -12738,8 +12901,11 @@ class MainWindow(QMainWindow):
 		if result is None:
 			return
 		cfg = result.config
-		if bool(getattr(cfg, "resolution_recovery", False)):
-			return  # NÍTIDA: filtros de proyección desactivados por diseño
+		_rr_g = bool(getattr(cfg, "resolution_recovery", False))
+		_rr_ung = _rr_g if getattr(cfg, "rr_ungated", None) is None else bool(cfg.rr_ungated)
+		_rr_gat = _rr_g if getattr(cfg, "rr_gated", None) is None else bool(cfg.rr_gated)
+		if (branch == "ungated" and _rr_ung) or (branch == "gated" and _rr_gat):
+			return  # NÍTIDA en esta rama: filtro de proyección desactivado por diseño
 		# Método propio de la rama desde su combo.
 		if branch == "ungated":
 			method = str(self.cine_crudo_recon_method_combo.currentText()).strip().lower() if hasattr(self, "cine_crudo_recon_method_combo") else "fbp"
@@ -12760,7 +12926,12 @@ class MainWindow(QMainWindow):
 		subsets = int(cfg.osem_subsets) if method == "osem" else 1
 		ccw = _detect_rotation_ccw(angles)
 		flip_x = True if ccw is None else (bool(ccw) == _FLIP_X_ON_CCW)
-		post_sigma = float(getattr(cfg, "post_filter_sigma_px", 0.0) or 0.0)
+		# Post-filtro por rama (fallback al global si la por-rama es None).
+		_post_global = float(getattr(cfg, "post_filter_sigma_px", 0.0) or 0.0)
+		if branch == "ungated":
+			post_sigma = _post_global if getattr(cfg, "post_filter_sigma_ungated_px", None) is None else float(cfg.post_filter_sigma_ungated_px)
+		else:
+			post_sigma = _post_global if getattr(cfg, "post_filter_sigma_gated_px", None) is None else float(cfg.post_filter_sigma_gated_px)
 		new_filter = self._cine_crudo_recon_filter_config(branch)
 		try:
 			if branch == "ungated":
@@ -12931,7 +13102,10 @@ class MainWindow(QMainWindow):
 				self._log("[INFO] MLEM/OSEM CPU en matriz real puede tardar; para pruebas rápidas usá Iter=1-2.")
 			self._set_progress(45, f"Reconstruyendo raw ({cfg.reconstruction_method.upper()})...")
 
-			nitida_on = bool(getattr(cfg, "resolution_recovery", False) and getattr(cfg, "psf_model", None) is not None)
+			nitida_on = bool(
+				(getattr(cfg, "resolution_recovery", False) or getattr(cfg, "rr_ungated", False))
+				and getattr(cfg, "psf_model", None) is not None
+			)
 			titulo = "NÍTIDA (OmniRes) — recuperación de resolución" if nitida_on else f"Reconstrucción {cfg.reconstruction_method.upper()}"
 			recon_dialog = QProgressDialog(
 				f"{titulo}\nEsto puede tardar según iteraciones y tamaño de matriz…",
@@ -13308,6 +13482,13 @@ class MainWindow(QMainWindow):
 			out_png, meta = self._write_cine_crudo_limits_qc(result, z0, z1, thickness, active_marker=active_marker)
 			self._cine_crudo_cut_limits_meta = dict(meta)
 			self.cine_crudo_preview_mode = "cut_limits"
+			# Al entrar a la pantalla de markers (Base/Ápex) la mostramos a zoom 40%,
+			# para ver el volumen completo y colocar las líneas sin paneo. No pisa un
+			# re-render posterior (drag/wheel): solo se fija al ENTRAR al modo.
+			if getattr(self, "_last_cine_crudo_preview_mode", None) != "cut_limits":
+				self.preview_zoom["cine_crudo"] = 0.4
+				self.preview_zoom["comparacion_ejes"] = 0.4
+			self._last_cine_crudo_preview_mode = "cut_limits"
 			for tab_name in ("comparacion_ejes", "cine_crudo"):
 				if tab_name in self.preview_labels:
 					pix = QPixmap(out_png)
@@ -13810,6 +13991,17 @@ class MainWindow(QMainWindow):
 			sa_cube = np.ascontiguousarray(cuts["sa"])
 			hla_cube = np.ascontiguousarray(cuts["hla"])
 			vla_cube = np.ascontiguousarray(cuts["vla"])
+			# Cortes del UNGATED (imagen de perfusión estática, con Denoise+ si está
+			# activo): mismo recorte base→ápex y mismos cortes anatómicos. El ungated
+			# es 3D (sin gates): se envuelve con un eje de gate de tamaño 1. Es la
+			# imagen que va al INFORME y la que se ve "espectacular" en la recon.
+			ung_cube4 = self._thickened_sa_cube(ung_vol[None, ...], z0, z1, thickness)
+			cuts_u = anatomical_cuts_gated(ung_cube4)
+			self.cine_crudo_axes_for_export_ungated = {
+				"SA": np.ascontiguousarray(cuts_u["sa"]),
+				"HLA": np.ascontiguousarray(cuts_u["hla"]),
+				"VLA": np.ascontiguousarray(cuts_u["vla"]),
+			}
 			if sa_cube.shape[1] < 2:
 				QMessageBox.information(self, "SINCRO", "Los límites deben dejar al menos 2 cortes SA.")
 				return
@@ -13900,11 +14092,13 @@ class MainWindow(QMainWindow):
 			# necesidad del botón "Marcar como reposo"): esfuerzo→_stress, reposo→_rest.
 			if getattr(self, "_cine_crudo_recon_stage", "stress") == "rest":
 				self.cine_crudo_axes_for_export_rest = {k: np.array(v, copy=True) for k, v in self.cine_crudo_axes_for_export.items()}
+				self.cine_crudo_axes_for_export_ungated_rest = {k: np.array(v, copy=True) for k, v in self.cine_crudo_axes_for_export_ungated.items()}
 				self.cine_crudo_rest_source_label = self.cine_crudo_cut_source_label or "raw recon"
 				self.cine_crudo_cut_thickness_mm_rest = float(cut_thickness_mm or 0.0)
 				self._log("Cortes de REPOSO guardados automáticamente para el montaje comparativo.")
 			else:
 				self.cine_crudo_axes_for_export_stress = {k: np.array(v, copy=True) for k, v in self.cine_crudo_axes_for_export.items()}
+				self.cine_crudo_axes_for_export_ungated_stress = {k: np.array(v, copy=True) for k, v in self.cine_crudo_axes_for_export_ungated.items()}
 				self._log("Cortes de ESFUERZO guardados automáticamente para el montaje comparativo.")
 			# Inicializar rango de gates para montaje (todo el ciclo por defecto).
 			n_gates_out = int(sa_cube.shape[0])
@@ -14159,6 +14353,196 @@ class MainWindow(QMainWindow):
 			tuple(sorted((str(k), int(v)) for k, v in (getattr(self, "cine_crudo_stripe_count", {}) or {}).items())),
 		)
 
+	def _montage_axes_for_source(self):
+		"""Resuelve (stress_axes, rest_axes) según la fuente del montaje.
+
+		"ungated" (default): cortes del ungated (perfusión estática, con Denoise+;
+		la imagen del informe). "gated": cortes del gated (cine en movimiento).
+		Devuelve dicts SA/HLA/VLA o {} si no hay.
+		"""
+		src = str(getattr(self, "cine_crudo_montage_source", "ungated") or "ungated")
+		if src == "gated":
+			stress = self.cine_crudo_axes_for_export_stress or self.cine_crudo_axes_for_export
+			rest = self.cine_crudo_axes_for_export_rest
+		else:
+			stress = (getattr(self, "cine_crudo_axes_for_export_ungated_stress", None)
+					or getattr(self, "cine_crudo_axes_for_export_ungated", None) or {})
+			rest = getattr(self, "cine_crudo_axes_for_export_ungated_rest", None) or {}
+		return stress, rest
+
+	def _update_montage_cine_controls(self):
+		"""Habilita/deshabilita los controles de cine del montaje según la fuente.
+
+		El cine solo tiene sentido con la fuente Gated (varios gates). Con Ungated
+		(imagen estática de perfusión) los controles quedan deshabilitados.
+		"""
+		is_gated = str(getattr(self, "cine_crudo_montage_source", "ungated")) == "gated"
+		for wname in (
+			"cine_crudo_montage_cine_play_btn",
+			"cine_crudo_montage_cine_prev_btn",
+			"cine_crudo_montage_cine_next_btn",
+			"cine_crudo_montage_cine_speed_spin",
+		):
+			w = getattr(self, wname, None)
+			if w is not None:
+				try:
+					w.setEnabled(bool(is_gated))
+				except Exception:
+					pass
+
+	def _update_montage_cine_toggle_text(self):
+		btn = getattr(self, "cine_crudo_montage_cine_play_btn", None)
+		if btn is not None:
+			btn.setText("⏸" if bool(getattr(self, "cine_crudo_montage_cine_playing", False)) else "▶")
+
+	def _montage_cine_range(self) -> tuple[int, int]:
+		"""Rango de gates (1-based, inclusivo) que recorre el cine del montaje."""
+		g0 = int(getattr(self, "cine_crudo_gate_from", 1) or 1)
+		g1 = int(getattr(self, "cine_crudo_gate_to", 1) or 1)
+		lo, hi = (g0, g1) if g0 <= g1 else (g1, g0)
+		return max(1, lo), max(1, hi)
+
+	def _toggle_montage_cine(self):
+		if str(getattr(self, "cine_crudo_montage_source", "ungated")) != "gated":
+			return
+		if not (getattr(self, "cine_crudo_axes_for_export_stress", None) or getattr(self, "cine_crudo_axes_for_export", None)):
+			return
+		self.cine_crudo_montage_cine_playing = not bool(getattr(self, "cine_crudo_montage_cine_playing", False))
+		if self.cine_crudo_montage_cine_playing:
+			if not self._ensure_montage_cine_frames():
+				self.cine_crudo_montage_cine_playing = False
+				self._update_montage_cine_toggle_text()
+				return
+			ms = int(self.cine_crudo_montage_cine_speed_spin.value()) if hasattr(self, "cine_crudo_montage_cine_speed_spin") else 40
+			self._montage_cine_timer.setInterval(max(40, ms))
+			self._montage_cine_timer.start()
+		else:
+			self._montage_cine_timer.stop()
+		self._update_montage_cine_toggle_text()
+
+	def _montage_cine_signature(self):
+		"""Firma del estado que define los frames del cine: si cambia, hay que re-pre-renderizar."""
+		def _ids(d):
+			try:
+				return tuple(sorted((str(k), id(v)) for k, v in (d or {}).items()))
+			except Exception:
+				return ()
+		return (
+			_ids(self._montage_axes_for_source()[0]),
+			_ids(self._montage_axes_for_source()[1]),
+			int(getattr(self, "cine_crudo_gate_from", 1) or 1),
+			int(getattr(self, "cine_crudo_gate_to", 1) or 1),
+			str(getattr(self, "cine_crudo_montage_template", "denso")),
+			float(getattr(self, "cine_crudo_montage_cut_zoom", 1.0) or 1.0),
+			str(getattr(self, "cine_crudo_montage_cmap", "")),
+			bool(getattr(self, "cine_crudo_montage_center_cuts", False)),
+			str(getattr(self, "cine_crudo_montage_interp", "Bilineal")),
+			float(getattr(self, "cine_crudo_montage_smooth", 0.0) or 0.0),
+			str(getattr(self, "cine_crudo_montage_win_mode", "percentil")),
+		)
+
+	def _ensure_montage_cine_frames(self) -> bool:
+		"""Pre-renderiza TODOS los gates del cine a QPixmap (una sola vez, en HQ).
+
+		La lentitud original venía de recomponer todo el montaje en cada tick del
+		timer. Acá se renderizan los N frames UNA vez (al Play o al primer step) y se
+		cachean; después cada frame solo blit-ea el QPixmap ya compuesto (instantáneo).
+		"""
+		sig = self._montage_cine_signature()
+		if getattr(self, "_montage_cine_frames", None) and getattr(self, "_montage_cine_frames_sig", None) == sig:
+			return True
+		lo, hi = self._montage_cine_range()
+		span = max(1, hi - lo + 1)
+		prev_playing = bool(getattr(self, "cine_crudo_montage_cine_playing", False))
+		prev_frame = int(getattr(self, "cine_crudo_montage_cine_frame", 0))
+		prev_panel = int(getattr(self, "_montage_panel_px", 512))
+		self._montage_panel_px = 512  # HQ para los frames cacheados
+		self.cine_crudo_montage_cine_playing = True  # para que el render tome gate único
+		frames = []
+		try:
+			QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+			for i in range(span):
+				self.cine_crudo_montage_cine_frame = i
+				self._montage_last_signature = None
+				self._show_cine_crudo_sa_montage()
+				pix = self.preview_pixmaps.get("comparacion_ejes")
+				if pix is None:
+					return False
+				frames.append(pix)
+				QApplication.processEvents()  # no congelar la UI durante el preload
+		except Exception as exc:
+			self._log(f"[WARN] Preload del cine del montaje falló: {exc}")
+			return False
+		finally:
+			try:
+				QApplication.restoreOverrideCursor()
+			except Exception:
+				pass
+			self._montage_panel_px = prev_panel
+			self.cine_crudo_montage_cine_playing = prev_playing
+			self.cine_crudo_montage_cine_frame = prev_frame
+		self._montage_cine_frames = frames
+		self._montage_cine_frames_sig = sig
+		self._log(f"Cine del montaje: {span} frames pre-renderizados en memoria.")
+		return True
+
+	def _blit_montage_cine_frame(self):
+		"""Muestra el frame actual del cine blit-eando el QPixmap cacheado (sin recomponer)."""
+		frames = getattr(self, "_montage_cine_frames", None) or []
+		if not frames:
+			return
+		idx = int(getattr(self, "cine_crudo_montage_cine_frame", 0)) % len(frames)
+		self.cine_crudo_montage_cine_frame = idx
+		pix = frames[idx]
+		if "comparacion_ejes" in self.preview_labels:
+			self.cine_crudo_preview_mode = "sa_montage"
+			self.preview_pixmaps["comparacion_ejes"] = pix
+			self.preview_base_sizes["comparacion_ejes"] = self._montage_display_base_size(pix)
+			self._apply_preview_zoom("comparacion_ejes", fast=False)
+			self._select_tab_by_title("comparacion_ejes")
+
+	def _stop_montage_cine(self):
+		"""Detiene el cine del montaje, libera el caché de frames y vuelve a la suma de gates."""
+		try:
+			self._montage_cine_timer.stop()
+		except Exception:
+			pass
+		self.cine_crudo_montage_cine_playing = False
+		self.cine_crudo_montage_cine_frame = 0
+		self._montage_cine_frames = []
+		self._montage_cine_frames_sig = None
+		self._update_montage_cine_toggle_text()
+
+	def _advance_montage_cine_frame(self):
+		if not bool(getattr(self, "cine_crudo_montage_cine_playing", False)):
+			self._montage_cine_timer.stop()
+			return
+		frames = getattr(self, "_montage_cine_frames", None) or []
+		if not frames:
+			self._montage_cine_timer.stop()
+			return
+		self.cine_crudo_montage_cine_frame = (int(getattr(self, "cine_crudo_montage_cine_frame", 0)) + 1) % len(frames)
+		self._blit_montage_cine_frame()
+
+	def _step_montage_cine(self, delta: int):
+		"""Navega gate a gate (detiene el play para dar control manual)."""
+		if str(getattr(self, "cine_crudo_montage_source", "ungated")) != "gated":
+			return
+		self._montage_cine_timer.stop()
+		self.cine_crudo_montage_cine_playing = False
+		self._update_montage_cine_toggle_text()
+		if not self._ensure_montage_cine_frames():
+			return
+		frames = getattr(self, "_montage_cine_frames", None) or []
+		if not frames:
+			return
+		cur = int(getattr(self, "cine_crudo_montage_cine_frame", 0))
+		self.cine_crudo_montage_cine_frame = int((cur + int(delta)) % len(frames))
+		self._blit_montage_cine_frame()
+
+	def _on_montage_cine_speed_changed(self, value: int):
+		self._montage_cine_timer.setInterval(max(40, int(value)))
+
 	def _show_cine_crudo_sa_montage(self):
 
 		"""Montaje clínico de TODOS los cortes SA/VLA/HLA (estilo MyoVation/Xeleris).
@@ -14167,7 +14551,18 @@ class MainWindow(QMainWindow):
 		(misma fuente que "cortes generados", así coincide la rotación). Filas:
 		SA (ápex→base), VLA (sep→lat) y HLA (inf→ant), paneles grandes cuadrados.
 		"""
-		if not self.cine_crudo_axes_for_export:
+		# Si el cine del montaje está activo y ya hay frames pre-renderizados, solo
+		# blit-ear el frame actual: NO recomponer todo el montaje en cada tick.
+		if (
+			str(getattr(self, "cine_crudo_montage_source", "ungated")) == "gated"
+			and (bool(getattr(self, "cine_crudo_montage_cine_playing", False)) or int(getattr(self, "cine_crudo_montage_cine_frame", 0)) > 0)
+			and getattr(self, "_montage_cine_frames", None)
+			and getattr(self, "_montage_cine_frames_sig", None) == self._montage_cine_signature()
+		):
+			self._blit_montage_cine_frame()
+			return
+		stress_axes, rest_axes = self._montage_axes_for_source()
+		if not stress_axes:
 			QMessageBox.information(self, "SINCRO", "Primero generá los cortes con 'Generar cortes'.")
 			return
 		try:
@@ -14176,6 +14571,12 @@ class MainWindow(QMainWindow):
 			# Rango de gates activo (1-based en UI).
 			gate_from = int(getattr(self, "cine_crudo_gate_from", 1) or 1)
 			gate_to = int(getattr(self, "cine_crudo_gate_to", 1) or 1)
+			# Cine del montaje: solo con fuente Gated, y si hay play o se navegó a un
+			# frame (step). Cuando está activo se muestra un solo gate en vez de la suma.
+			_cine_gate = None
+			if str(getattr(self, "cine_crudo_montage_source", "ungated")) == "gated":
+				if bool(getattr(self, "cine_crudo_montage_cine_playing", False)) or int(getattr(self, "cine_crudo_montage_cine_frame", 0)) > 0:
+					_cine_gate = int(getattr(self, "cine_crudo_montage_cine_frame", 0)) + 1
 			template_mode = str(getattr(self, "cine_crudo_montage_template", "denso") or "denso")
 			cut_zoom = float(getattr(self, "cine_crudo_montage_cut_zoom", 1.0) or 1.0)
 			montage_cmap = str(getattr(self, "cine_crudo_montage_cmap", "odyssey_cool") or "odyssey_cool")
@@ -14238,7 +14639,15 @@ class MainWindow(QMainWindow):
 					return np.zeros((1, 1, 1), dtype=np.float64)
 				g0 = int(np.clip(min(gate_from, gate_to) - 1, 0, arr4.shape[0] - 1))
 				g1 = int(np.clip(max(gate_from, gate_to) - 1, 0, arr4.shape[0] - 1))
-				v = np.asarray(arr4[g0:g1 + 1], dtype=np.float64).sum(axis=0)
+				if _cine_gate is not None:
+					# Cine activo: mostrar un solo gate (sin sumar), para ver el latido.
+					# Cada gate tiene escala distinta -> invalidar la firma cacheada para
+					# que el render NUNCA se saltee por firma igual entre frames.
+					self._montage_last_signature = None
+					gg = int(np.clip(int(_cine_gate) - 1, g0, g1))
+					v = np.asarray(arr4[gg], dtype=np.float64)
+				else:
+					v = np.asarray(arr4[g0:g1 + 1], dtype=np.float64).sum(axis=0)
 				mode = str(getattr(self, "cine_crudo_montage_win_mode", "percentil") or "percentil")
 				if mode == "lineal":
 					# Motor unificado: normaliza por min/máx del volumen (escala
@@ -14314,9 +14723,9 @@ class MainWindow(QMainWindow):
 				hla_idx = _window("HLA", hla_idx)
 				return [(sa_v, sa_idx, "SA"), (vla_v, vla_idx, "VLA"), (hla_v, hla_idx, "HLA")]
 
-			stress_rows = _build_rows(self.cine_crudo_axes_for_export_stress or self.cine_crudo_axes_for_export)
-			has_rest = bool(self.cine_crudo_axes_for_export_rest)
-			rest_rows = _build_rows(self.cine_crudo_axes_for_export_rest, self.cine_crudo_rest_offset) if has_rest else None
+			stress_rows = _build_rows(stress_axes)
+			has_rest = bool(rest_axes)
+			rest_rows = _build_rows(rest_axes, self.cine_crudo_rest_offset) if has_rest else None
 
 			thickness = self._cine_crudo_cut_thickness_px()
 			th_mm = float(getattr(self, "cine_crudo_cut_thickness_mm", 0.0) or 0.0)
@@ -14384,7 +14793,10 @@ class MainWindow(QMainWindow):
 			scale_txt = f" · pixel {px_mm:.2f}mm" if px_mm > 0 else ""
 			bnd_txt = f" · Base {bounds[0] + 1}→Ápex {bounds[1] + 1}" if bounds else ""
 			crop_txt = "Elipse VOI" if self.cine_crudo_montage_crop_mode == "voi" else "Límites"
-			gate_txt = f" · gates {min(gate_from, gate_to)}→{max(gate_from, gate_to)}"
+			if _cine_gate is not None:
+				gate_txt = f" · gate {_cine_gate} (cine)"
+			else:
+				gate_txt = f" · gates {min(gate_from, gate_to)}→{max(gate_from, gate_to)}"
 			tpl_txt = f" · layout {layout_cfg.get('label', template_mode)}"
 			zoom_txt = f" · zoom corte x{cut_zoom:.2f}"
 			n_sa_stress = len(stress_rows[0][1])
@@ -14430,6 +14842,19 @@ class MainWindow(QMainWindow):
 			if key in self.MONTAGE_LAYOUTS:
 				self.cine_crudo_montage_template = str(key)
 		if self.cine_crudo_preview_mode == "sa_montage":
+			self._schedule_montage_refresh(0)
+
+	def _on_montage_source_changed(self, _idx):
+		if hasattr(self, "cine_crudo_montage_source_combo"):
+			self.cine_crudo_montage_source = str(self.cine_crudo_montage_source_combo.currentData() or "ungated")
+		# El cine solo aplica a la fuente Gated: al cambiar, lo detenemos y
+		# habilitamos/deshabilitamos sus controles.
+		self._stop_montage_cine()
+		self._update_montage_cine_controls()
+		# La fuente cambia los cortes: hay que re-renderizar el montaje completo
+		# (no es solo un recolor). Forzamos el render aunque la firma no cambie.
+		if self.cine_crudo_preview_mode == "sa_montage":
+			self._montage_last_signature = None
 			self._schedule_montage_refresh(0)
 
 	def _on_montage_cut_zoom_changed(self, value):
@@ -14744,6 +15169,20 @@ class MainWindow(QMainWindow):
 		"""Controles de acción del montaje clínico, centralizados en la pestaña
 		Montaje clínico. El montaje se renderiza al entrar a la pestaña; el resto
 		de acciones (layout, zoom, gates) ocurre en vivo."""
+		toolbar.addWidget(QLabel("Fuente"))
+		self.cine_crudo_montage_source_combo = QComboBox()
+		self.cine_crudo_montage_source_combo.addItem("Ungated (perfusión)", "ungated")
+		self.cine_crudo_montage_source_combo.addItem("Gated (cine)", "gated")
+		_cur_src = self.cine_crudo_montage_source_combo.findData(getattr(self, "cine_crudo_montage_source", "ungated"))
+		if _cur_src >= 0:
+			self.cine_crudo_montage_source_combo.setCurrentIndex(_cur_src)
+		self.cine_crudo_montage_source_combo.setToolTip(
+			"Fuente de los cortes del montaje. Ungated = perfusión estática (con "
+			"Denoise+ si está activo; la imagen del informe). Gated = cine en "
+			"movimiento (suma de gates).")
+		self.cine_crudo_montage_source_combo.currentIndexChanged.connect(self._on_montage_source_changed)
+		toolbar.addWidget(self.cine_crudo_montage_source_combo)
+
 		toolbar.addWidget(QLabel("Template"))
 		self.cine_crudo_montage_template_combo = QComboBox()
 		for _lay_key, _lay_cfg in self.MONTAGE_LAYOUTS.items():
@@ -14790,6 +15229,40 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_gate_all_btn.setToolTip("Usa todos los gates para el montaje (click rápido).")
 		self.cine_crudo_gate_all_btn.clicked.connect(self._set_montage_gate_full_range)
 		toolbar.addWidget(self.cine_crudo_gate_all_btn)
+
+		# --- Cine del montaje (solo fuente Gated): play/step/velocidad ---
+		_is_gated_src = str(getattr(self, "cine_crudo_montage_source", "ungated")) == "gated"
+		self.cine_crudo_montage_cine_play_btn = QToolButton()
+		self.cine_crudo_montage_cine_play_btn.setText("▶")
+		self.cine_crudo_montage_cine_play_btn.setEnabled(_is_gated_src)
+		self.cine_crudo_montage_cine_play_btn.setToolTip(
+			"Cine del montaje (solo fuente Gated): recorre los gates en vivo para "
+			"ver el latido. Velocidad configurable (default 40 ms).")
+		self.cine_crudo_montage_cine_play_btn.clicked.connect(self._toggle_montage_cine)
+		toolbar.addWidget(self.cine_crudo_montage_cine_play_btn)
+		self.cine_crudo_montage_cine_prev_btn = QToolButton()
+		self.cine_crudo_montage_cine_prev_btn.setText("|<")
+		self.cine_crudo_montage_cine_prev_btn.setEnabled(_is_gated_src)
+		self.cine_crudo_montage_cine_prev_btn.setToolTip("Gate anterior (montaje cine)")
+		self.cine_crudo_montage_cine_prev_btn.clicked.connect(lambda _=False: self._step_montage_cine(-1))
+		toolbar.addWidget(self.cine_crudo_montage_cine_prev_btn)
+		self.cine_crudo_montage_cine_next_btn = QToolButton()
+		self.cine_crudo_montage_cine_next_btn.setText(">|")
+		self.cine_crudo_montage_cine_next_btn.setEnabled(_is_gated_src)
+		self.cine_crudo_montage_cine_next_btn.setToolTip("Gate siguiente (montaje cine)")
+		self.cine_crudo_montage_cine_next_btn.clicked.connect(lambda _=False: self._step_montage_cine(1))
+		toolbar.addWidget(self.cine_crudo_montage_cine_next_btn)
+		toolbar.addWidget(QLabel("Vel."))
+		self.cine_crudo_montage_cine_speed_spin = QSpinBox()
+		self.cine_crudo_montage_cine_speed_spin.setRange(40, 500)
+		self.cine_crudo_montage_cine_speed_spin.setSingleStep(10)
+		self.cine_crudo_montage_cine_speed_spin.setValue(40)
+		self.cine_crudo_montage_cine_speed_spin.setSuffix(" ms")
+		self.cine_crudo_montage_cine_speed_spin.setEnabled(_is_gated_src)
+		self.cine_crudo_montage_cine_speed_spin.setMaximumWidth(74)
+		self.cine_crudo_montage_cine_speed_spin.setToolTip("Intervalo entre gates del cine del montaje (default 40 ms).")
+		self.cine_crudo_montage_cine_speed_spin.valueChanged.connect(self._on_montage_cine_speed_changed)
+		toolbar.addWidget(self.cine_crudo_montage_cine_speed_spin)
 
 		self.cine_crudo_montage_center_btn = QToolButton()
 		self.cine_crudo_montage_center_btn.setText("Centrar")
