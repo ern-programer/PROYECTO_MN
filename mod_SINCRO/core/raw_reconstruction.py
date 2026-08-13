@@ -116,6 +116,22 @@ class RawReconConfig:
     # la pared. OFF por defecto. Independiente de FBP_CLEAN (que es gated).
     ungated_denoise_plus: bool = False
     ungated_denoise_plus_k: float = 0.20  # óptimo medido 0.20 (abre cavidad sin comer pared)
+    # --- Motion-frozen 3D (post-recon, pre-reorientación) ---
+    # Alinea cada gate del volumen 4D al end-diastole y promedia. Recupera la
+    # nitidez de un gate con todas las cuentas (el "cardiac morphing" físico).
+    # OFF por defecto. Reemplaza al ungated para display/montaje; el gated
+    # original se conserva para FEVI/volúmenes/asincronía.
+    # Método default "stable": alinea por el contexto (tórax/hígado/fondo)
+    # excluyendo el corazón, así corrige el desplazamiento del paciente SIN
+    # arrastrar el latido (el centroide global congela la contracción).
+    motion_frozen: bool = False
+    motion_frozen_method: str = "rigid"   # "rigid" | "displacement" | "stable"
+    motion_frozen_ref_gate: int | None = None  # None = auto (end-diastole)
+    # Motion-frozen POR GATE: NO VIABLE FÍSICAMENTE (promediar gates alineados
+    # congela el latido; verificado en fantoma 2026-08-13). Código conservado
+    # en core/motion_frozen.py pero sin UI. Para mejorar gates sin promediar:
+    # NITIDA II/III.
+    motion_frozen_per_gate: bool = False
     # --- Descuento de fondo automático (pre-recon, sobre el sinograma) ---
     # Resta un piso de cuentas medido automáticamente en la zona de bajo fondo
     # (pulmón/tejido blando; excluye el aire por umbral de cuerpo y las
@@ -140,6 +156,10 @@ class RawReconResult:
     config: RawReconConfig
     motion_result: dict
     notes: list[str] = field(default_factory=list)
+    # Motion-frozen: volumen 4D alineado y promediado (None si no se pidió).
+    ungated_volume_mf: np.ndarray | None = None
+    # Motion-frozen por gate: 4D de "cine nítido" (None si no se pidió).
+    gated_volume_mf_per_gate: np.ndarray | None = None
 
 
 def _normalize_filter_kind(kind: str) -> str:
@@ -989,6 +1009,98 @@ def reconstruct_raw_gated_pipeline(
                 f"band_sigma={float(getattr(cfg, 'nitida2_band_sigma', 0.7)):.2f}) aplicado al gated."
             )
 
+    # --- Motion-frozen 3D (post-recon, pre-reorientación) ---
+    # Alinea cada gate del volumen 4D al end-diastole y promedia. El resultado
+    # es una imagen de perfusión con la nitidez de un gate y todas las cuentas.
+    # Se aplica DESPUÉS de todos los filtros de recon (Denoise+, FBP_CLEAN,
+    # NITIDA, post-filtro) y ANTES de reorientar, porque el movimiento 3D real
+    # solo existe en el volumen transaxial, no en los cortes reorientados.
+    ungated_volume_mf = None
+    if bool(getattr(cfg, "motion_frozen", False)) and gated_volume.ndim == 4 and gated_volume.shape[0] >= 2:
+        if progress_callback is not None:
+            progress_callback(0.97, "Motion-frozen: alineando gates 4D...")
+        from core.motion_frozen import rigid_register_gates, displacement_field_register_gates
+        mf_method = str(getattr(cfg, "motion_frozen_method", "rigid") or "rigid").strip().lower()
+        mf_ref = getattr(cfg, "motion_frozen_ref_gate", None)
+        try:
+            if mf_method == "displacement":
+                aligned, _u = displacement_field_register_gates(
+                    gated_volume, ref_gate=mf_ref, smooth_sigma=1.5, reg_lambda=0.5, n_iter=30
+                )
+                notes.append("Motion-frozen: alineación por campo de desplazamiento 3D (demons-like).")
+            else:
+                aligned = rigid_register_gates(gated_volume, ref_gate=mf_ref, smooth_sigma=1.0)
+                notes.append("Motion-frozen: alineación rígida 3D (traslación por centroide).")
+            ungated_volume_mf = aligned.mean(axis=0)
+            # Re-centrar el MF al frame del UNGATED: la alineación deja el
+            # corazón en la posición del gate de referencia (ED), que difiere
+            # unos píxeles de la posición media del ungated. La VOI de la
+            # reorientación y el mf_blur del Denoise+ se calculan sobre el
+            # ungated: si el MF no comparte esa geometría, los cortes salen
+            # desplazados y la resta del Denoise+ genera fantasmas en "C"
+            # (reportado por el usuario 2026-08-13: MF + Denoise+ = cortes
+            # corridos/pared comida; pasaba igual con stable).
+            from core.motion_frozen import _center_of_mass_3d
+            from scipy.ndimage import shift as _ndi_shift
+            com_ung = _center_of_mass_3d(ungated_volume)
+            com_mf = _center_of_mass_3d(ungated_volume_mf)
+            shift_back = [com_ung[i] - com_mf[i] for i in range(3)]
+            if max(abs(s) for s in shift_back) > 0.05:
+                ungated_volume_mf = _ndi_shift(ungated_volume_mf, shift_back, order=3, mode="constant", cval=0.0)
+                notes.append(
+                    f"Motion-frozen: MF re-centrado al frame del ungated "
+                    f"(shift {[round(s, 2) for s in shift_back]} px)."
+                )
+            # Denoise+ al MF: mismo tratamiento que al ungated (es una imagen
+            # estática de alto conteo, con el mismo pedestal de scatter/fondo).
+            if getattr(cfg, "ungated_denoise_plus", False):
+                from core.fbp_clean import denoise_projections_bilateral, sharpen_by_subtraction
+                k_u = float(getattr(cfg, "ungated_denoise_plus_k", 0.20))
+                blur_sc = float(getattr(cfg, "fbp_clean_blur_sigma_color", 0.24))
+                mf_blur = reconstruct_projection_volume(
+                    denoise_projections_bilateral(ungated_corrected, sigma_color=blur_sc),
+                    angles_deg, method=method, projection_filter=cfg.ungated_filter,
+                    fbp_filter_name=cfg.fbp_filter_name, iterations=int(cfg.iterative_iterations),
+                    subsets=subsets, psf=rr_psf, slice_range=cfg.recon_slice_range)
+                ungated_volume_mf = sharpen_by_subtraction(ungated_volume_mf, mf_blur, k_u)
+                notes.append(f"Denoise+ aplicado al Motion-frozen (k={k_u:.2f}).")
+            notes.append(
+                f"Motion-frozen: {gated_volume.shape[0]} gates alineados y promediados "
+                f"(método={mf_method}, ref_gate={mf_ref if mf_ref is not None else 'auto'})."
+            )
+        except Exception as exc:
+            notes.append(f"[WARN] Motion-frozen falló ({exc}); se omite.")
+            ungated_volume_mf = None
+
+    # Motion-frozen POR GATE (cine nítido): alinea todos los gates a cada gate
+    # sucesivamente y promedia. Cada "gate" resultante tiene la nitidez del MF
+    # pero en su propia fase del ciclo. Útil para motilidad, NO para FEVI.
+    gated_volume_mf_per_gate = None
+    if bool(getattr(cfg, "motion_frozen_per_gate", False)) and gated_volume.ndim == 4 and gated_volume.shape[0] >= 2:
+        if progress_callback is not None:
+            progress_callback(0.97, "Motion-frozen por gate (cine nítido)...")
+        from core.motion_frozen import motion_frozen_per_gate
+        # Para el CINE el método es 'stable': alinea por el contexto (tórax,
+        # hígado, fondo) EXCLUYENDO el corazón. Así se corrige el desplazamiento
+        # global del paciente SIN congelar la contracción (el centroide global
+        # está dominado por el corazón y arrastraba el latido -> mini-
+        # desplazamientos raros reportados por el usuario).
+        _mfpg_method = str(getattr(cfg, "motion_frozen_method", "rigid") or "rigid").strip().lower()
+        if _mfpg_method == "rigid":
+            _mfpg_method = "stable"
+        try:
+            gated_volume_mf_per_gate = motion_frozen_per_gate(
+                gated_volume, method=_mfpg_method, smooth_sigma=1.0
+            )
+            notes.append(
+                f"Motion-frozen por gate: {gated_volume.shape[0]} gates alineados "
+                f"por contexto estable (conserva el latido) a cada fase y promediados "
+                f"(método={_mfpg_method})."
+            )
+        except Exception as exc:
+            notes.append(f"[WARN] Motion-frozen por gate falló ({exc}); se omite.")
+            gated_volume_mf_per_gate = None
+
     if progress_callback is not None:
         progress_callback(1.0, "Reconstrucción completa")
 
@@ -1015,4 +1127,6 @@ def reconstruct_raw_gated_pipeline(
         config=cfg,
         motion_result=dict(motion_result),
         notes=notes,
+        ungated_volume_mf=ungated_volume_mf,
+        gated_volume_mf_per_gate=gated_volume_mf_per_gate,
     )

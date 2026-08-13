@@ -1951,6 +1951,17 @@ class MainWindow(QMainWindow):
 				toolbar6_r_filters.addWidget(self.cine_crudo_denoise_plus_lbl)
 				self.cine_crudo_denoise_plus_slider.valueChanged.connect(
 					lambda v: self.cine_crudo_denoise_plus_lbl.setText(f"{v/100.0:.2f}"))
+				# Motion-frozen 3D: alinea gates 4D al end-diastole y promedia.
+				# Recupera la nitidez de un gate con todas las cuentas.
+				self.cine_crudo_motion_frozen_check = QCheckBox("Motion-frozen")
+				self.cine_crudo_motion_frozen_check.setChecked(False)
+				self.cine_crudo_motion_frozen_check.setToolTip(
+					"Motion-frozen 3D: alinea cada gate del volumen reconstruido al "
+					"end-diastole y promedia. Recupera la nitidez de un gate con todas "
+					"las cuentas (el 'cardiac morphing' físico). Reemplaza al ungated "
+					"para display/montaje; el gated original se conserva para FEVI. "
+					"Post-recon, pre-reorientación. Default OFF.")
+				toolbar6_r_filters.addWidget(self.cine_crudo_motion_frozen_check)
 				toolbar6_r_filters.addStretch(1)
 				# --- Fila GATED ---
 				toolbar6_r_filters_g.addWidget(QLabel("<b>Gated:</b>"))
@@ -2425,13 +2436,13 @@ class MainWindow(QMainWindow):
 		"cine_crudo_recon_result_phase",
 		"cine_crudo_cut_study", "cine_crudo_cut_source_label",
 		"cine_crudo_reoriented_gated", "cine_crudo_reoriented_ungated",
-		"cine_crudo_reoriented_gated_phase",
+		"cine_crudo_reoriented_gated_phase", "cine_crudo_reoriented_mf",
 		"cine_crudo_raw_study_for_recon", "_cine_crudo_recon_stage",
 		"cine_crudo_preview_mode",
 	)
 	UNDO_ATTRS_REORIENT = (
 		"cine_crudo_reoriented_gated", "cine_crudo_reoriented_ungated",
-		"cine_crudo_reoriented_gated_phase",
+		"cine_crudo_reoriented_gated_phase", "cine_crudo_reoriented_mf",
 		"cine_crudo_reoriented_voi", "cine_crudo_cut_source_label",
 	)
 
@@ -6208,6 +6219,9 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_axes_for_export_rest = {}
 		self.cine_crudo_axes_for_export_ungated_stress = {}
 		self.cine_crudo_axes_for_export_ungated_rest = {}
+		self.cine_crudo_axes_for_export_mf = {}
+		self.cine_crudo_axes_for_export_mf_stress = {}
+		self.cine_crudo_axes_for_export_mf_rest = {}
 		self.cine_crudo_rest_source_label = ""
 		self.cine_crudo_cut_thickness_mm = 0.0
 		self.cine_crudo_cut_thickness_mm_rest = 0.0
@@ -12668,6 +12682,9 @@ class MainWindow(QMainWindow):
 								and self.cine_crudo_denoise_plus_check.isChecked()),
 			ungated_denoise_plus_k=(float(self.cine_crudo_denoise_plus_slider.value()) / 100.0
 								if getattr(self, "cine_crudo_denoise_plus_slider", None) is not None else 0.20),
+			motion_frozen=bool(getattr(self, "cine_crudo_motion_frozen_check", None) is not None
+							and self.cine_crudo_motion_frozen_check.isChecked()),
+			motion_frozen_method="rigid",
 		)
 
 	# --- Pasajero de fase (FBP) para NÍTIDA ---
@@ -13178,6 +13195,7 @@ class MainWindow(QMainWindow):
 			self.cine_crudo_reoriented_gated = None
 			self.cine_crudo_reoriented_ungated = None
 			self.cine_crudo_reoriented_gated_phase = None
+			self.cine_crudo_reoriented_mf = None
 			if hasattr(self, "cine_crudo_reorient_btn"):
 				self.cine_crudo_reorient_btn.setEnabled(True)
 			if hasattr(self, "cine_crudo_process_recon_btn"):
@@ -13899,6 +13917,12 @@ class MainWindow(QMainWindow):
 				np.asarray(self.cine_crudo_recon_result_phase.gated_volume, dtype=np.float64)
 				if getattr(self, "cine_crudo_recon_result_phase", None) is not None else None
 			),
+			motion_frozen_volume=(
+				np.asarray(self.cine_crudo_recon_result.ungated_volume_mf, dtype=np.float64)
+				if getattr(self, "cine_crudo_recon_result", None) is not None
+					and getattr(self.cine_crudo_recon_result, "ungated_volume_mf", None) is not None
+				else None
+			),
 		)
 		if dlg.exec() != QDialog.DialogCode.Accepted or dlg.reoriented_gated is None:
 			return
@@ -13906,6 +13930,10 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_reoriented_ungated = (
 			np.asarray(dlg.reoriented_ungated, dtype=np.float64)
 			if dlg.reoriented_ungated is not None else None
+		)
+		self.cine_crudo_reoriented_mf = (
+			np.asarray(dlg.reoriented_mf, dtype=np.float64)
+			if getattr(dlg, "reoriented_mf", None) is not None else None
 		)
 		# Pasajero de fase reorientado con la misma transformación (o None si no hubo).
 		self.cine_crudo_reoriented_gated_phase = (
@@ -14002,6 +14030,25 @@ class MainWindow(QMainWindow):
 				"HLA": np.ascontiguousarray(cuts_u["hla"]),
 				"VLA": np.ascontiguousarray(cuts_u["vla"]),
 			}
+			# Cortes del MOTION-FROZEN (si el pipeline lo generó): mismo recorte y
+			# mismos cortes anatómicos. Si hubo reorientación, usar el volumen MF
+			# reorientado (misma transformación que el ungated); si no, el original.
+			mf_vol = getattr(self, "cine_crudo_reoriented_mf", None)
+			if mf_vol is None:
+				mf_vol = getattr(self.cine_crudo_recon_result, "ungated_volume_mf", None) if getattr(self, "cine_crudo_recon_result", None) is not None else None
+			if mf_vol is not None:
+				mf_vol = np.asarray(mf_vol, dtype=np.float64)
+				mf_cube4 = self._thickened_sa_cube(mf_vol[None, ...], z0, z1, thickness)
+				cuts_mf = anatomical_cuts_gated(mf_cube4)
+				self.cine_crudo_axes_for_export_mf = {
+					"SA": np.ascontiguousarray(cuts_mf["sa"]),
+					"HLA": np.ascontiguousarray(cuts_mf["hla"]),
+					"VLA": np.ascontiguousarray(cuts_mf["vla"]),
+				}
+				self._log(f"Cortes Motion-frozen generados: SA {cuts_mf['sa'].shape}, HLA {cuts_mf['hla'].shape}, VLA {cuts_mf['vla'].shape}")
+			else:
+				self.cine_crudo_axes_for_export_mf = {}
+				self._log("Motion-frozen: no hay volumen MF (¿checkbox activado al reconstruir?)")
 			if sa_cube.shape[1] < 2:
 				QMessageBox.information(self, "SINCRO", "Los límites deben dejar al menos 2 cortes SA.")
 				return
@@ -14093,12 +14140,14 @@ class MainWindow(QMainWindow):
 			if getattr(self, "_cine_crudo_recon_stage", "stress") == "rest":
 				self.cine_crudo_axes_for_export_rest = {k: np.array(v, copy=True) for k, v in self.cine_crudo_axes_for_export.items()}
 				self.cine_crudo_axes_for_export_ungated_rest = {k: np.array(v, copy=True) for k, v in self.cine_crudo_axes_for_export_ungated.items()}
+				self.cine_crudo_axes_for_export_mf_rest = {k: np.array(v, copy=True) for k, v in getattr(self, "cine_crudo_axes_for_export_mf", {}).items()}
 				self.cine_crudo_rest_source_label = self.cine_crudo_cut_source_label or "raw recon"
 				self.cine_crudo_cut_thickness_mm_rest = float(cut_thickness_mm or 0.0)
 				self._log("Cortes de REPOSO guardados automáticamente para el montaje comparativo.")
 			else:
 				self.cine_crudo_axes_for_export_stress = {k: np.array(v, copy=True) for k, v in self.cine_crudo_axes_for_export.items()}
 				self.cine_crudo_axes_for_export_ungated_stress = {k: np.array(v, copy=True) for k, v in self.cine_crudo_axes_for_export_ungated.items()}
+				self.cine_crudo_axes_for_export_mf_stress = {k: np.array(v, copy=True) for k, v in getattr(self, "cine_crudo_axes_for_export_mf", {}).items()}
 				self._log("Cortes de ESFUERZO guardados automáticamente para el montaje comparativo.")
 			# Inicializar rango de gates para montaje (todo el ciclo por defecto).
 			n_gates_out = int(sa_cube.shape[0])
@@ -14358,12 +14407,16 @@ class MainWindow(QMainWindow):
 
 		"ungated" (default): cortes del ungated (perfusión estática, con Denoise+;
 		la imagen del informe). "gated": cortes del gated (cine en movimiento).
+		"motion_frozen": cortes del volumen 4D alineado y promediado (si existe).
 		Devuelve dicts SA/HLA/VLA o {} si no hay.
 		"""
 		src = str(getattr(self, "cine_crudo_montage_source", "ungated") or "ungated")
 		if src == "gated":
 			stress = self.cine_crudo_axes_for_export_stress or self.cine_crudo_axes_for_export
 			rest = self.cine_crudo_axes_for_export_rest
+		elif src == "motion_frozen":
+			stress = getattr(self, "cine_crudo_axes_for_export_mf_stress", None) or getattr(self, "cine_crudo_axes_for_export_mf", None) or {}
+			rest = getattr(self, "cine_crudo_axes_for_export_mf_rest", None) or {}
 		else:
 			stress = (getattr(self, "cine_crudo_axes_for_export_ungated_stress", None)
 					or getattr(self, "cine_crudo_axes_for_export_ungated", None) or {})
@@ -14373,10 +14426,11 @@ class MainWindow(QMainWindow):
 	def _update_montage_cine_controls(self):
 		"""Habilita/deshabilita los controles de cine del montaje según la fuente.
 
-		El cine solo tiene sentido con la fuente Gated (varios gates). Con Ungated
-		(imagen estática de perfusión) los controles quedan deshabilitados.
+		El cine tiene sentido solo con la fuente Gated (varios gates). Con Ungated
+		o Motion-frozen (imágenes estáticas) los controles quedan deshabilitados.
 		"""
-		is_gated = str(getattr(self, "cine_crudo_montage_source", "ungated")) == "gated"
+		src = str(getattr(self, "cine_crudo_montage_source", "ungated"))
+		has_gates = src == "gated"
 		for wname in (
 			"cine_crudo_montage_cine_play_btn",
 			"cine_crudo_montage_cine_prev_btn",
@@ -14386,7 +14440,7 @@ class MainWindow(QMainWindow):
 			w = getattr(self, wname, None)
 			if w is not None:
 				try:
-					w.setEnabled(bool(is_gated))
+					w.setEnabled(bool(has_gates))
 				except Exception:
 					pass
 
@@ -14403,7 +14457,8 @@ class MainWindow(QMainWindow):
 		return max(1, lo), max(1, hi)
 
 	def _toggle_montage_cine(self):
-		if str(getattr(self, "cine_crudo_montage_source", "ungated")) != "gated":
+		src = str(getattr(self, "cine_crudo_montage_source", "ungated"))
+		if src != "gated":
 			return
 		if not (getattr(self, "cine_crudo_axes_for_export_stress", None) or getattr(self, "cine_crudo_axes_for_export", None)):
 			return
@@ -15173,13 +15228,15 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_montage_source_combo = QComboBox()
 		self.cine_crudo_montage_source_combo.addItem("Ungated (perfusión)", "ungated")
 		self.cine_crudo_montage_source_combo.addItem("Gated (cine)", "gated")
+		self.cine_crudo_montage_source_combo.addItem("Motion-frozen", "motion_frozen")
 		_cur_src = self.cine_crudo_montage_source_combo.findData(getattr(self, "cine_crudo_montage_source", "ungated"))
 		if _cur_src >= 0:
 			self.cine_crudo_montage_source_combo.setCurrentIndex(_cur_src)
 		self.cine_crudo_montage_source_combo.setToolTip(
 			"Fuente de los cortes del montaje. Ungated = perfusión estática (con "
 			"Denoise+ si está activo; la imagen del informe). Gated = cine en "
-			"movimiento (suma de gates).")
+			"movimiento (suma de gates). Motion-frozen = gates alineados al "
+			"end-diastole y promediados (nitidez de gate con todas las cuentas).")
 		self.cine_crudo_montage_source_combo.currentIndexChanged.connect(self._on_montage_source_changed)
 		toolbar.addWidget(self.cine_crudo_montage_source_combo)
 

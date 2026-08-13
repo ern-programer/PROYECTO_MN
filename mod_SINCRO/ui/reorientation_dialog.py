@@ -82,7 +82,7 @@ class _Handle:
 class CardiacReorientationDialog(QDialog):
     """Reorientacion oblicua interactiva del VI."""
 
-    def __init__(self, ungated_volume, gated_volume=None, source_label="", geometry=None, parent=None, locked_voi=None, initial_orientation=None, phase_gated_volume=None, voxel_mm=None):
+    def __init__(self, ungated_volume, gated_volume=None, source_label="", geometry=None, parent=None, locked_voi=None, initial_orientation=None, phase_gated_volume=None, voxel_mm=None, motion_frozen_volume=None, motion_frozen_gated_volume=None):
         super().__init__(parent)
         self.setWindowTitle("Reorientar corazón · Rec/Ref")
         self.setModal(True)
@@ -100,6 +100,10 @@ class CardiacReorientationDialog(QDialog):
         # Volumen pasajero (FBP) para la fase: viaja por la MISMA reorientación
         # que el gated visible, sin participar de la vista ni de la auto-orientación.
         self._phase_gated = None if phase_gated_volume is None else np.asarray(phase_gated_volume, dtype=np.float64)
+        # Volumen motion-frozen (estático): misma reorientación que el ungated.
+        self._mf = None if motion_frozen_volume is None else np.asarray(motion_frozen_volume, dtype=np.float64)
+        # Volumen motion-frozen POR GATE (4D): misma reorientación que el gated.
+        self._mf_gated = None if motion_frozen_gated_volume is None else np.asarray(motion_frozen_gated_volume, dtype=np.float64)
         self._geometry = geometry if isinstance(geometry, SpectGeometry) else None
         self._locked_voi = locked_voi if isinstance(locked_voi, dict) else None
         # Semilla de orientación heredada de la otra etapa (eje largo + rango de
@@ -109,6 +113,8 @@ class CardiacReorientationDialog(QDialog):
         self.reoriented_ungated = None
         self.reoriented_gated = None
         self.reoriented_gated_phase = None
+        self.reoriented_mf = None
+        self.reoriented_mf_gated = None
         self.result_long_axis = None
         self.result_center = None
         self.base_k = 0
@@ -1372,6 +1378,19 @@ class CardiacReorientationDialog(QDialog):
                 reo_p = reslice_from_vector_gated(cube_voi_p, center, u, out, order=1,
                                                  sample_scale=sample_scale)
                 self.reoriented_gated_phase = self._apply_post_ops_4d(reo_p)
+            # Motion-frozen (estático): misma VOI, mismo vector, mismo out, mismos
+            # post-ops que el ungated -> queda alineado con la perfusión.
+            if self._mf is not None:
+                vol_voi_mf = self._apply_voi(self._mf)
+                reo_mf = reslice_from_vector(vol_voi_mf, center, u, out, order=1,
+                                            sample_scale=sample_scale)
+                self.reoriented_mf = self._apply_post_ops_3d(reo_mf)
+            # Motion-frozen POR GATE (4D): misma VOI/vector/out/post-ops que el gated.
+            if self._mf_gated is not None:
+                cube_voi_mfg = self._apply_voi_gated(self._mf_gated)
+                reo_mfg = reslice_from_vector_gated(cube_voi_mfg, center, u, out, order=1,
+                                                    sample_scale=sample_scale)
+                self.reoriented_mf_gated = self._apply_post_ops_4d(reo_mfg)
         except Exception:
             self.reoriented_ungated = self._reo
         self.accept()
