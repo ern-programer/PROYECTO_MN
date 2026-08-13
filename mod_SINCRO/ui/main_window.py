@@ -1951,17 +1951,33 @@ class MainWindow(QMainWindow):
 				toolbar6_r_filters.addWidget(self.cine_crudo_denoise_plus_lbl)
 				self.cine_crudo_denoise_plus_slider.valueChanged.connect(
 					lambda v: self.cine_crudo_denoise_plus_lbl.setText(f"{v/100.0:.2f}"))
-				# Motion-frozen 3D: alinea gates 4D al end-diastole y promedia.
-				# Recupera la nitidez de un gate con todas las cuentas.
-				self.cine_crudo_motion_frozen_check = QCheckBox("Motion-frozen")
-				self.cine_crudo_motion_frozen_check.setChecked(False)
-				self.cine_crudo_motion_frozen_check.setToolTip(
-					"Motion-frozen 3D: alinea cada gate del volumen reconstruido al "
-					"end-diastole y promedia. Recupera la nitidez de un gate con todas "
-					"las cuentas (el 'cardiac morphing' físico). Reemplaza al ungated "
-					"para display/montaje; el gated original se conserva para FEVI. "
-					"Post-recon, pre-reorientación. Default OFF.")
-				toolbar6_r_filters.addWidget(self.cine_crudo_motion_frozen_check)
+				# Descuento de SCATTER por ventana energética (EM/SC). Habilitado solo
+				# si el estudio cargado trajo un hermano _SC (lo detecta el loader).
+				self.cine_crudo_scatter_check = QCheckBox("Desc. SC")
+				self.cine_crudo_scatter_check.setChecked(False)
+				self.cine_crudo_scatter_check.setEnabled(False)
+				self.cine_crudo_scatter_check.setToolTip(
+					"Corrección de scatter por ventana energética (dual EM/SC): resta "
+					"k × (proyecciones de la ventana de scatter) de cada proyección "
+					"ANTES de reconstruir. Solo disponible si el estudio tiene archivo "
+					"hermano _SC (p.ej. exportación Infinia EM/SC). Default OFF.")
+				toolbar6_r_filters.addWidget(self.cine_crudo_scatter_check)
+				toolbar6_r_filters.addWidget(QLabel("k"))
+				self.cine_crudo_scatter_k_spin = QDoubleSpinBox()
+				self.cine_crudo_scatter_k_spin.setRange(0.0, 2.0)
+				self.cine_crudo_scatter_k_spin.setSingleStep(0.1)
+				self.cine_crudo_scatter_k_spin.setDecimals(2)
+				self.cine_crudo_scatter_k_spin.setValue(1.0)
+				self.cine_crudo_scatter_k_spin.setMaximumWidth(64)
+				self.cine_crudo_scatter_k_spin.setEnabled(False)
+				self.cine_crudo_scatter_k_spin.setToolTip(
+					"Factor k de la resta de scatter (P = EM - k×SC). 1.0 = resta "
+					"directa (dual-window). Con TEW se calcula de los anchos de "
+					"ventana. Calibrar con fantoma/estudio real.")
+				toolbar6_r_filters.addWidget(self.cine_crudo_scatter_k_spin)
+				# NOTA: Motion-frozen fue retirado de la UI (2026-08-13). El pipeline
+				# (RawReconConfig.motion_frozen) y core/motion_frozen.py quedan
+				# disponibles y documentados por si sirven para otros cálculos.
 				toolbar6_r_filters.addStretch(1)
 				# --- Fila GATED ---
 				toolbar6_r_filters_g.addWidget(QLabel("<b>Gated:</b>"))
@@ -4643,6 +4659,29 @@ class MainWindow(QMainWindow):
 		import matplotlib.pyplot as plt
 		from core.raw_projections import build_sinograms, center_of_mass_tracking
 
+		# --- Ventana de scatter hermana (EM/SC): si el loader la adjuntó, ---
+		# --- habilitar el control y PREGUNTAR al usuario si quiere usarla. ---
+		_sc = getattr(self.study, "scatter_projections", None)
+		if hasattr(self, "cine_crudo_scatter_check"):
+			if _sc is not None:
+				self.cine_crudo_scatter_check.setEnabled(True)
+				self.cine_crudo_scatter_k_spin.setEnabled(True)
+				sc_name = os.path.basename(str(getattr(self.study, "scatter_path", "") or "?_SC"))
+				self._log(f"Ventana de scatter detectada: {sc_name} (misma geometría que EM).")
+				ans = QMessageBox.question(
+					self, "SINCRO — Scatter EM/SC",
+					f"Se detectó un archivo de SCATTER hermano:\n{sc_name}\n\n"
+					"¿Usarlo para la corrección de scatter en la reconstrucción?\n"
+					"(P = EM − k×SC, pre-recon. Podés cambiarlo con el checkbox 'Desc. SC'.)",
+					QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+					QMessageBox.StandardButton.Yes,
+				)
+				self.cine_crudo_scatter_check.setChecked(ans == QMessageBox.StandardButton.Yes)
+			else:
+				self.cine_crudo_scatter_check.setEnabled(False)
+				self.cine_crudo_scatter_check.setChecked(False)
+				self.cine_crudo_scatter_k_spin.setEnabled(False)
+
 		projections = np.asarray(self.study.cube, dtype=np.float64)  # (gates, angles, H, W)
 		n_gates, n_angles = int(projections.shape[0]), int(projections.shape[1])
 		gating = getattr(self.study, "gating_info", {}) or {}
@@ -6185,6 +6224,10 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_playing = False
 		self.cine_crudo_direction = 1
 		self._stop_montage_cine()
+		if hasattr(self, "cine_crudo_scatter_check"):
+			self.cine_crudo_scatter_check.setEnabled(False)
+			self.cine_crudo_scatter_check.setChecked(False)
+			self.cine_crudo_scatter_k_spin.setEnabled(False)
 		self.cine_crudo_matrix_txt = ""
 		self.cine_crudo_seed = None
 		self.cine_crudo_seed_compare = None
@@ -12682,9 +12725,11 @@ class MainWindow(QMainWindow):
 								and self.cine_crudo_denoise_plus_check.isChecked()),
 			ungated_denoise_plus_k=(float(self.cine_crudo_denoise_plus_slider.value()) / 100.0
 								if getattr(self, "cine_crudo_denoise_plus_slider", None) is not None else 0.20),
-			motion_frozen=bool(getattr(self, "cine_crudo_motion_frozen_check", None) is not None
-							and self.cine_crudo_motion_frozen_check.isChecked()),
-			motion_frozen_method="rigid",
+			scatter_subtract=bool(getattr(self, "cine_crudo_scatter_check", None) is not None
+							and self.cine_crudo_scatter_check.isEnabled()
+							and self.cine_crudo_scatter_check.isChecked()),
+			scatter_k=(float(self.cine_crudo_scatter_k_spin.value())
+						if getattr(self, "cine_crudo_scatter_k_spin", None) is not None else 1.0),
 		)
 
 	# --- Pasajero de fase (FBP) para NÍTIDA ---
@@ -13152,7 +13197,9 @@ class MainWindow(QMainWindow):
 
 			try:
 				result = reconstruct_raw_gated_pipeline(
-					projections, angles, motion_result=motion, config=cfg, progress_callback=_recon_progress
+					projections, angles, motion_result=motion, config=cfg,
+					progress_callback=_recon_progress,
+					scatter_projections=getattr(raw_study, "scatter_projections", None),
 				)
 			finally:
 				recon_dialog.close()
@@ -14414,9 +14461,6 @@ class MainWindow(QMainWindow):
 		if src == "gated":
 			stress = self.cine_crudo_axes_for_export_stress or self.cine_crudo_axes_for_export
 			rest = self.cine_crudo_axes_for_export_rest
-		elif src == "motion_frozen":
-			stress = getattr(self, "cine_crudo_axes_for_export_mf_stress", None) or getattr(self, "cine_crudo_axes_for_export_mf", None) or {}
-			rest = getattr(self, "cine_crudo_axes_for_export_mf_rest", None) or {}
 		else:
 			stress = (getattr(self, "cine_crudo_axes_for_export_ungated_stress", None)
 					or getattr(self, "cine_crudo_axes_for_export_ungated", None) or {})
@@ -15228,15 +15272,15 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_montage_source_combo = QComboBox()
 		self.cine_crudo_montage_source_combo.addItem("Ungated (perfusión)", "ungated")
 		self.cine_crudo_montage_source_combo.addItem("Gated (cine)", "gated")
-		self.cine_crudo_montage_source_combo.addItem("Motion-frozen", "motion_frozen")
+		# NOTA: la fuente "Motion-frozen" fue retirada del combo (2026-08-13). El
+		# código del pipeline queda disponible (ver core/motion_frozen.py).
 		_cur_src = self.cine_crudo_montage_source_combo.findData(getattr(self, "cine_crudo_montage_source", "ungated"))
 		if _cur_src >= 0:
 			self.cine_crudo_montage_source_combo.setCurrentIndex(_cur_src)
 		self.cine_crudo_montage_source_combo.setToolTip(
 			"Fuente de los cortes del montaje. Ungated = perfusión estática (con "
 			"Denoise+ si está activo; la imagen del informe). Gated = cine en "
-			"movimiento (suma de gates). Motion-frozen = gates alineados al "
-			"end-diastole y promediados (nitidez de gate con todas las cuentas).")
+			"movimiento (suma de gates).")
 		self.cine_crudo_montage_source_combo.currentIndexChanged.connect(self._on_montage_source_changed)
 		toolbar.addWidget(self.cine_crudo_montage_source_combo)
 

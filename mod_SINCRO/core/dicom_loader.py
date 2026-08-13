@@ -96,6 +96,11 @@ class GatedStudy:
     radius_mm: float | None = None
     focal_length_mm: float | None = None
     detector_iop: list | None = None   # (0054,0022)->(0020,0037) 6 cosenos LPS (modo crudo)
+    # --- Ventana de scatter (adquisición dual EM/SC, p.ej. Infinia) ---
+    # Si el crudo EM tiene hermano _SC en la misma carpeta, el loader lo adjunta
+    # automáticamente. La UI pregunta al usuario si se usa para la corrección.
+    scatter_projections: np.ndarray | None = None  # (n_gates, n_angles, H, W)
+    scatter_path: str = ""
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -415,6 +420,8 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
             radius_mm=getattr(raw, "radius_mm", None),
             focal_length_mm=getattr(raw, "focal_length_mm", None),
             detector_iop=getattr(raw, "detector_iop", None),
+            scatter_projections=getattr(raw, "scatter_projections", None),
+            scatter_path=getattr(raw, "scatter_path", ""),
             notes=notes + raw.notes,
         )
         return study

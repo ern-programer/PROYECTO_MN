@@ -42,6 +42,11 @@ class RawGatedProjections:
     # --- Orientacion anatomica (DetectorInformationSequence[0].ImageOrientationPatient) ---
     detector_iop: list | None = None       # (0054,0022)->(0020,0037) 6 cosenos LPS
     source_path: str = ""
+    # --- Ventana de SCATTER (adquisición dual EM/SC, p.ej. Infinia exporta ---
+    # --- dos archivos *_EM_* / *_SC_*). Si existe el hermano _SC, se carga ---
+    # --- automáticamente para corrección de scatter pre-reconstrucción. ---
+    scatter_projections: np.ndarray | None = None  # mismo shape que projections
+    scatter_path: str = ""
     patient_name: str = ""
     patient_id: str = ""
     study_description: str = ""
@@ -116,12 +121,46 @@ def _get(ds, tag, default=None):
     return ds[tag].value if tag in ds else default
 
 
-def load_raw_projections(path: str) -> RawGatedProjections:
+def find_scatter_sibling(path: str) -> str | None:
+    """Busca el archivo hermano de SCATTER de una adquisición EM (Infinia).
+
+    Infinia (y otras cámaras modernas) exportan la ventana de emisión y la de
+    scatter como dos archivos espejo: ``..._EM_...dcm`` / ``..._SC_...dcm``.
+    Reglas probadas (en orden):
+      1. ``_EM_`` → ``_SC_``
+      2. ``_EM`` antes de la extensión → ``_SC``
+    Devuelve la ruta del SC si existe en disco, None si no. Nunca devuelve el
+    propio archivo (si el path ya es _SC, no busca).
+    """
+    import os
+    if not path:
+        return None
+    base = os.path.basename(path)
+    if "_SC" in base.upper():
+        return None  # ya es el archivo de scatter
+    candidates = []
+    if "_EM_" in base:
+        candidates.append(base.replace("_EM_", "_SC_"))
+    stem, ext = os.path.splitext(base)
+    if stem.upper().endswith("_EM"):
+        candidates.append(stem[:-3] + "_SC" + ext)
+    for cand in candidates:
+        full = os.path.join(os.path.dirname(path), cand)
+        if os.path.isfile(full):
+            return full
+    return None
+
+
+def load_raw_projections(path: str, *, _skip_scatter: bool = False) -> RawGatedProjections:
     """
     Carga proyecciones crudas gated desde DICOM.
 
     Acepta archivos GATED TOMO con AngularViewVector (proyecciones angulares).
     Organiza los frames como (n_gates, n_angles, H, W).
+
+    Si el archivo es de emisión (``_EM``) y existe el hermano de scatter
+    (``_SC``) en la misma carpeta, lo carga automáticamente en
+    ``scatter_projections`` (la UI pregunta al usuario si quiere usarlo).
     """
     try:
         import pydicom
@@ -247,6 +286,29 @@ def load_raw_projections(path: str) -> RawGatedProjections:
     from core.orientation_resolver import read_detector_iop
     detector_iop = read_detector_iop(ds)
 
+    # --- Ventana de scatter hermana (EM/SC, p.ej. Infinia) ---
+    scatter_projections = None
+    scatter_path = ""
+    if not _skip_scatter:
+        sc_sibling = find_scatter_sibling(path)
+        if sc_sibling:
+            try:
+                sc_raw = load_raw_projections(sc_sibling, _skip_scatter=True)
+                if sc_raw.projections.shape == projections.shape:
+                    scatter_projections = sc_raw.projections
+                    scatter_path = sc_sibling
+                    notes.append(
+                        f"Ventana de SCATTER detectada y cargada: {os.path.basename(sc_sibling)} "
+                        f"({sc_raw.n_gates}g × {sc_raw.n_angles}áng). La UI preguntará si se usa."
+                    )
+                else:
+                    notes.append(
+                        f"[WARN] Hermano SC encontrado ({os.path.basename(sc_sibling)}) pero shape "
+                        f"{sc_raw.projections.shape} != EM {projections.shape}: NO se adjunta."
+                    )
+            except Exception as exc:
+                notes.append(f"[WARN] Hermano SC encontrado pero no se pudo cargar: {exc}")
+
     return RawGatedProjections(
         projections=projections,
         n_gates=int(n_gates),
@@ -269,6 +331,8 @@ def load_raw_projections(path: str) -> RawGatedProjections:
         focal_length_mm=geom.focal_length_mm,
         detector_iop=detector_iop,
         source_path=path,
+        scatter_projections=scatter_projections,
+        scatter_path=scatter_path,
         patient_name=str(_get(ds, (0x0010, 0x0010), "") or ""),
         patient_id=str(_get(ds, (0x0010, 0x0020), "") or ""),
         study_description=str(_get(ds, (0x0008, 0x1030), "") or ""),

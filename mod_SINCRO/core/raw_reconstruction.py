@@ -140,6 +140,15 @@ class RawReconConfig:
     # actividad difusa) es aditivo y también está debajo del miocardio.
     # Aumenta el contraste cavidad/pared. OFF por defecto.
     background_subtract: bool = False
+    # --- Corrección de SCATTER por ventana energética (pre-recon) ---
+    # Si la adquisición es dual EM/SC (p.ej. Infinia exporta *_EM_* y *_SC_*),
+    # el loader adjunta scatter_projections al estudio. Si el usuario lo
+    # habilita, se resta k*SC de CADA proyección ANTES de reconstruir:
+    #   P_primaria = P_EM - k * P_SC   (dual-window; TEW cuando haya anchos
+    #   de ventana en el DICOM). k=1.0 por defecto (placeholder; calibrar con
+    #   fantoma/estudio real). Se aplica a gated y ungated por igual.
+    scatter_subtract: bool = False
+    scatter_k: float = 1.0
 
 
 @dataclass
@@ -735,6 +744,7 @@ def reconstruct_raw_gated_pipeline(
     config: RawReconConfig | None = None,
     motion_kwargs: dict | None = None,
     progress_callback=None,
+    scatter_projections: np.ndarray | None = None,
 ) -> RawReconResult:
     """Ejecuta el pipeline raw gated central.
 
@@ -769,6 +779,28 @@ def reconstruct_raw_gated_pipeline(
 
     corrected = apply_shifts_to_projections(raw, shifts_y, shifts_x)
     ungated_corrected = apply_shifts_to_projections(ungate_projections(raw), shifts_y, shifts_x)
+
+    # Corrección de SCATTER por ventana energética (dual EM/SC). El SC recibe
+    # los MISMOS shifts geométricos de motion correction (misma adquisición,
+    # misma geometría) y se resta con factor k de cada proyección, ANTES de
+    # cualquier otro procesamiento. Clip a 0: las cuentas no pueden ser
+    # negativas (el exceso de resta es ruido/fondo sobre-estimado).
+    if bool(getattr(cfg, "scatter_subtract", False)) and scatter_projections is not None:
+        sc = np.asarray(scatter_projections, dtype=np.float64)
+        k_sc = float(getattr(cfg, "scatter_k", 1.0) or 1.0)
+        if sc.shape == raw.shape:
+            sc_corr = apply_shifts_to_projections(sc, shifts_y, shifts_x)
+            corrected = np.clip(corrected - k_sc * sc_corr, 0.0, None)
+            sc_ung = apply_shifts_to_projections(ungate_projections(sc), shifts_y, shifts_x)
+            ungated_corrected = np.clip(ungated_corrected - k_sc * sc_ung, 0.0, None)
+            notes.append(
+                f"Corrección de scatter EM/SC aplicada: P = EM - {k_sc:.2f}×SC "
+                f"(pre-recon, proyección por proyección, gated y ungated)."
+            )
+        else:
+            notes.append(
+                f"[WARN] Scatter pedido pero shape SC {sc.shape} != EM {raw.shape}: no se aplica."
+            )
 
     method = str(cfg.reconstruction_method).strip().lower()
     subsets = int(cfg.osem_subsets) if method == "osem" else 1
@@ -1032,38 +1064,12 @@ def reconstruct_raw_gated_pipeline(
                 aligned = rigid_register_gates(gated_volume, ref_gate=mf_ref, smooth_sigma=1.0)
                 notes.append("Motion-frozen: alineación rígida 3D (traslación por centroide).")
             ungated_volume_mf = aligned.mean(axis=0)
-            # Re-centrar el MF al frame del UNGATED: la alineación deja el
-            # corazón en la posición del gate de referencia (ED), que difiere
-            # unos píxeles de la posición media del ungated. La VOI de la
-            # reorientación y el mf_blur del Denoise+ se calculan sobre el
-            # ungated: si el MF no comparte esa geometría, los cortes salen
-            # desplazados y la resta del Denoise+ genera fantasmas en "C"
-            # (reportado por el usuario 2026-08-13: MF + Denoise+ = cortes
-            # corridos/pared comida; pasaba igual con stable).
-            from core.motion_frozen import _center_of_mass_3d
-            from scipy.ndimage import shift as _ndi_shift
-            com_ung = _center_of_mass_3d(ungated_volume)
-            com_mf = _center_of_mass_3d(ungated_volume_mf)
-            shift_back = [com_ung[i] - com_mf[i] for i in range(3)]
-            if max(abs(s) for s in shift_back) > 0.05:
-                ungated_volume_mf = _ndi_shift(ungated_volume_mf, shift_back, order=3, mode="constant", cval=0.0)
-                notes.append(
-                    f"Motion-frozen: MF re-centrado al frame del ungated "
-                    f"(shift {[round(s, 2) for s in shift_back]} px)."
-                )
-            # Denoise+ al MF: mismo tratamiento que al ungated (es una imagen
-            # estática de alto conteo, con el mismo pedestal de scatter/fondo).
-            if getattr(cfg, "ungated_denoise_plus", False):
-                from core.fbp_clean import denoise_projections_bilateral, sharpen_by_subtraction
-                k_u = float(getattr(cfg, "ungated_denoise_plus_k", 0.20))
-                blur_sc = float(getattr(cfg, "fbp_clean_blur_sigma_color", 0.24))
-                mf_blur = reconstruct_projection_volume(
-                    denoise_projections_bilateral(ungated_corrected, sigma_color=blur_sc),
-                    angles_deg, method=method, projection_filter=cfg.ungated_filter,
-                    fbp_filter_name=cfg.fbp_filter_name, iterations=int(cfg.iterative_iterations),
-                    subsets=subsets, psf=rr_psf, slice_range=cfg.recon_slice_range)
-                ungated_volume_mf = sharpen_by_subtraction(ungated_volume_mf, mf_blur, k_u)
-                notes.append(f"Denoise+ aplicado al Motion-frozen (k={k_u:.2f}).")
+            # PRIMERA IMPLEMENTACIÓN (la que funcionaba): solo alinear gates y
+            # promediar. SIN Denoise+ al MF y SIN re-centrado — esos dos pasos
+            # (agregados después) restaban volúmenes en distinta geometría y
+            # generaban fantasmas en "C" / cortes corridos (reportado 2026-08-13).
+            # Si se quiere mejorar la imagen del MF, el usuario aplica los
+            # filtros al UNGATED por separado y compara.
             notes.append(
                 f"Motion-frozen: {gated_volume.shape[0]} gates alineados y promediados "
                 f"(método={mf_method}, ref_gate={mf_ref if mf_ref is not None else 'auto'})."
