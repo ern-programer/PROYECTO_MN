@@ -1705,6 +1705,14 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_compare_check.setEnabled(False)
 				self.cine_crudo_compare_check.toggled.connect(self._refresh_cine_crudo_view)
 				toolbar4.addWidget(self.cine_crudo_compare_check)
+				self.cine_crudo_diff_check = QCheckBox("Diferencia")
+				self.cine_crudo_diff_check.setToolTip(
+					"Muestra la DIFERENCIA corregido − original (mismo truco que el "
+					"preview de scatter EM−SC). Sirve para ver QUÉ movió la corrección "
+					"de movimiento. Se activa tras aplicar la corrección.")
+				self.cine_crudo_diff_check.setEnabled(False)
+				self.cine_crudo_diff_check.toggled.connect(self._refresh_cine_crudo_view)
+				toolbar4.addWidget(self.cine_crudo_diff_check)
 				self.cine_crudo_sino_check = QCheckBox("Sinograma")
 				self.cine_crudo_sino_check.setToolTip("Muestra a la derecha el sinograma; con Comparar activo agrega original/corregido como Odyssey.")
 				self.cine_crudo_sino_check.toggled.connect(self._refresh_cine_crudo_view)
@@ -1962,6 +1970,9 @@ class MainWindow(QMainWindow):
 					"ANTES de reconstruir. Solo disponible si el estudio tiene archivo "
 					"hermano _SC (p.ej. exportación Infinia EM/SC). Default OFF.")
 				toolbar6_r_filters.addWidget(self.cine_crudo_scatter_check)
+				# Al activar/desactivar o cambiar k: refrescar el cine crudo (preview
+				# EM−SC en vivo) y la recon si ya se hizo.
+				self.cine_crudo_scatter_check.toggled.connect(self._on_scatter_preview_changed)
 				toolbar6_r_filters.addWidget(QLabel("k"))
 				self.cine_crudo_scatter_k_spin = QDoubleSpinBox()
 				self.cine_crudo_scatter_k_spin.setRange(0.0, 2.0)
@@ -1974,6 +1985,7 @@ class MainWindow(QMainWindow):
 					"Factor k de la resta de scatter (P = EM - k×SC). 1.0 = resta "
 					"directa (dual-window). Con TEW se calcula de los anchos de "
 					"ventana. Calibrar con fantoma/estudio real.")
+				self.cine_crudo_scatter_k_spin.valueChanged.connect(self._on_scatter_preview_changed)
 				toolbar6_r_filters.addWidget(self.cine_crudo_scatter_k_spin)
 				# NOTA: Motion-frozen fue retirado de la UI (2026-08-13). El pipeline
 				# (RawReconConfig.motion_frozen) y core/motion_frozen.py quedan
@@ -6254,6 +6266,9 @@ class MainWindow(QMainWindow):
 			self.cine_crudo_scatter_check.setEnabled(False)
 			self.cine_crudo_scatter_check.setChecked(False)
 			self.cine_crudo_scatter_k_spin.setEnabled(False)
+		if getattr(self, "cine_crudo_diff_check", None) is not None:
+			self.cine_crudo_diff_check.setEnabled(False)
+			self.cine_crudo_diff_check.setChecked(False)
 		self.cine_crudo_matrix_txt = ""
 		self.cine_crudo_seed = None
 		self.cine_crudo_seed_compare = None
@@ -11655,19 +11670,42 @@ class MainWindow(QMainWindow):
 		"""Genera frames QPixmap de un estudio crudo para el preview superior."""
 		projections = np.asarray(study_obj.cube, dtype=np.float64)  # (gates, angles, H, W)
 		n_gates, n_angles, H, W = projections.shape
+		# Preview rápido EM−SC: si el checkbox "Desc. SC" está activado y el
+		# estudio trajo scatter, restar k×SC de las proyecciones SOLO para el
+		# display del cine (no altera los datos ni la recon). Si está OFF, se ve
+		# el crudo EM solo. El SC no gatillado se reparte como SC/N_gates.
+		_sc_on = bool(getattr(self, "cine_crudo_scatter_check", None) is not None
+					and self.cine_crudo_scatter_check.isEnabled()
+					and self.cine_crudo_scatter_check.isChecked())
+		_sc = getattr(study_obj, "scatter_projections", None)
+		if _sc_on and _sc is not None:
+			_k = float(self.cine_crudo_scatter_k_spin.value()) if getattr(self, "cine_crudo_scatter_k_spin", None) is not None else 1.0
+			_sc_arr = np.asarray(_sc, dtype=np.float64)
+			if _sc_arr.shape[0] == 1 and n_gates >= 2:
+				_sc_arr = np.repeat(_sc_arr / float(n_gates), n_gates, axis=0)
+			if _sc_arr.shape == projections.shape:
+				projections = np.clip(projections - _k * _sc_arr, 0.0, None)
+				matrix_txt_sc = f" [EM−{_k:.2f}×SC preview]"
+			else:
+				matrix_txt_sc = ""
+		else:
+			matrix_txt_sc = ""
 		if source == "UngGat":
 			from core.raw_projections import ungate_projections
 			frames_arr = ungate_projections(projections)
-			matrix_txt = f"{stage_label}: UngGat {n_angles}áng × {H}×{W}px (suma {n_gates} gates)"
+			matrix_txt = f"{stage_label}: UngGat {n_angles}áng × {H}×{W}px (suma {n_gates} gates){matrix_txt_sc}"
 		else:
 			gate_mid = n_gates // 2
 			frames_arr = projections[gate_mid]
-			matrix_txt = f"{stage_label}: Gated gate {gate_mid + 1}/{n_gates} · {n_angles}áng × {H}×{W}px"
+			matrix_txt = f"{stage_label}: Gated gate {gate_mid + 1}/{n_gates} · {n_angles}áng × {H}×{W}px{matrix_txt_sc}"
 
 		counts = frames_arr.sum(axis=(1, 2)).astype(np.float64) if frames_arr.ndim == 3 else np.zeros((frames_arr.shape[0],), dtype=np.float64)
 		compare_on = bool(self.cine_crudo_compare_check is not None and self.cine_crudo_compare_check.isChecked())
+		diff_on = bool(getattr(self, "cine_crudo_diff_check", None) is not None
+					and self.cine_crudo_diff_check.isEnabled()
+					and self.cine_crudo_diff_check.isChecked())
 		corrected_frames_arr = None
-		if compare_on and corrected_projections is not None:
+		if (compare_on or diff_on) and corrected_projections is not None:
 			corr = np.asarray(corrected_projections, dtype=np.float64)
 			if source == "UngGat":
 				from core.raw_projections import ungate_projections
@@ -11675,11 +11713,22 @@ class MainWindow(QMainWindow):
 			else:
 				gate_mid = corr.shape[0] // 2
 				corrected_frames_arr = corr[gate_mid]
-			matrix_txt += " | original|corregido"
+			if compare_on and not diff_on:
+				matrix_txt += " | original|corregido"
+		# Vista de DIFERENCIA (corregido − original): mismo truco visual que el
+		# preview de scatter EM−SC. Muestra QUÉ movió la corrección de movimiento.
+		# La diferencia puede ser negativa (corregido < original) -> se centra en 0
+		# con un colormap divergente y ventana simétrica.
+		diff_frames_arr = None
+		if diff_on and corrected_frames_arr is not None and corrected_frames_arr.shape == frames_arr.shape:
+			diff_frames_arr = corrected_frames_arr - frames_arr
+			matrix_txt += " [corregido−original]"
 
 		p99 = float(np.percentile(frames_arr, 99.0)) or 1.0
 		if corrected_frames_arr is not None:
 			p99 = max(p99, float(np.percentile(corrected_frames_arr, 99.0)) or 1.0)
+		if diff_frames_arr is not None:
+			p99 = max(p99, float(np.percentile(np.abs(diff_frames_arr), 99.0)) or 1.0)
 		if p99 <= 0:
 			p99 = 1.0
 
@@ -11746,10 +11795,26 @@ class MainWindow(QMainWindow):
 					_hline(sy, sx - 3, sx + 3)
 					_vline(sx, sy - 3, sy + 3)
 
-				if corrected_frames_arr is not None:
+				if corrected_frames_arr is not None and not diff_on:
 					img_corr = np.clip((corrected_frames_arr[a] - win_lo) / win_den, 0, 1)
 					rgb_corr = (np.asarray(cmap(img_corr)[..., :3]) * 255).astype(np.uint8)
 					rgb = np.concatenate([rgb, rgb_corr], axis=1)
+				if diff_frames_arr is not None:
+					# Diferencia corregido−original: colormap divergente centrado en 0.
+					# Positivo (corregido > original) = un color; negativo = otro.
+					img_diff = diff_frames_arr[a]
+					abs99 = float(np.percentile(np.abs(img_diff), 99.0)) or 1.0
+					if abs99 <= 0:
+						abs99 = 1.0
+					# Normalizar a [-1, 1] y mapear a [0, 1] para el colormap.
+					norm = np.clip(img_diff / abs99, -1.0, 1.0)
+					disp = (norm + 1.0) / 2.0
+					try:
+						diff_cmap = matplotlib.colormaps["RdBu_r"]
+					except Exception:
+						diff_cmap = matplotlib.colormaps["coolwarm"]
+					rgb_diff = (np.asarray(diff_cmap(disp)[..., :3]) * 255).astype(np.uint8)
+					rgb = np.concatenate([rgb, rgb_diff], axis=1)
 				rgb = self._append_cine_crudo_sinogram_panel(rgb, frames_arr, corrected_frames_arr, a)
 				rgb = self._draw_cine_crudo_reference_line(rgb, H)
 				frames.append(self._rgb_frame_to_qpixmap_raw(rgb))
@@ -12032,6 +12097,8 @@ class MainWindow(QMainWindow):
 			if self.cine_crudo_compare_check is not None:
 				self.cine_crudo_compare_check.setEnabled(True)
 				self.cine_crudo_compare_check.setChecked(True)
+			if getattr(self, "cine_crudo_diff_check", None) is not None:
+				self.cine_crudo_diff_check.setEnabled(True)
 			if do_stress and do_rest and secondary_study is not None:
 				self._log("Dual crudo: corrección en vivo aplicada a esfuerzo y reposo en simultáneo.")
 			self._refresh_cine_crudo_view()
@@ -16465,6 +16532,19 @@ class MainWindow(QMainWindow):
 		self._montage_drag_start_x = None
 		self._load_cine_crudo_frames(str(source))
 		self._log(f"Cine crudo: fuente {source} ({len(self.cine_crudo_frames)} frames).")
+
+	def _on_scatter_preview_changed(self, *_args):
+		"""Refresca el cine crudo al cambiar el checkbox o k de scatter (preview EM−SC)."""
+		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
+			return
+		# Solo refrescar si estamos en modo cine crudo (no recon/montaje).
+		if str(getattr(self, "cine_crudo_preview_mode", None)) in ("recon_qc", "sa_montage", "generated_cuts"):
+			return
+		source = str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
+		self._load_cine_crudo_frames(source)
+		on = bool(getattr(self, "cine_crudo_scatter_check", None) is not None and self.cine_crudo_scatter_check.isChecked())
+		k = float(self.cine_crudo_scatter_k_spin.value()) if hasattr(self, "cine_crudo_scatter_k_spin") else 1.0
+		self._log(f"Preview scatter: {'EM−%.2f×SC' % k if on else 'EM solo'}.")
 
 	def _toggle_lower_cine_band(self):
 		"""Colapsa/expande la banda inferior dejando solo su header delgado."""
