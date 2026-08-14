@@ -14658,9 +14658,12 @@ class MainWindow(QMainWindow):
 		self._montage_panel_px = 512  # HQ para los frames cacheados
 		self.cine_crudo_montage_cine_playing = True  # para que el render tome gate único
 		frames = []
+		# Countdown de película vieja: overlay flotante 8→1 durante el preload.
+		countdown_overlay = self._create_montage_cine_countdown_overlay(span)
 		try:
 			QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
 			for i in range(span):
+				self._update_montage_countdown_overlay(countdown_overlay, span - i)
 				self.cine_crudo_montage_cine_frame = i
 				self._montage_last_signature = None
 				self._show_cine_crudo_sa_montage()
@@ -14673,6 +14676,7 @@ class MainWindow(QMainWindow):
 			self._log(f"[WARN] Preload del cine del montaje falló: {exc}")
 			return False
 		finally:
+			self._remove_montage_countdown_overlay(countdown_overlay)
 			try:
 				QApplication.restoreOverrideCursor()
 			except Exception:
@@ -14684,6 +14688,41 @@ class MainWindow(QMainWindow):
 		self._montage_cine_frames_sig = sig
 		self._log(f"Cine del montaje: {span} frames pre-renderizados en memoria.")
 		return True
+
+	def _create_montage_cine_countdown_overlay(self, span: int):
+		"""Crea el overlay de countdown discreto (esquina superior izquierda, chico)."""
+		from PyQt6.QtWidgets import QLabel
+		from PyQt6.QtCore import Qt
+		from PyQt6.QtGui import QFont
+
+		label = self.preview_labels.get("comparacion_ejes")
+		if label is None:
+			return None
+		# Overlay discreto: esquina superior izquierda, fondo casi transparente.
+		overlay = QLabel(str(span), label)
+		overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+		overlay.setStyleSheet(
+			"color: #ffb020; background: rgba(0,0,0,60); padding: 2px 6px; border-radius: 3px;"
+		)
+		overlay.setFont(QFont("Arial", 24, QFont.Weight.Bold))
+		overlay.adjustSize()
+		overlay.move(6, 6)  # esquina superior izquierda con un pequeño margen
+		overlay.show()
+		overlay.raise_()
+		return overlay
+
+	def _update_montage_countdown_overlay(self, overlay, value: int):
+		"""Actualiza el número del countdown."""
+		if overlay is None:
+			return
+		overlay.setText(str(max(1, int(value))))
+		overlay.adjustSize()
+
+	def _remove_montage_countdown_overlay(self, overlay):
+		"""Elimina el overlay de countdown."""
+		if overlay is not None:
+			overlay.hide()
+			overlay.deleteLater()
 
 	def _blit_montage_cine_frame(self):
 		"""Muestra el frame actual del cine blit-eando el QPixmap cacheado (sin recomponer)."""
