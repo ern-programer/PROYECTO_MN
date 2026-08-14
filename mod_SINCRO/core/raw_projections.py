@@ -125,26 +125,33 @@ def find_scatter_sibling(path: str) -> str | None:
     """Busca el archivo hermano de SCATTER de una adquisición EM (Infinia).
 
     Infinia (y otras cámaras modernas) exportan la ventana de emisión y la de
-    scatter como dos archivos espejo: ``..._EM_...dcm`` / ``..._SC_...dcm``.
-    Reglas probadas (en orden):
-      1. ``_EM_`` → ``_SC_``
-      2. ``_EM`` antes de la extensión → ``_SC``
-    Devuelve la ruta del SC si existe en disco, None si no. Nunca devuelve el
-    propio archivo (si el path ya es _SC, no busca).
+    scatter como dos archivos espejo. El token de ventana puede estar en el
+    medio o al final del nombre:
+      ``..._EM_...dcm`` / ``..._SC_...dcm``   (token en el medio)
+      ``..._EM.dcm``    / ``..._SC.dcm``      (token al final)
+    OJO: el check "ya es SC" debe buscar el token como SUFIJO de ventana
+    (``_SC_`` o ``_SC`` antes de la extensión), NO en cualquier parte del
+    nombre — un nombre como ``PRUEBA_SCATTER_1001_EM.dcm`` contiene ``_SC``
+    dentro de "SCATTER" pero es un archivo de EMISIÓN.
+    Devuelve la ruta del SC si existe en disco, None si no.
     """
     import os
     if not path:
         return None
     base = os.path.basename(path)
-    if "_SC" in base.upper():
-        return None  # ya es el archivo de scatter
-    candidates = []
+    stem, ext = os.path.splitext(base)
+    stem_up = stem.upper()
+    # Ya es el archivo de scatter si el TOKEN de ventana es SC (en medio o al final).
+    if "_SC_" in base.upper() or stem_up.endswith("_SC"):
+        return None
+    candidates: list[str] = []
     if "_EM_" in base:
         candidates.append(base.replace("_EM_", "_SC_"))
-    stem, ext = os.path.splitext(base)
-    if stem.upper().endswith("_EM"):
+    if stem_up.endswith("_EM"):
         candidates.append(stem[:-3] + "_SC" + ext)
     for cand in candidates:
+        if cand == base:
+            continue
         full = os.path.join(os.path.dirname(path), cand)
         if os.path.isfile(full):
             return full
@@ -294,17 +301,29 @@ def load_raw_projections(path: str, *, _skip_scatter: bool = False) -> RawGatedP
         if sc_sibling:
             try:
                 sc_raw = load_raw_projections(sc_sibling, _skip_scatter=True)
-                if sc_raw.projections.shape == projections.shape:
+                sc_shape = sc_raw.projections.shape
+                em_shape = projections.shape
+                # Aceptar si: (a) mismo shape exacto (SC gated), o (b) SC no
+                # gatillado (1 gate) con mismas dims angulares/espaciales (el
+                # pipeline lo reparte como SC/N_gates).
+                same_shape = sc_shape == em_shape
+                sc_ungated_ok = (
+                    sc_shape[0] == 1
+                    and sc_shape[1:] == em_shape[1:]
+                    and em_shape[0] >= 2
+                )
+                if same_shape or sc_ungated_ok:
                     scatter_projections = sc_raw.projections
                     scatter_path = sc_sibling
+                    kind = "gated" if same_shape else "no gatillado (se reparte por gates)"
                     notes.append(
                         f"Ventana de SCATTER detectada y cargada: {os.path.basename(sc_sibling)} "
-                        f"({sc_raw.n_gates}g × {sc_raw.n_angles}áng). La UI preguntará si se usa."
+                        f"({sc_raw.n_gates}g × {sc_raw.n_angles}áng, {kind}). La UI preguntará si se usa."
                     )
                 else:
                     notes.append(
                         f"[WARN] Hermano SC encontrado ({os.path.basename(sc_sibling)}) pero shape "
-                        f"{sc_raw.projections.shape} != EM {projections.shape}: NO se adjunta."
+                        f"{sc_shape} incompatible con EM {em_shape}: NO se adjunta."
                     )
             except Exception as exc:
                 notes.append(f"[WARN] Hermano SC encontrado pero no se pudo cargar: {exc}")

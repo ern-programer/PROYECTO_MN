@@ -100,6 +100,17 @@ class RawReconConfig:
     nitida3_beta0: float = 0.6     # tope de beta espacial (pared)
     nitida3_iterations: int = 2
     nitida3_subsets: int = 4
+    # --- NITIDA 4D (4D-OSEM): prior TEMPORAL entre gates ---
+    # Reconstruye los gates JUNTOS con un prior de suavidad temporal Huber
+    # DENTRO del update OSEM (Green OSL). A diferencia de promediar gates
+    # (motion-frozen, que congela el latido), el prior temporal solo frena el
+    # ruido incorrelado; la contracción (borde temporal real) se conserva.
+    # Reescalado por gate para conservar cuentas (FEVI). OFF por defecto.
+    nitida4d_enabled: bool = False
+    nitida4d_beta_temporal: float = 0.3   # fuerza del acoplamiento temporal
+    nitida4d_delta_temporal: float = 0.05  # umbral Huber (fracción del rango)
+    nitida4d_iterations: int = 4
+    nitida4d_subsets: int = 4
     # --- FBP_CLEAN: denoise Poisson en sinograma + realce por resta ---
     # Denoise bilateral de las proyecciones ANTES del FBP (ataca las estrías en
     # la raíz, banco 023/025) + realce de cavidad/bordes restando una fracción
@@ -788,7 +799,25 @@ def reconstruct_raw_gated_pipeline(
     if bool(getattr(cfg, "scatter_subtract", False)) and scatter_projections is not None:
         sc = np.asarray(scatter_projections, dtype=np.float64)
         k_sc = float(getattr(cfg, "scatter_k", 1.0) or 1.0)
-        if sc.shape == raw.shape:
+        n_gates_em = int(raw.shape[0])
+        n_gates_sc = int(sc.shape[0]) if sc.ndim >= 4 else 1
+        # SC no gatillado (1 gate) + EM gated (N gates): el SC tiene TODAS las
+        # cuentas de scatter (no se divide por gates), cada gate EM tiene 1/N.
+        # Para restar por gate hay que repartir el SC: SC_gate = SC_ungated / N.
+        # Física: el scatter es de baja frecuencia temporal (el corazón no se
+        # mueve mucho en la ventana de scatter) -> se considera estacionario.
+        if n_gates_sc == 1 and n_gates_em >= 2:
+            sc = np.repeat(sc / float(n_gates_em), n_gates_em, axis=0)
+            notes.append(
+                f"SC no gatillado detectado (1 gate): repartido como SC/N_gates "
+                f"({n_gates_em}) para la resta por gate."
+            )
+        elif n_gates_sc != n_gates_em:
+            notes.append(
+                f"[WARN] Scatter: gates SC={n_gates_sc} != EM={n_gates_em}: no se aplica."
+            )
+            sc = None
+        if sc is not None and sc.shape == raw.shape:
             sc_corr = apply_shifts_to_projections(sc, shifts_y, shifts_x)
             corrected = np.clip(corrected - k_sc * sc_corr, 0.0, None)
             sc_ung = apply_shifts_to_projections(ungate_projections(sc), shifts_y, shifts_x)
@@ -797,7 +826,7 @@ def reconstruct_raw_gated_pipeline(
                 f"Corrección de scatter EM/SC aplicada: P = EM - {k_sc:.2f}×SC "
                 f"(pre-recon, proyección por proyección, gated y ungated)."
             )
-        else:
+        elif sc is not None:
             notes.append(
                 f"[WARN] Scatter pedido pero shape SC {sc.shape} != EM {raw.shape}: no se aplica."
             )
@@ -947,6 +976,40 @@ def reconstruct_raw_gated_pipeline(
         notes.append(
             f"NITIDA III: gated reconstruido con MAP-OSEM Pilar C "
             f"(Huber por SNR, beta0={float(getattr(cfg, 'nitida3_beta0', 0.6)):.2f})."
+        )
+
+    # NITIDA 4D (4D-OSEM): prior TEMPORAL entre gates. Reconstruye los gates
+    # JUNTOS con suavidad temporal Huber dentro del update OSEM. A diferencia
+    # de promediar gates (motion-frozen, que congela el latido), el prior
+    # temporal solo frena el ruido incorrelado; la contracción se conserva.
+    # Reescalado por gate para conservar cuentas (FEVI). Reemplaza al gated.
+    if getattr(cfg, "nitida4d_enabled", False) and gated_volume.shape[0] >= 3:
+        from core.nitida4d import nitida4d_osem_gated
+        _n4_gates = int(gated_volume.shape[0])
+
+        def _n4_progress(frac: float, msg: str = "") -> None:
+            if progress_callback is not None:
+                f = max(0.0, min(1.0, float(frac)))
+                text = msg or f"NITIDA 4D (4D-OSEM, prior temporal)..."
+                progress_callback(0.90 + 0.07 * f, text)
+
+        gated_volume = nitida4d_osem_gated(
+            gated_src,
+            angles_deg,
+            iterations=int(getattr(cfg, "nitida4d_iterations", 4)),
+            subsets=int(getattr(cfg, "nitida4d_subsets", 4)),
+            beta_temporal=float(getattr(cfg, "nitida4d_beta_temporal", 0.3)),
+            delta_temporal=float(getattr(cfg, "nitida4d_delta_temporal", 0.05)),
+            psf=gated_rr_psf,
+            slice_range=cfg.recon_slice_range,
+            rescale=True,
+            ref_volume=gated_volume,
+            progress_callback=_n4_progress,
+        )
+        notes.append(
+            f"NITIDA 4D: gated reconstruido con 4D-OSEM (prior temporal Huber, "
+            f"beta_temp={float(getattr(cfg, 'nitida4d_beta_temporal', 0.3)):.2f}, "
+            f"delta_temp={float(getattr(cfg, 'nitida4d_delta_temporal', 0.05)):.3f})."
         )
 
     # FBP_CLEAN paso 2: realce de cavidad/bordes por resta de una fracción de la

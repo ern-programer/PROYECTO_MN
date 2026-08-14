@@ -2026,6 +2026,32 @@ class MainWindow(QMainWindow):
 					"(OSEM poco convergente en bajo conteo). Subilo a 4-6 para una recon "
 					"más suave. Más iteraciones = más tiempo de cómputo.")
 				toolbar6_r_filters_g.addWidget(self.cine_crudo_nitida3_iter_spin)
+				# NITIDA 4D (4D-OSEM): prior TEMPORAL entre gates. Reconstruye los gates
+				# juntos compartiendo información entre vecinos temporales (sin
+				# promediar: no congela el latido). Para gated de bajo conteo.
+				self.cine_crudo_nitida4d_check = QCheckBox("NITIDA 4D")
+				self.cine_crudo_nitida4d_check.setChecked(False)
+				self.cine_crudo_nitida4d_check.setToolTip(
+					"NITIDA 4D (4D-OSEM): reconstrucción del GATED con prior TEMPORAL "
+					"Huber entre gates vecinos DENTRO del update OSEM. Comparte "
+					"estadística entre gates SIN promediar (no congela el latido, a "
+					"diferencia del motion-frozen). Limpia el ruido conservando la "
+					"contracción. Para gated de bajo conteo. Es OSEM CPU: tarda más. "
+					"Default OFF.")
+				toolbar6_r_filters_g.addWidget(self.cine_crudo_nitida4d_check)
+				toolbar6_r_filters_g.addWidget(QLabel("βt"))
+				self.cine_crudo_nitida4d_beta_spin = QDoubleSpinBox()
+				self.cine_crudo_nitida4d_beta_spin.setRange(0.0, 1.0)
+				self.cine_crudo_nitida4d_beta_spin.setSingleStep(0.1)
+				self.cine_crudo_nitida4d_beta_spin.setDecimals(2)
+				self.cine_crudo_nitida4d_beta_spin.setValue(0.3)
+				self.cine_crudo_nitida4d_beta_spin.setMaximumWidth(58)
+				self.cine_crudo_nitida4d_beta_spin.setToolTip(
+					"Beta temporal (fuerza del acoplamiento entre gates). 0 = OSEM por "
+					"gate independiente. 0.2-0.4 = limpieza moderada conservando el "
+					"latido. >0.6 = más limpieza pero riesgo de amplificar el "
+					"movimiento (medido en fantoma).")
+				toolbar6_r_filters_g.addWidget(self.cine_crudo_nitida4d_beta_spin)
 				toolbar6_r_filters_g.addWidget(QLabel("NITIDA II"))
 				self.cine_crudo_nitida2_combo = QComboBox()
 				self.cine_crudo_nitida2_combo.addItem("Off", "none")
@@ -12721,6 +12747,10 @@ class MainWindow(QMainWindow):
 			nitida3_enabled=bool(getattr(self, "cine_crudo_nitida3_check", None) is not None
 							and self.cine_crudo_nitida3_check.isChecked()),
 			nitida3_iterations=int(self.cine_crudo_nitida3_iter_spin.value()) if getattr(self, "cine_crudo_nitida3_iter_spin", None) is not None else 2,
+			nitida4d_enabled=bool(getattr(self, "cine_crudo_nitida4d_check", None) is not None
+							and self.cine_crudo_nitida4d_check.isChecked()),
+			nitida4d_beta_temporal=(float(self.cine_crudo_nitida4d_beta_spin.value())
+								if getattr(self, "cine_crudo_nitida4d_beta_spin", None) is not None else 0.3),
 			ungated_denoise_plus=bool(getattr(self, "cine_crudo_denoise_plus_check", None) is not None
 								and self.cine_crudo_denoise_plus_check.isChecked()),
 			ungated_denoise_plus_k=(float(self.cine_crudo_denoise_plus_slider.value()) / 100.0
