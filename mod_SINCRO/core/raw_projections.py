@@ -192,43 +192,115 @@ def load_raw_projections(path: str, *, _skip_scatter: bool = False) -> RawGatedP
     notes: list[str] = []
 
     # Organizar por gates × ángulos
-    if ang_vec is not None and time_vec is not None and len(ang_vec) == n_frames and len(time_vec) == n_frames:
-        av = [int(v) for v in ang_vec]
-        tv = [int(v) for v in time_vec]
-        n_angles = len(set(av))
-        n_gates = len(set(tv))
-        projections = np.zeros((n_gates, n_angles, H, W), dtype=np.float64)
-        for f in range(n_frames):
-            projections[tv[f] - 1, av[f] - 1] = arr[f]
-        notes.append(f"Organizado por vectores DICOM: {n_gates} gates × {n_angles} ángulos.")
-    elif n_time and int(n_time) > 0 and n_frames % int(n_time) == 0:
-        n_gates = int(n_time)
-        n_angles = n_frames // n_gates
-        projections = arr.reshape(n_gates, n_angles, H, W)
-        notes.append(f"Reshape por producto: {n_gates} gates × {n_angles} ángulos (orden asumido gate-major).")
-    elif ang_vec is not None:
-        # UNGATED: rotacional sin gatillado. 1 solo "gate", cada frame es un ángulo.
-        av = [int(v) for v in ang_vec]
-        n_gates = 1
-        if len(set(av)) == n_frames and min(av) >= 1 and max(av) <= n_frames:
-            n_angles = n_frames
-            projections = np.zeros((1, n_angles, H, W), dtype=np.float64)
-            for f in range(n_frames):
-                projections[0, av[f] - 1] = arr[f]
+    # --- Detección de archivo DUAL-ENERGY (EM+SC en un solo archivo) ---
+    # Algunos equipos (p.ej. GE Infinia/Hawkeye) exportan las dos ventanas de
+    # energía en el mismo archivo: EnergyWindowVector marca cada frame como
+    # ventana 1 (EM, fotopico) o ventana 2 (SC, scatter). Ejemplo real:
+    #   120 frames = 60 ángulos × 2 energías; EnergyWindowVector = [1×60, 2×60].
+    # La ventana 2 (SC) tiene ~26% de las cuentas de la ventana 1 (EM).
+    energy_vec = _get(ds, (0x0054, 0x0010), None)  # EnergyWindowVector
+    scatter_projections = None
+    scatter_path = ""
+    if energy_vec is not None and len(energy_vec) == n_frames:
+        ev = [int(v) for v in energy_vec]
+        n_energy = len(set(ev))
+        if n_energy == 2 and ang_vec is not None and len(ang_vec) == n_frames:
+            av = [int(v) for v in ang_vec]
+            n_angles = len(set(av))
+            em_frames = [f for f in range(n_frames) if ev[f] == 1]
+            sc_frames = [f for f in range(n_frames) if ev[f] == 2]
+            # Caso UNGATED dual-energy: 1 gate, n_angles por ventana.
+            if len(em_frames) == n_angles and len(sc_frames) == n_angles:
+                projections = np.zeros((1, n_angles, H, W), dtype=np.float64)
+                scatter_projections = np.zeros((1, n_angles, H, W), dtype=np.float64)
+                for f in em_frames:
+                    projections[0, av[f] - 1] = arr[f]
+                for f in sc_frames:
+                    scatter_projections[0, av[f] - 1] = arr[f]
+                n_gates = 1
+                notes.append(
+                    f"DUAL-ENERGY: {n_angles} ángulos × 2 ventanas. "
+                    f"EM (ventana 1) y SC (ventana 2) separados automáticamente."
+                )
+            # Caso GATED dual-energy: n_gates × n_angles por ventana.
+            elif time_vec is not None and len(time_vec) == n_frames:
+                tv = [int(v) for v in time_vec]
+                n_gates = len(set(tv))
+                if len(em_frames) == n_gates * n_angles and len(sc_frames) == n_gates * n_angles:
+                    projections = np.zeros((n_gates, n_angles, H, W), dtype=np.float64)
+                    scatter_projections = np.zeros((n_gates, n_angles, H, W), dtype=np.float64)
+                    for f in em_frames:
+                        projections[tv[f] - 1, av[f] - 1] = arr[f]
+                    for f in sc_frames:
+                        scatter_projections[tv[f] - 1, av[f] - 1] = arr[f]
+                    notes.append(
+                        f"DUAL-ENERGY GATED: {n_gates} gates × {n_angles} ángulos × 2 ventanas. "
+                        f"EM (ventana 1) y SC (ventana 2) separados automáticamente."
+                    )
+                else:
+                    projections = None
+            else:
+                projections = None
+            # Leer límites de energía para el factor k de TEW (si se separó).
+            if projections is not None:
+                try:
+                    ews = _get(ds, (0x0054, 0x0013), None)  # EnergyWindowRangeSequence
+                    if ews is not None and len(ews) >= 2:
+                        lo1 = float(_get(ews[0], (0x0054, 0x0014), 0) or 0)
+                        hi1 = float(_get(ews[0], (0x0054, 0x0015), 0) or 0)
+                        lo2 = float(_get(ews[1], (0x0054, 0x0014), 0) or 0)
+                        hi2 = float(_get(ews[1], (0x0054, 0x0015), 0) or 0)
+                        w_em = hi1 - lo1
+                        w_sc = hi2 - lo2
+                        if w_em > 0 and w_sc > 0:
+                            k_tew = w_em / (2.0 * w_sc)
+                            notes.append(
+                                f"TEW: EM [{lo1:.0f}-{hi1:.0f}] keV (W={w_em:.0f}), "
+                                f"SC [{lo2:.0f}-{hi2:.0f}] keV (W={w_sc:.0f}) -> k={k_tew:.3f}."
+                            )
+                except Exception:
+                    pass
         else:
-            n_angles = n_frames
-            projections = arr.reshape(1, n_frames, H, W)
-        notes.append(
-            f"UNGATED: 1 gate × {n_angles} ángulos (sin gatillado). "
-            "FEVI/asincronía/fase NO disponibles; recon/cine/QC/NITIDA sí."
-        )
+            projections = None
     else:
-        raise ValueError(
-            f"No se pudo organizar el crudo: frames={n_frames}, "
-            f"AngularViewVector={'sí' if ang_vec is not None else 'no'}, n_time={n_time}."
-        )
+        projections = None
 
-    # --- Geometría de adquisición ---
+    if projections is None:
+        if ang_vec is not None and time_vec is not None and len(ang_vec) == n_frames and len(time_vec) == n_frames:
+            av = [int(v) for v in ang_vec]
+            tv = [int(v) for v in time_vec]
+            n_angles = len(set(av))
+            n_gates = len(set(tv))
+            projections = np.zeros((n_gates, n_angles, H, W), dtype=np.float64)
+            for f in range(n_frames):
+                projections[tv[f] - 1, av[f] - 1] = arr[f]
+            notes.append(f"Organizado por vectores DICOM: {n_gates} gates × {n_angles} ángulos.")
+        elif n_time and int(n_time) > 0 and n_frames % int(n_time) == 0:
+            n_gates = int(n_time)
+            n_angles = n_frames // n_gates
+            projections = arr.reshape(n_gates, n_angles, H, W)
+            notes.append(f"Reshape por producto: {n_gates} gates × {n_angles} ángulos (orden asumido gate-major).")
+        elif ang_vec is not None:
+            # UNGATED: rotacional sin gatillado. 1 solo "gate", cada frame es un ángulo.
+            av = [int(v) for v in ang_vec]
+            n_gates = 1
+            if len(set(av)) == n_frames and min(av) >= 1 and max(av) <= n_frames:
+                n_angles = n_frames
+                projections = np.zeros((1, n_angles, H, W), dtype=np.float64)
+                for f in range(n_frames):
+                    projections[0, av[f] - 1] = arr[f]
+            else:
+                n_angles = n_frames
+                projections = arr.reshape(1, n_frames, H, W)
+            notes.append(
+                f"UNGATED: 1 gate × {n_angles} ángulos (sin gatillado). "
+                "FEVI/asincronía/fase NO disponibles; recon/cine/QC/NITIDA sí."
+            )
+        else:
+            raise ValueError(
+                f"No se pudo organizar el crudo: frames={n_frames}, "
+                f"AngularViewVector={'sí' if ang_vec is not None else 'no'}, n_time={n_time}."
+            )
     # La metadata angular fiable vive en RotationInformationSequence (0054,0052).
     # StartAngle=(0054,0200), RotationDirection=(0018,1140) 'CW'/'CC',
     # AngularStep=(0018,1144), ScanArc/RadialPosition=(0018,1143).
@@ -294,39 +366,40 @@ def load_raw_projections(path: str, *, _skip_scatter: bool = False) -> RawGatedP
     detector_iop = read_detector_iop(ds)
 
     # --- Ventana de scatter hermana (EM/SC, p.ej. Infinia) ---
-    scatter_projections = None
-    scatter_path = ""
-    if not _skip_scatter:
-        sc_sibling = find_scatter_sibling(path)
-        if sc_sibling:
-            try:
-                sc_raw = load_raw_projections(sc_sibling, _skip_scatter=True)
-                sc_shape = sc_raw.projections.shape
-                em_shape = projections.shape
-                # Aceptar si: (a) mismo shape exacto (SC gated), o (b) SC no
-                # gatillado (1 gate) con mismas dims angulares/espaciales (el
-                # pipeline lo reparte como SC/N_gates).
-                same_shape = sc_shape == em_shape
-                sc_ungated_ok = (
-                    sc_shape[0] == 1
-                    and sc_shape[1:] == em_shape[1:]
-                    and em_shape[0] >= 2
-                )
-                if same_shape or sc_ungated_ok:
-                    scatter_projections = sc_raw.projections
-                    scatter_path = sc_sibling
-                    kind = "gated" if same_shape else "no gatillado (se reparte por gates)"
-                    notes.append(
-                        f"Ventana de SCATTER detectada y cargada: {os.path.basename(sc_sibling)} "
-                        f"({sc_raw.n_gates}g × {sc_raw.n_angles}áng, {kind}). La UI preguntará si se usa."
+    # Solo buscar si NO hay ya un scatter separado del archivo dual-energy.
+    if scatter_projections is None:
+        scatter_path = ""
+        if not _skip_scatter:
+            sc_sibling = find_scatter_sibling(path)
+            if sc_sibling:
+                try:
+                    sc_raw = load_raw_projections(sc_sibling, _skip_scatter=True)
+                    sc_shape = sc_raw.projections.shape
+                    em_shape = projections.shape
+                    # Aceptar si: (a) mismo shape exacto (SC gated), o (b) SC no
+                    # gatillado (1 gate) con mismas dims angulares/espaciales (el
+                    # pipeline lo reparte como SC/N_gates).
+                    same_shape = sc_shape == em_shape
+                    sc_ungated_ok = (
+                        sc_shape[0] == 1
+                        and sc_shape[1:] == em_shape[1:]
+                        and em_shape[0] >= 2
                     )
-                else:
-                    notes.append(
-                        f"[WARN] Hermano SC encontrado ({os.path.basename(sc_sibling)}) pero shape "
-                        f"{sc_shape} incompatible con EM {em_shape}: NO se adjunta."
-                    )
-            except Exception as exc:
-                notes.append(f"[WARN] Hermano SC encontrado pero no se pudo cargar: {exc}")
+                    if same_shape or sc_ungated_ok:
+                        scatter_projections = sc_raw.projections
+                        scatter_path = sc_sibling
+                        kind = "gated" if same_shape else "no gatillado (se reparte por gates)"
+                        notes.append(
+                            f"Ventana de SCATTER detectada y cargada: {os.path.basename(sc_sibling)} "
+                            f"({sc_raw.n_gates}g × {sc_raw.n_angles}áng, {kind}). La UI preguntará si se usa."
+                        )
+                    else:
+                        notes.append(
+                            f"[WARN] Hermano SC encontrado ({os.path.basename(sc_sibling)}) pero shape "
+                            f"{sc_shape} incompatible con EM {em_shape}: NO se adjunta."
+                        )
+                except Exception as exc:
+                    notes.append(f"[WARN] Hermano SC encontrado pero no se pudo cargar: {exc}")
 
     return RawGatedProjections(
         projections=projections,

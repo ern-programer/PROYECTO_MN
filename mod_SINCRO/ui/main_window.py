@@ -1574,6 +1574,32 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_correct_btn.setToolTip("Aplica motion correction con método/eje/threshold seleccionados.")
 				self.cine_crudo_correct_btn.clicked.connect(self._apply_cine_crudo_motion_correction)
 				self.cine_crudo_correct_btn.setMinimumHeight(90)
+				# Comparar / Diferencia / Sinograma: controles de VISUALIZACIÓN de la
+				# corrección, junto al botón Corregir (no en ajuste manual).
+				self.cine_crudo_compare_check = QCheckBox("Comparar")
+				self.cine_crudo_compare_check.setToolTip("Muestra original y corregido en paralelo (original | corregido).")
+				self.cine_crudo_compare_check.setEnabled(False)
+				self.cine_crudo_compare_check.toggled.connect(self._refresh_cine_crudo_view)
+				toolbar2.addWidget(self.cine_crudo_compare_check)
+				self.cine_crudo_diff_check = QCheckBox("Diferencia\n(resta scatter)")
+				self.cine_crudo_diff_check.setToolTip(
+					"Muestra la DIFERENCIA corregido − original (mismo truco que el "
+					"preview de scatter EM−SC). Sirve para ver QUÉ movió la corrección "
+					"de movimiento. Se activa tras aplicar la corrección.")
+				self.cine_crudo_diff_check.setEnabled(False)
+				self.cine_crudo_diff_check.toggled.connect(self._refresh_cine_crudo_view)
+				toolbar2.addWidget(self.cine_crudo_diff_check)
+				self.cine_crudo_sino_check = QCheckBox("Sinograma")
+				self.cine_crudo_sino_check.setToolTip("Muestra a la derecha el sinograma; con Comparar activo agrega original/corregido como Odyssey.")
+				self.cine_crudo_sino_check.toggled.connect(self._refresh_cine_crudo_view)
+				toolbar2.addWidget(self.cine_crudo_sino_check)
+				self.cine_crudo_sino_axis_combo = QComboBox()
+				self.cine_crudo_sino_axis_combo.addItems(["Sinograma Y", "Sinograma X"])
+				self.cine_crudo_sino_axis_combo.setCurrentIndex(1)  # Sinograma X por defecto
+				self.cine_crudo_sino_axis_combo.setMaximumWidth(118)
+				self.cine_crudo_sino_axis_combo.setToolTip("Y: perfil horizontal por ángulo. X: perfil vertical por ángulo.")
+				self.cine_crudo_sino_axis_combo.currentTextChanged.connect(self._refresh_cine_crudo_view)
+				toolbar2.addWidget(self.cine_crudo_sino_axis_combo)
 
 				# Aplicar / Rechazar: una vez que la corrección (p.ej. Sinusoide + ajuste
 				# fino manual) quedó como el usuario quiere, decide si el pipeline sigue
@@ -1700,29 +1726,6 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_set_ref_btn.setToolTip("Fija el frame actual como referencia (shift=0) para la corrección.")
 				self.cine_crudo_set_ref_btn.clicked.connect(self._set_cine_crudo_reference_frame)
 				toolbar4.addWidget(self.cine_crudo_set_ref_btn)
-				self.cine_crudo_compare_check = QCheckBox("Comparar")
-				self.cine_crudo_compare_check.setToolTip("Muestra original y corregido en paralelo (original | corregido).")
-				self.cine_crudo_compare_check.setEnabled(False)
-				self.cine_crudo_compare_check.toggled.connect(self._refresh_cine_crudo_view)
-				toolbar4.addWidget(self.cine_crudo_compare_check)
-				self.cine_crudo_diff_check = QCheckBox("Diferencia")
-				self.cine_crudo_diff_check.setToolTip(
-					"Muestra la DIFERENCIA corregido − original (mismo truco que el "
-					"preview de scatter EM−SC). Sirve para ver QUÉ movió la corrección "
-					"de movimiento. Se activa tras aplicar la corrección.")
-				self.cine_crudo_diff_check.setEnabled(False)
-				self.cine_crudo_diff_check.toggled.connect(self._refresh_cine_crudo_view)
-				toolbar4.addWidget(self.cine_crudo_diff_check)
-				self.cine_crudo_sino_check = QCheckBox("Sinograma")
-				self.cine_crudo_sino_check.setToolTip("Muestra a la derecha el sinograma; con Comparar activo agrega original/corregido como Odyssey.")
-				self.cine_crudo_sino_check.toggled.connect(self._refresh_cine_crudo_view)
-				toolbar4.addWidget(self.cine_crudo_sino_check)
-				self.cine_crudo_sino_axis_combo = QComboBox()
-				self.cine_crudo_sino_axis_combo.addItems(["Sinograma Y", "Sinograma X"])
-				self.cine_crudo_sino_axis_combo.setMaximumWidth(118)
-				self.cine_crudo_sino_axis_combo.setToolTip("Y: perfil horizontal por ángulo. X: perfil vertical por ángulo.")
-				self.cine_crudo_sino_axis_combo.currentTextChanged.connect(self._refresh_cine_crudo_view)
-				toolbar4.addWidget(self.cine_crudo_sino_axis_combo)
 				toolbar4.addStretch(1)
 
 				# --- Fila 5 (offset global + curvas): offset X/Y + curvas de shift ---
