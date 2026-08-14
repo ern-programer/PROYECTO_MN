@@ -1864,16 +1864,19 @@ class MainWindow(QMainWindow):
 				toolbar6_r1.addWidget(self.cine_crudo_gated_order_spin)
 				toolbar6_r1.addStretch(1)
 
-				# Auto-recompute por rama: al cambiar un filtro se recomputa SOLO esa
-				# rama del QC (la otra se conserva), con debounce vía QTimer.
-				self.cine_crudo_ung_filter_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
-				self.cine_crudo_ung_cutoff_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
-				self.cine_crudo_ung_order_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
-				self.cine_crudo_recon_method_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
-				self.cine_crudo_gated_filter_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
-				self.cine_crudo_gated_cutoff_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
-				self.cine_crudo_gated_order_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
-				self.cine_crudo_gated_method_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
+				# Auto-recompute por rama DESHABILITADO (2026-08-14): al cambiar método
+				# (FBP/OSEM/MLEM) o filtros, la imagen NO se actualiza en tiempo real
+				# (tarda mucho, sobre todo OSEM). Se actualiza recién al tocar
+				# "Recon raw" o "Reconstruir selección". Si se quiere reactivar,
+				# descomentar las conexiones de abajo.
+				# self.cine_crudo_ung_filter_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
+				# self.cine_crudo_ung_cutoff_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
+				# self.cine_crudo_ung_order_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
+				# self.cine_crudo_recon_method_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("ungated"))
+				# self.cine_crudo_gated_filter_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
+				# self.cine_crudo_gated_cutoff_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
+				# self.cine_crudo_gated_order_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
+				# self.cine_crudo_gated_method_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
 
 				toolbar6_r2.addWidget(QLabel("Iter"))
 				self.cine_crudo_iter_spin = QSpinBox()
@@ -2097,6 +2100,34 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_post_gated_fwhm_spin.setEnabled(False)
 				self.cine_crudo_post_gated_fwhm_spin.setToolTip("FWHM del suavizado gaussiano GATED [mm].")
 				toolbar6_r_filters_g.addWidget(self.cine_crudo_post_gated_fwhm_spin)
+				# Denoise+ GATED: denoise de sinograma + realce por resta para la rama
+				# gated, con CUALQUIER método (FBP u OSEM). FBP_CLEAN solo corre si gated
+				# es FBP; como el gated ahora defaultea a OSEM, quedaba sin tratamiento
+				# de cavidad. Esto abre la cavidad del gated (empata visual al ungated).
+				self.cine_crudo_denoise_plus_gated_check = QCheckBox("Denoise+")
+				self.cine_crudo_denoise_plus_gated_check.setChecked(False)
+				self.cine_crudo_denoise_plus_gated_check.setToolTip(
+					"Denoise+ GATED: denoise bilateral del sinograma gated + realce de "
+					"cavidad por resta (misma idea que Denoise+ ungated pero para la rama "
+					"gated, con CUALQUIER método FBP/OSEM). Abre la cavidad del gated que "
+					"a veces se pierde en OSEM. k default 0.50 (bajo conteo tolera más "
+					"realce que el ungated). Default OFF.")
+				toolbar6_r_filters_g.addWidget(self.cine_crudo_denoise_plus_gated_check)
+				toolbar6_r_filters_g.addWidget(QLabel("k"))
+				self.cine_crudo_denoise_plus_gated_slider = QSlider(Qt.Orientation.Horizontal)
+				self.cine_crudo_denoise_plus_gated_slider.setRange(0, 100)  # k = 0.00..1.00
+				self.cine_crudo_denoise_plus_gated_slider.setValue(50)      # default k=0.50
+				self.cine_crudo_denoise_plus_gated_slider.setMaximumWidth(80)
+				self.cine_crudo_denoise_plus_gated_slider.setToolTip(
+					"Factor de realce k del Denoise+ gated (0.00–1.00). Default 0.50 "
+					"(calibrado para bajo conteo). Más k = más apertura de cavidad pero "
+					"más ruido de fondo.")
+				toolbar6_r_filters_g.addWidget(self.cine_crudo_denoise_plus_gated_slider)
+				self.cine_crudo_denoise_plus_gated_lbl = QLabel("0.50")
+				self.cine_crudo_denoise_plus_gated_lbl.setMaximumWidth(36)
+				toolbar6_r_filters_g.addWidget(self.cine_crudo_denoise_plus_gated_lbl)
+				self.cine_crudo_denoise_plus_gated_slider.valueChanged.connect(
+					lambda v: self.cine_crudo_denoise_plus_gated_lbl.setText(f"{v/100.0:.2f}"))
 				toolbar6_r_filters_g.addStretch(1)
 				self.cine_crudo_recon_btn = QToolButton()
 				self.cine_crudo_recon_btn.setText("Recon raw")
@@ -12825,6 +12856,10 @@ class MainWindow(QMainWindow):
 								and self.cine_crudo_denoise_plus_check.isChecked()),
 			ungated_denoise_plus_k=(float(self.cine_crudo_denoise_plus_slider.value()) / 100.0
 								if getattr(self, "cine_crudo_denoise_plus_slider", None) is not None else 0.20),
+			gated_denoise_plus=bool(getattr(self, "cine_crudo_denoise_plus_gated_check", None) is not None
+								and self.cine_crudo_denoise_plus_gated_check.isChecked()),
+			gated_denoise_plus_k=(float(self.cine_crudo_denoise_plus_gated_slider.value()) / 100.0
+								if getattr(self, "cine_crudo_denoise_plus_gated_slider", None) is not None else 0.50),
 			scatter_subtract=bool(getattr(self, "cine_crudo_scatter_check", None) is not None
 							and self.cine_crudo_scatter_check.isEnabled()
 							and self.cine_crudo_scatter_check.isChecked()),
@@ -13541,9 +13576,13 @@ class MainWindow(QMainWindow):
 				ly, lx = va, vl
 			return ly, lx
 
+		# Motor de color: usar el cmap y ventana del preview (cableado con la UI).
+		qc_cmap = str(getattr(self, "cine_crudo_screen_cmap", "odyssey_cool") or "odyssey_cool")
+		win_hi_pct = float(getattr(self, "cine_crudo_screen_win_high", 99.0))
+
 		def _norm(img2d: np.ndarray) -> np.ndarray:
 			arr = np.asarray(img2d, dtype=np.float64)
-			p99 = float(np.percentile(arr, 99.0)) if arr.size else 0.0
+			p99 = float(np.percentile(arr, win_hi_pct)) if arr.size else 0.0
 			return np.clip(arr / max(p99, 1e-8), 0.0, 1.0)
 
 		ung_ly, ung_lx = _long_views(ung)
@@ -13566,13 +13605,13 @@ class MainWindow(QMainWindow):
 			ax.axis("off")
 			ax.set_facecolor("#0b1220")
 
-		axes[0, 0].imshow(_norm(ung_ly), cmap="odyssey_cool", aspect="auto")
+		axes[0, 0].imshow(_norm(ung_ly), cmap=qc_cmap, aspect="auto")
 		axes[0, 0].set_title(f"UngGat · {title_ap}", color="white", fontsize=9, fontweight="bold")
-		axes[0, 1].imshow(_norm(ung_lx), cmap="odyssey_cool", aspect="auto")
+		axes[0, 1].imshow(_norm(ung_lx), cmap=qc_cmap, aspect="auto")
 		axes[0, 1].set_title(f"UngGat · {title_ll}", color="white", fontsize=9, fontweight="bold")
-		axes[0, 3].imshow(_norm(g_ly), cmap="odyssey_cool", aspect="auto")
+		axes[0, 3].imshow(_norm(g_ly), cmap=qc_cmap, aspect="auto")
 		axes[0, 3].set_title(f"Gated ED · {title_ap}", color="#9fd0ff", fontsize=9, fontweight="bold")
-		axes[0, 4].imshow(_norm(g_lx), cmap="odyssey_cool", aspect="auto")
+		axes[0, 4].imshow(_norm(g_lx), cmap=qc_cmap, aspect="auto")
 		axes[0, 4].set_title(f"Gated ED · {title_ll}", color="#9fd0ff", fontsize=9, fontweight="bold")
 
 		for ax in (axes[0, 0], axes[0, 1], axes[0, 3], axes[0, 4]):
@@ -13593,7 +13632,7 @@ class MainWindow(QMainWindow):
 			(axes[1, 3], "SA Base", g_sa_base, z0), (axes[1, 4], "SA medio", g_sa_mid, mid_z), (axes[1, 5], "SA Ápex", g_sa_apex, z1),
 		]
 		for ax, title, img, z in sa_panels:
-			ax.imshow(_norm(img), cmap="odyssey_cool", vmin=0.0, vmax=1.0)
+			ax.imshow(_norm(img), cmap=qc_cmap, vmin=0.0, vmax=1.0)
 			ax.set_title(title, color="white", fontsize=9, fontweight="bold")
 			ax.text(0.03, 0.05, f"SA {int(z) + 1}", transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
 
@@ -13833,12 +13872,18 @@ class MainWindow(QMainWindow):
 		except Exception:
 			gaussian_filter = None
 
+		# Motor de color: usar el cmap y ventana del preview (cableado con la UI).
+		# Antes: cmap="odyssey_cool" hardcodeado y percentiles fijos.
+		qc_cmap = str(getattr(self, "cine_crudo_screen_cmap", "odyssey_cool") or "odyssey_cool")
+		win_lo_pct = float(getattr(self, "cine_crudo_screen_win_low", 5.0))
+		win_hi_pct = float(getattr(self, "cine_crudo_screen_win_high", 99.5))
+
 		def _norm(img2d: np.ndarray) -> np.ndarray:
 			arr = np.asarray(img2d, dtype=np.float64)
 			if gaussian_filter is not None and arr.ndim == 2 and cuts_smooth > 0.0:
 				arr = gaussian_filter(arr, sigma=cuts_smooth)
-			p99 = float(np.percentile(arr, 99.5)) if arr.size else 0.0
-			p5 = float(np.percentile(arr, 5.0)) if arr.size else 0.0
+			p99 = float(np.percentile(arr, win_hi_pct)) if arr.size else 0.0
+			p5 = float(np.percentile(arr, win_lo_pct)) if arr.size else 0.0
 			return np.clip((arr - p5) / max(p99 - p5, 1e-8), 0.0, 1.0)
 
 		# El volumen recibido ya está SA-alineado (reorientado): axis 0 = k
@@ -13865,7 +13910,7 @@ class MainWindow(QMainWindow):
 			ax.set_facecolor("#020611")
 
 		# Fila superior: localización SA + límites en los ejes largos (líneas rojas base/ápex).
-		axes[0, 0].imshow(_norm(sa_crop), cmap="odyssey_cool", vmin=0.0, vmax=1.0, interpolation=interp)
+		axes[0, 0].imshow(_norm(sa_crop), cmap=qc_cmap, vmin=0.0, vmax=1.0, interpolation=interp)
 		axes[0, 0].set_title("Localización SA", color="white", fontsize=9, fontweight="bold")
 		axes[0, 0].axhline((sa_crop.shape[0] - 1) / 2.0, color="#40ff5a", linewidth=1.0)
 		axes[0, 0].axvline((sa_crop.shape[1] - 1) / 2.0, color="#40ff5a", linewidth=1.0)
@@ -13873,7 +13918,7 @@ class MainWindow(QMainWindow):
 
 		nk = int(vol.shape[0])
 		# VLA: base→ápex en columnas (BASE izq / APEX der) → líneas verticales.
-		axes[0, 1].imshow(_norm(vla_view), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="auto", interpolation=interp)
+		axes[0, 1].imshow(_norm(vla_view), cmap=qc_cmap, vmin=0.0, vmax=1.0, aspect="auto", interpolation=interp)
 		axes[0, 1].set_title("VLA limits · ANT↑ BASE←", color="white", fontsize=9, fontweight="bold")
 		axes[0, 1].axvline(z0, color="#ff3333", linewidth=1.6)
 		axes[0, 1].axvline(z1, color="#ff3333", linewidth=1.6)
@@ -13881,7 +13926,7 @@ class MainWindow(QMainWindow):
 		axes[0, 1].text(0.03, 0.05, f"Base {z0 + 1}  Ápex {z1 + 1}  Esp {thickness}px", transform=axes[0, 1].transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
 		# HLA: APEX arriba / BASE abajo (fila k invertida) → líneas horizontales
 		# en coordenada de fila invertida k' = (nk-1) - k.
-		axes[0, 2].imshow(_norm(hla_view), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="auto", interpolation=interp)
+		axes[0, 2].imshow(_norm(hla_view), cmap=qc_cmap, vmin=0.0, vmax=1.0, aspect="auto", interpolation=interp)
 		axes[0, 2].set_title("HLA limits · APEX↑ SEP←", color="white", fontsize=9, fontweight="bold")
 		axes[0, 2].axhline((nk - 1) - z0, color="#ff3333", linewidth=1.6)
 		axes[0, 2].axhline((nk - 1) - z1, color="#ff3333", linewidth=1.6)
@@ -13894,7 +13939,7 @@ class MainWindow(QMainWindow):
 			(axes[1, 1], "HLA", hla_cut, "APEX↑ · SEP← LAT→"),
 			(axes[1, 2], "SA", sa_crop, "ANT↑ · SEP← LAT→"),
 		]:
-			ax.imshow(_norm(img), cmap="odyssey_cool", vmin=0.0, vmax=1.0, aspect="auto" if title != "SA" else "equal", interpolation=interp)
+			ax.imshow(_norm(img), cmap=qc_cmap, vmin=0.0, vmax=1.0, aspect="auto" if title != "SA" else "equal", interpolation=interp)
 			ax.set_title(title, color="white", fontsize=10, fontweight="bold")
 			ax.text(0.03, 0.05, marker, transform=ax.transAxes, color="#e8f5e9", fontsize=8, fontweight="bold")
 		fig.patch.set_facecolor("#0b1220")
@@ -13933,6 +13978,44 @@ class MainWindow(QMainWindow):
 				self.preview_pixmaps[tab_name] = pix
 				self.preview_base_sizes[tab_name] = pix.size()
 				self._apply_preview_zoom(tab_name)
+
+	def _refresh_cine_crudo_cuts_color(self) -> None:
+		"""Re-renderiza el QC de cortes al cambiar cmap/ventana del motor de color.
+
+		Mismo mecanismo que _refresh_cine_crudo_cuts_smoothing pero para cambios
+		de colormap o ventana (Base/Top).
+		"""
+		if getattr(self, "cine_crudo_preview_mode", None) != "generated_cuts":
+			return
+		args = getattr(self, "_cine_crudo_cuts_qc_args", None)
+		if not args:
+			return
+		ung_vol, z0, z1 = args
+		try:
+			out_png = self._write_cine_crudo_cuts_qc(np.asarray(ung_vol, dtype=np.float64), int(z0), int(z1))
+		except Exception as exc:
+			self._log(f"[WARN] Re-render de color de cortes falló: {exc}")
+			return
+		for tab_name in ("comparacion_ejes", "cine_crudo"):
+			if tab_name in self.preview_labels:
+				pix = QPixmap(out_png)
+				self.preview_pixmaps[tab_name] = pix
+				self.preview_base_sizes[tab_name] = pix.size()
+				self._apply_preview_zoom(tab_name)
+
+	def _refresh_cine_crudo_cut_limits_color(self) -> None:
+		"""Re-renderiza la QC de límites al cambiar cmap/ventana del motor de color.
+
+		Solo si estamos en modo cut_limits (Selección de límites para cortes).
+		"""
+		if getattr(self, "cine_crudo_preview_mode", None) != "cut_limits":
+			return
+		if getattr(self, "cine_crudo_recon_result", None) is None:
+			return
+		try:
+			self._preview_cine_crudo_cut_limits()
+		except Exception as exc:
+			self._log(f"[WARN] Re-render de color de límites falló: {exc}")
 
 	def _reorient_locked_voi_for_stage(self):
 		"""Devuelve el VOI (semiejes) bloqueado si otra etapa ya reorientó, o None.
@@ -15496,12 +15579,16 @@ class MainWindow(QMainWindow):
 		if strip is not None:
 			strip.set_cmap(self.cine_crudo_screen_cmap)
 		self._refresh_cine_crudo_projection_colors()
+		self._refresh_cine_crudo_cuts_color()
+		self._refresh_cine_crudo_cut_limits_color()
 
 	def _on_cine_crudo_screen_window_changed(self, low, high):
 		self.cine_crudo_screen_win_low = float(low)
 		self.cine_crudo_screen_win_high = float(high)
 		self._update_cine_crudo_screen_labels(low, high)
 		self._refresh_cine_crudo_projection_colors()
+		self._refresh_cine_crudo_cuts_color()
+		self._refresh_cine_crudo_cut_limits_color()
 
 	def _reset_cine_crudo_screen_window_high(self):
 		slider = getattr(self, "cine_crudo_screen_range_slider", None)

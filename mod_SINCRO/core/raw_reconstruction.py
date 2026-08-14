@@ -127,6 +127,16 @@ class RawReconConfig:
     # la pared. OFF por defecto. Independiente de FBP_CLEAN (que es gated).
     ungated_denoise_plus: bool = False
     ungated_denoise_plus_k: float = 0.20  # óptimo medido 0.20 (abre cavidad sin comer pared)
+    # --- Denoise+ GATED: mismo tratamiento pero para la rama gated ---
+    # FBP_CLEAN hace esto pero SOLO si la rama gated es FBP (fue diseñado para
+    # atacar las estrías de FBP). Como el gated ahora defaultea a OSEM (que no
+    # tiene estrías pero igual pierde la cavidad por bajo conteo), este paso
+    # aplica el MISMO realce por resta al gated CON CUALQUIER MÉTODO: denoise
+    # bilateral del sinograma gated + doble recon (nítida + difusa) + resta.
+    # k=0.5 (calibrado para bajo conteo, más agresivo que el 0.20 del ungated).
+    # OFF por defecto. Independiente de FBP_CLEAN.
+    gated_denoise_plus: bool = False
+    gated_denoise_plus_k: float = 0.50  # default 0.50 (bajo conteo tolera más realce)
     # --- Motion-frozen 3D (post-recon, pre-reorientación) ---
     # Alinea cada gate del volumen 4D al end-diastole y promedia. Recupera la
     # nitidez de un gate con todas las cuentas (el "cardiac morphing" físico).
@@ -1034,6 +1044,31 @@ def reconstruct_raw_gated_pipeline(
                 fbp_filter_name=cfg.fbp_filter_name, slice_range=cfg.recon_slice_range)
             gated_volume = sharpen_by_subtraction(gated_volume, gated_blur, k)
         notes.append(f"FBP_CLEAN: realce por resta (k={k:.2f}, difuso σc={blur_sc:.2f}).")
+
+    # Denoise+ GATED (method-agnostic): el MISMO realce por resta que abre la
+    # cavidad del ungated, pero para la rama gated y con CUALQUIER método (FBP u
+    # OSEM). Motivo: FBP_CLEAN solo corre si gated es FBP, y el gated OSEM (default
+    # actual) quedaba sin tratamiento de cavidad -> se veía difuminado y se
+    # perdía la cavidad (reportado por el usuario 2026-08-14). Denoise bilateral
+    # del sinograma gated (σc=0.04 nítido / 0.24 difuso) + doble recon con el
+    # MISMO método + resta con k. Aplica sobre el gated YA reconstruido.
+    if getattr(cfg, "gated_denoise_plus", False) and gated_volume is not None and gated_volume.ndim == 4:
+        from core.fbp_clean import denoise_projections_bilateral, sharpen_by_subtraction
+        k_g = float(getattr(cfg, "gated_denoise_plus_k", 0.50))
+        blur_sc = float(getattr(cfg, "fbp_clean_blur_sigma_color", 0.24))
+        try:
+            gated_blur = reconstruct_gated_projection_volume(
+                denoise_projections_bilateral(corrected, sigma_color=blur_sc),
+                angles_deg, method=gated_method, projection_filter=cfg.gated_filter,
+                fbp_filter_name=cfg.fbp_filter_name, iterations=int(cfg.iterative_iterations),
+                subsets=gated_subsets, psf=gated_rr_psf, slice_range=cfg.recon_slice_range)
+            gated_volume = sharpen_by_subtraction(gated_volume, gated_blur, k_g)
+            notes.append(
+                f"Denoise+ GATED: realce por resta (k={k_g:.2f}, difuso σc={blur_sc:.2f}, "
+                f"método {gated_method.upper()}). Abre la cavidad del gated."
+            )
+        except Exception as exc:
+            notes.append(f"[WARN] Denoise+ GATED falló ({exc}); se omite.")
 
     # Orientación radiológica L/R: la retroproyección produce el volumen con el
     # eje izquierda/derecha del paciente (columnas, axis -1) espejado respecto de
