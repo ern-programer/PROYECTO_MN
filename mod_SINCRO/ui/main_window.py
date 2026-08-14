@@ -14345,11 +14345,15 @@ class MainWindow(QMainWindow):
 		rgba = cmap(np.linspace(0.0, 1.0, 256))
 		return (np.clip(np.asarray(rgba)[:, :3], 0.0, 1.0) * 255.0).astype(np.uint8)
 
-	def _composite_montage_pixmap(self, rows_data, cols, cmap_name, suptitle):
+	def _composite_montage_pixmap(self, rows_data, cols, cmap_name, suptitle, ref_views=None):
 		"""Compone el montaje en memoria y cachea el lienzo GRIS + máscara para que
 		cambiar el colormap solo re-aplique el LUT (recoloreo casi instantáneo).
 		Interpola en gris de 1 canal (más suave y ~3x más barato que en RGB).
-		Cada corte llega ya normalizado/ventaneado a 0..1 con escala compartida."""
+		Cada corte llega ya normalizado/ventaneado a 0..1 con escala compartida.
+
+		``ref_views`` (opcional): dict {"SA": arr2d, "VLA": arr2d, "HLA": arr2d}
+		con las vistas MIP de referencia para la columna izquierda. Si es None o
+		falta alguna, la columna queda vacía (comportamiento previo)."""
 		from PIL import Image
 		rows = max(1, len(rows_data))
 		cols = max(1, int(cols))
@@ -14372,7 +14376,9 @@ class MainWindow(QMainWindow):
 		f = PANEL / 150.0
 		PAD = max(2, round(4 * f))
 		TITLE_H = round(16 * f)
-		LEFT = round(76 * f)
+		# Columna de referencia: ancho fijo a la izquierda (mismo alto que un panel).
+		REF_W = round(76 * f)
+		LEFT = round(76 * f) + REF_W  # espacio para rótulos de eje + columna ref
 		TOP = round(42 * f)
 		cell_w = PANEL + PAD
 		cell_h = TITLE_H + PANEL + PAD
@@ -14380,6 +14386,60 @@ class MainWindow(QMainWindow):
 		H = TOP + rows * cell_h + PAD
 		gray = np.zeros((H, W), dtype=np.uint8)
 		mask = np.zeros((H, W), dtype=bool)
+
+		# --- Columna de referencia: MIP por fila, con línea del corte actual ---
+		if ref_views:
+			for r, row in enumerate(rows_data):
+				prefix = row["prefix"]
+				if prefix not in ref_views:
+					continue
+				ref_img = np.asarray(ref_views[prefix], dtype=np.float64)
+				if ref_img.ndim != 2:
+					continue
+				# Normalizar a 0..1 con la misma ventana que el montaje.
+				p99 = float(np.percentile(ref_img, 99.0)) or 1.0
+				p2 = float(np.percentile(ref_img, 2.0)) or 0.0
+				ref_norm = np.clip((ref_img - p2) / max(p99 - p2, 1e-8), 0.0, 1.0)
+				# Resize al tamaño del panel (cuadrado, letterbox si no es cuadrado).
+				ih, iw = int(ref_norm.shape[0]), int(ref_norm.shape[1])
+				scale = min(PANEL / max(1, iw), PANEL / max(1, ih))
+				nw = max(1, int(round(iw * scale)))
+				nh = max(1, int(round(ih * scale)))
+				try:
+					rimg = np.asarray(Image.fromarray(ref_norm, mode="F").resize((nw, nh), resample))
+				except Exception:
+					rimg = ref_norm[:nh, :nw]
+				idx8 = np.clip(np.asarray(rimg) * 255.0, 0.0, 255.0).astype(np.uint8)
+				y0 = TOP + r * cell_h + TITLE_H
+				x0 = round(76 * f)  # inicio de la columna de referencia
+				oy = y0 + (PANEL - nh) // 2
+				ox = x0 + (REF_W - nw) // 2
+				gray[oy:oy + nh, ox:ox + nw] = idx8[:nh, :nw]
+				mask[oy:oy + nh, ox:ox + nw] = True
+				# Guardar la geometría de la referencia para pintar las rayitas después.
+				row["_ref_geom"] = (x0, y0, REF_W, PANEL, ox, oy, nw, nh)
+				# Calcular las posiciones de las rayitas (bandoneón) en la referencia.
+				# Cada corte de la fila tiene una rayita; la actual se destaca.
+				idxs = row.get("idxs", [])
+				if idxs and len(idxs) > 1:
+					# Mapear cada índice de corte a una posición en la referencia.
+					# Para SA: el eje de la fila es el eje 0 del volumen (transaxial),
+					# la referencia es un MIP transaxial -> la posición es vertical (y).
+					# Para VLA/HLA: el eje de la fila es el eje 1 o 2 (longitudinal),
+					# la referencia es un MIP coronal/sagital -> la posición es horizontal (x).
+					k_min, k_max = float(min(idxs)), float(max(idxs))
+					rayitas = []
+					for k in idxs:
+						frac = (float(k) - k_min) / max(k_max - k_min, 1e-6)
+						if row["prefix"] == "SA":
+							# Posición vertical en la referencia (y).
+							y_pos = oy + frac * nh
+							rayitas.append((ox, int(y_pos), ox + nw, int(y_pos)))
+						else:
+							# Posición horizontal en la referencia (x).
+							x_pos = ox + frac * nw
+							rayitas.append((int(x_pos), oy, int(x_pos), oy + nh))
+					row["_rayitas"] = rayitas
 
 		panel_boxes = []
 		for r, row in enumerate(rows_data):
@@ -14410,12 +14470,19 @@ class MainWindow(QMainWindow):
 				panel_boxes.append((x0, y0, p.get("title", ""), p.get("corners")))
 
 		rows_meta = [
-			{"tag": row["tag"], "prefix": row["prefix"], "selected": bool(row["selected"]), "used_cols": int(row["used_cols"])}
+			{
+				"tag": row["tag"],
+				"prefix": row["prefix"],
+				"selected": bool(row["selected"]),
+				"used_cols": int(row["used_cols"]),
+				"_ref_geom": row.get("_ref_geom"),
+				"_rayitas": row.get("_rayitas"),
+			}
 			for row in rows_data
 		]
 		self._montage_gray_cache = {
 			"gray": gray, "mask": mask, "panel_boxes": panel_boxes, "rows_meta": rows_meta,
-			"geom": (PANEL, PAD, TITLE_H, LEFT, TOP, cell_w, cell_h, f, W, H),
+			"geom": (PANEL, PAD, TITLE_H, LEFT, TOP, cell_w, cell_h, f, W, H, REF_W),
 			"suptitle": str(suptitle),
 		}
 		return self._montage_pix_from_gray(cmap_name)
@@ -14440,10 +14507,16 @@ class MainWindow(QMainWindow):
 
 	def _paint_montage_overlays(self, pix, cache):
 		"""Título, rótulos de eje rotados, recuadro de tira activa, títulos de panel
-		y esquinas anatómicas sobre el pixmap ya coloreado."""
+		y esquinas anatómicas sobre el pixmap ya coloreado. Si hay columna de
+		referencia, dibuja la línea indicativa del corte actual."""
 		from PyQt6.QtGui import QFont
 		from PyQt6.QtCore import QRect
-		PANEL, PAD, TITLE_H, LEFT, TOP, cell_w, cell_h, f, W, H = cache["geom"]
+		geom = cache["geom"]
+		if len(geom) == 11:
+			PANEL, PAD, TITLE_H, LEFT, TOP, cell_w, cell_h, f, W, H, REF_W = geom
+		else:
+			PANEL, PAD, TITLE_H, LEFT, TOP, cell_w, cell_h, f, W, H = geom
+			REF_W = 0
 		panel_boxes = cache["panel_boxes"]
 		rows_meta = cache["rows_meta"]
 		painter = QPainter(pix)
@@ -14473,6 +14546,34 @@ class MainWindow(QMainWindow):
 			if row["selected"]:
 				painter.setPen(QPen(QColor("#ff4040"), max(1, round(f))))
 				painter.drawRect(QRect(LEFT - 1, row_top + TITLE_H - 1, used * cell_w - PAD + 1, PANEL + 1))
+			# Línea indicativa en la columna de referencia (si existe).
+			ref_geom = row.get("_ref_geom")
+			if ref_geom is not None and REF_W > 0:
+				x0, y0, ref_w, ref_h, ox, oy, nw, nh = ref_geom
+				# Rayitas del bandoneón: cada corte de la fila tiene su marca.
+				rayitas = row.get("_rayitas") or []
+				if rayitas:
+					painter.setPen(QPen(QColor("#7cf29a"), max(1, round(0.7 * f))))
+					for (rx0, ry0, rx1, ry1) in rayitas:
+						painter.drawLine(rx0, ry0, rx1, ry1)
+					# La rayita del corte actual (centro de la ventana visible) se destaca.
+					mid = len(rayitas) // 2
+					if 0 <= mid < len(rayitas):
+						rx0, ry0, rx1, ry1 = rayitas[mid]
+						painter.setPen(QPen(QColor("#ffb020"), max(1, round(1.8 * f))))
+						painter.drawLine(rx0, ry0, rx1, ry1)
+				else:
+					# Fallback: una sola línea central si no hay rayitas.
+					cx = ox + nw // 2
+					cy = oy + nh // 2
+					painter.setPen(QPen(QColor("#ffb020"), max(1, round(1.5 * f))))
+					if row["prefix"] == "SA":
+						painter.drawLine(ox, cy, ox + nw, cy)
+					else:
+						painter.drawLine(cx, oy, cx, oy + nh)
+				# Marco sutil alrededor de la referencia.
+				painter.setPen(QPen(QColor("#4a6a8a"), max(1, round(0.8 * f))))
+				painter.drawRect(ox - 1, oy - 1, nw + 2, nh + 2)
 
 		for (x0, y0, title, corners) in panel_boxes:
 			painter.setFont(f_panel)
@@ -15017,7 +15118,18 @@ class MainWindow(QMainWindow):
 					"selected": (str(prefix) == selected_stripe),
 					"used_cols": len(idxs),
 					"panels": panels,
+					"idxs": list(idxs),  # posiciones de los cortes para las rayitas del bandoneón
 				})
+
+			# --- Vistas de referencia para la columna izquierda ---
+			# PENDIENTE (2026-08-14): la columna de referencia con rayitas tipo
+			# bandoneón (Odyssey) queda COMENTADA porque el render del compositor
+			# degrada la imagen (re-normaliza y reescala en el lienzo gris, dando un
+			# efecto "QR" incluso copiando el corte del medio del montaje). La
+			# solución correcta requiere refactor del compositor para aceptar
+			# QPixmaps directamente en la columna (no arrays re-procesados).
+			# Código conservado en git history (rama FBP_POCO_ORTODOXO, ~v1.46.0).
+			ref_views = {}
 
 			# Metadatos para drag en vivo de tiras por eje.
 			self._montage_render_meta = {
@@ -15044,7 +15156,7 @@ class MainWindow(QMainWindow):
 			)
 
 			# Render en memoria (numpy RGB + QPainter): sin matplotlib ni PNG en cada cambio.
-			pix = self._composite_montage_pixmap(rows_data, int(cols), montage_cmap, suptitle)
+			pix = self._composite_montage_pixmap(rows_data, int(cols), montage_cmap, suptitle, ref_views=ref_views)
 			self.cine_crudo_preview_mode = "sa_montage"
 			# Firma del estado ya renderizado: al reentrar no se re-renderiza si no cambió.
 			self._montage_last_signature = self._montage_signature()
