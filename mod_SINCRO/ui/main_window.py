@@ -1903,6 +1903,36 @@ class MainWindow(QMainWindow):
 					"de TODA la imagen, incluido el VI. Aumenta el contraste cavidad/pared. "
 					"Default OFF.")
 				toolbar6_r2.addWidget(self.cine_crudo_bg_check)
+				# --- Descuento de SCATTER (EM − k×SC): preprocesado de las
+				# proyecciones crudas ANTES de reconstruir. Como Fondo, es COMÚN a
+				# todo el estudio (afecta AMBAS ramas: ungated + gated). Por eso va
+				# acá, en la fila de funciones comunes, no en una rama.
+				self.cine_crudo_scatter_check = QCheckBox("Desc. SC")
+				self.cine_crudo_scatter_check.setChecked(False)
+				self.cine_crudo_scatter_check.setEnabled(False)
+				self.cine_crudo_scatter_check.setToolTip(
+					"Descuento de SCATTER dual-energy (P = EM − k×SC) en las proyecciones "
+					"ANTES de reconstruir. Afecta a AMBAS ramas (ungated + gated). Solo "
+					"disponible si el estudio tiene archivo hermano _SC (p.ej. exportación "
+					"Infinia EM/SC) o dual-energy en un archivo. Default OFF.")
+				toolbar6_r2.addWidget(self.cine_crudo_scatter_check)
+				# Al activar/desactivar o cambiar k: refrescar el cine crudo (preview
+				# EM−SC en vivo) y la recon si ya se hizo.
+				self.cine_crudo_scatter_check.toggled.connect(self._on_scatter_preview_changed)
+				toolbar6_r2.addWidget(QLabel("k"))
+				self.cine_crudo_scatter_k_spin = QDoubleSpinBox()
+				self.cine_crudo_scatter_k_spin.setRange(0.0, 2.0)
+				self.cine_crudo_scatter_k_spin.setSingleStep(0.05)
+				self.cine_crudo_scatter_k_spin.setDecimals(2)
+				self.cine_crudo_scatter_k_spin.setValue(1.0)
+				self.cine_crudo_scatter_k_spin.setMaximumWidth(58)
+				self.cine_crudo_scatter_k_spin.setEnabled(False)
+				self.cine_crudo_scatter_k_spin.setToolTip(
+					"Factor k de la resta de scatter (P = EM - k×SC). 1.0 = resta "
+					"directa (dual-window). Con TEW se calcula de los anchos de "
+					"ventana. Calibrar con fantoma/estudio real.")
+				self.cine_crudo_scatter_k_spin.valueChanged.connect(self._on_scatter_preview_changed)
+				toolbar6_r2.addWidget(self.cine_crudo_scatter_k_spin)
 				# --- Filtros por rama en DOS filas (ungated / gated): la fila única se
 				# iba de pantalla y no permitía activar un filtro en una rama y otro en
 				# la otra. UNGATED = perfusión estática (alto conteo) -> NÍTIDA(RR) para
@@ -1965,34 +1995,6 @@ class MainWindow(QMainWindow):
 				toolbar6_r_filters.addWidget(self.cine_crudo_denoise_plus_lbl)
 				self.cine_crudo_denoise_plus_slider.valueChanged.connect(
 					lambda v: self.cine_crudo_denoise_plus_lbl.setText(f"{v/100.0:.2f}"))
-				# Descuento de SCATTER por ventana energética (EM/SC). Habilitado solo
-				# si el estudio cargado trajo un hermano _SC (lo detecta el loader).
-				self.cine_crudo_scatter_check = QCheckBox("Desc. SC")
-				self.cine_crudo_scatter_check.setChecked(False)
-				self.cine_crudo_scatter_check.setEnabled(False)
-				self.cine_crudo_scatter_check.setToolTip(
-					"Corrección de scatter por ventana energética (dual EM/SC): resta "
-					"k × (proyecciones de la ventana de scatter) de cada proyección "
-					"ANTES de reconstruir. Solo disponible si el estudio tiene archivo "
-					"hermano _SC (p.ej. exportación Infinia EM/SC). Default OFF.")
-				toolbar6_r_filters.addWidget(self.cine_crudo_scatter_check)
-				# Al activar/desactivar o cambiar k: refrescar el cine crudo (preview
-				# EM−SC en vivo) y la recon si ya se hizo.
-				self.cine_crudo_scatter_check.toggled.connect(self._on_scatter_preview_changed)
-				toolbar6_r_filters.addWidget(QLabel("k"))
-				self.cine_crudo_scatter_k_spin = QDoubleSpinBox()
-				self.cine_crudo_scatter_k_spin.setRange(0.0, 2.0)
-				self.cine_crudo_scatter_k_spin.setSingleStep(0.1)
-				self.cine_crudo_scatter_k_spin.setDecimals(2)
-				self.cine_crudo_scatter_k_spin.setValue(1.0)
-				self.cine_crudo_scatter_k_spin.setMaximumWidth(64)
-				self.cine_crudo_scatter_k_spin.setEnabled(False)
-				self.cine_crudo_scatter_k_spin.setToolTip(
-					"Factor k de la resta de scatter (P = EM - k×SC). 1.0 = resta "
-					"directa (dual-window). Con TEW se calcula de los anchos de "
-					"ventana. Calibrar con fantoma/estudio real.")
-				self.cine_crudo_scatter_k_spin.valueChanged.connect(self._on_scatter_preview_changed)
-				toolbar6_r_filters.addWidget(self.cine_crudo_scatter_k_spin)
 				# NOTA: Motion-frozen fue retirado de la UI (2026-08-13). El pipeline
 				# (RawReconConfig.motion_frozen) y core/motion_frozen.py quedan
 				# disponibles y documentados por si sirven para otros cálculos.
@@ -4710,6 +4712,8 @@ class MainWindow(QMainWindow):
 
 		En estudios ungated (FEVI/asincronía/fase no calculables) deja disponibles
 		reconstrucción, cine, QC y NITIDA, y desactiva lo clínico dependiente del gating.
+		También deshabilita la fuente Gated del montaje y todos los controles gated
+		de la barra de reconstrucción (para no generar confusiones).
 		"""
 		gated = self._study_n_gates() >= 3
 		for attr in ("asynchrony_review_btn", "ectb_window_btn"):
@@ -4723,6 +4727,26 @@ class MainWindow(QMainWindow):
 				btn._orig_tooltip if gated
 				else "Requiere estudio gatillado (≥3 gates). Estudio ungated: FEVI/asincronía no disponibles."
 			)
+		# Fuente Gated del montaje: deshabilitar si no hay gates (no hay cine).
+		if hasattr(self, "cine_crudo_montage_source_combo"):
+			idx = self.cine_crudo_montage_source_combo.findData("gated")
+			if idx >= 0:
+				self.cine_crudo_montage_source_combo.model().item(idx).setEnabled(gated)
+				if not gated and str(getattr(self, "cine_crudo_montage_source", "ungated")) == "gated":
+					self.cine_crudo_montage_source_combo.setCurrentIndex(0)  # volver a Ungated
+		# Controles GATED de la reconstrucción: deshabilitar todos si no hay gates.
+		gated_widgets = (
+			"cine_crudo_fbpclean_check", "cine_crudo_fbpclean_slider",
+			"cine_crudo_nitida3_check", "cine_crudo_nitida3_iter_spin",
+			"cine_crudo_nitida4d_check", "cine_crudo_nitida4d_beta_spin",
+			"cine_crudo_nitida2_combo",
+			"cine_crudo_post_gated_check", "cine_crudo_post_gated_fwhm_spin",
+			"cine_crudo_denoise_plus_gated_check", "cine_crudo_denoise_plus_gated_slider",
+		)
+		for attr in gated_widgets:
+			w = getattr(self, attr, None)
+			if w is not None:
+				w.setEnabled(gated)
 
 	def _handle_raw_projections_loaded(self, path: str, t_total: float):
 		"""Maneja un estudio crudo (proyecciones gated): genera panel QC y muestra info/gating."""
@@ -13523,8 +13547,15 @@ class MainWindow(QMainWindow):
 
 		ung = np.asarray(result.ungated_volume, dtype=np.float64)
 		gated_all = np.asarray(result.gated_volume, dtype=np.float64)
-		# Panel gated: gate ED (fin de diástole = gate 1) por convención.
-		gated_ed = gated_all[0] if (gated_all.ndim == 4 and gated_all.shape[0] > 0) else ung
+		# Si el estudio NO es gated (1 gate), las columnas de la derecha (gated)
+		# muestran el mismo volumen ungated con un texto indicativo, para no generar
+		# confusión (no hay gates que mostrar).
+		is_gated = self._study_n_gates() >= 3
+		if not is_gated:
+			gated_ed = ung  # mismo volumen, se etiqueta como "UNGATED (sin gates)"
+		else:
+			# Panel gated: gate ED (fin de diástole = gate 1) por convención.
+			gated_ed = gated_all[0] if (gated_all.ndim == 4 and gated_all.shape[0] > 0) else ung
 		mid_y = int(np.clip(ung.shape[1] // 2, 0, ung.shape[1] - 1))
 		mid_x = int(np.clip(ung.shape[2] // 2, 0, ung.shape[2] - 1))
 		mid_z = int(np.clip((int(z0) + int(z1)) // 2, 0, ung.shape[0] - 1))
@@ -13610,9 +13641,9 @@ class MainWindow(QMainWindow):
 		axes[0, 1].imshow(_norm(ung_lx), cmap=qc_cmap, aspect="auto")
 		axes[0, 1].set_title(f"UngGat · {title_ll}", color="white", fontsize=9, fontweight="bold")
 		axes[0, 3].imshow(_norm(g_ly), cmap=qc_cmap, aspect="auto")
-		axes[0, 3].set_title(f"Gated ED · {title_ap}", color="#9fd0ff", fontsize=9, fontweight="bold")
+		axes[0, 3].set_title(f"{'Gated ED' if is_gated else 'UNGATED (sin gates)'} · {title_ap}", color="#9fd0ff" if is_gated else "#888888", fontsize=9, fontweight="bold")
 		axes[0, 4].imshow(_norm(g_lx), cmap=qc_cmap, aspect="auto")
-		axes[0, 4].set_title(f"Gated ED · {title_ll}", color="#9fd0ff", fontsize=9, fontweight="bold")
+		axes[0, 4].set_title(f"{'Gated ED' if is_gated else 'UNGATED (sin gates)'} · {title_ll}", color="#9fd0ff" if is_gated else "#888888", fontsize=9, fontweight="bold")
 
 		for ax in (axes[0, 0], axes[0, 1], axes[0, 3], axes[0, 4]):
 			ax.axis("on")
@@ -13641,9 +13672,9 @@ class MainWindow(QMainWindow):
 		axes[0, 2].text(0.5, 0.20, "Ajustá Base / Ápex / Esp\ny mirá las líneas rojas", ha="center", va="center", color="#7cf29a", fontsize=8)
 		if orient_note:
 			axes[0, 2].text(0.5, 0.02, orient_note, ha="center", va="bottom", color="#7cf29a", fontsize=6.5, wrap=True)
-		axes[0, 5].text(0.5, 0.62, f"GATED (ED)\n{gated_method} · {cfg.gated_filter.kind}\n{cfg.gated_filter.cutoff:.2f}/{cfg.gated_filter.order}",
-			ha="center", va="center", color="#9fd0ff", fontsize=9, fontweight="bold")
-		axes[0, 5].text(0.5, 0.20, "Elegí método/filtro gated:\nactualiza en vivo", ha="center", va="center", color="#7cf29a", fontsize=8)
+		axes[0, 5].text(0.5, 0.62, f"{'GATED (ED)' if is_gated else 'UNGATED'}\n{gated_method} · {cfg.gated_filter.kind}\n{cfg.gated_filter.cutoff:.2f}/{cfg.gated_filter.order}",
+			ha="center", va="center", color="#9fd0ff" if is_gated else "#888888", fontsize=9, fontweight="bold")
+		axes[0, 5].text(0.5, 0.20, "Elegí método/filtro gated:\nactualiza en vivo" if is_gated else "Estudio UNGATED\n(sin gates para animar)", ha="center", va="center", color="#7cf29a" if is_gated else "#888888", fontsize=8)
 
 		fig.patch.set_facecolor("#0b1220")
 		fig.suptitle("Selección de límites para cortes cardíacos — UngGat | Gated ED", color="white", fontsize=11, fontweight="bold")

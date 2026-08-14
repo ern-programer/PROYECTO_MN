@@ -1084,8 +1084,8 @@ class CardiacReorientationDialog(QDialog):
         cx_sa, cy_sa = 0.5 * (w_sa - 1), 0.5 * (h_sa - 1)
         self.ax_sa.plot([cx_sa - 2.0, cx_sa + 2.0], [cy_sa, cy_sa], color="#6ee7ff", lw=0.9)
         self.ax_sa.plot([cx_sa, cx_sa], [cy_sa - 2.0, cy_sa + 2.0], color="#6ee7ff", lw=0.9)
-        # Handle de ajuste fino mouse-driven.
-        self._fine_sa_handle = (bx0 + bw, by0)
+        # Handle de ajuste fino mouse-driven (borde derecho, al MEDIO de la caja).
+        self._fine_sa_handle = (bx0 + bw, by0 + 0.5 * bh)
         self.ax_sa.plot(self._fine_sa_handle[0], self._fine_sa_handle[1], "s", color="#6ee7ff", ms=5)
         self.ax_sa.text(0.03, 0.06, "Drag □: fine SA", transform=self.ax_sa.transAxes,
                 color="#9cdcff", fontsize=7, fontweight="bold")
@@ -1103,7 +1103,8 @@ class CardiacReorientationDialog(QDialog):
         self.ax_hla.axhline((n - 1) - kmid, color="#40ff5a", lw=1.0, ls="--")
         self.ax_hla.text(0.03, 0.05, "Ápex ▲ / Base ▼", transform=self.ax_hla.transAxes,
                          color="#7cf29a", fontsize=8, fontweight="bold")
-        self._fine_hla_handle = (0.95 * max(1, hla.shape[1] - 1), 0.10 * max(1, hla.shape[0] - 1))
+        # Handle de ajuste fino: borde derecho, al MEDIO vertical del frame.
+        self._fine_hla_handle = (0.95 * max(1, hla.shape[1] - 1), 0.50 * max(1, hla.shape[0] - 1))
         self.ax_hla.plot(self._fine_hla_handle[0], self._fine_hla_handle[1], "s", color="#6ee7ff", ms=5)
         self.ax_hla.text(0.64, 0.06, "Drag □: fine HLA", transform=self.ax_hla.transAxes,
                  color="#9cdcff", fontsize=7, fontweight="bold")
@@ -1117,7 +1118,8 @@ class CardiacReorientationDialog(QDialog):
                            aspect="auto", extent=(0, vla.shape[1], vla.shape[0], 0))
         self.ax_vla.axvline(self._base_k, color="#ff3333", lw=1.2)
         self.ax_vla.axvline(self._apex_k, color="#ff3333", lw=1.2)
-        self._fine_vla_handle = (0.95 * max(1, vla.shape[1] - 1), 0.10 * max(1, vla.shape[0] - 1))
+        # Handle de ajuste fino: borde derecho, al MEDIO vertical del frame.
+        self._fine_vla_handle = (0.95 * max(1, vla.shape[1] - 1), 0.50 * max(1, vla.shape[0] - 1))
         self.ax_vla.plot(self._fine_vla_handle[0], self._fine_vla_handle[1], "s", color="#6ee7ff", ms=5)
         self.ax_vla.text(0.64, 0.06, "Drag □: fine VLA", transform=self.ax_vla.transAxes,
                  color="#9cdcff", fontsize=7, fontweight="bold")
