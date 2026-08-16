@@ -331,27 +331,37 @@ class LV3DDialog(QDialog):
     def _set_view(self, name: str):
         """Orienta la cámara hacia una vista anatómica estándar.
 
+        Preserva el zoom actual (distancia cámara→focal) para que el corazón
+        no cambie de tamaño al alternar vistas.
+
         Convención SA: anterior=-Y, inferior=+Y, septal=-X, lateral=+X;
         Z va de ápex a base.
         """
         if self._plotter is None or not self._meshes:
             return
+        # Guardar distancia actual de la cámara al focal en el panel activo.
+        cam = self._plotter.camera
+        fp = np.asarray(cam.focal_point, dtype=np.float64)
+        cp = np.asarray(cam.position, dtype=np.float64)
+        current_dist = float(np.linalg.norm(cp - fp))
+
         mesh = self._meshes[self._ed_gate]
         xmin, xmax, ymin, ymax, zmin, zmax = (float(v) for v in mesh.bounds)
         cx, cy, cz = 0.5 * (xmin + xmax), 0.5 * (ymin + ymax), 0.5 * (zmin + zmax)
-        diag = max(xmax - xmin, ymax - ymin, zmax - zmin, 1.0)
-        dist = diag * 1.8
-        # (view_vector, up_vector)
+
+        # Dirección de vista normalizada (unitaria) + up vector.
         views = {
-            "Ápex":     (( 0,  0, -dist), ( 0, -1,  0)),
-            "Base":     (( 0,  0,  dist), ( 0, -1,  0)),
-            "Anterior": (( 0, -dist, 0), ( 0,  0,  1)),
-            "Inferior": (( 0,  dist, 0), ( 0,  0,  1)),
-            "Septal":   ((-dist, 0,  0), ( 0,  0,  1)),
-            "Lateral":  (( dist, 0,  0), ( 0,  0,  1)),
+            "Ápex":     (( 0,  0, -1), ( 0, -1,  0)),
+            "Base":     (( 0,  0,  1), ( 0, -1,  0)),
+            "Anterior": (( 0, -1,  0), ( 0,  0,  1)),
+            "Inferior": (( 0,  1,  0), ( 0,  0,  1)),
+            "Septal":   ((-1,  0,  0), ( 0,  0,  1)),
+            "Lateral":  (( 1,  0,  0), ( 0,  0,  1)),
         }
-        vec, up = views.get(name, ((0, -dist, 0), (0, 0, 1)))
-        cam_pos = (cx + vec[0], cy + vec[1], cz + vec[2])
+        d, up = views.get(name, ((0, -1, 0), (0, 0, 1)))
+        d = np.asarray(d, dtype=np.float64)
+        d /= max(np.linalg.norm(d), 1e-9)
+        cam_pos = (cx + d[0] * current_dist, cy + d[1] * current_dist, cz + d[2] * current_dist)
         focal = (cx, cy, cz)
         for sp in ((0, 0), (0, 1)):
             self._plotter.subplot(*sp)
