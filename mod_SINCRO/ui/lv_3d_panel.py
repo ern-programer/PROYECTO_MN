@@ -187,7 +187,21 @@ class LV3DDialog(QDialog):
         self.color_range.setMinimumHeight(330)
         self.color_range.set_values(0, 100)
         self.color_range.valuesChanged.connect(self._on_3d_range_changed)
-        range_row.addWidget(self.color_range, 1)
+        range_col = QVBoxLayout()
+        range_col.addWidget(self.color_range, 1)
+        btn_row = QHBoxLayout()
+        btn_reset_base = QPushButton("Base")
+        btn_reset_base.setToolTip("Resetea la base al 0%")
+        btn_reset_base.setFixedHeight(22)
+        btn_reset_base.clicked.connect(lambda: self._reset_range_handle("low"))
+        btn_reset_top = QPushButton("Top")
+        btn_reset_top.setToolTip("Resetea el top al 100%")
+        btn_reset_top.setFixedHeight(22)
+        btn_reset_top.clicked.connect(lambda: self._reset_range_handle("high"))
+        btn_row.addWidget(btn_reset_base)
+        btn_row.addWidget(btn_reset_top)
+        range_col.addLayout(btn_row)
+        range_row.addLayout(range_col, 1)
         self.color_strip = VerticalColorStrip(self._cmap_name)
         self.color_strip.setMinimumHeight(330)
         range_row.addWidget(self.color_strip)
@@ -535,6 +549,13 @@ class LV3DDialog(QDialog):
         self._color_high = float(high) / 100.0
         self.lbl_color_range.setText(f"{low}–{high}%")
         self._recreate_myo_actor()
+
+    def _reset_range_handle(self, which: str):
+        lo, hi = self.color_range.values()
+        if which == "low":
+            self.color_range.set_values(0, hi)
+        else:
+            self.color_range.set_values(lo, 100)
 
     def _on_epi_opacity_changed(self, value: int):
         value = max(0, min(100, int(value)))
