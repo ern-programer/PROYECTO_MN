@@ -202,6 +202,7 @@ class MainWindow(QMainWindow):
 		self.polar_perf_view_perf_btn: QToolButton | None = None
 		self.polar_perf_view_cine_btn: QToolButton | None = None
 		self.polar_view_mode = "perfusion"  # "perfusion" | "cine" dentro de polar_perfusion_directa
+		self.bullseye_view_mode = "perfusion"  # "perfusion" | "thickness" | "motion" dentro de bullseye_directo
 		# Colormap de pantalla del mapa polar de perfusión (independiente del informe).
 		# Default = mismo cmap que el informe para no cambiar el look inicial.
 		self.polar_perf_screen_cmap = "odyssey_cool"
@@ -1473,6 +1474,17 @@ class MainWindow(QMainWindow):
 				restart_btn.clicked.connect(self._restart_polar_cine_preview)
 				toolbar.addWidget(play_btn)
 				toolbar.addWidget(restart_btn)
+			if name == "bullseye_directo":
+				self._bullseye_btns: dict[str, QToolButton] = {}
+				for mode, label in [("perfusion", "Perfusión"), ("thickness", "Espesor"), ("motion", "Motilidad")]:
+					btn = QToolButton()
+					btn.setText(label)
+					btn.setCheckable(True)
+					btn.setChecked(self.bullseye_view_mode == mode)
+					btn.setToolTip({"perfusion": "Bullseye de perfusión segmentaria AHA", "thickness": "Bullseye de espesor de pared (mm) por segmento AHA", "motion": "Bullseye de motilidad: desplazamiento endocárdico ED→ES por segmento AHA"}[mode])
+					btn.clicked.connect(lambda _=False, m=mode: self._set_bullseye_view_mode(m))
+					self._bullseye_btns[mode] = btn
+					toolbar.addWidget(btn)
 			if name == "cine_crudo":
 				# --- Fila 1 (toolbar principal): zoom + reproducción + navegación + fuente/modo ---
 				self.cine_crudo_play_btn = QToolButton()
@@ -10247,20 +10259,81 @@ class MainWindow(QMainWindow):
 			pass
 		plt.close(fig_v)
 
-		# Bull's eye directo de perfusión (colores de intensidad), inspirado en consolas clínicas.
+		# Bull's eye directo: perfusión, espesor o motilidad según sub-modo.
 		from matplotlib.patches import Circle, Wedge
 		seg_map = np.asarray(self.aha.segment_map, dtype=np.int32)
-		mid_gate_cube = np.asarray(study_cube_render[mid_gate], dtype=np.float64)
-		mx = float(np.nanmax(mid_gate_cube)) if mid_gate_cube.size else 0.0
-		uptake_norm = mid_gate_cube / (mx + 1e-8)
-		seg_uptake: dict[int, float] = {}
-		for seg_id in range(1, 18):
-			vals = uptake_norm[seg_map == seg_id]
-			vals = vals[np.isfinite(vals)]
-			if vals.size:
-				seg_uptake[seg_id] = float(np.median(vals))
-			else:
-				seg_uptake[seg_id] = np.nan
+		bullseye_mode = getattr(self, "bullseye_view_mode", "perfusion")
+		ectb = getattr(self, "_ectb_last_result", None)
+
+		seg_values: dict[int, float] = {}
+		bull_title = "perfusión directa"
+		bull_subtitle = "Colores de intensidad normalizada (gate medio)"
+		bull_clinical = "Uso clínico: resumen segmentario AHA rápido para detectar regiones de hipocaptación."
+		cmap_b = matplotlib.colormaps.get(cmap_bullseye)
+		color_range = (0.0, 1.0)
+
+		if bullseye_mode == "thickness" and ectb is not None and getattr(ectb, "available", False):
+			# Espesor de pared: epi - endo por ángulo, promediado por corte.
+			edo = np.asarray(ectb.endo_radii_mm, dtype=np.float64)  # (gates, slices, angles)
+			epi = np.asarray(ectb.epi_radii_mm, dtype=np.float64)
+			ed_gate = int(getattr(ectb, "ed_gate", 1)) - 1
+			thk = epi[ed_gate] - edo[ed_gate]  # (slices, angles) mm
+			valid = list(getattr(ectb, "valid_slices", range(thk.shape[0])))
+			for i, s in enumerate(valid):
+				if 0 <= s < seg_map.shape[0] and i < thk.shape[0]:
+					thk_mean = float(np.nanmean(thk[i]))
+					for seg_id in range(1, 18):
+						mask = seg_map[s] == seg_id
+						if mask.any():
+							seg_values.setdefault(seg_id, [])
+							seg_values[seg_id].append(thk_mean)
+			seg_values = {k: float(np.nanmedian(v)) for k, v in seg_values.items() if v}
+			bull_title = "espesor de pared (ED)"
+			bull_subtitle = "Espesor miocárdico en mm (ED) por segmento AHA"
+			bull_clinical = "Uso clínico: detectar hipertrofia (↑espesor) o adelgazamiento (↓espesor) regional."
+			cmap_b = matplotlib.colormaps.get("coolwarm")
+			color_range = (0.0, 20.0)
+
+		elif bullseye_mode == "motion" and ectb is not None and getattr(ectb, "available", False):
+			# Motilidad: desplazamiento endocárdico ED→ES por ángulo.
+			edo = np.asarray(ectb.endo_radii_mm, dtype=np.float64)
+			ed_gate = int(getattr(ectb, "ed_gate", 1)) - 1
+			es_gate = int(getattr(ectb, "es_gate", 1)) - 1
+			displ = edo[es_gate] - edo[ed_gate]  # (slices, angles) mm (negativo = contracción)
+			valid = list(getattr(ectb, "valid_slices", range(displ.shape[0])))
+			for i, s in enumerate(valid):
+				if 0 <= s < seg_map.shape[0] and i < displ.shape[0]:
+					d_mean = float(np.nanmean(displ[i]))
+					for seg_id in range(1, 18):
+						mask = seg_map[s] == seg_id
+						if mask.any():
+							seg_values.setdefault(seg_id, [])
+							seg_values[seg_id].append(d_mean)
+			seg_values = {k: float(np.nanmedian(v)) for k, v in seg_values.items() if v}
+			# Normalizar: displ negativo = buena motilidad (contracción).
+			# Mapear: más negativo → más color. Usar abs(displ).
+			seg_values = {k: abs(v) for k, v in seg_values.items()}
+			bull_title = "motilidad (desplazamiento ED→ES)"
+			bull_subtitle = "Desplazamiento endocárdico absoluto en mm por segmento AHA"
+			bull_clinical = "Uso clínico: detectar acinesia (≈0mm) o discinesia regional."
+			cmap_b = matplotlib.colormaps.get("viridis")
+			color_range = (0.0, 12.0)
+
+		else:
+			# Perfusión (default): intensidad normalizada del gate medio.
+			mid_gate_cube = np.asarray(study_cube_render[mid_gate], dtype=np.float64)
+			mx = float(np.nanmax(mid_gate_cube)) if mid_gate_cube.size else 0.0
+			uptake_norm = mid_gate_cube / (mx + 1e-8)
+			for seg_id in range(1, 18):
+				vals = uptake_norm[seg_map == seg_id]
+				vals = vals[np.isfinite(vals)]
+				if vals.size:
+					seg_values[seg_id] = float(np.median(vals))
+				else:
+					seg_values[seg_id] = np.nan
+
+		if cmap_b is None:
+			cmap_b = matplotlib.colormaps.get("viridis")
 
 		fig_b, ax_b = plt.subplots(figsize=(7.2, 7.2), facecolor=style["fig_bg"])
 		ax_b.set_facecolor(style["fig_bg"])
@@ -10268,14 +10341,15 @@ class MainWindow(QMainWindow):
 		ax_b.set_ylim(-1.08, 1.08)
 		ax_b.set_aspect("equal")
 		ax_b.axis("off")
-		cmap_b = matplotlib.colormaps.get(cmap_bullseye)
 
 		def _segment_color(seg_id: int):
-			v = seg_uptake.get(int(seg_id), np.nan)
+			v = seg_values.get(int(seg_id), np.nan)
 			if not np.isfinite(v):
 				return (0.25, 0.25, 0.28, 1.0)
-			v = float(np.clip(v, 0.0, 1.0))
-			return cmap_b(v)
+			vmin, vmax = color_range
+			frac = (v - vmin) / max(vmax - vmin, 1e-8)
+			frac = float(np.clip(frac, 0.0, 1.0))
+			return cmap_b(frac)
 
 		def _draw_ring(seg_ids: list[int], r_inner: float, r_outer: float, start_deg: float = 90.0):
 			n = len(seg_ids)
@@ -10286,7 +10360,14 @@ class MainWindow(QMainWindow):
 				ax_b.add_patch(wedge)
 				mid_a = np.deg2rad((theta1 + theta2) * 0.5)
 				r_t = (r_inner + r_outer) * 0.5
-				ax_b.text(r_t * np.cos(mid_a), r_t * np.sin(mid_a), str(sid), color=style["fg"], fontsize=8, ha="center", va="center", fontweight="bold")
+				v = seg_values.get(int(sid), np.nan)
+				if bullseye_mode == "perfusion":
+					label = str(sid)
+				elif np.isfinite(v):
+					label = f"{sid}\n{v:.1f}"
+				else:
+					label = str(sid)
+				ax_b.text(r_t * np.cos(mid_a), r_t * np.sin(mid_a), label, color=style["fg"], fontsize=7, ha="center", va="center", fontweight="bold")
 
 		_draw_ring([1, 2, 3, 4, 5, 6], 0.68, 0.98, start_deg=90.0)
 		_draw_ring([7, 8, 9, 10, 11, 12], 0.40, 0.68, start_deg=90.0)
@@ -10295,9 +10376,9 @@ class MainWindow(QMainWindow):
 		ax_b.add_patch(apex)
 		ax_b.text(0.0, 0.0, "17", color=style["fg"], fontsize=8, ha="center", va="center", fontweight="bold")
 
-		ax_b.text(0.0, 1.04, f"Bull's eye perfusión directa ({self.visual_style_combo.currentText()})", ha="center", va="bottom", color=style["fg"], fontsize=12, fontweight="bold")
-		ax_b.text(0.0, -1.02, "Colores de intensidad normalizada (gate medio)", ha="center", va="top", color=style["subtle"], fontsize=9)
-		ax_b.text(0.0, -1.09, "Uso clínico: resumen segmentario AHA rápido para detectar regiones de hipocaptación.", ha="center", va="top", color=style["subtle"], fontsize=8.4)
+		ax_b.text(0.0, 1.04, f"Bull's eye {bull_title} ({self.visual_style_combo.currentText()})", ha="center", va="bottom", color=style["fg"], fontsize=12, fontweight="bold")
+		ax_b.text(0.0, -1.02, bull_subtitle, ha="center", va="top", color=style["subtle"], fontsize=9)
+		ax_b.text(0.0, -1.09, bull_clinical, ha="center", va="top", color=style["subtle"], fontsize=8.4)
 		self._stamp_export_figure(fig_b, active_cine_widget)
 		fig_b.savefig(os.path.join(self.output_dir, "bullseye_directo.png"), dpi=170, bbox_inches="tight", facecolor=fig_b.get_facecolor())
 		plt.close(fig_b)
@@ -11577,6 +11658,15 @@ class MainWindow(QMainWindow):
 			self.polar_cine_playing = False
 			self._update_polar_cine_toggle_text(enabled=bool(self.polar_cine_preview_frames))
 		self._load_preview("polar_perfusion_directa")
+
+	def _set_bullseye_view_mode(self, mode: str):
+		self.bullseye_view_mode = mode
+		if hasattr(self, "_bullseye_btns"):
+			for m, btn in self._bullseye_btns.items():
+				btn.setChecked(m == mode)
+		# Re-renderizar el bullseye con el nuevo modo.
+		self._write_outputs(target_tabs={"bullseye_directo"})
+		self._load_preview("bullseye_directo")
 
 	def _toggle_polar_cine_preview(self):
 		if self.polar_view_mode != "cine":
