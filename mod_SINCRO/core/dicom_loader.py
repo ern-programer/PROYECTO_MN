@@ -101,6 +101,8 @@ class GatedStudy:
     # automáticamente. La UI pregunta al usuario si se usa para la corrección.
     scatter_projections: np.ndarray | None = None  # (n_gates, n_angles, H, W)
     scatter_path: str = ""
+    # Factor k de TEW leído de las ventanas del DICOM (None si no disponible).
+    scatter_k_tew: float | None = None
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -422,6 +424,7 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
             detector_iop=getattr(raw, "detector_iop", None),
             scatter_projections=getattr(raw, "scatter_projections", None),
             scatter_path=getattr(raw, "scatter_path", ""),
+            scatter_k_tew=getattr(raw, "scatter_k_tew", None),
             notes=notes + raw.notes,
         )
         return study

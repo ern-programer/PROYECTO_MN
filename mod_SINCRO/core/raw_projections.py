@@ -47,6 +47,10 @@ class RawGatedProjections:
     # --- automáticamente para corrección de scatter pre-reconstrucción. ---
     scatter_projections: np.ndarray | None = None  # mismo shape que projections
     scatter_path: str = ""
+    # Factor k de TEW calculado de los anchos de ventana del DICOM
+    # (EnergyWindowRangeSequence): k = W_EM / (2 * W_SC). None si no se pudo
+    # leer (la UI usa su default manual en ese caso).
+    scatter_k_tew: float | None = None
     patient_name: str = ""
     patient_id: str = ""
     study_description: str = ""
@@ -201,6 +205,7 @@ def load_raw_projections(path: str, *, _skip_scatter: bool = False) -> RawGatedP
     energy_vec = _get(ds, (0x0054, 0x0010), None)  # EnergyWindowVector
     scatter_projections = None
     scatter_path = ""
+    scatter_k_tew: float | None = None
     if energy_vec is not None and len(energy_vec) == n_frames:
         ev = [int(v) for v in energy_vec]
         n_energy = len(set(ev))
@@ -244,20 +249,33 @@ def load_raw_projections(path: str, *, _skip_scatter: bool = False) -> RawGatedP
             # Leer límites de energía para el factor k de TEW (si se separó).
             if projections is not None:
                 try:
-                    ews = _get(ds, (0x0054, 0x0013), None)  # EnergyWindowRangeSequence
-                    if ews is not None and len(ews) >= 2:
-                        lo1 = float(_get(ews[0], (0x0054, 0x0014), 0) or 0)
-                        hi1 = float(_get(ews[0], (0x0054, 0x0015), 0) or 0)
-                        lo2 = float(_get(ews[1], (0x0054, 0x0014), 0) or 0)
-                        hi2 = float(_get(ews[1], (0x0054, 0x0015), 0) or 0)
-                        w_em = hi1 - lo1
-                        w_sc = hi2 - lo2
-                        if w_em > 0 and w_sc > 0:
-                            k_tew = w_em / (2.0 * w_sc)
-                            notes.append(
-                                f"TEW: EM [{lo1:.0f}-{hi1:.0f}] keV (W={w_em:.0f}), "
-                                f"SC [{lo2:.0f}-{hi2:.0f}] keV (W={w_sc:.0f}) -> k={k_tew:.3f}."
-                            )
+                    # Las ventanas viven en EnergyWindowInformationSequence (0054,0012):
+                    # cada item tiene su EnergyWindowRangeSequence (0054,0013) con
+                    # LowerLimit (0054,0014) / UpperLimit (0054,0015) en keV.
+                    ewi = _get(ds, (0x0054, 0x0012), None)  # EnergyWindowInformationSequence
+                    if ewi is not None and len(ewi) >= 2:
+                        def _win_range(item):
+                            ews = _get(item, (0x0054, 0x0013), None)
+                            if ews is not None and len(ews) >= 1:
+                                lo = float(_get(ews[0], (0x0054, 0x0014), 0) or 0)
+                                hi = float(_get(ews[0], (0x0054, 0x0015), 0) or 0)
+                                if hi > lo:
+                                    return lo, hi
+                            return None
+                        wr1 = _win_range(ewi[0])
+                        wr2 = _win_range(ewi[1])
+                        if wr1 is not None and wr2 is not None:
+                            lo1, hi1 = wr1
+                            lo2, hi2 = wr2
+                            w_em = hi1 - lo1
+                            w_sc = hi2 - lo2
+                            if w_em > 0 and w_sc > 0:
+                                k_tew = w_em / (2.0 * w_sc)
+                                scatter_k_tew = k_tew
+                                notes.append(
+                                    f"TEW: EM [{lo1:.0f}-{hi1:.0f}] keV (W={w_em:.0f}), "
+                                    f"SC [{lo2:.0f}-{hi2:.0f}] keV (W={w_sc:.0f}) -> k={k_tew:.3f}."
+                                )
                 except Exception:
                     pass
         else:
@@ -388,6 +406,39 @@ def load_raw_projections(path: str, *, _skip_scatter: bool = False) -> RawGatedP
                     if same_shape or sc_ungated_ok:
                         scatter_projections = sc_raw.projections
                         scatter_path = sc_sibling
+                        # TEW con archivos hermanos: las ventanas energéticas de
+                        # cada archivo están en su propio EnergyWindowRangeSequence.
+                        # k = W_EM / (2 * W_SC). Si alguno no lo trae, queda None.
+                        try:
+                            def _window_width(_ds):
+                                # EnergyWindowInformationSequence (0054,0012) -> [0] ->
+                                # EnergyWindowRangeSequence (0054,0013) -> [0] -> Lower/UpperLimit.
+                                _ewi = _get(_ds, (0x0054, 0x0012), None)
+                                if _ewi is not None and len(_ewi) >= 1:
+                                    _ews = _get(_ewi[0], (0x0054, 0x0013), None)
+                                    if _ews is not None and len(_ews) >= 1:
+                                        _lo = float(_get(_ews[0], (0x0054, 0x0014), 0) or 0)
+                                        _hi = float(_get(_ews[0], (0x0054, 0x0015), 0) or 0)
+                                        if _hi > _lo:
+                                            return _hi - _lo
+                                return None
+                            w_em = _window_width(ds)
+                            # El hermano SC se re-lee solo para su ventana (barato:
+                            # es un archivo chico de cabecera + pixel data).
+                            w_sc = None
+                            try:
+                                _sc_ds = pydicom.dcmread(sc_sibling, stop_before_pixels=True)
+                                w_sc = _window_width(_sc_ds)
+                            except Exception:
+                                pass
+                            if w_em is not None and w_sc is not None and w_sc > 0:
+                                scatter_k_tew = w_em / (2.0 * w_sc)
+                                notes.append(
+                                    f"TEW (hermanos): W_EM={w_em:.0f} keV, W_SC={w_sc:.0f} keV "
+                                    f"-> k={scatter_k_tew:.3f}."
+                                )
+                        except Exception:
+                            pass
                         kind = "gated" if same_shape else "no gatillado (se reparte por gates)"
                         notes.append(
                             f"Ventana de SCATTER detectada y cargada: {os.path.basename(sc_sibling)} "
@@ -425,6 +476,7 @@ def load_raw_projections(path: str, *, _skip_scatter: bool = False) -> RawGatedP
         source_path=path,
         scatter_projections=scatter_projections,
         scatter_path=scatter_path,
+        scatter_k_tew=scatter_k_tew,
         patient_name=str(_get(ds, (0x0010, 0x0010), "") or ""),
         patient_id=str(_get(ds, (0x0010, 0x0020), "") or ""),
         study_description=str(_get(ds, (0x0008, 0x1030), "") or ""),

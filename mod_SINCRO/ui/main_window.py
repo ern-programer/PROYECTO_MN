@@ -999,6 +999,14 @@ class MainWindow(QMainWindow):
 			"Abre una vista separada para inspección visual de imagen, ROIs y bordes en modo asincrónico.\n"
 			"No reemplaza el flujo actual: conserva la ventana principal y añade una vista de revisión independiente."
 		)
+		self.lv_3d_btn = QPushButton("VI 3D")
+		self.lv_3d_btn.clicked.connect(self.open_lv_3d_window)
+		self.lv_3d_btn.setToolTip(
+			"Abre el panel 3D del ventrículo: miocardio sólido (isosuperficie del SA reorientado) "
+			"a la izquierda y la malla alambre del VI (ECTb) a la derecha, con ED fija y el gate "
+			"actual animado en cine sincronizado. Rotación/zoom con el mouse. Exporta GIF/AVI.\n"
+			"Requiere estudio gated procesado con FEVI (ECTb) calculado."
+		)
 		button_row.addWidget(self.process_btn, 0, 0)
 		button_row.addWidget(self.pdf_btn, 0, 1)
 		button_row.addWidget(self.restart_btn, 0, 2)
@@ -1021,6 +1029,7 @@ class MainWindow(QMainWindow):
 		button_row.addWidget(self.ectb_window_btn, 4, 0, 1, 3)
 		button_row.addWidget(self.gqc_window_btn, 5, 0, 1, 3)
 		button_row.addWidget(self.asynchrony_review_btn, 6, 0, 1, 3)
+		button_row.addWidget(self.lv_3d_btn, 7, 0, 1, 3)
 		# Ubicar Acciones justo debajo de la versión y la barra de progreso.
 		insert_at = self._sidebar_layout.indexOf(self._progress_bar) + 1
 		self._sidebar_layout.insertWidget(insert_at, button_box)
@@ -3862,6 +3871,176 @@ class MainWindow(QMainWindow):
 		window.sync_from_main()
 		return window
 
+	def _polar_perfusion_map_for_3d(self):
+		"""Construye el mapa polar numérico para 3D aunque el render avanzado esté omitido."""
+		cache = getattr(self, "_polar_perf_cart_cache", None) or {}
+		cached = cache.get("polar_map")
+		if cached is not None and np.asarray(cached).size:
+			return np.asarray(cached, dtype=np.float64)
+		if self.study is None or self.seg is None:
+			return None
+		cube = np.asarray(getattr(self.study, "cube", None), dtype=np.float64)
+		mask = np.asarray(getattr(self.seg, "mask", None), dtype=bool)
+		centers = np.asarray(getattr(self.seg, "center_per_slice", None), dtype=np.float64)
+		if cube.ndim != 4 or mask.ndim != 3 or cube.shape[1:] != mask.shape:
+			return None
+		if centers.shape != (mask.shape[0], 2):
+			return None
+
+		ungated = cube.sum(axis=0)
+		valid_slices = np.where(mask.reshape(mask.shape[0], -1).any(axis=1))[0]
+		profiles = []
+		for s in valid_slices:
+			mask_s = mask[int(s)]
+			cy, cx = centers[int(s)]
+			if not (np.isfinite(cy) and np.isfinite(cx)):
+				continue
+			ys, xs = np.nonzero(mask_s)
+			if ys.size == 0:
+				continue
+			vals = ungated[int(s), ys, xs]
+			ang = (np.degrees(np.arctan2(ys - cy, xs - cx)) + 360.0) % 360.0
+			bins = np.floor(ang).astype(np.int32) % 360
+			profile = np.full(360, np.nan, dtype=np.float64)
+			for b in range(360):
+				vb = vals[bins == b]
+				if vb.size:
+					profile[b] = float(np.percentile(vb, 70))
+			finite = np.isfinite(profile)
+			if not finite.any():
+				continue
+			if not finite.all():
+				x = np.arange(360)
+				xv = x[finite]
+				yv = profile[finite]
+				profile[~finite] = np.interp(
+					x[~finite], np.concatenate([xv - 360, xv, xv + 360]),
+					np.concatenate([yv, yv, yv]),
+				)
+			profiles.append(profile)
+		if len(profiles) < 2:
+			return None
+
+		profiles_arr = np.asarray(profiles, dtype=np.float64)
+		nr, nt = 220, 360
+		polar_map = np.empty((nr, nt), dtype=np.float64)
+		for ir in range(nr):
+			t = (ir / max(1, nr - 1)) * (profiles_arr.shape[0] - 1)
+			i0 = int(np.floor(t))
+			i1 = min(i0 + 1, profiles_arr.shape[0] - 1)
+			a = float(t - i0)
+			polar_map[ir] = (1.0 - a) * profiles_arr[i0] + a * profiles_arr[i1]
+		mx = float(np.nanmax(polar_map))
+		if not np.isfinite(mx) or mx <= 0.0:
+			return None
+		polar_map = np.clip(polar_map / mx, 0.0, 1.0)
+		try:
+			from scipy.ndimage import gaussian_filter
+			strength = float(self.polar_perf_smooth_strength_spin.value())
+			polar_map = gaussian_filter(
+				polar_map, sigma=(max(0.05, strength), max(0.05, strength * 0.60)),
+				mode=("nearest", "wrap"),
+			)
+		except Exception:
+			pass
+		rotation = int(getattr(self, "polar_rotation_spin", None).value()) if hasattr(self, "polar_rotation_spin") else 0
+		if rotation:
+			polar_map = np.roll(polar_map, shift=rotation % 360, axis=1)
+		if getattr(self, "_polar_perf_cart_cache", None) is None:
+			self._polar_perf_cart_cache = {}
+		self._polar_perf_cart_cache["polar_map"] = polar_map
+		return polar_map
+
+	def open_lv_3d_window(self):
+		"""Abre el panel 3D del VI (miocardio sólido + malla alambre ECTb).
+
+		Necesita: estudio gated procesado (cube reorientado a eje corto) + FEVI
+		ECTb calculado (el resultado completo queda cacheado en
+		``self._ectb_last_result`` la última vez que corrió ``_estimate_lv_ef_ectb``).
+		Si el cache no existe (p.ej. recién cargado y nunca se refrescó el resumen),
+		se calcula al vuelo acá.
+		"""
+		if self.study is None:
+			self._log("[3D] No hay estudio cargado.")
+			return None
+		res = getattr(self, "_ectb_last_result", None)
+		if res is None or not getattr(res, "available", False):
+			# Calcular FEVI ECTb al vuelo (llena el cache si tiene éxito).
+			self._estimate_lv_ef_ectb()
+			res = getattr(self, "_ectb_last_result", None)
+		if res is None or not getattr(res, "available", False):
+			reason = str(getattr(res, "reason", "") or "FEVI ECTb no disponible")
+			self._log(f"[3D] No se puede abrir el panel 3D: {reason}")
+			QMessageBox.information(
+				self, "SINCRO — VI 3D",
+				"El panel 3D necesita un estudio gated procesado con FEVI (ECTb) calculado.\n"
+				f"Motivo: {reason}",
+			)
+			return None
+
+		cube = getattr(self.study, "cube", None)
+		pixel_spacing = getattr(self.study, "pixel_spacing", None) or (1.0, 1.0)
+		slice_mm = float(getattr(self.study, "z_spacing_mm", None) or 1.0)
+		spacing = (slice_mm, float(pixel_spacing[0]), float(pixel_spacing[1]))
+
+		# El 3D necesita el volumen RECONSTRUIDO (no el crudo). Si el estudio es
+		# crudo y nunca se reconstruyó, no hay volumen para samplear actividad.
+		recon = getattr(self, "cine_crudo_recon_result", None)
+		if recon is None or getattr(recon, "gated_volume", None) is None:
+			self._log("[3D] No hay volumen reconstruido. Reconstruí el estudio primero.")
+			QMessageBox.information(
+				self, "SINCRO — VI 3D",
+				"El panel 3D necesita un estudio RECONSTRUIDO (no crudo).\n"
+				"Usá 'Recon raw' o 'Reconstruir selección' primero, después abrí el 3D."
+			)
+			return None
+
+		from core.lv_mesh import lv_meshes_from_ectb
+		try:
+			# Shape del volumen SA reorientado (para alinear la cáscara al samplear).
+			volume_shape = None
+			if recon is not None and getattr(recon, "gated_volume", None) is not None:
+				volume_shape = tuple(int(v) for v in recon.gated_volume.shape[1:])
+			lv = lv_meshes_from_ectb(
+				res, slice_mm, surface="endo",
+				seg=self.seg, pixel_mm=(float(pixel_spacing[0]), float(pixel_spacing[1])),
+				volume_shape=volume_shape,
+			)
+		except Exception as exc:
+			self._log(f"[3D] No se pudo construir la malla del VI: {exc}")
+			return None
+
+		from ui.lv_3d_panel import LV3DDialog
+		cmap = str(getattr(self, "cine_crudo_screen_cmap", "odyssey_cool") or "odyssey_cool")
+		# Volumen de actividad para mapear sobre la cáscara: el GATED reconstruido
+		# (suma de gates = ungated) tiene mejor SNR y la misma geometría de pared.
+		myo_volume = None
+		if recon is not None and getattr(recon, "gated_volume", None) is not None:
+			import numpy as _np
+			myo_volume = _np.asarray(recon.gated_volume, dtype=_np.float64).sum(axis=0)
+
+		# Usar el mapa polar REAL ya calculado por el pipeline. No fabricar un
+		# mapa sintético al abrir 3D: además de no representar al paciente, ese
+		# cálculo podía dejar la ventana pesada o inestable.
+		polar_map = self._polar_perfusion_map_for_3d()
+
+		dlg = LV3DDialog(
+			self,
+			lv_meshes=lv,
+			myo_volume=myo_volume,
+			spacing_mm=spacing,
+			cmap_name=cmap,
+			ectb_result=res,
+			seg=self.seg,
+			pixel_mm=(float(pixel_spacing[0]), float(pixel_spacing[1])),
+			polar_map=polar_map,
+		)
+		dlg.show()
+		dlg.raise_()
+		dlg.activateWindow()
+		self._lv_3d_window = dlg
+		return dlg
+
 	def _refresh_gqc_window(self):
 		"""Recalcula el panel GQC si está abierto (tras cargar o reprocesar)."""
 		window = getattr(self, "_gqc_window", None)
@@ -4762,8 +4941,15 @@ class MainWindow(QMainWindow):
 			if _sc is not None:
 				self.cine_crudo_scatter_check.setEnabled(True)
 				self.cine_crudo_scatter_k_spin.setEnabled(True)
+				# Si el DICOM trae las ventanas de energía, el loader calculó el
+				# k de TEW (W_EM / (2*W_SC)). Usarlo como default del spin: es
+				# físicamente mejor que el 1.0 a ciegas. El usuario puede cambiarlo.
+				_k_tew = getattr(self.study, "scatter_k_tew", None)
+				if _k_tew is not None and float(_k_tew) > 0:
+					self.cine_crudo_scatter_k_spin.setValue(float(_k_tew))
 				sc_name = os.path.basename(str(getattr(self.study, "scatter_path", "") or "?_SC"))
-				self._log(f"Ventana de scatter detectada: {sc_name} (misma geometría que EM).")
+				_k_msg = f" (k TEW={float(_k_tew):.3f} de las ventanas del DICOM)" if _k_tew else ""
+				self._log(f"Ventana de scatter detectada: {sc_name} (misma geometría que EM){_k_msg}.")
 				ans = QMessageBox.question(
 					self, "SINCRO — Scatter EM/SC",
 					f"Se detectó un archivo de SCATTER hermano:\n{sc_name}\n\n"
@@ -8022,6 +8208,10 @@ class MainWindow(QMainWindow):
 		if not res.available:
 			return unavailable(res.reason)
 
+		# Cachear el resultado completo (con radios endo/epi por gate) para el
+		# panel 3D del VI: la malla alambre ED/ES se construye de acá.
+		self._ectb_last_result = res
+
 		payload: dict[str, object | None] = {
 			"available": True,
 			"method": "ectb_max_counts",
@@ -10263,6 +10453,7 @@ class MainWindow(QMainWindow):
 			self._polar_perf_cart_cache = {
 				"raw": cart_raw,
 				"smooth": cart_smooth,
+				"polar_map": polar_map_smooth,
 				"label": str(study_context_label),
 				"rotation_deg": int(rotation_deg),
 				"smooth_desc": f"{self.polar_perf_smooth_method_combo.currentText()} {smooth_strength:.2f}",
