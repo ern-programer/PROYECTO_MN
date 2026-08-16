@@ -443,6 +443,10 @@ def myocardium_shell_mesh(
         endo = endo * flatten[:, None]
         epi = epi * flatten[:, None]
 
+    # Espesor muscular apical de referencia ANTES del afinado geométrico. El
+    # taper modifica la silueta externa, pero no debe adelgazar el músculo.
+    apex_wall_reference_mm = float(np.nanmedian(np.maximum(epi[0] - endo[0], 0.0)))
+
     # Afinado apical conservador. Los primeros contornos ECTb todavía
     # pertenecen a cortes con pared visible y suelen tener un radio grande;
     # extrapolarlos sin transición produce el aspecto de "barril". Este
@@ -465,44 +469,70 @@ def myocardium_shell_mesh(
         except Exception:
             centers = np.zeros((len(z), 2), dtype=np.float64)
 
+    # Endocardio y epicardio comparten Z en los cortes medidos, pero tendrán
+    # cierres apicales distintos: el epicardio llega a la punta externa y la
+    # cavidad endocárdica termina más proximal, dejando músculo entre ambos.
+    z_endo = z.copy()
+
     # Cierre apical progresivo con anillos virtuales. Así la punta converge
     # suavemente y no aparece la tapa plana con triángulos radiales.
     n_apex = max(0, int(apex_virtual_rings))
+    apex_epi_target = None
+    apex_endo_target = None
     if n_apex and endo.shape[0] >= 2:
         dz_apex = abs(float(z[1] - z[0])) if len(z) > 1 else 1.0
+        wall_apex_mm = float(np.clip(apex_wall_reference_mm, 4.0, 12.0))
         endo_extra = []
         epi_extra = []
-        z_extra = []
+        z_epi_extra = []
+        z_endo_extra = []
         c_extra = []
         # Orden distal→proximal: radios y Z crecen monótonamente hacia el
         # primer corte real. La versión anterior insertaba estos anillos en
         # orden Z inverso, cruzando caras y achatando la punta.
-        extension = 2.2 * dz_apex
-        for j in range(1, n_apex + 1):
-            frac = j / float(n_apex + 1)
-            scale = max(0.02, float(np.sin(0.5 * np.pi * frac) ** 2.2))
-            if j == 1:
-                # En el extremo distal endo y epi convergen prácticamente al
-                # mismo punto. Así la pared se cierra como una bala y no queda
-                # una tapa anular chata visible desde abajo.
-                tip_ring = 0.02 * epi[0]
-                endo_extra.append(tip_ring)
-                epi_extra.append(tip_ring.copy())
+        extension = max(2.2 * dz_apex, 1.35 * wall_apex_mm)
+        z_epi_tip = float(z[0] - extension)
+        z_endo_tip = float(z_epi_tip + wall_apex_mm)
+        for j in range(n_apex):
+            # Casquete circular muestreado por ÁNGULO, no por Z. Así se
+            # concentran anillos cerca del polo y los primeros triángulos no
+            # forman un pincho largo. r=R·sin(phi), z=R·(1-cos(phi)).
+            frac = j / float(n_apex)
+            phi = 0.5 * np.pi * frac
+            scale = float(np.sin(phi))
+            axial_frac = float(1.0 - np.cos(phi))
+            if j == 0:
+                # Dos puntos sobre el eje largo: punta epicárdica externa y
+                # cierre endocárdico más proximal. La separación axial es el
+                # espesor apical medido, no una tapa plana concéntrica.
+                endo_extra.append(np.zeros_like(endo[0]))
+                epi_extra.append(np.zeros_like(epi[0]))
             else:
                 endo_extra.append(endo[0] * scale)
                 epi_extra.append(epi[0] * scale)
-            z_extra.append(z[0] - extension * (1.0 - frac))
+            if j == 0:
+                z_epi_extra.append(z_epi_tip)
+                z_endo_extra.append(z_endo_tip)
+            else:
+                z_epi_extra.append(z_epi_tip + axial_frac * (z[0] - z_epi_tip))
+                z_endo_extra.append(z_endo_tip + axial_frac * (z[0] - z_endo_tip))
             c_extra.append(centers[0] + (centers[0] - centers[1]) * (1.0 - frac) * 0.35)
+        tip_center = np.asarray(c_extra[0], dtype=np.float64)
+        apex_epi_target = np.array([tip_center[0], tip_center[1], z_epi_tip], dtype=np.float64)
+        apex_endo_target = np.array([tip_center[0], tip_center[1], z_endo_tip], dtype=np.float64)
         endo = np.vstack([np.asarray(endo_extra), endo])
         epi = np.vstack([np.asarray(epi_extra), epi])
-        z = np.concatenate([np.asarray(z_extra), z])
+        z = np.concatenate([np.asarray(z_epi_extra), z])
+        z_endo = np.concatenate([np.asarray(z_endo_extra), z_endo])
         centers = np.vstack([np.asarray(c_extra), centers])
 
     n_slices, n_angles = endo.shape
 
-    pts_endo = radii_to_points(endo, z, n_angles, centers_mm=centers)
+    pts_endo = radii_to_points(endo, z_endo, n_angles, centers_mm=centers)
     pts_epi = radii_to_points(epi, z, n_angles, centers_mm=centers)
     n_ring = n_slices * n_angles
+    apex_epi_rings_target = pts_epi[:n_apex * n_angles].copy() if n_apex > 0 else None
+    apex_endo_rings_target = pts_endo[:n_apex * n_angles].copy() if n_apex > 0 else None
 
     # Puntos: primero todos los epicárdicos, después todos los endocárdicos.
     points = np.vstack([pts_epi, pts_endo])
@@ -548,6 +578,10 @@ def myocardium_shell_mesh(
     face_arr = np.hstack([np.asarray(f).ravel() for f in faces])
     mesh = pv.PolyData(points, face_arr)
     mesh.point_data["thickness"] = thickness
+    mesh.field_data["shell_n_ring"] = np.asarray([n_ring], dtype=np.int64)
+    mesh.field_data["shell_surface_cells"] = np.asarray(
+        [2 * (n_slices - 1) * n_angles], dtype=np.int64,
+    )
 
     # Ápex redondeado (opcional): reemplaza la tapa plana por una semiesfera
     # que cierra la punta suavemente. Se aplica DESPUÉS de construir la cáscara
@@ -559,19 +593,52 @@ def myocardium_shell_mesh(
     if smooth_iter > 0:
         mesh = _smooth_mesh_laplacian(mesh, n_iter=smooth_iter, relaxation=smooth_relax)
 
-    # El suavizado mueve por separado las caras epi y endo y puede volver a
-    # abrir unas décimas el anillo distal que acabamos de cerrar. Reunir sus
-    # pares después del smooth conserva una punta cerrada sin alterar el resto.
-    if n_apex > 0 and mesh.n_points >= 2 * n_ring:
+    # El suavizado puede abrir cada punto apical degenerado. Volver a colapsar
+    # cada anillo sobre su propio centro conserva DOS cierres: epi distal y
+    # endo proximal, manteniendo el espesor muscular longitudinal entre ambos.
+    if (n_apex > 0 and apex_epi_target is not None and apex_endo_target is not None
+            and apex_epi_rings_target is not None and apex_endo_rings_target is not None
+            and mesh.n_points >= 2 * n_ring):
         pts = np.asarray(mesh.points, dtype=np.float64).copy()
+        apex_count = n_apex * n_angles
+        # Preservar el casquete completo. Si solo se restaura el polo después
+        # del Laplaciano, los anillos vecinos suavizados quedan retraídos y se
+        # forma visualmente un pincho entre ambos.
+        pts[:apex_count] = apex_epi_rings_target
+        pts[n_ring:n_ring + apex_count] = apex_endo_rings_target
         tip_epi = np.arange(n_angles, dtype=np.int64)
         tip_endo = n_ring + tip_epi
-        joined = 0.5 * (pts[tip_epi] + pts[tip_endo])
-        pts[tip_epi] = joined
-        pts[tip_endo] = joined
+        pts[tip_epi] = apex_epi_target
+        pts[tip_endo] = apex_endo_target
         mesh.points = pts
+        tip_thickness = float(np.linalg.norm(apex_endo_target - apex_epi_target))
+        if "thickness" in mesh.point_data:
+            thickness_out = np.asarray(mesh.point_data["thickness"], dtype=np.float64).copy()
+            thickness_out[tip_epi] = tip_thickness
+            thickness_out[tip_endo] = tip_thickness
+            mesh.point_data["thickness"] = thickness_out
 
     return mesh
+
+
+def split_myocardium_shell(mesh):
+    """Separa una cáscara miocárdica en superficies epi y endocárdica.
+
+    Omite las tapas anulares: el epicardio queda como envolvente externa y el
+    endocardio como superficie de la cavidad. Esto permite transparentar u
+    ocultar el epi sin perder el endo.
+    """
+    try:
+        n_cells = int(np.asarray(mesh.field_data["shell_surface_cells"]).ravel()[0])
+    except Exception as exc:
+        raise ValueError("La malla no contiene metadatos de cáscara") from exc
+    epi = mesh.extract_cells(np.arange(0, n_cells, dtype=np.int64)).extract_surface(
+        algorithm="dataset_surface"
+    )
+    endo = mesh.extract_cells(np.arange(n_cells, 2 * n_cells, dtype=np.int64)).extract_surface(
+        algorithm="dataset_surface"
+    )
+    return epi, endo
 
 
 def _round_apex(mesh, z, endo, epi, n_angles):

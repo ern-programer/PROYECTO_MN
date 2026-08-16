@@ -22,7 +22,7 @@ import numpy as np
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QVBoxLayout, QPushButton, QLabel, QSpinBox,
-    QCheckBox, QComboBox, QFileDialog, QMessageBox, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QMessageBox, QWidget, QSlider,
 )
 from ui.cine_widget import RangeSlider, VerticalColorStrip
 
@@ -87,6 +87,8 @@ class LV3DDialog(QDialog):
 
         # Referencias a actores para poder actualizarlos sin recrear la escena.
         self._actor_myo = None
+        self._actor_epi = None
+        self._actor_endo = None
         self._actor_ed = None
         self._actor_gate = None
         self._meshes = lv_meshes["meshes"]
@@ -193,6 +195,19 @@ class LV3DDialog(QDialog):
         self.lbl_color_range = QLabel("0–100%")
         self.lbl_color_range.setAlignment(Qt.AlignmentFlag.AlignCenter)
         color_bar.addWidget(self.lbl_color_range)
+        color_bar.addSpacing(8)
+        color_bar.addWidget(QLabel("Transparencia epi"))
+        self.epi_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.epi_opacity_slider.setRange(0, 100)
+        self.epi_opacity_slider.setValue(100)
+        self.epi_opacity_slider.setToolTip(
+            "100%: epicardio sólido · 0%: oculta el epicardio y deja solo la cavidad endocárdica."
+        )
+        self.epi_opacity_slider.valueChanged.connect(self._on_epi_opacity_changed)
+        color_bar.addWidget(self.epi_opacity_slider)
+        self.lbl_epi_opacity = QLabel("Epi 100%")
+        self.lbl_epi_opacity.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        color_bar.addWidget(self.lbl_epi_opacity)
 
         # Contenedor de la escena 3D (lo llena _init_3d).
         self._3d_host = QWidget()
@@ -362,7 +377,7 @@ class LV3DDialog(QDialog):
         # Modo cáscara ECTb (default).
         if self._endo_radii is None or self._epi_radii is None:
             return
-        from core.lv_mesh import myocardium_shell_mesh, sample_volume_on_mesh
+        from core.lv_mesh import myocardium_shell_mesh, split_myocardium_shell
         try:
             shell = myocardium_shell_mesh(
                 self._endo_radii[self._gate],
@@ -374,7 +389,7 @@ class LV3DDialog(QDialog):
                 smooth_angular=1.0,   # quitar serrucho angular sin borrar asimetría
                 smooth_iter=6,
                 smooth_relax=0.04,
-                apex_virtual_rings=5,
+                apex_virtual_rings=9,
                 apex_taper=0.32,
             )
         except Exception:
@@ -414,51 +429,83 @@ class LV3DDialog(QDialog):
         except Exception:
             pass
 
+        try:
+            epi_mesh, endo_mesh = split_myocardium_shell(shell)
+            epi_mesh = epi_mesh.compute_normals(
+                point_normals=True, cell_normals=False,
+                split_vertices=False, consistent_normals=True,
+            )
+            endo_mesh = endo_mesh.compute_normals(
+                point_normals=True, cell_normals=False,
+                split_vertices=False, consistent_normals=True, auto_orient_normals=False,
+            )
+        except Exception:
+            return
+
         self._plotter.subplot(0, 0)
-        if self._actor_myo is None:
+        if self._actor_epi is None or self._actor_endo is None:
             if scalar_name is not None and scalar_name in shell.point_data:
                 vals = np.asarray(shell.point_data[scalar_name], dtype=np.float64)
                 clim = self._perfusion_clim(vals)
-                self._actor_myo = self._plotter.add_mesh(
-                    shell, scalars=scalar_name, cmap=self._cmap, clim=clim,
-                    smooth_shading=True, name="myo",
+                self._actor_epi = self._plotter.add_mesh(
+                    epi_mesh, scalars=scalar_name, cmap=self._cmap, clim=clim,
+                    smooth_shading=True, name="myo_epi",
                     ambient=0.3, diffuse=0.7, specular=0.2,
+                    show_scalar_bar=False, interpolate_before_map=True,
+                    opacity=float(self.epi_opacity_slider.value()) / 100.0,
+                )
+                self._actor_endo = self._plotter.add_mesh(
+                    endo_mesh, scalars=scalar_name, cmap=self._cmap, clim=clim,
+                    smooth_shading=True, name="myo_endo",
+                    ambient=0.25, diffuse=0.75, specular=0.15,
                     show_scalar_bar=False, interpolate_before_map=True,
                 )
             elif "thickness" in shell.point_data:
                 # Colorear por espesor de pared (mm). Más grueso = más frío
                 # (azul), más fino = más caliente (rojo). Es una medida física
                 # real que no depende del volumen ni de la alineación.
-                self._actor_myo = self._plotter.add_mesh(
-                    shell, scalars="thickness", cmap="coolwarm",
-                    smooth_shading=True, name="myo",
+                self._actor_epi = self._plotter.add_mesh(
+                    epi_mesh, scalars="thickness", cmap="coolwarm",
+                    smooth_shading=True, name="myo_epi",
                     ambient=0.3, diffuse=0.7, specular=0.2,
-                    show_scalar_bar=True,
-                    scalar_bar_args={"title": "Espesor (mm)", "color": "white"},
+                    show_scalar_bar=False,
+                    opacity=float(self.epi_opacity_slider.value()) / 100.0,
+                )
+                self._actor_endo = self._plotter.add_mesh(
+                    endo_mesh, color="#b91c1c", smooth_shading=True,
+                    name="myo_endo", ambient=0.25, diffuse=0.75, specular=0.15,
                 )
             else:
-                self._actor_myo = self._plotter.add_mesh(
-                    shell, color="#c0392b", smooth_shading=True, name="myo",
+                self._actor_epi = self._plotter.add_mesh(
+                    epi_mesh, color="#c0392b", smooth_shading=True, name="myo_epi",
                     ambient=0.3, diffuse=0.7, specular=0.2,
+                    opacity=float(self.epi_opacity_slider.value()) / 100.0,
+                )
+                self._actor_endo = self._plotter.add_mesh(
+                    endo_mesh, color="#7f1d1d", smooth_shading=True, name="myo_endo",
+                    ambient=0.25, diffuse=0.75, specular=0.15,
                 )
         else:
-            self._actor_myo.mapper.SetInputData(shell)
+            self._actor_epi.mapper.SetInputData(epi_mesh)
+            self._actor_endo.mapper.SetInputData(endo_mesh)
             # Al cambiar de gate VTK pierde la selección explícita del array y
             # podía colorear toda la superficie con un único valor. Reafirmar
             # perfusión + rango en cada frame mantiene el mismo LUT del estático.
             if scalar_name is not None and scalar_name in shell.point_data:
                 vals = np.asarray(shell.point_data[scalar_name], dtype=np.float64)
                 clim = self._perfusion_clim(vals)
-                mapper = self._actor_myo.mapper
-                mapper.SetScalarModeToUsePointFieldData()
-                mapper.SelectColorArray(scalar_name)
-                mapper.SetScalarRange(*clim)
-                mapper.ScalarVisibilityOn()
-                mapper.InterpolateScalarsBeforeMappingOn()
-            try:
-                self._actor_myo.mapper.Update()
-            except Exception:
-                pass
+                for actor in (self._actor_epi, self._actor_endo):
+                    mapper = actor.mapper
+                    mapper.SetScalarModeToUsePointFieldData()
+                    mapper.SelectColorArray(scalar_name)
+                    mapper.SetScalarRange(*clim)
+                    mapper.ScalarVisibilityOn()
+                    mapper.InterpolateScalarsBeforeMappingOn()
+            for actor in (self._actor_epi, self._actor_endo):
+                try:
+                    actor.mapper.Update()
+                except Exception:
+                    pass
         self._surface_status = polar_status
         self._update_info()
         self._plotter.render()
@@ -489,26 +536,38 @@ class LV3DDialog(QDialog):
         self.lbl_color_range.setText(f"{low}–{high}%")
         self._recreate_myo_actor()
 
-    def _recreate_myo_actor(self):
-        if self._plotter is not None and self._actor_myo is not None:
-            try:
-                self._plotter.subplot(0, 0)
-                self._plotter.remove_actor(self._actor_myo)
-            except Exception:
-                pass
+    def _on_epi_opacity_changed(self, value: int):
+        value = max(0, min(100, int(value)))
+        self.lbl_epi_opacity.setText(f"Epi {value}%")
+        if self._actor_epi is not None:
+            self._actor_epi.GetProperty().SetOpacity(float(value) / 100.0)
+            if self._plotter is not None:
+                self._plotter.render()
+
+    def _remove_myo_actors(self):
+        if self._plotter is not None:
+            for actor in (self._actor_myo, self._actor_epi, self._actor_endo):
+                if actor is not None:
+                    try:
+                        self._plotter.remove_actor(actor)
+                    except Exception:
+                        pass
         self._actor_myo = None
+        self._actor_epi = None
+        self._actor_endo = None
+
+    def _recreate_myo_actor(self):
+        if self._plotter is not None:
+            self._plotter.subplot(0, 0)
+        self._remove_myo_actors()
         self._rebuild_myo_surface()
 
     def _on_surface_mode_changed(self, _idx):
         # Al cambiar de modo, recrear la superficie (el actor puede tener
         # distintos datos: cáscara con actividad vs borde sin actividad).
-        if self._plotter is not None and self._actor_myo is not None:
-            try:
-                self._plotter.subplot(0, 0)
-                self._plotter.remove_actor(self._actor_myo)
-            except Exception:
-                pass
-        self._actor_myo = None
+        if self._plotter is not None:
+            self._plotter.subplot(0, 0)
+        self._remove_myo_actors()
         self._rebuild_myo_surface()
 
     def _toggle_play(self, on: bool):
