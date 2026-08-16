@@ -239,14 +239,6 @@ class LV3DDialog(QDialog):
         self._slab_controls = QWidget()
         slab_l = QVBoxLayout(self._slab_controls)
         slab_l.setContentsMargins(0, 6, 0, 0)
-        slab_l.addWidget(QLabel("Eje de corte:"))
-        self.combo_slab_axis = QComboBox()
-        self.combo_slab_axis.addItem("SA (horizontal)", "SA")
-        self.combo_slab_axis.addItem("HLA (sagital)", "HLA")
-        self.combo_slab_axis.addItem("VLA (coronal)", "VLA")
-        self.combo_slab_axis.setToolTip("Eje a lo largo del cual se apilan las fetas.")
-        self.combo_slab_axis.currentIndexChanged.connect(lambda: self._rebuild_myo_surface())
-        slab_l.addWidget(self.combo_slab_axis)
         slab_l.addWidget(QLabel("Separación"))
         self.slab_gap_slider = QSlider(Qt.Orientation.Horizontal)
         self.slab_gap_slider.setRange(0, 200)
@@ -695,77 +687,49 @@ class LV3DDialog(QDialog):
         self._rebuild_myo_surface()
 
     def _build_cortes_slabs(self):
-        """Renderiza el volumen SA como fetas 3D independientes."""
-        import pyvista as pv
+        """Renderiza el VI como fetas SA anulares (forma de corazón).
+
+        Cada feta es un anillo miocárdico extruido al espesor de corte,
+        usando los radios endo/epi del ECTb. No es un cubo: es la forma
+        real de la rodaja de miocardio en cada corte.
+        """
         if self._plotter is None:
             return
-        vol = self._myo_volume
-        if vol is None or not np.asarray(vol).size:
+        if self._endo_radii is None or self._epi_radii is None or self._z_positions is None:
             return
-        vol = np.asarray(vol, dtype=np.float64)
-        dz, dy, dx = (float(s) for s in self._spacing_mm)
+        from core.lv_mesh_slabs import ring_prism_mesh
 
-        # Elegir eje de apilamiento.
-        axis_key = str(self.combo_slab_axis.currentData()) if hasattr(self, "combo_slab_axis") else "SA"
-        if axis_key == "HLA":
-            # HLA: cortes sagitales a lo largo de X.
-            vol = np.transpose(vol, (2, 0, 1))  # (W, K, H) -> cortes en axis0
-            thickness = dx
-        elif axis_key == "VLA":
-            # VLA: cortes coronales a lo largo de Y.
-            vol = np.transpose(vol, (1, 0, 2))  # (H, K, W) -> cortes en axis0
-            thickness = dy
-        else:
-            # SA: cortes axiales a lo largo de Z.
-            thickness = dz
+        endo_all = self._endo_radii[self._gate]  # (n_slices, n_angles)
+        epi_all = self._epi_radii[self._gate]
+        z_pos = self._z_positions
+        n_slices = len(z_pos)
 
-        n_slices = vol.shape[0]
+        dz = float(self._spacing_mm[0])
         gap_frac = float(self.slab_gap_slider.value()) / 100.0 if hasattr(self, "slab_gap_slider") else 0.0
-        gap_mm = gap_frac * thickness * 2.0
-        total_step = thickness + gap_mm
-
-        # Centro del volumen para que las fetas queden centradas.
-        extent_k = n_slices * total_step
-        z_start = -extent_k / 2.0
+        gap_mm = gap_frac * dz * 2.0
 
         slab_actors = []
         self._plotter.subplot(0, 0)
         for k in range(n_slices):
-            sl = vol[k]
-            if float(np.nanmax(sl)) <= 0:
+            endo_r = endo_all[k]
+            epi_r = epi_all[k]
+            if float(np.nanmax(epi_r)) <= 0:
                 continue
-            h, w = sl.shape
-            # Crear ImageData con espesor real.
-            grid = pv.ImageData()
-            grid.dimensions = (w, h, 2)
-            grid.spacing = (dx, dy, thickness)
-            grid.origin = (
-                -0.5 * w * dx,
-                -0.5 * h * dy,
-                z_start + k * total_step,
-            )
-            sl3 = np.empty((2, h, w), dtype=np.float64)
-            sl3[0] = sl
-            sl3[1] = sl
-            grid.point_data["activity"] = sl3.ravel(order="F")
-            surf = grid.extract_surface()
-            if surf.n_points == 0:
+            zc = float(z_pos[k]) + gap_mm * (k - (n_slices - 1) / 2.0)
+            ring = ring_prism_mesh(endo_r, epi_r, zc, dz)
+            if ring is None or ring.n_points == 0:
                 continue
-            surf = surf.compute_normals(
-                point_normals=True, cell_normals=False,
-                split_vertices=False, consistent_normals=True,
-            )
-            vals = np.asarray(surf.point_data["activity"], dtype=np.float64)
-            clim = self._perfusion_clim(vals)
+            # Colorear por espesor de pared (medida física, no depende del volumen).
+            clim = (0.0, 15.0)  # rango típico de espesor miocárdico en mm
             actor = self._plotter.add_mesh(
-                surf, scalars="activity", cmap=self._cmap, clim=clim,
+                ring, scalars="thickness", cmap=self._cmap, clim=clim,
                 smooth_shading=True, name=f"slab_{k}",
                 ambient=0.3, diffuse=0.7, specular=0.2,
                 show_scalar_bar=False, interpolate_before_map=True,
             )
             slab_actors.append(actor)
         self._slab_actors = slab_actors
-        self._surface_status = f"{len(slab_actors)} fetas ({axis_key})"
+        self._surface_status = f"{len(slab_actors)} fetas SA (gate {self._gate + 1})"
         self._update_info()
         self._plotter.render()
 
