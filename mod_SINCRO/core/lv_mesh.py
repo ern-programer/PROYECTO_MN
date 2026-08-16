@@ -624,21 +624,29 @@ def myocardium_shell_mesh(
 def split_myocardium_shell(mesh):
     """Separa una cáscara miocárdica en superficies epi y endocárdica.
 
-    Incluye las tapas anulares (base y ápex) en el endocardio para que el
-    espesor de pared visible en la base NO desaparezca al transparentar el
-    epicardio. Las tapas conectan los anillos epi↔endo y son la superficie
-    que muestra el grosor muscular cuando se mira el corazón desde abajo.
+    Las tapas anulares (base y ápex) se agrupan con el epicardio: son la
+    superficie que muestra el grosor muscular cuando se mira el corazón desde
+    abajo. El slider de transparencia controla epi+tapas juntos, mientras que
+    el endocardio (cavidad) permanece siempre opaco.
+
+    Returns
+    -------
+    (epi_with_caps, endo) — dos pv.PolyData.
     """
     try:
         n_cells = int(np.asarray(mesh.field_data["shell_surface_cells"]).ravel()[0])
     except Exception as exc:
         raise ValueError("La malla no contiene metadatos de cáscara") from exc
-    epi = mesh.extract_cells(np.arange(0, n_cells, dtype=np.int64)).extract_surface(
+    # epi + tapas anulares (base y ápex): lo que el slider controla.
+    epi_idx = np.concatenate([
+        np.arange(0, n_cells, dtype=np.int64),
+        np.arange(2 * n_cells, mesh.n_cells, dtype=np.int64),
+    ])
+    epi = mesh.extract_cells(epi_idx).extract_surface(
         algorithm="dataset_surface"
     )
-    total = mesh.n_cells
-    endo_idx = np.arange(n_cells, total, dtype=np.int64)
-    endo = mesh.extract_cells(endo_idx).extract_surface(
+    # endocardio (cavidad): siempre opaco.
+    endo = mesh.extract_cells(np.arange(n_cells, 2 * n_cells, dtype=np.int64)).extract_surface(
         algorithm="dataset_surface"
     )
     return epi, endo
