@@ -169,6 +169,17 @@ class LV3DDialog(QDialog):
 
         root.addLayout(bar)
 
+        # Barra de vistas anatómicas.
+        view_bar = QHBoxLayout()
+        view_bar.addWidget(QLabel("Vista:"))
+        for label in ("Ápex", "Base", "Anterior", "Inferior", "Septal", "Lateral"):
+            btn = QPushButton(label)
+            btn.setFixedHeight(22)
+            btn.clicked.connect(lambda checked, name=label: self._set_view(name))
+            view_bar.addWidget(btn)
+        view_bar.addStretch(1)
+        root.addLayout(view_bar)
+
         # Motor de color lateral: el RangeSlider necesita recorrido vertical
         # real; en una barra horizontal de 54 px los dos handles se solapaban.
         color_side = QWidget()
@@ -315,6 +326,40 @@ class LV3DDialog(QDialog):
             )
         except Exception:
             pass
+
+    # ------------------------------------------------------------ vistas
+    def _set_view(self, name: str):
+        """Orienta la cámara hacia una vista anatómica estándar.
+
+        Convención SA: anterior=-Y, inferior=+Y, septal=-X, lateral=+X;
+        Z va de ápex a base.
+        """
+        if self._plotter is None or not self._meshes:
+            return
+        mesh = self._meshes[self._ed_gate]
+        xmin, xmax, ymin, ymax, zmin, zmax = (float(v) for v in mesh.bounds)
+        cx, cy, cz = 0.5 * (xmin + xmax), 0.5 * (ymin + ymax), 0.5 * (zmin + zmax)
+        diag = max(xmax - xmin, ymax - ymin, zmax - zmin, 1.0)
+        dist = diag * 1.8
+        # (view_vector, up_vector)
+        views = {
+            "Ápex":     (( 0,  0, -dist), ( 0, -1,  0)),
+            "Base":     (( 0,  0,  dist), ( 0, -1,  0)),
+            "Anterior": (( 0, -dist, 0), ( 0,  0,  1)),
+            "Inferior": (( 0,  dist, 0), ( 0,  0,  1)),
+            "Septal":   ((-dist, 0,  0), ( 0,  0,  1)),
+            "Lateral":  (( dist, 0,  0), ( 0,  0,  1)),
+        }
+        vec, up = views.get(name, ((0, -dist, 0), (0, 0, 1)))
+        cam_pos = (cx + vec[0], cy + vec[1], cz + vec[2])
+        focal = (cx, cy, cz)
+        for sp in ((0, 0), (0, 1)):
+            self._plotter.subplot(*sp)
+            self._plotter.camera.position = cam_pos
+            self._plotter.camera.focal_point = focal
+            self._plotter.camera.up = up
+            self._plotter.reset_camera_clipping_range()
+        self._plotter.render()
 
     # ------------------------------------------------------------ cine
     def _rebuild_myo_surface(self):
