@@ -624,9 +624,10 @@ def myocardium_shell_mesh(
 def split_myocardium_shell(mesh):
     """Separa una cáscara miocárdica en superficies epi y endocárdica.
 
-    Omite las tapas anulares: el epicardio queda como envolvente externa y el
-    endocardio como superficie de la cavidad. Esto permite transparentar u
-    ocultar el epi sin perder el endo.
+    Incluye las tapas anulares (base y ápex) en el endocardio para que el
+    espesor de pared visible en la base NO desaparezca al transparentar el
+    epicardio. Las tapas conectan los anillos epi↔endo y son la superficie
+    que muestra el grosor muscular cuando se mira el corazón desde abajo.
     """
     try:
         n_cells = int(np.asarray(mesh.field_data["shell_surface_cells"]).ravel()[0])
@@ -635,7 +636,9 @@ def split_myocardium_shell(mesh):
     epi = mesh.extract_cells(np.arange(0, n_cells, dtype=np.int64)).extract_surface(
         algorithm="dataset_surface"
     )
-    endo = mesh.extract_cells(np.arange(n_cells, 2 * n_cells, dtype=np.int64)).extract_surface(
+    total = mesh.n_cells
+    endo_idx = np.arange(n_cells, total, dtype=np.int64)
+    endo = mesh.extract_cells(endo_idx).extract_surface(
         algorithm="dataset_surface"
     )
     return epi, endo
