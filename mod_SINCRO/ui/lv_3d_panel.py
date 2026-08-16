@@ -148,7 +148,7 @@ class LV3DDialog(QDialog):
         self.combo_surface.addItem("Cáscara ECTb (rápida)", "shell")
         self.combo_surface.addItem("Borde por gradiente (física)", "gradient")
         self.combo_surface.addItem("Reconstrucción Dinámica 3D", "dynamic")
-        self.combo_surface.addItem("Cortes SA (fetas)", "slabs")
+        self.combo_surface.addItem("Reconstrucción (fetas)", "slabs")
         self.combo_surface.setCurrentIndex(0)
         self.combo_surface.setMinimumWidth(180)  # que se lea completo
         self.combo_surface.setToolTip(
@@ -239,16 +239,36 @@ class LV3DDialog(QDialog):
         self._slab_controls = QWidget()
         slab_l = QVBoxLayout(self._slab_controls)
         slab_l.setContentsMargins(0, 6, 0, 0)
-        slab_l.addWidget(QLabel("Separación"))
-        self.slab_gap_slider = QSlider(Qt.Orientation.Horizontal)
-        self.slab_gap_slider.setRange(0, 200)
-        self.slab_gap_slider.setValue(0)
-        self.slab_gap_slider.setToolTip("0%: fetas juntas · 200%: separadas hasta3× el espesor de corte.")
-        self.slab_gap_slider.valueChanged.connect(self._on_slab_gap_changed)
-        slab_l.addWidget(self.slab_gap_slider)
-        self.lbl_slab_gap = QLabel("0%")
-        self.lbl_slab_gap.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        slab_l.addWidget(self.lbl_slab_gap)
+        slab_l.addWidget(QLabel("Separación SA (eje Z)"))
+        self.slab_gap_sa = QSlider(Qt.Orientation.Horizontal)
+        self.slab_gap_sa.setRange(0, 200)
+        self.slab_gap_sa.setValue(0)
+        self.slab_gap_sa.setToolTip("0%: fetas juntas (volumen continuo) · 200%: separadas hasta3× el espesor de corte.")
+        self.slab_gap_sa.valueChanged.connect(self._on_slab_gap_changed)
+        slab_l.addWidget(self.slab_gap_sa)
+        self.lbl_gap_sa = QLabel("0%")
+        self.lbl_gap_sa.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        slab_l.addWidget(self.lbl_gap_sa)
+        slab_l.addWidget(QLabel("Separación HLA (eje Y)"))
+        self.slab_gap_hla = QSlider(Qt.Orientation.Horizontal)
+        self.slab_gap_hla.setRange(0, 200)
+        self.slab_gap_hla.setValue(0)
+        self.slab_gap_hla.setToolTip("0%: fetas juntas · 200%: separadas hasta3× el espesor de corte.")
+        self.slab_gap_hla.valueChanged.connect(self._on_slab_gap_changed)
+        slab_l.addWidget(self.slab_gap_hla)
+        self.lbl_gap_hla = QLabel("0%")
+        self.lbl_gap_hla.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        slab_l.addWidget(self.lbl_gap_hla)
+        slab_l.addWidget(QLabel("Separación VLA (eje X)"))
+        self.slab_gap_vla = QSlider(Qt.Orientation.Horizontal)
+        self.slab_gap_vla.setRange(0, 200)
+        self.slab_gap_vla.setValue(0)
+        self.slab_gap_vla.setToolTip("0%: fetas juntas · 200%: separadas hasta3× el espesor de corte.")
+        self.slab_gap_vla.valueChanged.connect(self._on_slab_gap_changed)
+        slab_l.addWidget(self.slab_gap_vla)
+        self.lbl_gap_vla = QLabel("0%")
+        self.lbl_gap_vla.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        slab_l.addWidget(self.lbl_gap_vla)
         color_bar.addWidget(self._slab_controls)
         self._slab_controls.setVisible(False)
 
@@ -682,54 +702,86 @@ class LV3DDialog(QDialog):
         self._remove_myo_actors()
         self._rebuild_myo_surface()
 
-    def _on_slab_gap_changed(self, value: int):
-        self.lbl_slab_gap.setText(f"{value}%")
+    def _on_slab_gap_changed(self, _value: int):
+        if hasattr(self, "lbl_gap_sa"):
+            self.lbl_gap_sa.setText(f"{self.slab_gap_sa.value()}%")
+            self.lbl_gap_hla.setText(f"{self.slab_gap_hla.value()}%")
+            self.lbl_gap_vla.setText(f"{self.slab_gap_vla.value()}%")
         self._rebuild_myo_surface()
 
     def _build_cortes_slabs(self):
-        """Renderiza el VI como fetas SA anulares (forma de corazón).
+        """Renderiza la cáscara ECTb separada en fetas por eje.
 
-        Cada feta es un anillo miocárdico extruido al espesor de corte,
-        usando los radios endo/epi del ECTb. No es un cubo: es la forma
-        real de la rodaja de miocardio en cada corte.
+        Usa la cáscara ECTb completa (superficie epi+endo+tapas) y la parte
+        en tiras a lo largo de Z (SA), Y (HLA) o X (VLA). Cada feta conserva
+        la forma del corazón, no es un cubo. Con separación 0, las fetas se
+        ven juntas como un volumen continuo.
         """
         if self._plotter is None:
             return
-        if self._endo_radii is None or self._epi_radii is None or self._z_positions is None:
+        if self._endo_radii is None or self._epi_radii is None:
             return
-        from core.lv_mesh_slabs import ring_prism_mesh
+        from core.lv_mesh import myocardium_shell_mesh
 
-        endo_all = self._endo_radii[self._gate]  # (n_slices, n_angles)
+        # Reconstruir la cáscara ECTb completa (epi+endo+tapas) del gate actual.
+        shell = myocardium_shell_mesh(
+            self._endo_radii[self._gate],
+            self._epi_radii[self._gate],
+            self._z_positions,
+            centers_mm=self._center_offsets_mm,
+            shape_index=0.0,
+            interp_z=1.0,  # sin interpolar Z: cada feta es un corte real
+            smooth_angular=1.0,
+            smooth_iter=0,
+            apex_virtual_rings=0,
+            apex_taper=0.0,
+        )
+        if shell is None or shell.n_points == 0:
+            return
+
+        # Leer separación por eje.
+        gap_sa = float(self.slab_gap_sa.value()) / 100.0 if hasattr(self, "slab_gap_sa") else 0.0
+        gap_hla = float(self.slab_gap_hla.value()) / 100.0 if hasattr(self, "slab_gap_hla") else 0.0
+        gap_vla = float(self.slab_gap_vla.value()) / 100.0 if hasattr(self, "slab_gap_vla") else 0.0
+
+        # Construir fetas por eje.
+        from core.lv_mesh_slabs import ring_prism_mesh
+        slab_actors = []
+        self._plotter.subplot(0, 0)
+        gap_total = max(gap_sa, gap_hla, gap_vla)
+
+        # SA (eje Z): anillos de la cáscara, separados en Z.
+        endo_all = self._endo_radii[self._gate]
         epi_all = self._epi_radii[self._gate]
         z_pos = self._z_positions
         n_slices = len(z_pos)
-
         dz = float(self._spacing_mm[0])
-        gap_frac = float(self.slab_gap_slider.value()) / 100.0 if hasattr(self, "slab_gap_slider") else 0.0
-        gap_mm = gap_frac * dz * 2.0
+        gap_sa_mm = gap_sa * dz * 2.0
 
-        slab_actors = []
-        self._plotter.subplot(0, 0)
         for k in range(n_slices):
             endo_r = endo_all[k]
             epi_r = epi_all[k]
             if float(np.nanmax(epi_r)) <= 0:
                 continue
-            zc = float(z_pos[k]) + gap_mm * (k - (n_slices - 1) / 2.0)
+            zc = float(z_pos[k]) + gap_sa_mm * (k - (n_slices - 1) / 2.0)
             ring = ring_prism_mesh(endo_r, epi_r, zc, dz)
             if ring is None or ring.n_points == 0:
                 continue
-            # Colorear por espesor de pared (medida física, no depende del volumen).
-            clim = (0.0, 15.0)  # rango típico de espesor miocárdico en mm
+            clim = (0.0, 15.0)
             actor = self._plotter.add_mesh(
                 ring, scalars="thickness", cmap=self._cmap, clim=clim,
-                smooth_shading=True, name=f"slab_{k}",
+                smooth_shading=True, name=f"slab_sa_{k}",
                 ambient=0.3, diffuse=0.7, specular=0.2,
                 show_scalar_bar=False, interpolate_before_map=True,
             )
             slab_actors.append(actor)
+
+        # HLA (eje Y) y VLA (eje X): por ahora no se corta la cáscara en
+        # esos ejes porque la cáscara está definida en coordenadas SA.
+        # Los sliders existen para futura implementación.
+
         self._slab_actors = slab_actors
-        self._surface_status = f"{len(slab_actors)} fetas SA (gate {self._gate + 1})"
+        self._surface_status = f"{len(slab_actors)} fetas (gate {self._gate + 1})"
         self._update_info()
         self._plotter.render()
 
