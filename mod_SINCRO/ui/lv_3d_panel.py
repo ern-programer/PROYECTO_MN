@@ -91,6 +91,7 @@ class LV3DDialog(QDialog):
         self._actor_endo = None
         self._actor_ed = None
         self._actor_gate = None
+        self._slab_actors = []
         self._meshes = lv_meshes["meshes"]
         self._surface_status = "sin mapa polar"
 
@@ -147,6 +148,7 @@ class LV3DDialog(QDialog):
         self.combo_surface.addItem("Cáscara ECTb (rápida)", "shell")
         self.combo_surface.addItem("Borde por gradiente (física)", "gradient")
         self.combo_surface.addItem("Reconstrucción Dinámica 3D", "dynamic")
+        self.combo_surface.addItem("Cortes SA (fetas)", "slabs")
         self.combo_surface.setCurrentIndex(0)
         self.combo_surface.setMinimumWidth(180)  # que se lea completo
         self.combo_surface.setToolTip(
@@ -156,7 +158,9 @@ class LV3DDialog(QDialog):
             "muestra la actividad real del volumen.\n"
             "Reconstrucción Dinámica 3D: reconstruye el volumen del miocardio desde la "
             "segmentación ECTb por gate (sin fondo), apila los cortes en Z y genera la "
-            "isosuperficie. Es la pared exacta del VI latiendo, sin fondo ni hígado."
+            "isosuperficie. Es la pared exacta del VI latiendo, sin fondo ni hígado.\n"
+            "Cortes SA: muestra cada feta tomográfica como un prisma 3D coloreado por "
+            "actividad. Permite separar las fetas para ver la distribución interna."
         )
         self.combo_surface.currentIndexChanged.connect(self._on_surface_mode_changed)
         bar.addWidget(self.combo_surface)
@@ -230,6 +234,31 @@ class LV3DDialog(QDialog):
         self.lbl_epi_opacity = QLabel("Epi 100%")
         self.lbl_epi_opacity.setAlignment(Qt.AlignmentFlag.AlignCenter)
         color_bar.addWidget(self.lbl_epi_opacity)
+
+        # Controles de fetas (visibles solo en modo "Cortes SA").
+        self._slab_controls = QWidget()
+        slab_l = QVBoxLayout(self._slab_controls)
+        slab_l.setContentsMargins(0, 6, 0, 0)
+        slab_l.addWidget(QLabel("Eje de corte:"))
+        self.combo_slab_axis = QComboBox()
+        self.combo_slab_axis.addItem("SA (horizontal)", "SA")
+        self.combo_slab_axis.addItem("HLA (sagital)", "HLA")
+        self.combo_slab_axis.addItem("VLA (coronal)", "VLA")
+        self.combo_slab_axis.setToolTip("Eje a lo largo del cual se apilan las fetas.")
+        self.combo_slab_axis.currentIndexChanged.connect(lambda: self._rebuild_myo_surface())
+        slab_l.addWidget(self.combo_slab_axis)
+        slab_l.addWidget(QLabel("Separación"))
+        self.slab_gap_slider = QSlider(Qt.Orientation.Horizontal)
+        self.slab_gap_slider.setRange(0, 200)
+        self.slab_gap_slider.setValue(0)
+        self.slab_gap_slider.setToolTip("0%: fetas juntas · 200%: separadas hasta3× el espesor de corte.")
+        self.slab_gap_slider.valueChanged.connect(self._on_slab_gap_changed)
+        slab_l.addWidget(self.slab_gap_slider)
+        self.lbl_slab_gap = QLabel("0%")
+        self.lbl_slab_gap.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        slab_l.addWidget(self.lbl_slab_gap)
+        color_bar.addWidget(self._slab_controls)
+        self._slab_controls.setVisible(False)
 
         # Contenedor de la escena 3D (lo llena _init_3d).
         self._3d_host = QWidget()
@@ -440,6 +469,10 @@ class LV3DDialog(QDialog):
             self._plotter.render()
             return
 
+        if mode == "slabs":
+            self._build_cortes_slabs()
+            return
+
         # Modo cáscara ECTb (default).
         if self._endo_radii is None or self._epi_radii is None:
             return
@@ -625,9 +658,16 @@ class LV3DDialog(QDialog):
                         self._plotter.remove_actor(actor)
                     except Exception:
                         pass
+            for actor in getattr(self, "_slab_actors", []):
+                if actor is not None:
+                    try:
+                        self._plotter.remove_actor(actor)
+                    except Exception:
+                        pass
         self._actor_myo = None
         self._actor_epi = None
         self._actor_endo = None
+        self._slab_actors = []
 
     def _recreate_myo_actor(self):
         if self._plotter is not None:
@@ -638,10 +678,96 @@ class LV3DDialog(QDialog):
     def _on_surface_mode_changed(self, _idx):
         # Al cambiar de modo, recrear la superficie (el actor puede tener
         # distintos datos: cáscara con actividad vs borde sin actividad).
+        mode = str(self.combo_surface.currentData()) if hasattr(self, "combo_surface") else "shell"
+        is_slabs = (mode == "slabs")
+        if hasattr(self, "_slab_controls"):
+            self._slab_controls.setVisible(is_slabs)
+        if hasattr(self, "epi_opacity_slider"):
+            self.epi_opacity_slider.setVisible(not is_slabs)
+            self.lbl_epi_opacity.setVisible(not is_slabs)
         if self._plotter is not None:
             self._plotter.subplot(0, 0)
         self._remove_myo_actors()
         self._rebuild_myo_surface()
+
+    def _on_slab_gap_changed(self, value: int):
+        self.lbl_slab_gap.setText(f"{value}%")
+        self._rebuild_myo_surface()
+
+    def _build_cortes_slabs(self):
+        """Renderiza el volumen SA como fetas 3D independientes."""
+        import pyvista as pv
+        if self._plotter is None:
+            return
+        vol = self._myo_volume
+        if vol is None or not np.asarray(vol).size:
+            return
+        vol = np.asarray(vol, dtype=np.float64)
+        dz, dy, dx = (float(s) for s in self._spacing_mm)
+
+        # Elegir eje de apilamiento.
+        axis_key = str(self.combo_slab_axis.currentData()) if hasattr(self, "combo_slab_axis") else "SA"
+        if axis_key == "HLA":
+            # HLA: cortes sagitales a lo largo de X.
+            vol = np.transpose(vol, (2, 0, 1))  # (W, K, H) -> cortes en axis0
+            thickness = dx
+        elif axis_key == "VLA":
+            # VLA: cortes coronales a lo largo de Y.
+            vol = np.transpose(vol, (1, 0, 2))  # (H, K, W) -> cortes en axis0
+            thickness = dy
+        else:
+            # SA: cortes axiales a lo largo de Z.
+            thickness = dz
+
+        n_slices = vol.shape[0]
+        gap_frac = float(self.slab_gap_slider.value()) / 100.0 if hasattr(self, "slab_gap_slider") else 0.0
+        gap_mm = gap_frac * thickness * 2.0
+        total_step = thickness + gap_mm
+
+        # Centro del volumen para que las fetas queden centradas.
+        extent_k = n_slices * total_step
+        z_start = -extent_k / 2.0
+
+        slab_actors = []
+        self._plotter.subplot(0, 0)
+        for k in range(n_slices):
+            sl = vol[k]
+            if float(np.nanmax(sl)) <= 0:
+                continue
+            h, w = sl.shape
+            # Crear ImageData con espesor real.
+            grid = pv.ImageData()
+            grid.dimensions = (w, h, 2)
+            grid.spacing = (dx, dy, thickness)
+            grid.origin = (
+                -0.5 * w * dx,
+                -0.5 * h * dy,
+                z_start + k * total_step,
+            )
+            sl3 = np.empty((2, h, w), dtype=np.float64)
+            sl3[0] = sl
+            sl3[1] = sl
+            grid.point_data["activity"] = sl3.ravel(order="F")
+            surf = grid.extract_surface()
+            if surf.n_points == 0:
+                continue
+            surf = surf.compute_normals(
+                point_normals=True, cell_normals=False,
+                split_vertices=False, consistent_normals=True,
+            )
+            vals = np.asarray(surf.point_data["activity"], dtype=np.float64)
+            clim = self._perfusion_clim(vals)
+            actor = self._plotter.add_mesh(
+                surf, scalars="activity", cmap=self._cmap, clim=clim,
+                smooth_shading=True, name=f"slab_{k}",
+                ambient=0.3, diffuse=0.7, specular=0.2,
+                show_scalar_bar=False, interpolate_before_map=True,
+            )
+            slab_actors.append(actor)
+        self._slab_actors = slab_actors
+        self._surface_status = f"{len(slab_actors)} fetas ({axis_key})"
+        self._update_info()
+        self._plotter.render()
 
     def _toggle_play(self, on: bool):
         self._playing = bool(on)
