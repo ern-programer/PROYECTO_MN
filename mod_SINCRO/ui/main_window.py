@@ -88,6 +88,7 @@ from core.robustness import (
 )
 from core.segmentation import segment_myocardium
 from report.report_generator import generate_report
+from report.html_report import generate_html_report
 from viz.histogram import build_phase_histogram, save_histogram
 from viz.polar_map import (
 	build_clinical_phase_panel,
@@ -945,6 +946,9 @@ class MainWindow(QMainWindow):
 		self.pdf_btn.setMenu(self.pdf_menu)
 		self.pdf_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 		self.pdf_btn.setToolTip("Abrir o guardar el informe PDF.")
+		self.open_html_btn = QPushButton("Abrir HTML")
+		self.open_html_btn.clicked.connect(self.open_html_report)
+		self.open_html_btn.setToolTip("Abre el informe clínico HTML autocontenido en el navegador.")
 		self.compare_stress_rest_btn = QPushButton("Comparar Rest/Stress")
 		self.compare_stress_rest_btn.clicked.connect(self.load_compare_study)
 		self.compare_stress_rest_btn.setToolTip(
@@ -1009,27 +1013,29 @@ class MainWindow(QMainWindow):
 		)
 		button_row.addWidget(self.process_btn, 0, 0)
 		button_row.addWidget(self.pdf_btn, 0, 1)
-		button_row.addWidget(self.restart_btn, 0, 2)
+		button_row.addWidget(self.open_html_btn, 0, 2)
+		button_row.addWidget(self.restart_btn, 0, 3)
 		button_row.setColumnStretch(0, 3)
 		button_row.setColumnStretch(1, 3)
-		button_row.setColumnStretch(2, 1)
+		button_row.setColumnStretch(2, 3)
+		button_row.setColumnStretch(3, 1)
 		compare_load_row = QHBoxLayout()
 		compare_load_row.setContentsMargins(0, 0, 0, 0)
 		compare_load_row.setSpacing(4)
 		compare_load_row.addWidget(self.compare_stress_rest_btn, 1)
 		compare_load_row.addWidget(self.load_one_or_two_btn, 1)
-		button_row.addLayout(compare_load_row, 1, 0, 1, 3)
-		button_row.addWidget(self.preparacion_btn, 2, 0, 1, 3)
+		button_row.addLayout(compare_load_row, 1, 0, 1, 4)
+		button_row.addWidget(self.preparacion_btn, 2, 0, 1, 4)
 		ungated_config_row = QHBoxLayout()
 		ungated_config_row.setContentsMargins(0, 0, 0, 0)
 		ungated_config_row.setSpacing(4)
 		ungated_config_row.addWidget(self.export_ungated_btn, 1)
 		ungated_config_row.addWidget(self.ui_config_btn, 1)
-		button_row.addLayout(ungated_config_row, 3, 0, 1, 3)
-		button_row.addWidget(self.ectb_window_btn, 4, 0, 1, 3)
-		button_row.addWidget(self.gqc_window_btn, 5, 0, 1, 3)
-		button_row.addWidget(self.asynchrony_review_btn, 6, 0, 1, 3)
-		button_row.addWidget(self.lv_3d_btn, 7, 0, 1, 3)
+		button_row.addLayout(ungated_config_row, 3, 0, 1, 4)
+		button_row.addWidget(self.ectb_window_btn, 4, 0, 1, 4)
+		button_row.addWidget(self.gqc_window_btn, 5, 0, 1, 4)
+		button_row.addWidget(self.asynchrony_review_btn, 6, 0, 1, 4)
+		button_row.addWidget(self.lv_3d_btn, 7, 0, 1, 4)
 		# Ubicar Acciones justo debajo de la versión y la barra de progreso.
 		insert_at = self._sidebar_layout.indexOf(self._progress_bar) + 1
 		self._sidebar_layout.insertWidget(insert_at, button_box)
@@ -11235,6 +11241,15 @@ class MainWindow(QMainWindow):
 			"report_cmap_bullseye": str(self.report_cmap_bullseye.currentText()),
 			"report_cmap_polar_perf": str(self.report_cmap_polar_perf.currentText()),
 			"intestinal_subtraction": self.intestinal_subtraction_info,
+			"ecg_ritmo": str(self.ecg_ritmo_combo.currentText()),
+			"ecg_fc": int(self.ecg_fc_spin.value()),
+			"ecg_qrs": int(self.ecg_qrs_spin.value()),
+			"ecg_qt": int(self.ecg_qt_spin.value()),
+			"ecg_bri": bool(self.ecg_bri_check.isChecked()),
+			"ecg_brd": bool(self.ecg_brd_check.isChecked()),
+			"ecg_marcapasos": bool(self.ecg_marcapasos_check.isChecked()),
+			"ecg_observaciones": str(getattr(self, "ecg_observaciones_text", "")),
+			"ecg_file_path": str(getattr(self, "ecg_file_path", "")),
 		}
 		vol = self._compute_volumes_ml()
 		ef = self._estimate_lv_ef()
@@ -11292,6 +11307,26 @@ class MainWindow(QMainWindow):
 			self._log(f"PDF actualizado: {pdf_path}")
 		except Exception as exc:
 			self._log(f"[WARN] No se pudo generar PDF integrado: {exc}")
+
+		# Generar informe HTML autocontenido.
+		try:
+			html_path = os.path.join(self.output_dir, "informe_sincro.html")
+			generate_html_report(
+				output_html=html_path,
+				output_dir=self.output_dir,
+				study=self.study,
+				seg=self.seg,
+				metrics=report_metrics,
+				territory=self.territory,
+				processing_params=params,
+				volumes=vol,
+				ef=ef,
+				stress_rest=stress_rest,
+				perfusion_phase_rows=perfusion_phase_rows,
+			)
+			self._log(f"HTML actualizado: {html_path}")
+		except Exception as exc:
+			self._log(f"[WARN] No se pudo generar HTML integrado: {exc}")
 
 	def _ensure_reports_generated(self):
 		if self.study is None or self.seg is None or self.metrics is None or self.territory is None:
@@ -17712,6 +17747,15 @@ class MainWindow(QMainWindow):
 			QMessageBox.information(self, "SINCRO", "Todavía no hay PDF generado en output_demo.")
 			return
 		QDesktopServices.openUrl(QUrl.fromLocalFile(pdf_path))
+
+	def open_html_report(self):
+		if not self._ensure_reports_generated():
+			return
+		html_path = os.path.join(self.output_dir, "informe_sincro.html")
+		if not os.path.exists(html_path):
+			QMessageBox.information(self, "SINCRO", "Todavía no hay HTML generado. Procesá un estudio primero.")
+			return
+		QDesktopServices.openUrl(QUrl.fromLocalFile(html_path))
 
 	def save_pdf_as(self):
 		import shutil
