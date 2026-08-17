@@ -9288,8 +9288,8 @@ class MainWindow(QMainWindow):
 
 		# --- Figura ----------------------------------------------------------
 		n_bulls = 2 * len(stages)  # fase + perfusión por etapa
-		fig = plt.figure(figsize=(6.6 if not dual else 12.6, 8.9), facecolor=style["fig_bg"])
-		gs = fig.add_gridspec(2, n_bulls, height_ratios=[1.15, 1.0], hspace=0.18, wspace=0.12)
+		fig = plt.figure(figsize=(6.6 if not dual else 12.6, 10.5), facecolor=style["fig_bg"])
+		gs = fig.add_gridspec(2, n_bulls, height_ratios=[1.0, 1.3], hspace=0.22, wspace=0.12)
 
 		phase_cmap = matplotlib.colormaps.get_cmap("twilight")
 		phase_norm = Normalize(vmin=0.0, vmax=360.0)
@@ -9363,15 +9363,15 @@ class MainWindow(QMainWindow):
 
 		table = ax_tbl.table(cellText=table_rows, colLabels=headers, loc="center", cellLoc="center")
 		table.auto_set_font_size(False)
-		table.set_fontsize(7.6)
-		table.scale(1.0, 1.28)
+		table.set_fontsize(8.0)
+		table.scale(1.0, 1.35)
 		n_cols = len(headers)
 		for (r_idx, c_idx), cell in table.get_celld().items():
-			cell.set_edgecolor(style["grid"])
-			cell.set_linewidth(0.6)
+			cell.set_edgecolor("#4a5568")
+			cell.set_linewidth(0.8)
 			if r_idx == 0:
-				cell.set_facecolor(style["ax_bg"])
-				cell.set_text_props(color=style["fg"], fontweight="bold")
+				cell.set_facecolor("#1a3a5c")
+				cell.set_text_props(color="#ffffff", fontweight="bold", fontsize=8.5)
 			else:
 				seg_id = r_idx  # fila r_idx (1..17) → segmento
 				bg = cell_bg[r_idx - 1]
@@ -9380,7 +9380,7 @@ class MainWindow(QMainWindow):
 					cell.set_text_props(color="#ffe9a8", fontweight="bold")
 				else:
 					cell.set_facecolor(bg)
-					cell.set_text_props(color=style["fg"])
+					cell.set_text_props(color="#e2e8f0", fontweight="normal")
 
 		# Título + leyenda.
 		src_label = self.perfusion_source_label()
@@ -10516,6 +10516,25 @@ class MainWindow(QMainWindow):
 			self._stamp_export_figure(fig_pp, active_cine_widget)
 			fig_pp.savefig(os.path.join(self.output_dir, "polar_perfusion_directa.png"), dpi=185, bbox_inches="tight", facecolor=fig_pp.get_facecolor())
 			plt.close(fig_pp)
+
+			# PNG solo con el mapa suavizado (para el informe HTML).
+			try:
+				fig_smooth = plt.figure(figsize=(7.0, 7.0), facecolor=perf_bg)
+				ax_s = fig_smooth.add_axes([0.02, 0.02, 0.96, 0.96])
+				ax_s.set_facecolor(perf_bg)
+				ax_s.set_aspect("equal")
+				ax_s.set_xticks([])
+				ax_s.set_yticks([])
+				im_s = ax_s.imshow(cart_smooth, cmap=cmap_polar_perf, vmin=0.0, vmax=1.0)
+				_annotate_polar_guides(ax_s, int(cart_smooth.shape[0]))
+				cbar_s = fig_smooth.colorbar(im_s, ax=ax_s, fraction=0.046, pad=0.03)
+				cbar_s.set_ticks([])
+				cbar_s.outline.set_edgecolor("white")
+				cbar_s.ax.set_facecolor(perf_bg)
+				fig_smooth.savefig(os.path.join(self.output_dir, "polar_perfusion_smooth.png"), dpi=150, bbox_inches="tight", facecolor=fig_smooth.get_facecolor())
+				plt.close(fig_smooth)
+			except Exception:
+				pass
 
 			# Cine polar gatillado por gate: genera GIF y un montaje estático para preview/PDF.
 			try:

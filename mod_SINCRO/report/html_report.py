@@ -561,13 +561,17 @@ def generate_html_report(
 </div>
 <div class="gallery">{mip_items}</div>''')
 
-    # Galería principal
+    # Galería principal - histograma y polar como featured (full box).
+    hist_tag = _img_tag(os.path.join(output_dir, "histograma.png"), "Histograma de fase", "featured-img")
+    if hist_tag:
+        visual_sections.append(f'<div class="featured">{hist_tag}<div class="caption">Histograma de fase: distribución temporal de activación mecánica por segmento.</div></div>')
+    polar_smooth = _img_tag(os.path.join(output_dir, "polar_perfusion_smooth.png"), "Mapa polar de perfusión (filtrado)", "featured-img")
+    if polar_smooth:
+        visual_sections.append(f'<div class="featured">{polar_smooth}<div class="caption">Mapa polar continuo de perfusión (filtrado). Apex en centro, base en borde.</div></div>')
+
     gallery_specs = [
         ("polar_map.png", "Mapa polar de fase AHA (17)"),
-        ("histograma.png", "Histograma de fase"),
-        ("polar_perfusion_directa.png", "Mapa polar continuo de perfusión"),
         ("bullseye_directo.png", "Bull's-eye segmentario AHA (perfusión)"),
-        ("guia_fase_vi.png", "Guía para fase VI (bullseye doble + tabla AHA)"),
         ("comparacion_ejes.png", "Comparación original vs reconstruido"),
         ("curva_fevi.png", "Curva FEVI preliminar"),
         ("curva_tac.png", "Curva de actividad por gate"),
@@ -581,6 +585,11 @@ def generate_html_report(
             gallery_items += f'<div class="gallery-item">{tag}<div class="caption">{caption}</div></div>'
     if gallery_items:
         visual_sections.append(f'<h3 style="color:var(--accent); margin:24px 0 12px;">Visualizaciones</h3><div class="gallery">{gallery_items}</div>')
+
+    # Guía fase VI con altura doble (para que la tabla sea legible).
+    guia_tag = _img_tag(os.path.join(output_dir, "guia_fase_vi.png"), "Guía para fase VI", "featured-img")
+    if guia_tag:
+        visual_sections.append(f'<div class="featured" style="max-height:1400px;">{guia_tag}<div class="caption">Guía para fase VI: bull\'s-eye doble (fase + perfusión/viabilidad) y tabla segmentaria AHA-17.</div></div>')
 
     # Vistas 3D (si fueron capturadas).
     td3d_gif = _gif_tag(os.path.join(output_dir, "3d_rotation.gif"), "Reconstrucción 3D rotación")
