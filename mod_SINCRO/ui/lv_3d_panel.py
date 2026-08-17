@@ -883,17 +883,14 @@ class LV3DDialog(QDialog):
         super().closeEvent(ev)
 
     def save_report_views(self, output_dir: str):
-        """Captura una vista 3D estándar (anterior) y la guarda como PNG para el informe.
-
-        Solo captura UNA vista para evitar el crash por manipulación repetida de
-        cámara + render + screenshot sobre el QtInteractor activo.
-        """
+        """Captura una vista 3D estándar (anterior) + GIF de rotación para el informe."""
         if self._plotter is None:
             return
         mesh = self._meshes[self._ed_gate] if self._meshes else None
         if mesh is None:
             return
         import os
+        import math
         try:
             xmin, xmax, ymin, ymax, zmin, zmax = (float(v) for v in mesh.bounds)
             cx, cy, cz = 0.5 * (xmin + xmax), 0.5 * (ymin + ymax), 0.5 * (zmin + zmax)
@@ -901,7 +898,9 @@ class LV3DDialog(QDialog):
             fp = np.asarray(cam.focal_point, dtype=np.float64)
             cp = np.asarray(cam.position, dtype=np.float64)
             dist = float(np.linalg.norm(cp - fp))
-            d = np.array([0.0, -1.0, 0.0])
+            from PyQt6.QtWidgets import QApplication
+
+            # Vista anterior estática.
             for sp in ((0, 0), (0, 1)):
                 self._plotter.subplot(*sp)
                 self._plotter.camera.position = (cx, cy - dist, cz)
@@ -909,11 +908,35 @@ class LV3DDialog(QDialog):
                 self._plotter.camera.up = (0, 0, 1)
                 self._plotter.reset_camera_clipping_range()
             self._plotter.render()
-            from PyQt6.QtWidgets import QApplication
             QApplication.processEvents()
             img = self._plotter.screenshot(transparent_background=False)
             if img is not None:
                 from PIL import Image
                 Image.fromarray(img).save(os.path.join(output_dir, "3d_anterior.png"), "PNG")
+
+            # GIF de rotación 360° (24 frames).
+            n_frames = 24
+            rot_frames = []
+            for i in range(n_frames):
+                angle = 2.0 * math.pi * i / n_frames
+                px = cx + dist * math.sin(angle)
+                py = cy - dist * math.cos(angle)
+                for sp in ((0, 0), (0, 1)):
+                    self._plotter.subplot(*sp)
+                    self._plotter.camera.position = (px, py, cz)
+                    self._plotter.camera.focal_point = (cx, cy, cz)
+                    self._plotter.camera.up = (0, 0, 1)
+                    self._plotter.reset_camera_clipping_range()
+                self._plotter.render()
+                QApplication.processEvents()
+                frame = self._plotter.screenshot(transparent_background=False)
+                if frame is not None:
+                    rot_frames.append(Image.fromarray(frame))
+            if len(rot_frames) >= 4:
+                rot_frames[0].save(
+                    os.path.join(output_dir, "3d_rotation.gif"),
+                    save_all=True, append_images=rot_frames[1:],
+                    duration=100, loop=0,
+                )
         except Exception:
             pass

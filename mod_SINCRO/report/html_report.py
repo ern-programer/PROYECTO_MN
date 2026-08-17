@@ -532,7 +532,12 @@ def generate_html_report(
         visual_sections.append(f'<div class="featured">{montage}<div class="caption">Montaje clínico: cortes SA/HLA/VLA reorientados, base→ápex.</div></div>')
     montage_gif = _gif_tag(os.path.join(output_dir, "sa_montage_cine.gif"), "Montaje clínico cine")
     if montage_gif:
-        visual_sections.append(f'<div class="featured" style="max-width:600px; margin:0 auto;">{montage_gif}<div class="caption">Montaje clínico cine (evolución por gate).</div></div>')
+        visual_sections.append(f'<div class="featured" style="max-width:900px; margin:0 auto;">{montage_gif}<div class="caption">Montaje clínico cine (evolución por gate).</div></div>')
+
+    # Panel funcional grande debajo del montaje cine.
+    panel_fn = _img_tag(os.path.join(output_dir, "panel_funcional_gated.png"), "Panel funcional gated", "featured-img")
+    if panel_fn:
+        visual_sections.append(f'<div class="featured" style="max-width:900px; margin:0 auto;">{panel_fn}<div class="caption">Panel funcional gated: ED/ES + curvas de volumen y fase.</div></div>')
 
     # MIPs crudas con selector de escala interactivo.
     mip_specs = [("raw_ap_mip.png", "AP (anterior)"), ("raw_oai_mip.png", "OAI 45°"), ("raw_ll_mip.png", "Lat. izquierda")]
@@ -559,11 +564,10 @@ def generate_html_report(
     # Galería principal
     gallery_specs = [
         ("polar_map.png", "Mapa polar de fase AHA (17)"),
-        ("polar_clinico.png", "Panel polar clínico (histograma + bullseye)"),
+        ("histograma.png", "Histograma de fase"),
         ("polar_perfusion_directa.png", "Mapa polar continuo de perfusión"),
         ("bullseye_directo.png", "Bull's-eye segmentario AHA (perfusión)"),
         ("guia_fase_vi.png", "Guía para fase VI (bullseye doble + tabla AHA)"),
-        ("panel_funcional_gated.png", "Panel funcional gated (ED/ES + curvas)"),
         ("comparacion_ejes.png", "Comparación original vs reconstruido"),
         ("curva_fevi.png", "Curva FEVI preliminar"),
         ("curva_tac.png", "Curva de actividad por gate"),
@@ -579,14 +583,18 @@ def generate_html_report(
         visual_sections.append(f'<h3 style="color:var(--accent); margin:24px 0 12px;">Visualizaciones</h3><div class="gallery">{gallery_items}</div>')
 
     # Vistas 3D (si fueron capturadas).
-    td_specs = [("3d_anterior.png", "Reconstrucción 3D — Vista anterior")]
-    td_items = ""
-    for fname, caption in td_specs:
-        tag = _img_tag(os.path.join(output_dir, fname), caption, "gallery-img")
-        if tag:
-            td_items += f'<div class="gallery-item">{tag}<div class="caption">{caption}</div></div>'
-    if td_items:
-        visual_sections.append(f'<h3 style="color:var(--accent); margin:24px 0 12px;">Reconstrucción 3D</h3><div class="gallery">{td_items}</div>')
+    td3d_gif = _gif_tag(os.path.join(output_dir, "3d_rotation.gif"), "Reconstrucción 3D rotación")
+    if td3d_gif:
+        visual_sections.append(f'<div class="featured" style="max-width:700px; margin:0 auto;">{td3d_gif}<div class="caption">Reconstrucción 3D del VI — rotación automática.</div></div>')
+    else:
+        td_specs = [("3d_anterior.png", "Reconstrucción 3D — Vista anterior")]
+        td_items = ""
+        for fname, caption in td_specs:
+            tag = _img_tag(os.path.join(output_dir, fname), caption, "gallery-img")
+            if tag:
+                td_items += f'<div class="gallery-item">{tag}<div class="caption">{caption}</div></div>'
+        if td_items:
+            visual_sections.append(f'<h3 style="color:var(--accent); margin:24px 0 12px;">Reconstrucción 3D</h3><div class="gallery">{td_items}</div>')
 
     # GIFs animados
     gif_specs = [
@@ -711,6 +719,23 @@ def generate_html_report(
   {interp_html}
 </div>
 
+</div>
+
+<div class="container" style="margin-top:32px;">
+  <div class="interpretation" style="border-color:var(--border); opacity:0.85;">
+    <h4 style="color:var(--fg-muted); font-size:0.9rem;">Referencias y definiciones</h4>
+    <ul style="font-size:0.8rem; color:var(--fg-muted);">
+      <li><b>AHA (American Heart Association):</b> modelo de 17 segmentos estándar para dividir el ventrículo izquierdo en regiones anatómicas comparables entre estudios y software.</li>
+      <li><b>Phase SD (°):</b> desviación estándar de la fase de activación mecánica por segmento. Mayor valor = mayor dispersión temporal = mayor probabilidad de asincronía.</li>
+      <li><b>Bandwidth (°):</b> ancho del histograma de fase (percentil 95%). Complementa Phase SD para evaluar dispersión.</li>
+      <li><b>Entropy (%):</b> entropía normalizada de Shannon del histograma de fase. Mide desorganización; mayor valor = peor sincronía.</li>
+      <li><b>FEVI:</b> fracción de eyección del ventrículo izquierdo (preliminar en SINCRO; no reemplaza software validado para cuantificación).</li>
+      <li><b>ECTb:</b> método de contorno elíptico para segmentación del VI y cálculo de volúmenes/FEVI.</li>
+      <li><b>Bullseye:</b> representación circular de los17segmentos AHA (ápex en el centro, base en el borde).</li>
+      <li><b>Denoise+:</b> filtro propio de SINCRO que aplica denoise bilateral del sinograma + realce por resta para abrir la cavidad y limpiar el fondo.</li>
+      <li><b>NÍTIDA (OmniRes):</b> recuperación de resolución iterativa (OSEM + prior MAP) para nitidez sin perder contraste.</li>
+    </ul>
+  </div>
 </div>
 
 <div class="footer">
