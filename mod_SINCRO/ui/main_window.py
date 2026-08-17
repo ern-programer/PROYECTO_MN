@@ -203,6 +203,7 @@ class MainWindow(QMainWindow):
 		self.polar_perf_view_perf_btn: QToolButton | None = None
 		self.polar_perf_view_cine_btn: QToolButton | None = None
 		self.polar_view_mode = "perfusion"  # "perfusion" | "cine" dentro de polar_perfusion_directa
+		self._report_editor_html = ""  # HTML del editor de informe (si se usó)
 		# Colormap de pantalla del mapa polar de perfusión (independiente del informe).
 		# Default = mismo cmap que el informe para no cambiar el look inicial.
 		self.polar_perf_screen_cmap = "odyssey_cool"
@@ -949,6 +950,8 @@ class MainWindow(QMainWindow):
 		self.html_menu = QMenu(self)
 		self.html_menu.addAction("Abrir HTML", self.open_html_report)
 		self.html_menu.addAction("Guardar HTML como...", self.save_html_as)
+		self.html_menu.addSeparator()
+		self.html_menu.addAction("Editor de informe...", self.open_report_editor)
 		self.html_btn = QToolButton()
 		self.html_btn.setText("HTML ▾")
 		self.html_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -11430,6 +11433,7 @@ class MainWindow(QMainWindow):
 				ef=ef,
 				stress_rest=stress_rest,
 				perfusion_phase_rows=perfusion_phase_rows,
+				editor_html=getattr(self, "_report_editor_html", ""),
 			)
 			self._log(f"HTML actualizado: {html_path}")
 		except Exception as exc:
@@ -17917,6 +17921,39 @@ class MainWindow(QMainWindow):
 			self.statusBar().showMessage(f"HTML guardado en: {dest}")
 		except Exception as exc:
 			QMessageBox.critical(self, "SINCRO", f"No se pudo guardar el HTML:\n{exc}")
+
+	def open_report_editor(self):
+		"""Abre el editor de informe clínico con formato rico."""
+		if self.study is None:
+			QMessageBox.information(self, "SINCRO", "Cargá un estudio primero.")
+			return
+		# Generar resumen ejecutivo si está disponible.
+		exec_html = ""
+		try:
+			from core.executive_summary import build_executive_summary
+			vol = self._compute_volumes_ml()
+			ef = self._estimate_lv_ef()
+			summary = build_executive_summary(
+				metrics=self.metrics, ef=ef, territory=self.territory,
+				volumes=vol, phase_label="Estudio",
+			)
+			if summary.get("available"):
+				sections = summary.get("sections", [])
+				exec_html = "".join(f"<p><b>{s['title']}.</b> {s['text']}</p>" for s in sections)
+		except Exception:
+			pass
+		from report.report_editor import ReportEditorDialog
+		patient_name = str(getattr(self.study, "patient_name", "") or "").strip() or "Paciente"
+		study_desc = str(getattr(self.study, "study_description", "") or "")
+		dlg = ReportEditorDialog(
+			self,
+			exec_summary=exec_html,
+			patient_name=patient_name,
+			study_desc=study_desc,
+		)
+		if dlg.exec():
+			self._report_editor_html = dlg.get_html()
+			self._log("Informe del editor guardado en memoria. Se incluirá en el próximo HTML.")
 
 	def save_pdf_as(self):
 		import shutil

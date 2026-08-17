@@ -378,6 +378,7 @@ def generate_html_report(
     ef: dict,
     stress_rest: dict | None = None,
     perfusion_phase_rows: list | None = None,
+    editor_html: str = "",
 ) -> str:
     """Genera un informe HTML clínico autocontenido.
 
@@ -735,12 +736,17 @@ def generate_html_report(
 {fevi_html}
 
 <div class="tabs">
-  <button class="tab-btn active" data-group="main" data-tab="tab-metrics">Métricas</button>
+  <button class="tab-btn active" data-group="main" data-tab="tab-informe">Informe</button>
+  <button class="tab-btn" data-group="main" data-tab="tab-metrics">Métricas</button>
   <button class="tab-btn" data-group="main" data-tab="tab-visual">Visualización</button>
   <button class="tab-btn" data-group="main" data-tab="tab-audit">Auditoría</button>
 </div>
 
-<div id="tab-metrics" class="tab-panel active" data-group="main">
+<div id="tab-informe" class="tab-panel active" data-group="main">
+{editor_html if editor_html else '<p style="color:var(--fg-muted); font-style:italic;">No se utilizó el editor de informe. Usá HTML ▾ → Editor de informe para escribir la interpretación clínica antes de generar el informe.</p>'}
+</div>
+
+<div id="tab-metrics" class="tab-panel" data-group="main">
   <h3 style="color:var(--accent); margin-bottom:16px;">Métricas principales</h3>
   {metrics_cards}
   {metrics_table}
