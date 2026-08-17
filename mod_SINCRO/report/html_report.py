@@ -590,12 +590,18 @@ def generate_html_report(
             duo += f'<div style="flex:1; min-width:0;"><img src="{hist_tag}" alt="Histograma de fase" style="width:100%; border-radius:var(--radius);"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Histograma de fase</div></div>'
         visual_sections.append(f'<div style="display:flex; gap:16px; margin:16px 0;">{duo}</div>')
 
-    polar_smooth = _img_tag(os.path.join(output_dir, "polar_perfusion_smooth.png"), "Mapa polar de perfusión (filtrado)", "featured-img")
-    if polar_smooth:
-        visual_sections.append(f'<div class="featured">{polar_smooth}<div class="caption">Mapa polar continuo de perfusión (filtrado). Apex en centro, base en borde.</div></div>')
+    # Polar perfusión + bullseye lado a lado.
+    polar_smooth_uri = _img_to_data_uri(os.path.join(output_dir, "polar_perfusion_smooth.png"))
+    bullseye_uri = _img_to_data_uri(os.path.join(output_dir, "bullseye_directo.png"))
+    if polar_smooth_uri or bullseye_uri:
+        duo2 = ""
+        if polar_smooth_uri:
+            duo2 += f'<div style="flex:1; min-width:0;"><img src="{polar_smooth_uri}" alt="Polar perfusión filtrado" style="width:100%; border-radius:var(--radius);"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Mapa polar continuo de perfusión (filtrado). Apex en centro, base en borde.</div></div>'
+        if bullseye_uri:
+            duo2 += f'<div style="flex:1; min-width:0;"><img src="{bullseye_uri}" alt="Bullseye AHA" style="width:100%; border-radius:var(--radius);"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Bull&#8217;s-eye segmentario AHA (perfusión)</div></div>'
+        visual_sections.append(f'<div style="display:flex; gap:16px; margin:16px 0;">{duo2}</div>')
 
     gallery_specs = [
-        ("bullseye_directo.png", "Bull's-eye segmentario AHA (perfusión)"),
         ("comparacion_ejes.png", "Comparación original vs reconstruido"),
         ("curva_fevi.png", "Curva FEVI preliminar"),
         ("curva_tac.png", "Curva de actividad por gate"),
