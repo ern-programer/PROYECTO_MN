@@ -585,10 +585,10 @@ def generate_html_report(
     if polar_fase_tag or hist_tag:
         duo = ""
         if polar_fase_tag:
-            duo += f'<div style="flex:1; min-width:0;"><img src="{polar_fase_tag}" alt="Mapa polar de fase AHA" style="width:100%; border-radius:var(--radius);"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Mapa polar de fase AHA (17)</div></div>'
+            duo += f'<div style="flex:1; min-width:0; display:flex; flex-direction:column;"><img src="{polar_fase_tag}" alt="Mapa polar de fase AHA" style="width:100%; border-radius:var(--radius); flex:1; object-fit:fill;"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Mapa polar de fase AHA (17)</div></div>'
         if hist_tag:
-            duo += f'<div style="flex:1; min-width:0;"><img src="{hist_tag}" alt="Histograma de fase" style="width:100%; border-radius:var(--radius);"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Histograma de fase</div></div>'
-        visual_sections.append(f'<div style="display:flex; gap:16px; margin:16px 0;">{duo}</div>')
+            duo += f'<div style="flex:1; min-width:0; display:flex; flex-direction:column;"><img src="{hist_tag}" alt="Histograma de fase" style="width:100%; border-radius:var(--radius); flex:1; object-fit:fill;"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Histograma de fase</div></div>'
+        visual_sections.append(f'<div style="display:flex; gap:16px; margin:16px 0; align-items:stretch;">{duo}</div>')
 
     # Polar perfusión + bullseye lado a lado.
     polar_smooth_uri = _img_to_data_uri(os.path.join(output_dir, "polar_perfusion_smooth.png"))
