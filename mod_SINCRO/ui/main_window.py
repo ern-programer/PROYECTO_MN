@@ -11202,6 +11202,55 @@ class MainWindow(QMainWindow):
 		except Exception as exc:
 			self._log(f"[WARN] Proyecciones AP/OAI/Lateral no generadas para PDF: {exc}")
 
+	def _write_filtered_mip_views_for_pdf(self):
+		"""Genera las mismas 3 proyecciones (AP, OAI 45°, Lat.izq) pero del volumen
+		reconstruido CON los filtros aplicados (Denoise+, NITIDA, Suavizar, etc.)."""
+		recon = getattr(self, "cine_crudo_recon_result", None)
+		if recon is None or getattr(recon, "gated_volume", None) is None:
+			return
+		try:
+			import matplotlib
+			matplotlib.use("Agg")
+			import matplotlib.pyplot as plt
+			from core.spect_geometry import reproject_view
+
+			vol = np.asarray(recon.gated_volume, dtype=np.float64)  # (gates, z, y, x)
+			ung = vol.sum(axis=0) if vol.ndim == 4 else vol  # (z, y, x)
+			raw = getattr(self, "cine_crudo_raw_study_for_recon", None) or self.study
+			start = getattr(raw, "start_angle", None)
+			rot = str(getattr(raw, "rotation_direction", "") or "")
+			sign = -1.0 if rot.upper().startswith("CW") else 1.0
+
+			if start is not None and ung.ndim == 3:
+				ap = reproject_view(ung, (float(start) + sign * 45.0) % 360.0)
+				oai = reproject_view(ung, (float(start) + sign * 90.0) % 360.0)
+				ll = reproject_view(ung, (float(start) + sign * 135.0) % 360.0)
+			else:
+				ap = ung.sum(axis=1) if ung.ndim == 3 else ung
+				oai = ap
+				ll = ung.sum(axis=2) if ung.ndim == 3 else ung
+
+			cmap_axes = str(self.report_cmap_axes.currentText())
+			for arr, fname, title in [
+				(ap, "filtered_ap_mip.png", "AP (filtrada)"),
+				(oai, "filtered_oai_mip.png", "OAI 45° (filtrada)"),
+				(ll, "filtered_ll_mip.png", "Lateral izq (filtrada)"),
+			]:
+				a = np.asarray(arr, dtype=np.float64)
+				p99 = float(np.percentile(a, 99.0)) if a.size else 0.0
+				a = np.clip(a / max(p99, 1e-8), 0.0, 1.0)
+				fig, axm = plt.subplots(figsize=(3.2, 4.4))
+				axm.set_facecolor("#020611")
+				axm.imshow(a, cmap=cmap_axes, interpolation="bicubic", aspect="equal")
+				axm.set_title(title, fontsize=10, fontweight="bold")
+				axm.set_xticks([])
+				axm.set_yticks([])
+				fig.tight_layout()
+				fig.savefig(os.path.join(self.output_dir, fname), dpi=150, bbox_inches="tight")
+				plt.close(fig)
+		except Exception as exc:
+			self._log(f"[WARN] MIPs filtradas no generadas: {exc}")
+
 	def _ensure_pdf_extra_images(self):
 		"""Fuerza las imágenes que en modo básico no se generan en la corrida rápida
 		pero deben ir sí o sí al PDF (guía fase VI, perfusión polar directa), genera

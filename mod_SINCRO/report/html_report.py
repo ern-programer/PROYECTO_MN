@@ -492,15 +492,23 @@ def generate_html_report(
     if montage_gif:
         visual_sections.append(f'<div class="featured" style="max-width:600px; margin:0 auto;">{montage_gif}<div class="caption">Montaje clínico cine (evolución por gate).</div></div>')
 
-    # MIPs
+    # MIPs crudas + filtradas
     mip_specs = [("raw_ap_mip.png", "AP"), ("raw_oai_mip.png", "OAI 45°"), ("raw_ll_mip.png", "Lat. izquierda")]
     mip_items = ""
     for fname, label in mip_specs:
         tag = _img_tag(os.path.join(output_dir, fname), f"MIP {label}", "gallery-img")
         if tag:
-            mip_items += f'<div class="gallery-item">{tag}<div class="caption">MIP {label}</div></div>'
+            mip_items += f'<div class="gallery-item">{tag}<div class="caption">MIP {label} (crudo)</div></div>'
     if mip_items:
         visual_sections.append(f'<h3 style="color:var(--accent); margin:24px 0 12px;">Proyecciones planares (crudo)</h3><div class="gallery">{mip_items}</div>')
+    filt_specs = [("filtered_ap_mip.png", "AP"), ("filtered_oai_mip.png", "OAI 45°"), ("filtered_ll_mip.png", "Lat. izquierda")]
+    filt_items = ""
+    for fname, label in filt_specs:
+        tag = _img_tag(os.path.join(output_dir, fname), f"MIP {label} filtrada", "gallery-img")
+        if tag:
+            filt_items += f'<div class="gallery-item">{tag}<div class="caption">MIP {label} (filtrada)</div></div>'
+    if filt_items:
+        visual_sections.append(f'<h3 style="color:var(--accent); margin:24px 0 12px;">Proyecciones planares (filtradas)</h3><div class="gallery">{filt_items}</div>')
 
     # Galería principal
     gallery_specs = [
@@ -526,13 +534,11 @@ def generate_html_report(
 
     # GIFs animados
     gif_specs = [
-        ("polar_cine.gif", "Polar cine gatillado (evolución por gate)", "25%"),
+        ("polar_cine.gif", "Polar cine gatillado (evolución por gate)"),
+        ("sa_montage_cine.gif", "Montaje clínico cine"),
     ]
     gif_items = ""
-    for fname, caption, max_w in gif_specs:
-        tag = _gif_tag(os.path.join(output_dir, fname), caption, "gallery-img")
-        if tag:
-            gif_items += f'<div class="gallery-item" style="max-width:{max_w}; margin:0 auto;">{tag}<div class="caption">{caption}</div></div>'
+    for fname, caption in gif_specs:
         tag = _gif_tag(os.path.join(output_dir, fname), caption, "gallery-img")
         if tag:
             gif_items += f'<div class="gallery-item">{tag}<div class="caption">{caption}</div></div>'
