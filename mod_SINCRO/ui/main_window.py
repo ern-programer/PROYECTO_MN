@@ -204,6 +204,7 @@ class MainWindow(QMainWindow):
 		self.polar_perf_view_cine_btn: QToolButton | None = None
 		self.polar_view_mode = "perfusion"  # "perfusion" | "cine" dentro de polar_perfusion_directa
 		self._report_editor_html = ""  # HTML del editor de informe (si se usó)
+		self._cached_exec_html = ""  # Resumen ejecutivo cacheado del pipeline
 		# Colormap de pantalla del mapa polar de perfusión (independiente del informe).
 		# Default = mismo cmap que el informe para no cambiar el look inicial.
 		self.polar_perf_screen_cmap = "odyssey_cool"
@@ -951,7 +952,9 @@ class MainWindow(QMainWindow):
 		self.html_menu.addAction("Abrir HTML", self.open_html_report)
 		self.html_menu.addAction("Guardar HTML como...", self.save_html_as)
 		self.html_menu.addSeparator()
-		self.html_menu.addAction("Editor de informe...", self.open_report_editor)
+		editor_action = self.html_menu.addAction("Editor de informe...", self.open_report_editor)
+		editor_action.setEnabled(False)
+		editor_action.setToolTip("Se habilita después de reorientar el estudio.")
 		self.html_btn = QToolButton()
 		self.html_btn.setText("HTML ▾")
 		self.html_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -11421,7 +11424,7 @@ class MainWindow(QMainWindow):
 		# Generar informe HTML autocontenido.
 		try:
 			html_path = os.path.join(self.output_dir, "informe_sincro.html")
-			generate_html_report(
+			_, exec_html_out = generate_html_report(
 				output_html=html_path,
 				output_dir=self.output_dir,
 				study=self.study,
@@ -11435,6 +11438,7 @@ class MainWindow(QMainWindow):
 				perfusion_phase_rows=perfusion_phase_rows,
 				editor_html=getattr(self, "_report_editor_html", ""),
 			)
+			self._cached_exec_html = exec_html_out or ""
 			self._log(f"HTML actualizado: {html_path}")
 		except Exception as exc:
 			self._log(f"[WARN] No se pudo generar HTML integrado: {exc}")
@@ -14589,6 +14593,12 @@ class MainWindow(QMainWindow):
 		finally:
 			self._undo_suspended = _prev_suspended
 		self._commit_undo("Reorientación", _undo_group, _undo_before, deep=False)
+		# Habilitar el editor de informe ahora que hay datos reorientados.
+		if hasattr(self, "html_menu"):
+			for action in self.html_menu.actions():
+				if "Editor" in action.text():
+					action.setEnabled(True)
+					break
 
 	def _generate_cine_crudo_cardiac_cuts(self):
 		"""Genera los cortes cardíacos desde el volumen reconstruido; SA alimenta fase/FEVI."""
@@ -17927,21 +17937,23 @@ class MainWindow(QMainWindow):
 		if self.study is None:
 			QMessageBox.information(self, "SINCRO", "Cargá un estudio primero.")
 			return
-		# Generar resumen ejecutivo si está disponible.
-		exec_html = ""
-		try:
-			from core.executive_summary import build_executive_summary
-			vol = self._compute_volumes_ml()
-			ef = self._estimate_lv_ef()
-			summary = build_executive_summary(
-				metrics=self.metrics, ef=ef, territory=self.territory,
-				volumes=vol, phase_label="Estudio",
-			)
-			if summary.get("available"):
-				sections = summary.get("sections", [])
-				exec_html = "".join(f"<p><b>{s['title']}.</b> {s['text']}</p>" for s in sections)
-		except Exception:
-			pass
+		# Usar el resumen ejecutivo cacheado del pipeline (mismo texto que el HTML).
+		exec_html = getattr(self, "_cached_exec_html", "")
+		if not exec_html:
+			# Fallback: generar si no hay caché (ej: editor antes de generar HTML).
+			try:
+				from core.executive_summary import build_executive_summary
+				vol = self._compute_volumes_ml()
+				ef = self._estimate_lv_ef()
+				summary = build_executive_summary(
+					metrics=self.metrics, ef=ef, territory=self.territory,
+					volumes=vol, phase_label="Estudio",
+				)
+				if summary.get("available"):
+					sections = summary.get("sections", [])
+					exec_html = "".join(f"<p><b>{s['title']}.</b> {s['text']}</p>" for s in sections)
+			except Exception:
+				pass
 		from report.report_editor import ReportEditorDialog
 		patient_name = str(getattr(self.study, "patient_name", "") or "").strip() or "Paciente"
 		study_desc = str(getattr(self.study, "study_description", "") or "")

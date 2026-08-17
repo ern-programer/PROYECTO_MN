@@ -802,7 +802,7 @@ def generate_html_report(
     with open(output_html, "wb") as f:
         f.write(html.encode("utf-8"))
 
-    return output_html
+    return output_html, exec_html
 
 
 def _build_table(headers: list[str], rows: list[tuple]) -> str:
