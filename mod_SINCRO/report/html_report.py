@@ -733,6 +733,7 @@ def generate_html_report(
       <li><b>ECTb:</b> método de contorno elíptico para segmentación del VI y cálculo de volúmenes/FEVI.</li>
       <li><b>Bullseye:</b> representación circular de los17segmentos AHA (ápex en el centro, base en el borde).</li>
       <li><b>Denoise+:</b> filtro propio de SINCRO que aplica denoise bilateral del sinograma + realce por resta para abrir la cavidad y limpiar el fondo.</li>
+      <li><b>FBP CLEAR:</b> filtro exclusivo de SINCRO para imágenes gated: denoise Poisson del sinograma + doble recon (nítida + difusa) + resta ponderada. Limpia el ruido de bajo conteo por gate sin perder la cavidad.</li>
       <li><b>NÍTIDA (OmniRes):</b> recuperación de resolución iterativa (OSEM + prior MAP) para nitidez sin perder contraste.</li>
     </ul>
   </div>
