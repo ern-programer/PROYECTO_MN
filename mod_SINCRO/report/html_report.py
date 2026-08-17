@@ -484,10 +484,13 @@ def generate_html_report(
     # --- Visualizaciones ---
     visual_sections = []
 
-    # Montaje SA (destacado)
+    # Montaje SA (destacado) + GIF cine debajo
     montage = _img_tag(os.path.join(output_dir, "sa_montage.png"), "Montaje clínico SA/HLA/VLA", "featured-img")
     if montage:
         visual_sections.append(f'<div class="featured">{montage}<div class="caption">Montaje clínico: cortes SA/HLA/VLA reorientados, base→ápex.</div></div>')
+    montage_gif = _gif_tag(os.path.join(output_dir, "sa_montage_cine.gif"), "Montaje clínico cine")
+    if montage_gif:
+        visual_sections.append(f'<div class="featured" style="max-width:600px; margin:0 auto;">{montage_gif}<div class="caption">Montaje clínico cine (evolución por gate).</div></div>')
 
     # MIPs
     mip_specs = [("raw_ap_mip.png", "AP"), ("raw_oai_mip.png", "OAI 45°"), ("raw_ll_mip.png", "Lat. izquierda")]
@@ -523,11 +526,13 @@ def generate_html_report(
 
     # GIFs animados
     gif_specs = [
-        ("polar_cine.gif", "Polar cine gatillado (evolución por gate)"),
-        ("montage_cine.gif", "Montaje clínico cine"),
+        ("polar_cine.gif", "Polar cine gatillado (evolución por gate)", "25%"),
     ]
     gif_items = ""
-    for fname, caption in gif_specs:
+    for fname, caption, max_w in gif_specs:
+        tag = _gif_tag(os.path.join(output_dir, fname), caption, "gallery-img")
+        if tag:
+            gif_items += f'<div class="gallery-item" style="max-width:{max_w}; margin:0 auto;">{tag}<div class="caption">{caption}</div></div>'
         tag = _gif_tag(os.path.join(output_dir, fname), caption, "gallery-img")
         if tag:
             gif_items += f'<div class="gallery-item">{tag}<div class="caption">{caption}</div></div>'

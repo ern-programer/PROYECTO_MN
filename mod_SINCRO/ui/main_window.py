@@ -14946,6 +14946,23 @@ class MainWindow(QMainWindow):
 				pix.save(os.path.join(self.output_dir, "sa_montage.png"), "PNG")
 			except Exception:
 				pass
+			# Generar GIF del montaje cine si hay frames cacheados.
+			try:
+				frames = getattr(self, "_montage_cine_frames", None) or []
+				if len(frames) >= 2:
+					from PIL import Image
+					pil_frames = []
+					for fpix in frames:
+						img = fpix.toImage()
+						buf = img.bits().asstring(img.sizeInBytes())
+						pil_frames.append(Image.frombuffer("RGBA", (img.width(), img.height()), buf, "raw", "BGRA"))
+					gif_path = os.path.join(self.output_dir, "sa_montage_cine.gif")
+					pil_frames[0].save(
+						gif_path, save_all=True, append_images=pil_frames[1:],
+						duration=int(self.polar_cine_speed_spin.value()), loop=0,
+					)
+			except Exception:
+				pass
 		if "comparacion_ejes" in self.preview_labels:
 			self.preview_pixmaps["comparacion_ejes"] = pix
 			self.preview_base_sizes["comparacion_ejes"] = self._montage_display_base_size(pix)
