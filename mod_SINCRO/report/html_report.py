@@ -579,16 +579,22 @@ def generate_html_report(
 </div>
 <div class="gallery">{mip_items}</div>''')
 
-    # Galería principal - histograma y polar como featured (full box).
-    hist_tag = _img_tag(os.path.join(output_dir, "histograma.png"), "Histograma de fase", "featured-img")
-    if hist_tag:
-        visual_sections.append(f'<div class="featured">{hist_tag}<div class="caption">Histograma de fase: distribución temporal de activación mecánica por segmento.</div></div>')
+    # Galería principal - polar fase + histograma lado a lado, luego polar perfusión.
+    polar_fase_tag = _img_to_data_uri(os.path.join(output_dir, "polar_map.png"))
+    hist_tag = _img_to_data_uri(os.path.join(output_dir, "histograma.png"))
+    if polar_fase_tag or hist_tag:
+        duo = ""
+        if polar_fase_tag:
+            duo += f'<div style="flex:1; min-width:0;"><img src="{polar_fase_tag}" alt="Mapa polar de fase AHA" style="width:100%; border-radius:var(--radius);"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Mapa polar de fase AHA (17)</div></div>'
+        if hist_tag:
+            duo += f'<div style="flex:1; min-width:0;"><img src="{hist_tag}" alt="Histograma de fase" style="width:100%; border-radius:var(--radius);"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Histograma de fase</div></div>'
+        visual_sections.append(f'<div style="display:flex; gap:16px; margin:16px 0;">{duo}</div>')
+
     polar_smooth = _img_tag(os.path.join(output_dir, "polar_perfusion_smooth.png"), "Mapa polar de perfusión (filtrado)", "featured-img")
     if polar_smooth:
         visual_sections.append(f'<div class="featured">{polar_smooth}<div class="caption">Mapa polar continuo de perfusión (filtrado). Apex en centro, base en borde.</div></div>')
 
     gallery_specs = [
-        ("polar_map.png", "Mapa polar de fase AHA (17)"),
         ("bullseye_directo.png", "Bull's-eye segmentario AHA (perfusión)"),
         ("comparacion_ejes.png", "Comparación original vs reconstruido"),
         ("curva_fevi.png", "Curva FEVI preliminar"),
