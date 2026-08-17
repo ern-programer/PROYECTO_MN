@@ -555,7 +555,7 @@ def generate_html_report(
         visual_sections.append(f'<h3 style="color:var(--accent); margin:24px 0 12px;">Visualizaciones</h3><div class="gallery">{gallery_items}</div>')
 
     # Vistas 3D (si fueron capturadas).
-    td_specs = [("3d_anterior.png", "3D Anterior"), ("3d_apex.png", "3D Ápex"), ("3d_lateral.png", "3D Lateral")]
+    td_specs = [("3d_anterior.png", "Reconstrucción 3D — Vista anterior")]
     td_items = ""
     for fname, caption in td_specs:
         tag = _img_tag(os.path.join(output_dir, fname), caption, "gallery-img")

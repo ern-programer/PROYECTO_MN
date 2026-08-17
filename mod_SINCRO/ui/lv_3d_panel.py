@@ -883,39 +883,37 @@ class LV3DDialog(QDialog):
         super().closeEvent(ev)
 
     def save_report_views(self, output_dir: str):
-        """Captura vistas 3D estándar y las guarda como PNG para el informe HTML."""
+        """Captura una vista 3D estándar (anterior) y la guarda como PNG para el informe.
+
+        Solo captura UNA vista para evitar el crash por manipulación repetida de
+        cámara + render + screenshot sobre el QtInteractor activo.
+        """
         if self._plotter is None:
             return
-        views = {
-            "3d_anterior": ("Anterior", (0, -1, 0), (0, 0, 1)),
-            "3d_apex": ("Ápex", (0, 0, -1), (0, -1, 0)),
-            "3d_lateral": ("Lateral", (1, 0, 0), (0, 0, 1)),
-        }
         mesh = self._meshes[self._ed_gate] if self._meshes else None
         if mesh is None:
             return
-        xmin, xmax, ymin, ymax, zmin, zmax = (float(v) for v in mesh.bounds)
-        cx, cy, cz = 0.5 * (xmin + xmax), 0.5 * (ymin + ymax), 0.5 * (zmin + zmax)
-        cam = self._plotter.camera
-        fp = np.asarray(cam.focal_point, dtype=np.float64)
-        cp = np.asarray(cam.position, dtype=np.float64)
-        dist = float(np.linalg.norm(cp - fp))
         import os
-        for fname, (label, d, up) in views.items():
-            try:
-                d = np.asarray(d, dtype=np.float64)
-                d /= max(np.linalg.norm(d), 1e-9)
-                for sp in ((0, 0), (0, 1)):
-                    self._plotter.subplot(*sp)
-                    self._plotter.camera.position = (cx + d[0] * dist, cy + d[1] * dist, cz + d[2] * dist)
-                    self._plotter.camera.focal_point = (cx, cy, cz)
-                    self._plotter.camera.up = up
-                    self._plotter.reset_camera_clipping_range()
-                self._plotter.render()
-                img = self._plotter.screenshot(transparent_background=False)
-                if img is not None:
-                    from PIL import Image
-                    pil = Image.fromarray(img)
-                    pil.save(os.path.join(output_dir, f"{fname}.png"), "PNG")
-            except Exception:
-                pass
+        try:
+            xmin, xmax, ymin, ymax, zmin, zmax = (float(v) for v in mesh.bounds)
+            cx, cy, cz = 0.5 * (xmin + xmax), 0.5 * (ymin + ymax), 0.5 * (zmin + zmax)
+            cam = self._plotter.camera
+            fp = np.asarray(cam.focal_point, dtype=np.float64)
+            cp = np.asarray(cam.position, dtype=np.float64)
+            dist = float(np.linalg.norm(cp - fp))
+            d = np.array([0.0, -1.0, 0.0])
+            for sp in ((0, 0), (0, 1)):
+                self._plotter.subplot(*sp)
+                self._plotter.camera.position = (cx, cy - dist, cz)
+                self._plotter.camera.focal_point = (cx, cy, cz)
+                self._plotter.camera.up = (0, 0, 1)
+                self._plotter.reset_camera_clipping_range()
+            self._plotter.render()
+            from PyQt6.QtWidgets import QApplication
+            QApplication.processEvents()
+            img = self._plotter.screenshot(transparent_background=False)
+            if img is not None:
+                from PIL import Image
+                Image.fromarray(img).save(os.path.join(output_dir, "3d_anterior.png"), "PNG")
+        except Exception:
+            pass

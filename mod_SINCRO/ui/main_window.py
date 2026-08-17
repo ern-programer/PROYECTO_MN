@@ -11419,7 +11419,7 @@ class MainWindow(QMainWindow):
 		if self.study is None or self.seg is None or self.metrics is None or self.territory is None:
 			QMessageBox.information(self, "SINCRO", "Primero procesá un estudio para generar informes.")
 			return False
-		self._set_progress(92, "Generando informe PDF...")
+		self._set_progress(92, "Generando informes (PDF + HTML)...")
 		self._generate_pdf_report()
 		self._set_progress(100, "Informes listos")
 		return True
