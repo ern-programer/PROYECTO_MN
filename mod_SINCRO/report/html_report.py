@@ -257,6 +257,16 @@ td.label { font-weight: 600; color: var(--accent); white-space: nowrap; min-widt
 }
 .bullseye-toggle button.active { background: var(--accent-dark); color: white; border-color: var(--accent); }
 
+/* MIP scale buttons */
+.mip-scale-bar { display: flex; gap: 6px; margin: 8px 0 12px; flex-wrap: wrap; }
+.mip-scale-btn {
+  padding: 6px 14px; background: var(--bg-card-alt); border: 1px solid var(--border);
+  color: var(--fg-muted); cursor: pointer; border-radius: 6px; font-size: 0.82rem;
+  transition: all 0.2s;
+}
+.mip-scale-btn:hover { background: rgba(56,189,248,0.1); color: var(--fg); }
+.mip-scale-btn.active { background: var(--accent-dark); color: white; border-color: var(--accent); }
+
 /* Interpretation */
 .interpretation {
   background: var(--bg-card); border-radius: var(--radius); padding: 20px;
@@ -325,6 +335,16 @@ document.querySelectorAll('.gallery-item, .featured img').forEach(item => {
 });
 lightbox.addEventListener('click', () => lightbox.classList.remove('open'));
 document.addEventListener('keydown', e => { if (e.key === 'Escape') lightbox.classList.remove('open'); });
+
+// MIP scale buttons
+document.querySelectorAll('.mip-scale-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.mip-scale-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const filter = btn.dataset.filter;
+    document.querySelectorAll('.mip-img').forEach(img => { img.style.filter = filter; });
+  });
+});
 
 // Bullseye toggle
 document.querySelectorAll('.bullseye-toggle button').forEach(btn => {
@@ -514,23 +534,27 @@ def generate_html_report(
     if montage_gif:
         visual_sections.append(f'<div class="featured" style="max-width:600px; margin:0 auto;">{montage_gif}<div class="caption">Montaje clínico cine (evolución por gate).</div></div>')
 
-    # MIPs crudas + filtradas
-    mip_specs = [("raw_ap_mip.png", "AP"), ("raw_oai_mip.png", "OAI 45°"), ("raw_ll_mip.png", "Lat. izquierda")]
+    # MIPs crudas con selector de escala interactivo.
+    mip_specs = [("raw_ap_mip.png", "AP (anterior)"), ("raw_oai_mip.png", "OAI 45°"), ("raw_ll_mip.png", "Lat. izquierda")]
     mip_items = ""
     for fname, label in mip_specs:
-        tag = _img_tag(os.path.join(output_dir, fname), f"MIP {label}", "gallery-img")
-        if tag:
-            mip_items += f'<div class="gallery-item">{tag}<div class="caption">MIP {label} (crudo)</div></div>'
+        uri = _img_to_data_uri(os.path.join(output_dir, fname))
+        if uri:
+            mip_id = fname.replace(".", "_")
+            mip_items += f'''<div class="gallery-item">
+  <img src="{uri}" alt="{label}" id="{mip_id}" class="mip-img" style="width:100%; filter: grayscale(1);">
+  <div class="caption">{label}</div>
+</div>'''
     if mip_items:
-        visual_sections.append(f'<h3 style="color:var(--accent); margin:24px 0 12px;">Proyecciones planares (crudo)</h3><div class="gallery">{mip_items}</div>')
-    filt_specs = [("filtered_ap_mip.png", "AP"), ("filtered_oai_mip.png", "OAI 45°"), ("filtered_ll_mip.png", "Lat. izquierda")]
-    filt_items = ""
-    for fname, label in filt_specs:
-        tag = _img_tag(os.path.join(output_dir, fname), f"MIP {label} filtrada", "gallery-img")
-        if tag:
-            filt_items += f'<div class="gallery-item">{tag}<div class="caption">MIP {label} (filtrada)</div></div>'
-    if filt_items:
-        visual_sections.append(f'<h3 style="color:var(--accent); margin:24px 0 12px;">Proyecciones planares (filtradas)</h3><div class="gallery">{filt_items}</div>')
+        visual_sections.append(f'''<h3 style="color:var(--accent); margin:24px 0 12px;">Proyecciones planares</h3>
+<div class="mip-scale-bar">
+  <button class="mip-scale-btn active" data-filter="grayscale(1)">Gris</button>
+  <button class="mip-scale-btn" data-filter="grayscale(0)">Original</button>
+  <button class="mip-scale-btn" data-filter="grayscale(1) sepia(1) hue-rotate(200deg) saturate(3)">Azul</button>
+  <button class="mip-scale-btn" data-filter="grayscale(1) sepia(1) hue-rotate(340deg) saturate(4)">Hot</button>
+  <button class="mip-scale-btn" data-filter="grayscale(1) invert(1)">Invertido</button>
+</div>
+<div class="gallery">{mip_items}</div>''')
 
     # Galería principal
     gallery_specs = [

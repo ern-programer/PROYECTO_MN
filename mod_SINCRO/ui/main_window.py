@@ -11256,11 +11256,6 @@ class MainWindow(QMainWindow):
 		pero deben ir sí o sí al PDF (guía fase VI, perfusión polar directa), genera
 		las MIP AP/Lateral y persiste el montaje clínico si está en memoria."""
 		self._write_raw_mip_views_for_pdf()
-		# MIPs filtradas (volumen reconstruido con filtros aplicados).
-		try:
-			self._write_filtered_mip_views_for_pdf()
-		except Exception as exc:
-			self._log(f"[WARN] MIPs filtradas no generadas: {exc}")
 		try:
 			self._write_outputs(target_tabs={"guia_fase_vi", "polar_perfusion_directa"})
 		except Exception as exc:
@@ -11279,6 +11274,10 @@ class MainWindow(QMainWindow):
 			pass
 		# Forzar generación del GIF del montaje cine (para el informe HTML).
 		try:
+			# Asegurar que el montaje esté renderizado antes de generar el GIF.
+			if str(getattr(self, "cine_crudo_preview_mode", "")) != "sa_montage":
+				self.cine_crudo_preview_mode = "sa_montage"
+				self._show_cine_crudo_sa_montage()
 			self._ensure_montage_cine_frames()
 			frames = getattr(self, "_montage_cine_frames", None) or []
 			if len(frames) >= 2:
@@ -11294,6 +11293,8 @@ class MainWindow(QMainWindow):
 					duration=int(self.polar_cine_speed_spin.value()), loop=0,
 				)
 				self._log(f"GIF montaje cine generado: {len(frames)} frames")
+			else:
+				self._log("[INFO] GIF montaje cine no generado: no hay suficientes frames.")
 		except Exception as exc:
 			self._log(f"[WARN] GIF montaje cine no generado: {exc}")
 		# Capturar vistas 3D si el panel está abierto.
