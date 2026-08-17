@@ -41,17 +41,39 @@ def _format_dicom_date(raw: str) -> str:
     return val or "N/D"
 
 
-def _img_to_data_uri(path: str) -> str:
-    """Convierte una imagen a data URI (base64 inline)."""
+def _img_to_data_uri(path: str, max_width: int = 900) -> str:
+    """Convierte una imagen a data URI (base64 inline), comprimiendo si es necesario.
+
+    Para PNGs grandes los re-escala a max_width px y guarda como JPEG (mucho más
+    liviano). Los GIFs se pasan tal cual (no se pueden recomprimir fácilmente).
+    """
     if not os.path.exists(path):
         return ""
     ext = os.path.splitext(path)[1].lower()
-    mime = {"png": "image/png", "gif": "image/gif", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(
-        ext.lstrip("."), "image/png"
-    )
-    with open(path, "rb") as f:
-        data = base64.b64encode(f.read()).decode("ascii")
-    return f"data:{mime};base64,{data}"
+    if ext == ".gif":
+        with open(path, "rb") as f:
+            data = base64.b64encode(f.read()).decode("ascii")
+        return f"data:image/gif;base64,{data}"
+    try:
+        from PIL import Image
+        img = Image.open(path)
+        w, h = img.size
+        if w > max_width:
+            ratio = max_width / w
+            img = img.resize((max_width, int(h * ratio)), Image.LANCZOS)
+        import io
+        buf = io.BytesIO()
+        # Convertir a RGB si tiene canal alfa (JPEG no soporta alpha).
+        if img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGB")
+        img.save(buf, format="JPEG", quality=78, optimize=True)
+        data = base64.b64encode(buf.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{data}"
+    except Exception:
+        with open(path, "rb") as f:
+            data = base64.b64encode(f.read()).decode("ascii")
+        mime = "image/png" if ext == ".png" else "image/jpeg"
+        return f"data:{mime};base64,{data}"
 
 
 def _img_tag(path: str, alt: str = "", css_class: str = "", max_w: str = "100%") -> str:
@@ -531,6 +553,16 @@ def generate_html_report(
             gallery_items += f'<div class="gallery-item">{tag}<div class="caption">{caption}</div></div>'
     if gallery_items:
         visual_sections.append(f'<h3 style="color:var(--accent); margin:24px 0 12px;">Visualizaciones</h3><div class="gallery">{gallery_items}</div>')
+
+    # Vistas 3D (si fueron capturadas).
+    td_specs = [("3d_anterior.png", "3D Anterior"), ("3d_apex.png", "3D Ápex"), ("3d_lateral.png", "3D Lateral")]
+    td_items = ""
+    for fname, caption in td_specs:
+        tag = _img_tag(os.path.join(output_dir, fname), caption, "gallery-img")
+        if tag:
+            td_items += f'<div class="gallery-item">{tag}<div class="caption">{caption}</div></div>'
+    if td_items:
+        visual_sections.append(f'<h3 style="color:var(--accent); margin:24px 0 12px;">Reconstrucción 3D</h3><div class="gallery">{td_items}</div>')
 
     # GIFs animados
     gif_specs = [

@@ -11296,6 +11296,14 @@ class MainWindow(QMainWindow):
 				self._log(f"GIF montaje cine generado: {len(frames)} frames")
 		except Exception as exc:
 			self._log(f"[WARN] GIF montaje cine no generado: {exc}")
+		# Capturar vistas 3D si el panel está abierto.
+		try:
+			lv3d = getattr(self, "_lv_3d_window", None)
+			if lv3d is not None and lv3d.isVisible():
+				lv3d.save_report_views(self.output_dir)
+				self._log("Vistas 3D capturadas para informe.")
+		except Exception as exc:
+			self._log(f"[WARN] Captura 3D no disponible: {exc}")
 
 	def _generate_pdf_report(self):
 		if self.study is None or self.seg is None or self.metrics is None or self.territory is None:
