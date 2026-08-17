@@ -946,9 +946,15 @@ class MainWindow(QMainWindow):
 		self.pdf_btn.setMenu(self.pdf_menu)
 		self.pdf_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 		self.pdf_btn.setToolTip("Abrir o guardar el informe PDF.")
-		self.open_html_btn = QPushButton("Abrir HTML")
-		self.open_html_btn.clicked.connect(self.open_html_report)
-		self.open_html_btn.setToolTip("Abre el informe clínico HTML autocontenido en el navegador.")
+		self.html_menu = QMenu(self)
+		self.html_menu.addAction("Abrir HTML", self.open_html_report)
+		self.html_menu.addAction("Guardar HTML como...", self.save_html_as)
+		self.html_btn = QToolButton()
+		self.html_btn.setText("HTML ▾")
+		self.html_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+		self.html_btn.setMenu(self.html_menu)
+		self.html_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+		self.html_btn.setToolTip("Abrir o guardar el informe HTML autocontenido.")
 		self.compare_stress_rest_btn = QPushButton("Comparar Rest/Stress")
 		self.compare_stress_rest_btn.clicked.connect(self.load_compare_study)
 		self.compare_stress_rest_btn.setToolTip(
@@ -1013,7 +1019,7 @@ class MainWindow(QMainWindow):
 		)
 		button_row.addWidget(self.process_btn, 0, 0)
 		button_row.addWidget(self.pdf_btn, 0, 1)
-		button_row.addWidget(self.open_html_btn, 0, 2)
+		button_row.addWidget(self.html_btn, 0, 2)
 		button_row.addWidget(self.restart_btn, 0, 3)
 		button_row.setColumnStretch(0, 3)
 		button_row.setColumnStretch(1, 3)
@@ -11201,6 +11207,11 @@ class MainWindow(QMainWindow):
 		pero deben ir sí o sí al PDF (guía fase VI, perfusión polar directa), genera
 		las MIP AP/Lateral y persiste el montaje clínico si está en memoria."""
 		self._write_raw_mip_views_for_pdf()
+		# MIPs filtradas (volumen reconstruido con filtros aplicados).
+		try:
+			self._write_filtered_mip_views_for_pdf()
+		except Exception as exc:
+			self._log(f"[WARN] MIPs filtradas no generadas: {exc}")
 		try:
 			self._write_outputs(target_tabs={"guia_fase_vi", "polar_perfusion_directa"})
 		except Exception as exc:
@@ -11217,6 +11228,25 @@ class MainWindow(QMainWindow):
 				mont_pix.save(mont_png, "PNG")
 		except Exception:
 			pass
+		# Forzar generación del GIF del montaje cine (para el informe HTML).
+		try:
+			self._ensure_montage_cine_frames()
+			frames = getattr(self, "_montage_cine_frames", None) or []
+			if len(frames) >= 2:
+				from PIL import Image
+				pil_frames = []
+				for fpix in frames:
+					img = fpix.toImage()
+					buf = img.bits().asstring(img.sizeInBytes())
+					pil_frames.append(Image.frombuffer("RGBA", (img.width(), img.height()), buf, "raw", "BGRA"))
+				gif_path = os.path.join(self.output_dir, "sa_montage_cine.gif")
+				pil_frames[0].save(
+					gif_path, save_all=True, append_images=pil_frames[1:],
+					duration=int(self.polar_cine_speed_spin.value()), loop=0,
+				)
+				self._log(f"GIF montaje cine generado: {len(frames)} frames")
+		except Exception as exc:
+			self._log(f"[WARN] GIF montaje cine no generado: {exc}")
 
 	def _generate_pdf_report(self):
 		if self.study is None or self.seg is None or self.metrics is None or self.territory is None:
@@ -17773,6 +17803,43 @@ class MainWindow(QMainWindow):
 			QMessageBox.information(self, "SINCRO", "Todavía no hay HTML generado. Procesá un estudio primero.")
 			return
 		QDesktopServices.openUrl(QUrl.fromLocalFile(html_path))
+
+	def save_html_as(self):
+		import shutil
+		if not self._ensure_reports_generated():
+			return
+		html_path = os.path.join(self.output_dir, "informe_sincro.html")
+		if not os.path.exists(html_path):
+			QMessageBox.information(self, "SINCRO", "Todavía no hay HTML generado. Procesá un estudio primero.")
+			return
+		# Nombre sugerido con paciente y fecha.
+		patient = str(getattr(self.study, "patient_name", "") or "").strip().replace(" ", "_")
+		patient_id = str(getattr(self.study, "patient_id", "") or "").strip()
+		study_date = str(getattr(self.study, "study_date", "") or "").strip()
+		if len(study_date) == 8 and study_date.isdigit():
+			study_date = f"{study_date[6:8]}-{study_date[4:6]}-{study_date[0:4]}"
+		parts = ["SINCRO"]
+		if patient:
+			parts.append(patient)
+		elif patient_id:
+			parts.append(patient_id)
+		if study_date:
+			parts.append(study_date)
+		suggested = "_".join(parts) + ".html"
+		dest, _ = QFileDialog.getSaveFileName(
+			self,
+			"Guardar informe HTML como...",
+			suggested,
+			"Archivos HTML (*.html);;Todos (*.*)",
+		)
+		if not dest:
+			return
+		try:
+			shutil.copy2(html_path, dest)
+			self._log(f"HTML guardado en: {dest}")
+			self.statusBar().showMessage(f"HTML guardado en: {dest}")
+		except Exception as exc:
+			QMessageBox.critical(self, "SINCRO", f"No se pudo guardar el HTML:\n{exc}")
 
 	def save_pdf_as(self):
 		import shutil
