@@ -412,6 +412,24 @@ def generate_html_report(
     study_desc = str(getattr(study, "study_description", "") or "N/D")
     cube = np.asarray(study.cube)
 
+    # Detectar método de stress/apremio desde la descripción del estudio.
+    desc_upper = study_desc.upper()
+    source_upper = str(getattr(study, "source_path", "") or "").upper()
+    if any(k in desc_upper for k in ("DIPYRIDAMOL", "DIPYRIDAMOLE", "PERSANTIN")):
+        stress_method = "DIPYRIDAMOL"
+    elif any(k in desc_upper for k in ("ADENOSINA", "ADENOSINE")):
+        stress_method = "ADENOSINA"
+    elif any(k in desc_upper for k in ("DOBUTAMINA", "DOBUTAMINE")):
+        stress_method = "DOBUTAMINA"
+    elif any(k in desc_upper + source_upper for k in ("STRESS", "ESFUERZO", "ERGOMETR", "TAPING", "BICI")):
+        stress_method = "ESFUERZO"
+    else:
+        stress_method = ""
+    if stress_method:
+        header_title = f"PERFUSIÓN MIOCÁRDICA — REPOSO Y {stress_method}"
+    else:
+        header_title = "PERFUSIÓN MIOCÁRDICA"
+
     # --- Resumen ejecutivo ---
     exec_html = ""
     try:
@@ -687,8 +705,9 @@ def generate_html_report(
 <body>
 
 <div class="header">
-  <h1>SINCRO</h1>
-  <div class="subtitle">Análisis de sincronía cardíaca — Informe automático ({phase_label})</div>
+  <h1 style="font-size:2.2rem; letter-spacing:3px;">SINCRO</h1>
+  <div style="font-size:1.15rem; color:var(--fg); font-weight:600; margin-top:6px;">{header_title}</div>
+  <div class="subtitle">Informe automático ({phase_label})</div>
   <div class="patient-bar">
     <span class="chip"><b>Paciente:</b> {patient_name}</span>
     <span class="chip"><b>ID:</b> {patient_id}</span>
