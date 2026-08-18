@@ -1839,10 +1839,10 @@ class MainWindow(QMainWindow):
 				toolbar6_r3 = QHBoxLayout()
 				toolbar6_r1.addWidget(QLabel("Recon Ung"))
 				self.cine_crudo_recon_method_combo = QComboBox()
-				self.cine_crudo_recon_method_combo.addItems(["FBP", "MLEM", "OSEM"])
+				self.cine_crudo_recon_method_combo.addItems(["FBP", "MLEM", "OSEM", "OSEM-Adj"])
 				self.cine_crudo_recon_method_combo.setCurrentText("FBP")
-				self.cine_crudo_recon_method_combo.setMaximumWidth(74)
-				self.cine_crudo_recon_method_combo.setToolTip("Método de reconstrucción de la rama UngGat/perfusión. La rama gated tiene su propio método (combo 'Gated'). MLEM/OSEM son CPU de referencia.")
+				self.cine_crudo_recon_method_combo.setMaximumWidth(90)
+				self.cine_crudo_recon_method_combo.setToolTip("Método de reconstrucción. OSEM-Adj: proyector ray-driven adyunto (sin shift, más lento). MLEM/OSEM son CPU de referencia.")
 				toolbar6_r1.addWidget(self.cine_crudo_recon_method_combo)
 				toolbar6_r1.addWidget(QLabel("Ung"))
 				self.cine_crudo_ung_filter_combo = QComboBox()
@@ -1867,10 +1867,10 @@ class MainWindow(QMainWindow):
 				toolbar6_r1.addWidget(self.cine_crudo_ung_order_spin)
 				toolbar6_r1.addWidget(QLabel("Gated"))
 				self.cine_crudo_gated_method_combo = QComboBox()
-				self.cine_crudo_gated_method_combo.addItems(["FBP", "MLEM", "OSEM"])
+				self.cine_crudo_gated_method_combo.addItems(["FBP", "MLEM", "OSEM", "OSEM-Adj"])
 				self.cine_crudo_gated_method_combo.setCurrentText("FBP")
-				self.cine_crudo_gated_method_combo.setMaximumWidth(74)
-				self.cine_crudo_gated_method_combo.setToolTip("Método de reconstrucción de la rama gated (independiente del ungated). FBP/MLEM/OSEM.")
+				self.cine_crudo_gated_method_combo.setMaximumWidth(90)
+				self.cine_crudo_gated_method_combo.setToolTip("Método de reconstrucción de la rama gated. OSEM-Adj: proyector ray-driven adyunto (sin shift, más lento).")
 				toolbar6_r1.addWidget(self.cine_crudo_gated_method_combo)
 				self.cine_crudo_gated_filter_combo = QComboBox()
 				self.cine_crudo_gated_filter_combo.addItems(["none", "lowpass", "butterworth", "wiener"])
@@ -13173,6 +13173,9 @@ class MainWindow(QMainWindow):
 		from core.raw_reconstruction import RawReconConfig
 
 		method = str(self.cine_crudo_recon_method_combo.currentText()).strip().lower() if hasattr(self, "cine_crudo_recon_method_combo") else "fbp"
+		self._use_adjoint_osem = (method == "osem-adj")
+		if method == "osem-adj":
+			method = "osem"  # el config solo conoce fbp/osem/mlem
 		# NÍTIDA (OmniRes): recuperación de resolución dependiente de profundidad.
 		# Es una OPCIÓN de reconstrucción (modela la PSF del colimador dentro del
 		# OSEM/MLEM), NO un pre-filtro del crudo: se aplica DESPUÉS del motion
@@ -13745,6 +13748,35 @@ class MainWindow(QMainWindow):
 				recon_dialog.close()
 				recon_dialog.deleteLater()
 			self.cine_crudo_recon_result = result
+
+			# OSEM-Adj: reemplazar el volumen ungated con la recon adyunta.
+			if getattr(self, "_use_adjoint_osem", False):
+				try:
+					self._set_progress(85, "OSEM adyunto ray-driven...")
+					from core.osem_adjoint import osem_adjoint_reconstruct_slice
+					proj_adj = np.asarray(projections, dtype=np.float64)
+					angles_adj = np.asarray(angles, dtype=np.float64)
+					if proj_adj.ndim == 4:
+						# gated: sumar gates para ungated
+						proj_ung = proj_adj.sum(axis=0)
+					else:
+						proj_ung = proj_adj
+					n_slices_adj = proj_ung.shape[1]
+					det_size = proj_ung.shape[2]
+					recon_vol = np.zeros((n_slices_adj, det_size, det_size), dtype=np.float64)
+					for sl in range(n_slices_adj):
+						sino = proj_ung[:, sl, :].T
+						recon_vol[sl] = osem_adjoint_reconstruct_slice(
+							sino, angles_adj, output_size=det_size,
+							iterations=int(cfg.iterations), subsets=int(cfg.osem_subsets),
+						)
+						self._set_progress(85 + 10 * (sl + 1) / max(n_slices_adj, 1))
+						QApplication.processEvents()
+					result.ungated_volume = recon_vol
+					self._log(f"OSEM-Adj aplicado: {n_slices_adj} slices, {int(cfg.iterations)} iter, {int(cfg.osem_subsets)} subsets.")
+				except Exception as exc:
+					self._log(f"[WARN] OSEM-Adj falló, conservo recon estándar: {exc}")
+
 			if feta_only:
 				try:
 					self._dump_feta_for_harness(result, raw_study, angles, cfg, z0, z1, stage)
