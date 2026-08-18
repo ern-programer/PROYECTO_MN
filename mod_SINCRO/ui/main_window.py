@@ -4168,6 +4168,32 @@ class MainWindow(QMainWindow):
 		output_l.addWidget(output_btn)
 		root.addWidget(output_box)
 
+		# --- Integridad de informes HTML ---
+		integrity_box = QGroupBox("Integridad de informes HTML")
+		integrity_l = QFormLayout(integrity_box)
+		_saved_mf = int(self._ui_settings.value("integrity/hash_max_files", 200)) if hasattr(self, "_ui_settings") else 200
+		_saved_md = int(self._ui_settings.value("integrity/hash_max_days", 90)) if hasattr(self, "_ui_settings") else 90
+		hash_max_files = QSpinBox()
+		hash_max_files.setRange(0, 9999)
+		hash_max_files.setValue(_saved_mf)
+		hash_max_files.setSuffix(" archivos")
+		hash_max_files.setSpecialValueText("Sin límite")
+		hash_max_files.setToolTip("Cantidad máxima de hashes SHA-256 a conservar. Los más antiguos se eliminan automáticamente.")
+		integrity_l.addRow("Retención (archivos):", hash_max_files)
+		hash_max_days = QSpinBox()
+		hash_max_days.setRange(0, 3650)
+		hash_max_days.setValue(_saved_md)
+		hash_max_days.setSuffix(" días")
+		hash_max_days.setSpecialValueText("Sin límite")
+		hash_max_days.setToolTip("Días de retención de hashes. Los más antiguos se eliminan automáticamente.")
+		integrity_l.addRow("Retención (días):", hash_max_days)
+		hash_info = QLabel(
+			f"Almacén: report_hashes/ · {self._hash_store_count()} hashes actuales"
+		)
+		hash_info.setStyleSheet("color:#6b7280; font-size:8pt;")
+		integrity_l.addRow(hash_info)
+		root.addWidget(integrity_box)
+
 		# Aplicar el tema en vivo al cambiar el combo (aunque se cancele el diálogo,
 		# ya queda aplicado el tema elegido; se persiste solo al Aceptar).
 		def _on_theme_changed(_idx: int):
@@ -4211,6 +4237,13 @@ class MainWindow(QMainWindow):
 			self._save_global_ui_preferences()
 			self._log(f"[PERFUSIÓN] Fuente del panel segmentario: {self.perfusion_source_label()}")
 			self._refresh_readonly_results_panel()
+
+		# Integridad: retención de hashes.
+		settings = getattr(self, "_ui_settings", None)
+		if settings:
+			settings.setValue("integrity/hash_max_files", int(hash_max_files.value()))
+			settings.setValue("integrity/hash_max_days", int(hash_max_days.value()))
+			settings.sync()
 
 		self.statusBar().showMessage("Configuración aplicada")
 
@@ -11440,6 +11473,8 @@ class MainWindow(QMainWindow):
 				stress_rest=stress_rest,
 				perfusion_phase_rows=perfusion_phase_rows,
 				editor_html=getattr(self, "_report_editor_html", ""),
+				hash_max_files=int(self._ui_settings.value("integrity/hash_max_files", 200)) if hasattr(self, "_ui_settings") else 200,
+				hash_max_days=int(self._ui_settings.value("integrity/hash_max_days", 90)) if hasattr(self, "_ui_settings") else 90,
 			)
 			self._cached_exec_html = exec_html_out or ""
 			if hash_entry:
@@ -13954,7 +13989,11 @@ class MainWindow(QMainWindow):
 			return ly, lx
 
 		# Motor de color: usar el cmap y ventana del preview (cableado con la UI).
+		# Default odyssey_cool para esta ventana (más informativo que gris para
+		# elegir límites base/ápex sobre el miocardio).
 		qc_cmap = str(getattr(self, "cine_crudo_screen_cmap", "odyssey_cool") or "odyssey_cool")
+		if qc_cmap == "gray":
+			qc_cmap = "odyssey_cool"
 		win_hi_pct = float(getattr(self, "cine_crudo_screen_win_high", 99.0))
 
 		def _norm(img2d: np.ndarray) -> np.ndarray:
@@ -17937,6 +17976,14 @@ class MainWindow(QMainWindow):
 		except Exception as exc:
 			QMessageBox.critical(self, "SINCRO", f"No se pudo guardar el HTML:\n{exc}")
 
+	def _hash_store_count(self) -> int:
+		"""Retorna la cantidad de hashes almacenados."""
+		try:
+			from report.hash_store import HashStore
+			return HashStore().count()
+		except Exception:
+			return 0
+
 	def verify_html_integrity(self):
 		"""Verifica la integridad de un archivo HTML contra su hash registrado."""
 		path, _ = QFileDialog.getOpenFileName(
@@ -17958,17 +18005,22 @@ class MainWindow(QMainWindow):
 			QMessageBox.critical(self, "SINCRO", f"Error al verificar:\n{exc}")
 
 	def cleanup_hash_store(self):
-		"""Limpia hashes antiguos del almacén."""
+		"""Limpia hashes antiguos del almacén según retención configurada."""
 		try:
 			from report.hash_store import HashStore
 			store = HashStore()
+			settings = getattr(self, "_ui_settings", None)
+			mf = int(settings.value("integrity/hash_max_files", 200)) if settings else 200
+			md = int(settings.value("integrity/hash_max_days", 90)) if settings else 90
 			n = store.count()
-			removed = store.cleanup(max_files=200, max_days=90)
+			removed = store.cleanup(max_files=mf, max_days=md)
 			remaining = store.count()
+			mf_txt = str(mf) if mf > 0 else "sin límite"
+			md_txt = f"{md} días" if md > 0 else "sin límite"
 			QMessageBox.information(
 				self, "SINCRO — Limpieza de hashes",
 				f"Hashes antes: {n}\nEliminados: {removed}\nRestantes: {remaining}\n"
-				f"Retención: 200 archivos / 90 días.",
+				f"Retención: {mf_txt} / {md_txt}.",
 			)
 		except Exception as exc:
 			QMessageBox.critical(self, "SINCRO", f"Error al limpiar:\n{exc}")
