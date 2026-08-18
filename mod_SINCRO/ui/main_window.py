@@ -14289,8 +14289,10 @@ class MainWindow(QMainWindow):
 			gaussian_filter = None
 
 		# Motor de color: usar el cmap y ventana del preview (cableado con la UI).
-		# Antes: cmap="odyssey_cool" hardcodeado y percentiles fijos.
+		# Default odyssey_cool para esta ventana (igual que Selección de límites).
 		qc_cmap = str(getattr(self, "cine_crudo_screen_cmap", "odyssey_cool") or "odyssey_cool")
+		if qc_cmap == "gray":
+			qc_cmap = "odyssey_cool"
 		win_lo_pct = float(getattr(self, "cine_crudo_screen_win_low", 5.0))
 		win_hi_pct = float(getattr(self, "cine_crudo_screen_win_high", 99.5))
 
