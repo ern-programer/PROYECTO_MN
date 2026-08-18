@@ -799,10 +799,28 @@ def generate_html_report(
 </body>
 </html>"""
 
+    html_bytes = html.encode("utf-8")
     with open(output_html, "wb") as f:
-        f.write(html.encode("utf-8"))
+        f.write(html_bytes)
 
-    return output_html, exec_html
+    # Registrar hash SHA-256 para verificación de integridad.
+    hash_entry = None
+    try:
+        from report.hash_store import HashStore
+        store = HashStore()
+        hash_entry = store.register(
+            html_bytes,
+            os.path.basename(output_html),
+            patient_name=patient_name,
+            study_uid=str(getattr(study, "study_instance_uid", "") or ""),
+            study_date=study_date,
+        )
+        # Limpiar hashes antiguos (configurable).
+        store.cleanup(max_files=200, max_days=90)
+    except Exception:
+        pass
+
+    return output_html, exec_html, hash_entry
 
 
 def _build_table(headers: list[str], rows: list[tuple]) -> str:

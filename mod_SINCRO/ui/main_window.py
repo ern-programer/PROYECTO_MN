@@ -955,6 +955,9 @@ class MainWindow(QMainWindow):
 		editor_action = self.html_menu.addAction("Editor de informe...", self.open_report_editor)
 		editor_action.setEnabled(False)
 		editor_action.setToolTip("Se habilita después de reorientar el estudio.")
+		self.html_menu.addSeparator()
+		self.html_menu.addAction("Verificar integridad HTML...", self.verify_html_integrity)
+		self.html_menu.addAction("Limpiar hashes antiguos...", self.cleanup_hash_store)
 		self.html_btn = QToolButton()
 		self.html_btn.setText("HTML ▾")
 		self.html_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -11424,7 +11427,7 @@ class MainWindow(QMainWindow):
 		# Generar informe HTML autocontenido.
 		try:
 			html_path = os.path.join(self.output_dir, "informe_sincro.html")
-			_, exec_html_out = generate_html_report(
+			_, exec_html_out, hash_entry = generate_html_report(
 				output_html=html_path,
 				output_dir=self.output_dir,
 				study=self.study,
@@ -11439,6 +11442,8 @@ class MainWindow(QMainWindow):
 				editor_html=getattr(self, "_report_editor_html", ""),
 			)
 			self._cached_exec_html = exec_html_out or ""
+			if hash_entry:
+				self._log(f"Hash SHA-256 registrado: {hash_entry.get('sha256', '')[:16]}...")
 			self._log(f"HTML actualizado: {html_path}")
 		except Exception as exc:
 			self._log(f"[WARN] No se pudo generar HTML integrado: {exc}")
@@ -17931,6 +17936,42 @@ class MainWindow(QMainWindow):
 			self.statusBar().showMessage(f"HTML guardado en: {dest}")
 		except Exception as exc:
 			QMessageBox.critical(self, "SINCRO", f"No se pudo guardar el HTML:\n{exc}")
+
+	def verify_html_integrity(self):
+		"""Verifica la integridad de un archivo HTML contra su hash registrado."""
+		path, _ = QFileDialog.getOpenFileName(
+			self, "Seleccionar HTML para verificar...",
+			self.output_dir,
+			"Archivos HTML (*.html);;Todos (*.*)",
+		)
+		if not path:
+			return
+		try:
+			from report.hash_store import HashStore
+			store = HashStore()
+			ok, msg = store.verify(path)
+			if ok:
+				QMessageBox.information(self, "SINCRO — Verificación de integridad", msg)
+			else:
+				QMessageBox.warning(self, "SINCRO — Verificación de integridad", msg)
+		except Exception as exc:
+			QMessageBox.critical(self, "SINCRO", f"Error al verificar:\n{exc}")
+
+	def cleanup_hash_store(self):
+		"""Limpia hashes antiguos del almacén."""
+		try:
+			from report.hash_store import HashStore
+			store = HashStore()
+			n = store.count()
+			removed = store.cleanup(max_files=200, max_days=90)
+			remaining = store.count()
+			QMessageBox.information(
+				self, "SINCRO — Limpieza de hashes",
+				f"Hashes antes: {n}\nEliminados: {removed}\nRestantes: {remaining}\n"
+				f"Retención: 200 archivos / 90 días.",
+			)
+		except Exception as exc:
+			QMessageBox.critical(self, "SINCRO", f"Error al limpiar:\n{exc}")
 
 	def open_report_editor(self):
 		"""Abre el editor de informe clínico con formato rico."""
