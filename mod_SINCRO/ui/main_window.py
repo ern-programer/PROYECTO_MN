@@ -1051,6 +1051,12 @@ class MainWindow(QMainWindow):
 		button_row.addWidget(self.gqc_window_btn, 5, 0, 1, 4)
 		button_row.addWidget(self.asynchrony_review_btn, 6, 0, 1, 4)
 		button_row.addWidget(self.lv_3d_btn, 7, 0, 1, 4)
+		self.amyloid_btn = QPushButton("Amyloidosis")
+		self.amyloid_btn.clicked.connect(self.open_amyloid_window)
+		self.amyloid_btn.setToolTip(
+			"Módulo de amiloidosis cardíaca con imágenes planar y SPECT (HMR/Perugini)."
+		)
+		button_row.addWidget(self.amyloid_btn, 8, 0, 1, 4)
 		# Ubicar Acciones justo debajo de la versión y la barra de progreso.
 		insert_at = self._sidebar_layout.indexOf(self._progress_bar) + 1
 		self._sidebar_layout.insertWidget(insert_at, button_box)
@@ -4061,6 +4067,48 @@ class MainWindow(QMainWindow):
 		dlg.activateWindow()
 		self._lv_3d_window = dlg
 		return dlg
+
+	def open_amyloid_window(self):
+		"""Abre la ventana de amiloidosis para el estudio planar cargado."""
+		if self.study is None:
+			QMessageBox.information(self, "SINCRO — Amyloidosis", "Cargá una imagen planar o SPECT primero.")
+			return None
+		img = self._amyloid_2d_image()
+		if img is None:
+			QMessageBox.information(
+				self, "SINCRO — Amyloidosis",
+				"No se pudo extraer una imagen 2D del estudio.\n"
+				"Usá una imagen planar estática (1 frame, no gated)."
+			)
+			return None
+		from ui.amyloid_window import AmyloidWindow
+		dlg = AmyloidWindow(self, image=img, study=self.study)
+		dlg.show()
+		dlg.raise_()
+		dlg.activateWindow()
+		self._amyloid_window = dlg
+		return dlg
+
+	def _amyloid_2d_image(self):
+		"""Extrae una imagen 2D del estudio para amiloidosis.
+
+        - Si es planar (1 gate, 1 slice): usa el único frame.
+		- Si es SPECT 3D (1 gate, n_slices): usa el MIP maximo.
+		- Si es gated: usa la proyección sumada.
+		"""
+		if self.study is None:
+			return None
+		cube = np.asarray(self.study.cube, dtype=np.float64)
+		if cube.ndim != 4:
+			return None
+		n_gates, n_slices, rows, cols = cube.shape
+		if n_gates == 1 and n_slices == 1:
+			return cube[0, 0]
+		if n_slices > 1:
+			return cube.max(axis=1) if cube.ndim == 4 else None
+		if n_gates > 1 and n_slices == 1:
+			return cube[:, 0].sum(axis=0)
+		return None
 
 	def _refresh_gqc_window(self):
 		"""Recalcula el panel GQC si está abierto (tras cargar o reprocesar)."""
