@@ -431,7 +431,42 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
 
     arr = ds.pixel_array.astype(np.float64)
     if arr.ndim == 2:
-        raise LoaderError("Imagen 2D única: no es un estudio gated multiframe.")
+        # Imagen 2D única (planar estática, no gated).
+        # Es el caso de amiloidosis planar (PYP/DPD) o cualquier imagen estática NM.
+        notes.append(
+            f"Planar estática detectada: {rows}x{cols} píxeles, 1 frame. "
+            "Modo planar: HMR/Perugini disponibles; no requiere gating ni reconstrucción."
+        )
+        study = GatedStudy(
+            cube=arr[None, None, :, :],  # (1, 1, H, W) — un solo gate, un solo corte
+            n_gates=1,
+            n_slices=1,
+            rows=rows,
+            cols=cols,
+            pixel_spacing=pixel_spacing,
+            z_spacing_mm=z_spacing_mm,
+            slice_thickness_mm=slice_thickness_mm,
+            spacing_between_slices_mm=spacing_between_slices_mm,
+            source_path=path,
+            image_type=itype,
+            series_description=series_desc,
+            study_description=study_desc,
+            patient_name=patient_name,
+            patient_id=patient_id,
+            patient_sex=patient_sex,
+            patient_birth_date=patient_birth_date,
+            study_date=study_date,
+            study_time=study_time,
+            accession_number=accession_number,
+            study_instance_uid=study_instance_uid,
+            was_montage=False,
+            had_summed_frame=False,
+            reconstructed=True,
+            qc_first_harmonic=0.0,
+            qc_passed=False,
+            notes=notes,
+        )
+        return study
 
     n_frames = arr.shape[0]
 
