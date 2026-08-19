@@ -1057,6 +1057,13 @@ class MainWindow(QMainWindow):
 			"Módulo de amiloidosis cardíaca con imágenes planar y SPECT (HMR/Perugini)."
 		)
 		button_row.addWidget(self.amyloid_btn, 8, 0, 1, 4)
+		self.open_planar_btn = QPushButton("Abrir Planar")
+		self.open_planar_btn.clicked.connect(self.open_planar_study)
+		self.open_planar_btn.setToolTip(
+			"Carga una imagen planar estática (no gated) directamente, sin procesamiento cardíaco.\n"
+			"Para amiloidosis (PYP/DPD) y otros estudios planares."
+		)
+		button_row.addWidget(self.open_planar_btn, 9, 0, 1, 4)
 		# Ubicar Acciones justo debajo de la versión y la barra de progreso.
 		insert_at = self._sidebar_layout.indexOf(self._progress_bar) + 1
 		self._sidebar_layout.insertWidget(insert_at, button_box)
@@ -4099,6 +4106,58 @@ class MainWindow(QMainWindow):
 		if self.study is None:
 			return None
 		cube = np.asarray(self.study.cube, dtype=np.float64)
+		if cube.ndim != 4:
+			return None
+		n_gates, n_slices, rows, cols = cube.shape
+		if n_gates == 1 and n_slices == 1:
+			return cube[0, 0]
+		if n_slices > 1:
+			return cube.max(axis=1) if cube.ndim == 4 else None
+		if n_gates > 1 and n_slices == 1:
+			return cube[:, 0].sum(axis=0)
+		return None
+
+	def open_planar_study(self):
+		"""Carga una imagen planar estática (no gated) y abre la ventana de amiloidosis.
+
+        Diferente a load_one_or_two_studies: no pasa por process_current, no intenta
+        segmentar ni calcular fase/FEVI. Carga directa para imágenes planar.
+		"""
+		paths = self._select_dicom_paths(
+			title="Seleccionar imagen planar (estática)",
+			allow_multiple=False,
+		)
+		if not paths:
+			return
+		path = paths[0]
+		try:
+			from core.dicom_loader import load
+			study = load(path, verbose=False)
+			if study is None:
+				QMessageBox.warning(self, "SINCRO", "No se pudo cargar el archivo.")
+				return
+			img = self._amyloid_2d_image_from_study(study)
+			if img is None:
+				QMessageBox.information(
+					self, "SINCRO — Amyloidosis",
+					"El archivo no contiene una imagen planar válida.\n"
+					"Se espera una imagen 2D estática (1 frame, no gated)."
+				)
+				return
+			self.study = study
+			from ui.amyloid_window import AmyloidWindow
+			dlg = AmyloidWindow(self, image=img, study=study)
+			dlg.show()
+			dlg.raise_()
+			dlg.activateWindow()
+			self._amyloid_window = dlg
+			self._log(f"Planar cargado: {study.series_description or path}")
+		except Exception as exc:
+			QMessageBox.critical(self, "SINCRO", f"Error al cargar planar:\n{exc}")
+
+	def _amyloid_2d_image_from_study(self, study):
+		"""Extrae la imagen 2D de un estudio cargado (sin asumir self.study)."""
+		cube = np.asarray(study.cube, dtype=np.float64)
 		if cube.ndim != 4:
 			return None
 		n_gates, n_slices, rows, cols = cube.shape
