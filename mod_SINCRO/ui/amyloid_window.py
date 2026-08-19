@@ -18,8 +18,9 @@ from PyQt6.QtCore import Qt, QPointF, pyqtSignal
 from PyQt6.QtGui import QMouseEvent, QPainter, QPen, QColor, QBrush, QPolygonF
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
-    QComboBox, QWidget, QSizePolicy,
+    QComboBox, QWidget, QSizePolicy, QMessageBox,
 )
+import os
 
 from core.amyloid_planar import ROICircle, compute_hmr, PERUGINI_SCORES
 
@@ -123,7 +124,7 @@ class ROIDragWidget(QWidget):
         pass
 
     def wheelEvent(self, event):
-        """Rueda del mouse = ajustar radio del ROI bajo el cursor."""
+        """Rueda del mouse = ajustar radio del ROI bajo el cursor (ambos ROIs juntos)."""
         scale = self._scale()
         ox = (self.width() - self._image.shape[1] * scale) // 2
         oy = (self.height() - self._image.shape[0] * scale) // 2
@@ -133,9 +134,11 @@ class ROIDragWidget(QWidget):
             rcy = event.position().y()
             dist = np.sqrt((rcx - ox - roi["cx"] * scale) ** 2 + (rcy - oy - roi["cy"] * scale) ** 2)
             if dist < roi["radius"] * 1.5 * scale:
-                new_radius = roi["radius"] + delta * 1.0
-                self._rois[i]["radius"] = max(3.0, min(64.0, new_radius))
-                self.roiChanged.emit(i, self._rois[i]["cy"], self._rois[i]["cx"], self._rois[i]["radius"])
+                new_radius = max(3.0, min(64.0, roi["radius"] + delta * 1.0))
+                # Actualizar AMBOS ROIs con el mismo radio (tienen que ser igual).
+                for r in self._rois:
+                    r["radius"] = new_radius
+                self.roiChanged.emit(i, self._rois[i]["cy"], self._rois[i]["cx"], new_radius)
                 break
         self.update()
 
