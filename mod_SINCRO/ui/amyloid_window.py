@@ -119,16 +119,21 @@ class ROIDragWidget(QWidget):
         self._drag_roi = -1
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
-        # Doble clic = ajustar radio del ROI bajo el cursor.
+        # Doble clic = no hacer nada (la rueda ajusta el radio).
+        pass
+
+    def wheelEvent(self, event):
+        """Rueda del mouse = ajustar radio del ROI bajo el cursor."""
         scale = self._scale()
         ox = (self.width() - self._image.shape[1] * scale) // 2
         oy = (self.height() - self._image.shape[0] * scale) // 2
+        delta = 1 if event.angleDelta().y() > 0 else -1
         for i, roi in enumerate(self._rois):
             rcx = event.position().x()
             rcy = event.position().y()
             dist = np.sqrt((rcx - ox - roi["cx"] * scale) ** 2 + (rcy - oy - roi["cy"] * scale) ** 2)
             if dist < roi["radius"] * 1.5 * scale:
-                new_radius = (dist / scale) if event.position() else roi["radius"]
+                new_radius = roi["radius"] + delta * 1.0
                 self._rois[i]["radius"] = max(3.0, min(64.0, new_radius))
                 self.roiChanged.emit(i, self._rois[i]["cy"], self._rois[i]["cx"], self._rois[i]["radius"])
                 break
@@ -188,6 +193,9 @@ class AmyloidWindow(QDialog):
         btn_reset.clicked.connect(self._reset_rois)
         btns.addWidget(btn_reset)
         btns.addStretch(1)
+        btn_report = QPushButton("Generar Informe")
+        btn_report.clicked.connect(self._generate_report)
+        btns.addWidget(btn_report)
         btn_close = QPushButton("Cerrar")
         btn_close.clicked.connect(self.accept)
         btns.addWidget(btn_close)
