@@ -178,6 +178,7 @@ class AmyloidWindow(QDialog):
         self._loaded_images: list[tuple[str, np.ndarray]] = []  # (label, img) para cuadrantes
         self._current_layout_n = 4
         self._current_mode = "visor"  # "visor" | "analisis"
+        self._page_offset = 0  # índice de inicio de la página actual
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
@@ -310,6 +311,19 @@ class AmyloidWindow(QDialog):
         self._btn_analyze.clicked.connect(self._analyze_selected)
         sidebar.addWidget(self._btn_analyze)
 
+        # Paginación: anterior/siguiente.
+        pag_layout = QHBoxLayout()
+        btn_prev = QPushButton("◀")
+        btn_prev.clicked.connect(self._prev_page)
+        pag_layout.addWidget(btn_prev)
+        self._lbl_pagination = QLabel("Página 1/1")
+        self._lbl_pagination.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        pag_layout.addWidget(self._lbl_pagination)
+        btn_next = QPushButton("▶")
+        btn_next.clicked.connect(self._next_page)
+        pag_layout.addWidget(btn_next)
+        sidebar.addLayout(pag_layout)
+
         sidebar_frame = QFrame()
         sidebar_frame.setLayout(sidebar)
         sidebar_frame.setFixedWidth(160)
@@ -397,17 +411,16 @@ class AmyloidWindow(QDialog):
         n = self._layout_combo.currentData()
         if n and n != self._current_layout_n:
             self._current_layout_n = n
-            # Forzar el layout elegido por el usuario, no el auto.
+            self._page_offset = 0  # reiniciar paginación al cambiar layout
             self._rebuild_layout(force_layout=n)
 
     def _rebuild_layout(self, force_layout: int = None):
-        """Reconstruye el layout con las imágenes cargadas. Si force_layout
-        está definido, usa ese layout en lugar del auto."""
-        imgs = [img for _, img in self._loaded_images]
-        labels = [lbl for lbl, _ in self._loaded_images]
-        n_imgs = len(imgs)
-        # Elegir layout automáticamente según cantidad de imágenes, a menos que
-        # el usuario haya elegido uno específico.
+        """Reconstruye el layout con las imágenes cargadas. Preserva posiciones
+        por índice y maneja paginación si hay más imágenes que cuadrantes."""
+        all_imgs = [img for _, img in self._loaded_images]
+        all_labels = [lbl for lbl, _ in self._loaded_images]
+        n_imgs = len(all_imgs)
+
         if force_layout is not None:
             n = force_layout
         else:
@@ -422,6 +435,13 @@ class AmyloidWindow(QDialog):
             else:
                 n = 16
         self._current_layout_n = n
+
+        # Paginación: mostrar solo la página actual.
+        start = self._page_offset
+        end = start + n
+        imgs = all_imgs[start:end]
+        labels = all_labels[start:end]
+
         if n == 4:
             layout = layout_4q(
                 ap_roi=imgs[0] if len(imgs) > 0 else None,
@@ -449,6 +469,9 @@ class AmyloidWindow(QDialog):
             return
         self._quadrant_viewer.set_layout(layout)
         self._on_quadrant_selected(0)
+        # Actualizar info de paginación.
+        total_pages = (len(all_imgs) + n - 1) // n if n > 0 else 1
+        self._lbl_pagination.setText(f"Página {self._page_offset // n + 1}/{total_pages}")
 
     def get_layout_images(self) -> list[np.ndarray]:
         """Devuelve las imágenes del layout actual como arrays RGB."""
@@ -1010,4 +1033,19 @@ td {{ padding: 8px; border-bottom: 1px solid #475569; }}
 </html>"""
         with open(html_path, "wb") as f:
             f.write(html.encode("utf-8"))
+
+    # ── Paginación de layouts ───────────────────────────────────────
+
+    def _prev_page(self):
+        """Ir a la página anterior."""
+        if self._page_offset > 0:
+            self._page_offset -= self._current_layout_n
+            self._rebuild_layout(force_layout=self._current_layout_n)
+
+    def _next_page(self):
+        """Ir a la página siguiente."""
+        n = self._current_layout_n
+        if self._page_offset + n < len(self._loaded_images):
+            self._page_offset += n
+            self._rebuild_layout(force_layout=n)
 
