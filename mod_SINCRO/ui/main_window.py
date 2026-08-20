@@ -4076,20 +4076,9 @@ class MainWindow(QMainWindow):
 		return dlg
 
 	def open_amyloid_window(self):
-		"""Abre la ventana de amiloidosis para el estudio planar cargado."""
-		if self.study is None:
-			QMessageBox.information(self, "SINCRO — Amyloidosis", "Cargá una imagen planar o SPECT primero.")
-			return None
-		img = self._amyloid_2d_image()
-		if img is None:
-			QMessageBox.information(
-				self, "SINCRO — Amyloidosis",
-				"No se pudo extraer una imagen 2D del estudio.\n"
-				"Usá una imagen planar estática (1 frame, no gated)."
-			)
-			return None
+		"""Abre AMYLO vacío; la carga 1 h/3 h se realiza dentro del módulo."""
 		from ui.amyloid_window import AmyloidWindow
-		dlg = AmyloidWindow(self, image=img, study=self.study)
+		dlg = AmyloidWindow(self)
 		dlg.show()
 		dlg.raise_()
 		dlg.activateWindow()

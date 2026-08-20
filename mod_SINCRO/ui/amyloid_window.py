@@ -192,6 +192,7 @@ class AmyloidWindow(QDialog):
         self._page_offset = 0  # índice de inicio de la página actual
         self._processed_images: dict[str, dict[str, np.ndarray]] = {"1h": {}, "3h": {}}
         self._roi_state: dict[str, list[dict] | None] = {"1h": None, "3h": None}
+        self._perugini_by_time: dict[str, int] = {}
         self._active_time: str | None = None
         self._washout_data: dict[str, dict] = {}  # tiempo_label → {hmr, heart_counts, mediastinum_counts}
 
@@ -919,7 +920,9 @@ class AmyloidWindow(QDialog):
             "hmr": result.hmr,
             "heart_counts": result.heart_counts,
             "mediastinum_counts": result.mediastinum_counts,
+            "classification": result.classification,
         }
+        self._perugini_by_time[time_label] = int(self._perugini_combo.currentData())
         self._roi_state[time_label] = [dict(roi) for roi in self._roi_widget._rois]
 
         # Renderizar imagen con ROIs dibujados + leyenda al pie.
@@ -1436,127 +1439,203 @@ class AmyloidWindow(QDialog):
         return base64.b64encode(buf.read()).decode('ascii')
 
     def _generate_html(self, html_path, img_path, composite_path, result, perugini):
-        """Genera el informe HTML con bloques para cada tiempo cuantificado."""
-        import base64
-        with open(img_path, "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode("ascii")
-        washout_b64 = self._generate_washout_curve_b64()
-        hist_b64 = self._generate_roi_histogram_b64()
-        patient = self._metadata["patient"]
-        date = self._metadata["date"]
-        series = self._metadata["series"]
+                """Genera el informe HTML con bloques para cada tiempo cuantificado."""
+                import base64
+                import io
+                from html import escape
+                from PIL import Image as PILImage
 
-        # Construir bloques HMR/Perugini por cada tiempo cuantificado.
-        time_results_html = ""
-        for time_label, data in sorted(self._washout_data.items()):
-            hmr = data["hmr"]
-            heart = data["heart_counts"]
-            medi = data["mediastinum_counts"]
-            cls = ("POSITIVO" if hmr >= 1.5 else ("EQUIVOCO" if hmr >= 1.0 else "NEGATIVO"))
-            color_class = "positive" if hmr >= 1.5 else ("equivocal" if hmr >= 1.0 else "negative")
-            perugini_time = self._perugini_combo.currentData()
-            time_results_html += f"""
-<div class="card">
-  <h3>Resultados {time_label}</h3>
-  <div class="metric {color_class}">{hmr:.2f}</div>
-  <table>
-    <tr><th>Métrica</th><th>Valor</th><th>Referencia</th></tr>
-    <tr><td>HMR ({time_label})</td><td>{hmr:.2f}</td><td>≥1.5 sugiere ATTR</td></tr>
-    <tr><td>Cuentas cardíacas</td><td>{heart:,.0f}</td><td></td></tr>
-    <tr><td>Cuentas mediastinales</td><td>{medi:,.0f}</td><td></td></tr>
-    <tr><td>Clasificación</td><td>{cls}</td><td></td></tr>
-    <tr><td>Perugini</td><td>{perugini_time}</td><td>0–3</td></tr>
-  </table>
-</div>"""
+                with open(img_path, "rb") as f:
+                        img_b64 = base64.b64encode(f.read()).decode("ascii")
 
-        if not time_results_html:
-            # Bloque único (solo el resultado actual).
-            color_class = "positive" if result.hmr >= 1.5 else ("equivocal" if result.hmr >= 1.0 else "negative")
-            time_results_html = f"""
-<div class="card">
-  <h3>Resultados</h3>
-  <div class="metric {color_class}">{result.hmr:.2f}</div>
-  <table>
-    <tr><th>Métrica</th><th>Valor</th><th>Referencia</th></tr>
-    <tr><td>HMR</td><td>{result.hmr:.2f}</td><td>≥1.5 sugiere ATTR</td></tr>
-    <tr><td>Cuentas cardíacas</td><td>{result.heart_counts:,.0f}</td><td></td></tr>
-    <tr><td>Cuentas mediastinales</td><td>{result.mediastinum_counts:,.0f}</td><td></td></tr>
-    <tr><td>Clasificación</td><td>{result.classification}</td><td></td></tr>
-    <tr><td>Perugini</td><td>{perugini}</td><td>0–3</td></tr>
-  </table>
-</div>"""
+                hist_b64 = self._generate_roi_histogram_b64()
+                washout_b64 = self._generate_washout_curve_b64()
+                patient = escape(str(self._metadata["patient"]))
+                date = escape(str(self._metadata["date"]))
+                series = escape(str(self._metadata["series"]))
 
-        layout_html = ""
-        if composite_path and os.path.isfile(composite_path):
-            with open(composite_path, "rb") as f:
-                composite_b64 = base64.b64encode(f.read()).decode("ascii")
-            layout_html = (
-                f'<div class="card"><h3>Layout completo</h3>'
-                f'<img src="data:image/png;base64,{composite_b64}" '
-                f'style="max-width:100%; border-radius:8px; border:1px solid #475569;" '
-                f'alt="Layout completo"></div>'
-            )
+                temporal_blocks = []
+                temporal_hmr = {}
+                for time_label in ("1h", "3h"):
+                        data = self._washout_data.get(time_label)
+                        has_ap = self._time_images.get(time_label, {}).get("ap") is not None
+                        if data is None:
+                                if has_ap:
+                                        temporal_blocks.append(f"""
+<section class="card">
+    <h2>Resultados {time_label}</h2>
+    <p class="pending">Imagen AP cargada; cuantificación HMR pendiente.</p>
+</section>""")
+                                continue
 
-        header_html = f"""
-<div class="header">
-  <h1>SINCRO</h1>
-  <div class="subtitle">Informe de Amiloidosis Cardíaca</div>
-  <div style="margin-top:12px; font-size:0.85rem; color:#94a3b8;">Paciente: {patient} · Fecha: {date} · Serie: {series}</div>
-</div>"""
-        roi_html = f"""
-<div class="card">
-  <h3>Imagen planar con ROIs</h3>
-  <img src="data:image/png;base64,{img_b64}" style="max-width:100%; border-radius:8px; border:1px solid #475569;" alt="Imagen planar">
-</div>"""
+                        hmr = float(data["hmr"])
+                        heart_counts = float(data["heart_counts"])
+                        mediastinum_counts = float(data["mediastinum_counts"])
+                        classification = data.get("classification") or (
+                                "POSITIVO" if hmr >= 1.5 else ("EQUÍVOCO" if hmr >= 1.0 else "NEGATIVO")
+                        )
+                        color_class = "positive" if hmr >= 1.5 else ("equivocal" if hmr >= 1.0 else "negative")
+                        perugini_time = self._perugini_by_time.get(time_label, perugini)
+                        temporal_hmr[time_label] = hmr
 
-        histogram_html = ""
-        if hist_b64:
-            histogram_html = f"""
-<div class="card"><h3>Distribución de cuentas ROI cardíaco</h3>
-  <img src="data:image/png;base64,{hist_b64}" style="max-width:100%; border-radius:8px;" alt="Histograma ROI cardíaco">
-</div>"""
+                        roi_html = '<div class="roi-placeholder">Imagen ROI no disponible</div>'
+                        roi_image = self._processed_images.get(time_label, {}).get("roi")
+                        if roi_image is not None:
+                                roi_array = np.asarray(roi_image)
+                                if roi_array.dtype != np.uint8:
+                                        roi_array = np.clip(roi_array, 0, 255).astype(np.uint8)
+                                roi_buffer = io.BytesIO()
+                                PILImage.fromarray(roi_array).save(roi_buffer, format="PNG")
+                                roi_b64 = base64.b64encode(roi_buffer.getvalue()).decode("ascii")
+                                roi_html = (
+                                        f'<img class="report-image" src="data:image/png;base64,{roi_b64}" '
+                                        f'alt="AP cuantificada {time_label}">'
+                                )
 
-        washout_html = ""
-        if washout_b64:
-            washout_html = f"""
-<div class="card"><h3>Curva de washout (1h vs 3h)</h3>
-  <img src="data:image/png;base64,{washout_b64}" style="max-width:100%; border-radius:8px;" alt="Curva de washout">
-</div>"""
+                        temporal_blocks.append(f"""
+<section class="card">
+    <h2>Resultados {time_label}</h2>
+    <div class="result-grid">
+        <div>{roi_html}</div>
+        <div>
+            <div class="metric {color_class}">{hmr:.2f}</div>
+            <table>
+                <tr><th>Métrica</th><th>Valor</th><th>Referencia</th></tr>
+                <tr><td>HMR ({time_label})</td><td>{hmr:.2f}</td><td>≥1.5 sugiere ATTR</td></tr>
+                <tr><td>Cuentas cardíacas</td><td>{heart_counts:,.0f}</td><td></td></tr>
+                <tr><td>Cuentas mediastinales</td><td>{mediastinum_counts:,.0f}</td><td></td></tr>
+                <tr><td>Clasificación</td><td>{escape(str(classification))}</td><td></td></tr>
+                <tr><td>Perugini</td><td>{escape(str(perugini_time))}</td><td>0–3</td></tr>
+            </table>
+        </div>
+    </div>
+</section>""")
 
-        interpretation_html = f"""
-<div class="card">
-  <h3>Interpretación clínica</h3>
-  <p>HMR = {result.hmr:.2f}. <b>{result.classification}</b></p>
-  <p>Si EQUÍVOCO (HMR 1.0–1.5), considerar SPECT/CT o planar a 3h para descartar pool sanguíneo residual.</p>
-  <p>Perugini ≥ 2 + ausencia de gammapatía monoclonal confirma ATTR.</p>
-</div>"""
+                if temporal_blocks:
+                        results_html = "".join(temporal_blocks)
+                        roi_html = ""
+                else:
+                        current_hmr = float(result.hmr)
+                        color_class = (
+                                "positive" if current_hmr >= 1.5
+                                else ("equivocal" if current_hmr >= 1.0 else "negative")
+                        )
+                        results_html = f"""
+<section class="card">
+    <h2>Resultados</h2>
+    <div class="metric {color_class}">{current_hmr:.2f}</div>
+    <table>
+        <tr><th>Métrica</th><th>Valor</th><th>Referencia</th></tr>
+        <tr><td>HMR</td><td>{current_hmr:.2f}</td><td>≥1.5 sugiere ATTR</td></tr>
+        <tr><td>Cuentas cardíacas</td><td>{float(result.heart_counts):,.0f}</td><td></td></tr>
+        <tr><td>Cuentas mediastinales</td><td>{float(result.mediastinum_counts):,.0f}</td><td></td></tr>
+        <tr><td>Clasificación</td><td>{escape(str(result.classification))}</td><td></td></tr>
+        <tr><td>Perugini</td><td>{escape(str(perugini))}</td><td>0–3</td></tr>
+    </table>
+</section>"""
+                        roi_html = f"""
+<section class="card">
+    <h2>Imagen planar con ROIs</h2>
+    <img class="report-image" src="data:image/png;base64,{img_b64}" alt="Imagen planar con ROIs">
+</section>"""
 
-        html = f"""<!DOCTYPE html>
+                layout_html = ""
+                if composite_path and os.path.isfile(composite_path):
+                        with open(composite_path, "rb") as f:
+                                composite_b64 = base64.b64encode(f.read()).decode("ascii")
+                        layout_html = f"""
+<section class="card">
+    <h2>Layout completo</h2>
+    <img class="report-image" src="data:image/png;base64,{composite_b64}" alt="Layout completo">
+</section>"""
+
+                histogram_html = ""
+                if hist_b64:
+                        histogram_html = f"""
+<section class="card">
+    <h2>Distribución de cuentas ROI cardíaco</h2>
+    <img class="report-image" src="data:image/png;base64,{hist_b64}" alt="Histograma ROI cardíaco">
+</section>"""
+
+                washout_html = ""
+                if washout_b64:
+                        washout_html = f"""
+<section class="card">
+    <h2>Curva de washout (1h vs 3h)</h2>
+    <img class="report-image" src="data:image/png;base64,{washout_b64}" alt="Curva de washout">
+</section>"""
+
+                if "1h" in temporal_hmr and "3h" in temporal_hmr:
+                        interpretation_summary = (
+                                f'HMR 1h = {temporal_hmr["1h"]:.2f} y '
+                                f'HMR 3h = {temporal_hmr["3h"]:.2f}.'
+                        )
+                else:
+                        interpretation_summary = (
+                                f'HMR = {float(result.hmr):.2f}. '
+                                f'<strong>{escape(str(result.classification))}</strong>'
+                        )
+
+                html = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SINCRO — Amiloidosis</title>
 <style>
-body {{ font-family:'Segoe UI',sans-serif; background:#0f172a; color:#e2e8f0; max-width:900px; margin:0 auto; padding:24px; }}
-.header {{ background:linear-gradient(135deg,#1a3a5c,#0f172a); border-bottom:3px solid #38bdf8; padding:24px; text-align:center; border-radius:12px; margin-bottom:24px; }}
-.header h1 {{ color:#38bdf8; font-size:1.8rem; margin:0; }}
-.header .subtitle {{ color:#94a3b8; font-size:0.95rem; }}
-.card {{ background:#1e293b; border-radius:12px; padding:20px; margin:16px 0; border:1px solid #475569; }}
-.metric {{ font-size:2.5rem; font-weight:800; color:#38bdf8; }}
+:root {{ color-scheme:dark; }}
+* {{ box-sizing:border-box; }}
+body {{ margin:0; background:#0f172a; color:#e2e8f0; font-family:"Segoe UI",Arial,sans-serif; }}
+.report {{ width:min(100% - 32px,980px); margin:0 auto; padding:24px 0; }}
+.header {{ padding:24px; margin-bottom:20px; text-align:center; background:linear-gradient(135deg,#1a3a5c,#111827); border:1px solid #334155; border-bottom:3px solid #38bdf8; border-radius:14px; }}
+.header h1 {{ margin:0; color:#38bdf8; font-size:1.9rem; letter-spacing:.08em; }}
+.subtitle {{ color:#cbd5e1; }}
+.patient-data {{ margin-top:12px; color:#94a3b8; font-size:.88rem; }}
+.card {{ margin:16px 0; padding:20px; overflow:hidden; background:#1e293b; border:1px solid #475569; border-radius:12px; }}
+.card h2 {{ margin:0 0 16px; color:#f8fafc; font-size:1.15rem; }}
+.result-grid {{ display:grid; grid-template-columns:minmax(240px,.85fr) minmax(320px,1.15fr); gap:20px; align-items:start; }}
+.report-image {{ display:block; width:100%; height:auto; border:1px solid #475569; border-radius:8px; }}
+.roi-placeholder {{ display:grid; min-height:180px; place-items:center; color:#94a3b8; border:1px dashed #475569; border-radius:8px; }}
+.metric {{ margin-bottom:12px; color:#38bdf8; font-size:2.6rem; font-weight:800; }}
 .metric.positive {{ color:#f87171; }}
-.metric.equivocal {{ color:#fbbf24; }}
+.metric.equivocal,.pending {{ color:#fbbf24; }}
 .metric.negative {{ color:#4ade80; }}
 table {{ width:100%; border-collapse:collapse; }}
-th {{ background:#1a3a5c; color:white; padding:8px; text-align:left; }}
-td {{ padding:8px; border-bottom:1px solid #475569; }}
-.footer {{ text-align:center; padding:16px; border-top:1px solid #475569; color:#94a3b8; font-size:0.8rem; }}
+th {{ padding:9px; background:#1a3a5c; color:#f8fafc; text-align:left; }}
+td {{ padding:9px; border-bottom:1px solid #475569; }}
+.footer {{ padding:16px; color:#94a3b8; font-size:.8rem; text-align:center; border-top:1px solid #475569; }}
+@media (max-width:700px) {{
+    .report {{ width:min(100% - 20px,980px); padding:10px 0; }}
+    .header,.card {{ padding:16px; }}
+    .result-grid {{ grid-template-columns:1fr; }}
+    table {{ font-size:.88rem; }}
+}}
 </style>
 </head>
-<body>{header_html}{roi_html}{time_results_html}{interpretation_html}{histogram_html}{washout_html}{layout_html}
-<div class="footer">Informe SINCRO — Amiloidosis. Resultados orientativos.</div>
-</body></html>"""
-        with open(html_path, "wb") as f:
-            f.write(html.encode("utf-8"))
+<body>
+<main class="report">
+<header class="header">
+    <h1>SINCRO</h1>
+    <div class="subtitle">Informe de Amiloidosis Cardíaca</div>
+    <div class="patient-data">Paciente: {patient} · Fecha: {date} · Serie: {series}</div>
+</header>
+{roi_html}
+{results_html}
+<section class="card">
+    <h2>Interpretación clínica</h2>
+    <p>{interpretation_summary}</p>
+    <p>Si EQUÍVOCO (HMR 1.0–1.5), considerar SPECT/CT o planar a 3h para descartar pool sanguíneo residual.</p>
+    <p>Perugini ≥ 2 + ausencia de gammapatía monoclonal confirma ATTR.</p>
+</section>
+{histogram_html}
+{washout_html}
+{layout_html}
+<footer class="footer">Informe SINCRO — Amiloidosis. Resultados orientativos.</footer>
+</main>
+</body>
+</html>"""
+                with open(html_path, "wb") as f:
+                        f.write(html.encode("utf-8"))
 
     # ── Paginación de layouts ───────────────────────────────────────
 

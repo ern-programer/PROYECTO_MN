@@ -15,12 +15,12 @@ from pathlib import Path
 
 import numpy as np
 
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter
+from PyQt6.QtCore import Qt, QSize, QSettings, pyqtSignal
+from PyQt6.QtGui import QIcon, QImage, QPixmap, QColor, QPainter
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFileDialog, QListWidget, QListWidgetItem, QSplitter,
-    QWidget, QSizePolicy, QProgressBar, QTextEdit, QCheckBox,
+    QWidget, QSizePolicy, QProgressBar, QTextEdit, QCheckBox, QComboBox,
 )
 
 
@@ -35,14 +35,22 @@ def _is_dicom_file(path: str) -> bool:
         return False
 
 
-def _read_dicom_thumb(path: str, thumb_size: int = 96) -> tuple[QPixmap, dict]:
-    """Lee un DICOM y devuelve (thumbnail, metadata_dict)."""
+def _read_dicom_thumb_data(path: str) -> tuple[np.ndarray | None, dict]:
+    """Lee un DICOM y devuelve RGB uint8 + metadatos, sin objetos GUI."""
     try:
         import pydicom
-        ds = pydicom.dcmread(path, stop_before_pixels=False, force=True)
-        arr = ds.pixel_array.astype(np.float64)
-        if arr.ndim > 2:
-            arr = arr.reshape(arr.shape[-2], arr.shape[-1]) if arr.ndim == 3 else arr[0, 0]
+        from pydicom.pixels import pixel_array
+
+        # Leer primero solo metadatos: evita cargar PixelData completo.
+        ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
+        n_frames = int(getattr(ds, "NumberOfFrames", 1) or 1)
+        frame_index = n_frames // 2 if n_frames > 1 else None
+        # pydicom 3 permite decodificar un único frame directamente desde archivo.
+        arr = pixel_array(path, index=frame_index).astype(np.float64)
+        while arr.ndim > 2:
+            arr = arr[arr.shape[0] // 2]
+        if arr.ndim != 2:
+            raise ValueError(f"Dimensiones DICOM no soportadas: {arr.shape}")
         # Normalizar a 0-255.
         mn, mx = float(arr.min()), float(arr.max())
         if mx - mn < 1e-8:
@@ -51,10 +59,6 @@ def _read_dicom_thumb(path: str, thumb_size: int = 96) -> tuple[QPixmap, dict]:
             norm = np.clip((arr - mn) / (mx - mn) * 255, 0, 255).astype(np.uint8)
         h, w = norm.shape
         rgb = np.stack([norm, norm, norm], axis=-1)
-        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-        pix = QPixmap.fromImage(qimg.copy())
-        pix = pix.scaled(QSize(thumb_size, thumb_size), Qt.AspectRatioMode.KeepAspectRatio,
-                          Qt.TransformationMode.SmoothTransformation)
         meta = {
             "patient": str(getattr(ds, "PatientName", "N/D")),
             "date": str(getattr(ds, "StudyDate", "N/D")),
@@ -64,19 +68,40 @@ def _read_dicom_thumb(path: str, thumb_size: int = 96) -> tuple[QPixmap, dict]:
             "cols": int(getattr(ds, "Columns", w)),
             "path": path,
         }
-        return pix, meta
-    except Exception:
-        # Fallback: pixmap vacío.
+        return rgb, meta
+    except Exception as exc:
+        return None, {"patient": "?", "date": "?", "series": "?", "modality": "?",
+                      "rows": 0, "cols": 0, "path": path, "error": str(exc)}
+
+
+def _rgb_to_pixmap(rgb: np.ndarray | None, thumb_size: int) -> QPixmap:
+    """Crea el QPixmap en el hilo gráfico a partir de RGB uint8."""
+    if rgb is None:
         pix = QPixmap(thumb_size, thumb_size)
         pix.fill(QColor("#1e293b"))
-        return pix, {"patient": "?", "date": "?", "series": "?", "modality": "?",
-                      "rows": 0, "cols": 0, "path": path}
+        return pix
+    h, w = rgb.shape[:2]
+    rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
+    qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format.Format_RGB888)
+    return QPixmap.fromImage(qimg.copy()).scaled(
+        QSize(thumb_size, thumb_size),
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+
+
+def _read_dicom_thumb(path: str, thumb_size: int = 96) -> tuple[QPixmap, dict]:
+    """Lectura síncrona para el preview grande, ejecutada en el hilo GUI."""
+    rgb, meta = _read_dicom_thumb_data(path)
+    return _rgb_to_pixmap(rgb, thumb_size), meta
 
 
 class DicomBrowserDialog(QDialog):
     """Diálogo para explorar y seleccionar archivos DICOM con thumbnails."""
 
     filesSelected = pyqtSignal(list)  # lista de paths seleccionados
+    thumbReady = pyqtSignal(object, object, int, int)
+    MAX_RECENT_FOLDERS = 4
 
     def __init__(self, parent=None, start_dir: str = ""):
         super().__init__(parent)
@@ -85,6 +110,9 @@ class DicomBrowserDialog(QDialog):
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
         self._start_dir = start_dir
         self._items: list[tuple[QPixmap, dict]] = []
+        self._scan_generation = 0
+        self._settings = QSettings("PROYECTO_MN", "SINCRO")
+        self.thumbReady.connect(self._add_item_ui)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -96,8 +124,16 @@ class DicomBrowserDialog(QDialog):
         self._lbl_folder.setStyleSheet("color: #94a3b8; font-size: 11px;")
         top.addWidget(self._lbl_folder, 1)
 
+        self._recent_combo = QComboBox()
+        self._recent_combo.setMinimumWidth(220)
+        self._recent_combo.setToolTip("Últimas carpetas abiertas")
+        self._recent_combo.activated.connect(self._on_recent_activated)
+        top.addWidget(self._recent_combo)
+
         self._chk_subdirs = QCheckBox("Subcarpetas")
-        self._chk_subdirs.setChecked(True)
+        # Desactivado por defecto: una carpeta de pacientes puede contener miles
+        # de DICOM y no debe escanearse recursivamente por sorpresa.
+        self._chk_subdirs.setChecked(False)
         self._chk_subdirs.setStyleSheet("color: #e2e8f0;")
         top.addWidget(self._chk_subdirs)
 
@@ -105,6 +141,8 @@ class DicomBrowserDialog(QDialog):
         btn_folder.clicked.connect(self._select_folder)
         top.addWidget(btn_folder)
         root.addLayout(top)
+
+        self._refresh_recent_folders()
 
         # ── Progreso ───────────────────────────────────────────────
         self._progress = QProgressBar()
@@ -180,11 +218,52 @@ class DicomBrowserDialog(QDialog):
             self._lbl_folder.setText(folder)
             self._scan_folder(folder)
 
+    def _recent_folders(self) -> list[str]:
+        """Devuelve las últimas carpetas abiertas, más reciente primero."""
+        value = self._settings.value("dicom_browser/recent_folders", [], type=list)
+        if isinstance(value, str):
+            value = [value]
+        folders = []
+        for folder in value or []:
+            folder = str(folder)
+            if folder and os.path.isdir(folder) and folder not in folders:
+                folders.append(folder)
+        return folders[:self.MAX_RECENT_FOLDERS]
+
+    def _remember_folder(self, folder: str):
+        """Guarda la carpeta como la más reciente, con máximo 4 entradas."""
+        folder = os.path.normpath(folder)
+        folders = [folder]
+        folders.extend(f for f in self._recent_folders() if os.path.normpath(f) != folder)
+        self._settings.setValue("dicom_browser/recent_folders", folders[:self.MAX_RECENT_FOLDERS])
+        self._settings.sync()
+        self._refresh_recent_folders()
+
+    def _refresh_recent_folders(self):
+        """Actualiza el combo de carpetas recientes."""
+        self._recent_combo.blockSignals(True)
+        self._recent_combo.clear()
+        self._recent_combo.addItem("Recientes…", "")
+        for folder in self._recent_folders():
+            self._recent_combo.addItem(folder, folder)
+        self._recent_combo.setCurrentIndex(0)
+        self._recent_combo.blockSignals(False)
+
+    def _on_recent_activated(self, index: int):
+        folder = self._recent_combo.itemData(index)
+        if folder:
+            self._lbl_folder.setText(folder)
+            self._scan_folder(folder)
+
     def _scan_folder(self, folder: str):
         """Escanea la carpeta en un hilo para no bloquear la UI."""
+        folder = os.path.normpath(folder)
+        self._remember_folder(folder)
         self._list.clear()
         self._items.clear()
         self._progress.setValue(0)
+        self._scan_generation += 1
+        generation = self._scan_generation
 
         # Recolectar archivos DICOM: primero por extensión .dcm (rápido),
         # luego por magic number solo si no hay .dcm (fallback lento).
@@ -231,24 +310,20 @@ class DicomBrowserDialog(QDialog):
         # Escanear en hilo background.
         def _scan():
             for i, fpath in enumerate(files):
-                pix, meta = _read_dicom_thumb(fpath)
-                self._items.append((pix, meta))
-                # Señal para actualizar UI (usando metacall thread-safe).
-                self._add_item_safe(pix, meta, i + 1, len(files))
+                if generation != self._scan_generation:
+                    return
+                rgb, meta = _read_dicom_thumb_data(fpath)
+                # La señal cruza al hilo GUI; allí se crean QImage/QPixmap/items.
+                self.thumbReady.emit(rgb, meta, i + 1, len(files))
 
         t = threading.Thread(target=_scan, daemon=True)
         t.start()
 
-    def _add_item_safe(self, pix: QPixmap, meta: dict, current: int, total: int):
-        """Agrega un item a la lista (thread-safe via invokeMethod pattern)."""
-        from PyQt6.QtCore import QMetaObject, Qt as QtNamespace, Q_ARG
-        # En PyQt6 podemos usar QTimer.singleShot(0, ...) para ejecutar en el hilo principal.
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(0, lambda: self._add_item_ui(pix, meta, current, total))
-
-    def _add_item_ui(self, pix: QPixmap, meta: dict, current: int, total: int):
+    def _add_item_ui(self, rgb: np.ndarray | None, meta: dict, current: int, total: int):
+        pix = _rgb_to_pixmap(rgb, 96)
+        self._items.append((pix, meta))
         label = os.path.basename(meta["path"])
-        item = QListWidgetItem(pix, label[:20])
+        item = QListWidgetItem(QIcon(pix), label[:20])
         item.setData(Qt.ItemDataRole.UserRole, meta)
         item.setToolTip(f"{meta['patient']}\n{meta['date']} — {meta['series']}\n{meta['rows']}×{meta['cols']} ({meta['modality']})")
         self._list.addItem(item)
