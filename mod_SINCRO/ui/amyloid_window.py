@@ -180,6 +180,7 @@ class AmyloidWindow(QDialog):
         self._current_mode = "visor"  # "visor" | "analisis"
         self._page_offset = 0  # índice de inicio de la página actual
         self._processed_images: dict[int, np.ndarray] = {}  # índice → imagen procesada (ROIs/limpia)
+        self._washout_data: dict[str, dict] = {}  # tiempo_label → {hmr, heart_counts, mediastinum_counts}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
@@ -364,6 +365,15 @@ class AmyloidWindow(QDialog):
         except Exception:
             self._perugini_combo.setCurrentIndex(0)
         analysis_layout.addWidget(self._perugini_combo)
+
+        # Selector de tiempo para washout.
+        time_row = QHBoxLayout()
+        time_row.addWidget(QLabel("Tiempo:"))
+        self._time_combo = QComboBox()
+        self._time_combo.addItems(["1h", "3h", "Otro"])
+        self._time_combo.setStyleSheet("color: #e2e8f0;")
+        time_row.addWidget(self._time_combo)
+        analysis_layout.addLayout(time_row)
 
         # Botón Aplicar: renderiza ROIs + HMR y asigna al cuadrante AP+ROIs.
         btn_apply = QPushButton("Aplicar ROIs al cuadrante")
@@ -795,6 +805,14 @@ class AmyloidWindow(QDialog):
             QMessageBox.warning(self, "SINCRO", f"Error calculando HMR:\n{exc}")
             return
 
+        # Guardar datos para curva de washout.
+        time_label = self._time_combo.currentText()
+        self._washout_data[time_label] = {
+            "hmr": result.hmr,
+            "heart_counts": result.heart_counts,
+            "mediastinum_counts": result.mediastinum_counts,
+        }
+
         # Renderizar imagen con ROIs dibujados + leyenda al pie.
         report_img = self.get_report_image()
         from PIL import Image as PILImage, ImageDraw, ImageFont
@@ -1062,6 +1080,73 @@ class AmyloidWindow(QDialog):
         ))
         doc.build(story)
 
+    def _generate_washout_curve_b64(self) -> str | None:
+        """Genera curva de washout (1h vs 3h) como imagen base64.
+        Devuelve None si no hay datos de ambos tiempos."""
+        if len(self._washout_data) < 2:
+            return None
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import io, base64
+
+        def _time_hours(label: str) -> float:
+            try:
+                return float(label.replace("h", "").strip())
+            except Exception:
+                return 0.0
+
+        sorted_items = sorted(self._washout_data.items(), key=lambda kv: _time_hours(kv[0]))
+        times = [_time_hours(k) for k, _ in sorted_items]
+        hmr_vals = [v["hmr"] for _, v in sorted_items]
+        heart_vals = [v["heart_counts"] for _, v in sorted_items]
+        medi_vals = [v["mediastinum_counts"] for _, v in sorted_items]
+
+        h0 = heart_vals[0] if heart_vals[0] > 0 else 1.0
+        m0 = medi_vals[0] if medi_vals[0] > 0 else 1.0
+        heart_pct = [v / h0 * 100 for v in heart_vals]
+        medi_pct = [v / m0 * 100 for v in medi_vals]
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7, 2.5), dpi=100)
+        fig.patch.set_facecolor("#0f172a")
+        for ax in (ax1, ax2):
+            ax.set_facecolor("#1e293b")
+            ax.tick_params(colors="#e2e8f0", labelsize=8)
+            for spine in ax.spines.values():
+                spine.set_color("#475569")
+
+        ax1.plot(times, hmr_vals, "o-", color="#38bdf8", linewidth=2, markersize=8)
+        ax1.axhline(y=1.5, color="#f87171", linestyle="--", linewidth=1, alpha=0.7, label="Corte ATTR (1.5)")
+        ax1.axhline(y=1.0, color="#4ade80", linestyle="--", linewidth=1, alpha=0.7, label="Corte negativo (1.0)")
+        ax1.set_xlabel("Tiempo (horas)", color="#94a3b8", fontsize=8)
+        ax1.set_ylabel("HMR", color="#94a3b8", fontsize=8)
+        ax1.set_title("HMR vs Tiempo", color="#e2e8f0", fontsize=10, fontweight="bold")
+        ax1.legend(fontsize=6, facecolor="#1e293b", edgecolor="#475569", labelcolor="#e2e8f0")
+        for t, h in zip(times, hmr_vals):
+            ax1.annotate(f"{h:.2f}", (t, h), textcoords="offset points", xytext=(0, 10),
+                         ha="center", fontsize=8, color="#e2e8f0")
+
+        ax2.plot(times, heart_pct, "o-", color="#f87171", linewidth=2, markersize=8, label="Corazon")
+        ax2.plot(times, medi_pct, "o-", color="#38bdf8", linewidth=2, markersize=8, label="Mediastino")
+        ax2.set_xlabel("Tiempo (horas)", color="#94a3b8", fontsize=8)
+        ax2.set_ylabel("Cuentas (% del inicial)", color="#94a3b8", fontsize=8)
+        ax2.set_title("Washout de cuentas", color="#e2e8f0", fontsize=10, fontweight="bold")
+        ax2.legend(fontsize=7, facecolor="#1e293b", edgecolor="#475569", labelcolor="#e2e8f0")
+
+        if len(hmr_vals) >= 2:
+            delta_hmr = hmr_vals[-1] - hmr_vals[0]
+            delta_pct = heart_pct[-1] - heart_pct[0]
+            washout_class = "ATTR (washout rapido)" if delta_hmr > 0.2 else ("AL (washout lento)" if delta_hmr < -0.1 else "Indeterminado")
+            fig.suptitle(f"Washout: {delta_pct:+.1f}% cuentas corazon - {washout_class}",
+                         color="#fbbf24", fontsize=9, y=0.02)
+
+        plt.tight_layout(rect=[0, 0.05, 1, 1])
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode("ascii")
+
     def _generate_hmr_bar_b64(self, hmr_value: float) -> str:
         """Genera barra de referencia HMR como imagen base64.
 
@@ -1201,6 +1286,7 @@ class AmyloidWindow(QDialog):
             img_b64 = base64.b64encode(f.read()).decode("ascii")
         hmr_bar_b64 = self._generate_hmr_bar_b64(result.hmr)
         hist_b64 = self._generate_roi_histogram_b64()
+        washout_b64 = self._generate_washout_curve_b64()
         patient = getattr(self._study, "patient_name", "") or "N/D"
         date = getattr(self._study, "study_date", "") or "N/D"
         series = getattr(self._study, "series_description", "") or "N/D"
@@ -1211,7 +1297,7 @@ class AmyloidWindow(QDialog):
             with open(composite_path, "rb") as f:
                 composite_b64 = base64.b64encode(f.read()).decode("ascii")
             layout_html = (
-                f'<div class="card"><h3>out completo</h3>'
+                f'<div class="card"><h3>Layout completo</h3>'
                 f'<img src="data:image/png;base64,{composite_b64}" '
                 f'style="max-width:100%; border-radius:8px; border:1px solid #475569;" '
                 f'alt="Layout completo"></div>'
@@ -1278,6 +1364,7 @@ td {{ padding: 8px; border-bottom: 1px solid #475569; }}
   <p>La interpretación debe integrarse con laboratorio (cadenas livianas libres, proteínas monoclonales) y contexto clínico. El Perugini score ≥2 en presencia de gammapatía monoclonal ausente confirma ATTR.</p>
 </div>
 {'<div class="card"><h3>Distribución de cuentas en ROI cardíaco</h3><img src="data:image/png;base64,' + hist_b64 + '" style="max-width:100%; border-radius:8px;" alt="Histograma ROI cardíaco"></div>' if hist_b64 else ''}
+{'<div class="card"><h3>Curva de washout (1h vs 3h)</h3><img src="data:image/png;base64,' + washout_b64 + '" style="max-width:100%; border-radius:8px;" alt="Curva de washout"></div>' if washout_b64 else ''}
 {layout_html}
 <div class="footer">
   Informe generado por SINCRO — Análisis de amiloidosis cardíaca.<br>
