@@ -1062,11 +1062,82 @@ class AmyloidWindow(QDialog):
         ))
         doc.build(story)
 
+    def _generate_hmr_bar_b64(self, hmr_value: float) -> str:
+        """Genera barra de referencia HMR como imagen base64.
+
+        Zonas: verde (<1.0), amarillo (1.0-1.5), rojo (>=1.5).
+        Un marcador vertical indica el valor del paciente.
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        from matplotlib.transforms import blended_transform_factory
+        import io, base64
+
+        fig, ax = plt.subplots(figsize=(6, 1.2), dpi=100)
+        fig.patch.set_facecolor('#0f172a')
+        ax.set_facecolor('#0f172a')
+
+        # Rango total de la barra.
+        x_min, x_max = 0.0, 3.0
+        bar_height = 0.55
+        y_center = 0.5
+
+        # Zonas coloreadas.
+        zones = [
+            (x_min, 1.0, '#4ade80', 'NEGATIVO\n(<1.0)'),
+            (1.0, 1.5, '#fbbf24', 'EQUÍVOCO\n(1.0–1.5)'),
+            (1.5, x_max, '#f87171', 'POSITIVO\n(≥1.5)'),
+        ]
+        for zx0, zx1, color, label in zones:
+            ax.barh(
+                y_center, zx1 - zx0, left=zx0, height=bar_height,
+                color=color, edgecolor='none', alpha=0.85,
+            )
+            # Etiqueta centrada en cada zona.
+            ax.text(
+                (zx0 + zx1) / 2, y_center, label,
+                ha='center', va='center', fontsize=7, fontweight='bold',
+                color='#0f172a',
+            )
+
+        # Marcador del paciente.
+        hmr_clamped = max(x_min, min(x_max, hmr_value))
+        ax.annotate(
+            '',
+            xy=(hmr_clamped, y_center + bar_height / 2 + 0.02),
+            xytext=(hmr_clamped, y_center + bar_height / 2 + 0.32),
+            arrowprops=dict(arrowstyle='->', color='white', lw=2.5),
+        )
+        ax.text(
+            hmr_clamped, y_center + bar_height / 2 + 0.36,
+            f'{hmr_value:.2f}',
+            ha='center', va='bottom', fontsize=11, fontweight='bold',
+            color='white',
+        )
+
+        # Líneas de corte en 1.0 y 1.5.
+        for cut in (1.0, 1.5):
+            ax.axvline(cut, color='white', lw=0.8, ls='--', alpha=0.5)
+
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(0, 1.15)
+        ax.axis('off')
+        fig.subplots_adjust(left=0.02, right=0.98, top=0.85, bottom=0.05)
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode('ascii')
+
     def _generate_html(self, html_path, img_path, composite_path, result, perugini):
         """Genera el informe HTML de amiloidosis."""
         import base64
         with open(img_path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode("ascii")
+        hmr_bar_b64 = self._generate_hmr_bar_b64(result.hmr)
         patient = getattr(self._study, "patient_name", "") or "N/D"
         date = getattr(self._study, "study_date", "") or "N/D"
         series = getattr(self._study, "series_description", "") or "N/D"
@@ -1123,6 +1194,7 @@ td {{ padding: 8px; border-bottom: 1px solid #475569; }}
     <div class="data-col">
       <h3>HMR</h3>
       <div class="metric {"positive" if result.hmr >= 1.5 else "equivocal" if result.hmr >= 1.0 else "negative"}">{result.hmr:.2f}</div>
+      <img src="data:image/png;base64,{hmr_bar_b64}" style="width:100%; border-radius:6px; margin: 12px 0;" alt="Barra de referencia HMR">
       <table>
         <tr><th>Métrica</th><th>Valor</th><th>Referencia</th></tr>
         <tr><td>HMR</td><td>{result.hmr:.2f}</td><td>≥1.5 sugiere ATTR</td></tr>
