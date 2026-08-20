@@ -240,32 +240,44 @@ class AmyloidWindow(QDialog):
         # Sidebar de controles del cuadrante seleccionado.
         sidebar = QVBoxLayout()
         sidebar.setSpacing(6)
-        sidebar.addWidget(QLabel("Cuadrante seleccionado:"))
+        self._lbl_css = "color: #e2e8f0;"
+
+        lbl = QLabel("Cuadrante seleccionado:")
+        lbl.setStyleSheet(self._lbl_css)
+        sidebar.addWidget(lbl)
         self._lbl_sel_quad = QLabel("#1")
         self._lbl_sel_quad.setStyleSheet("font-size: 14px; font-weight: bold; color: #38bdf8;")
         sidebar.addWidget(self._lbl_sel_quad)
 
-        sidebar.addWidget(QLabel("Colormap:"))
+        lbl = QLabel("Colormap:")
+        lbl.setStyleSheet(self._lbl_css)
+        sidebar.addWidget(lbl)
         self._cmap_combo = QComboBox()
         self._cmap_combo.addItems(["grey", "hot", "cool", "viridis"])
         self._cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
         sidebar.addWidget(self._cmap_combo)
 
-        sidebar.addWidget(QLabel("Ventana baja (%):"))
+        lbl = QLabel("Ventana baja (%):")
+        lbl.setStyleSheet(self._lbl_css)
+        sidebar.addWidget(lbl)
         self._win_low_slider = QSlider(Qt.Orientation.Horizontal)
         self._win_low_slider.setRange(0, 95)
         self._win_low_slider.setValue(0)
         self._win_low_slider.valueChanged.connect(self._on_window_changed)
         sidebar.addWidget(self._win_low_slider)
 
-        sidebar.addWidget(QLabel("Ventana alta (%):"))
+        lbl = QLabel("Ventana alta (%):")
+        lbl.setStyleSheet(self._lbl_css)
+        sidebar.addWidget(lbl)
         self._win_high_slider = QSlider(Qt.Orientation.Horizontal)
         self._win_high_slider.setRange(5, 100)
         self._win_high_slider.setValue(100)
         self._win_high_slider.valueChanged.connect(self._on_window_changed)
         sidebar.addWidget(self._win_high_slider)
 
-        sidebar.addWidget(QLabel("Filtros:"))
+        lbl = QLabel("Filtros:")
+        lbl.setStyleSheet(self._lbl_css)
+        sidebar.addWidget(lbl)
         btn_smooth = QPushButton("Suavizar")
         btn_smooth.clicked.connect(lambda: self._toggle_filter("smooth"))
         sidebar.addWidget(btn_smooth)
@@ -278,6 +290,14 @@ class AmyloidWindow(QDialog):
 
         sidebar.addStretch(1)
 
+        # Swap: intercambiar imágenes entre cuadrantes.
+        self._swap_mode = False
+        self._swap_first = -1
+        self._btn_swap = QPushButton("Swap")
+        self._btn_swap.setStyleSheet("background: #d97706; color: white; font-weight: bold; padding: 4px;")
+        self._btn_swap.clicked.connect(self._toggle_swap_mode)
+        sidebar.addWidget(self._btn_swap)
+
         # Botón para abrir la imagen seleccionada en modo análisis ROI.
         self._btn_analyze = QPushButton("Analizar ROI")
         self._btn_analyze.clicked.connect(self._analyze_selected)
@@ -286,7 +306,7 @@ class AmyloidWindow(QDialog):
         sidebar_frame = QFrame()
         sidebar_frame.setLayout(sidebar)
         sidebar_frame.setFixedWidth(160)
-        sidebar_frame.setStyleSheet("QFrame { background: #1e293b; border-radius: 8px; padding: 8px; }")
+        sidebar_frame.setStyleSheet("QFrame { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 8px; }")
         visor_layout.addWidget(sidebar_frame)
 
         self._stack.addWidget(page_visor)
@@ -436,6 +456,18 @@ class AmyloidWindow(QDialog):
     # ── Controles del cuadrante ─────────────────────────────────────
 
     def _on_quadrant_selected(self, idx: int):
+        # Si estamos en modo swap, ejecutar el intercambio.
+        if self._swap_mode and self._swap_first >= 0 and idx != self._swap_first:
+            self._do_swap(self._swap_first, idx)
+            self._swap_mode = False
+            self._swap_first = -1
+            self._btn_swap.setText("Swap")
+            self._btn_swap.setStyleSheet("background: #d97706; color: white; font-weight: bold; padding: 4px;")
+            return
+        elif self._swap_mode:
+            self._swap_first = idx
+            self._btn_swap.setText(f"Swap ← #{idx+1} (click destino)")
+            return
         q = self._quadrant_viewer.selected_quadrant()
         if q is None:
             return
@@ -476,6 +508,38 @@ class AmyloidWindow(QDialog):
             q.filters.remove(filt)
         else:
             q.filters.append(filt)
+        self._quadrant_viewer._rebuild_pixmaps()
+        self._quadrant_viewer.update()
+
+    # ── Swap entre cuadrantes ───────────────────────────────────────
+
+    def _toggle_swap_mode(self):
+        """Activa/desactiva el modo swap entre cuadrantes."""
+        self._swap_mode = not self._swap_mode
+        self._swap_first = -1
+        if self._swap_mode:
+            self._btn_swap.setText("Swap (click origen)")
+            self._btn_swap.setStyleSheet("background: #ef4444; color: white; font-weight: bold; padding: 4px;")
+        else:
+            self._btn_swap.setText("Swap")
+            self._btn_swap.setStyleSheet("background: #d97706; color: white; font-weight: bold; padding: 4px;")
+
+    def _do_swap(self, idx_a: int, idx_b: int):
+        """Intercambia las imágenes entre dos cuadrantes."""
+        layout = self._quadrant_viewer._layout
+        if layout is None:
+            return
+        qa = layout.quadrants[idx_a]
+        qb = layout.quadrants[idx_b]
+        # Intercambiar imagen, label, cmap, filtros, ventana, hmr.
+        qa.image, qb.image = qb.image, qa.image
+        qa.label, qb.label = qb.label, qa.label
+        qa.cmap, qb.cmap = qb.cmap, qa.cmap
+        qa.filters, qb.filters = list(qb.filters), list(qa.filters)
+        qa.win_low, qb.win_low = qb.win_low, qa.win_low
+        qa.win_high, qb.win_high = qb.win_high, qa.win_high
+        qa.hmr, qb.hmr = qb.hmr, qa.hmr
+        qa.roi_overlay, qb.roi_overlay = qb.roi_overlay, qa.roi_overlay
         self._quadrant_viewer._rebuild_pixmaps()
         self._quadrant_viewer.update()
 
