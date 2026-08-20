@@ -14,19 +14,20 @@ Referencias:
 from __future__ import annotations
 
 import numpy as np
+import base64
 
 from PyQt6.QtCore import Qt, QPointF, pyqtSignal
-from PyQt6.QtGui import QMouseEvent, QPainter, QPen, QColor, QBrush, QPolygonF
+from PyQt6.QtGui import QMouseEvent, QPainter, QPen, QColor, QBrush, QPixmap
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
     QComboBox, QWidget, QSizePolicy, QMessageBox, QStackedWidget,
-    QSlider, QFileDialog, QFrame,
+    QSlider, QFrame,
 )
 import os
 
 from core.amyloid_planar import ROICircle, compute_hmr, PERUGINI_SCORES
 from core.amyloid_layouts import (
-    Quadrant, Layout, LAYOUT_CATALOG, LAYOUT_NAMES,
+    LAYOUT_NAMES,
     layout_4q, layout_8q, layout_9q, layout_12q, layout_16q,
 )
 from ui.quadrant_viewer import QuadrantViewer
@@ -75,7 +76,7 @@ class ROIDragWidget(QWidget):
         rgb[..., 1] = rgb[..., 0]
         rgb[..., 2] = rgb[..., 0]
         from PyQt6.QtGui import QImage, QPixmap
-        qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format.Format_RGB888)
+        qimg = QImage(rgb.tobytes(), w, h, rgb.strides[0], QImage.Format.Format_RGB888)
         pix = QPixmap.fromImage(qimg)
         # Aplicar colormap o escala si se desea (por ahora gris).
         painter.drawPixmap(ox, oy, img_w, img_h, pix)
@@ -175,11 +176,23 @@ class AmyloidWindow(QDialog):
         self._image = image          # imagen renderizada (puede ser RGB)
         self._original_image = image  # imagen original 2D para análisis ROI
         self._study = study
-        self._loaded_images: list[tuple[str, np.ndarray]] = []  # (label, img) para cuadrantes
+        self._metadata = {
+            "patient": str(getattr(study, "patient_name", "") or "N/D"),
+            "date": str(getattr(study, "study_date", "") or "N/D"),
+            "series": str(getattr(study, "series_description", "") or "N/D"),
+        }
+        # Fuente canónica independiente del layout. Cada tiempo conserva sus tres
+        # vistas aunque el usuario cambie la grilla, pagine o vuelva del análisis.
+        self._time_images: dict[str, dict[str, dict | None]] = {
+            "1h": {"ap": None, "oai": None, "lat": None},
+            "3h": {"ap": None, "oai": None, "lat": None},
+        }
         self._current_layout_n = 4
         self._current_mode = "visor"  # "visor" | "analisis"
         self._page_offset = 0  # índice de inicio de la página actual
-        self._processed_images: dict[int, np.ndarray] = {}  # índice → imagen procesada (ROIs/limpia)
+        self._processed_images: dict[str, dict[str, np.ndarray]] = {"1h": {}, "3h": {}}
+        self._roi_state: dict[str, list[dict] | None] = {"1h": None, "3h": None}
+        self._active_time: str | None = None
         self._washout_data: dict[str, dict] = {}  # tiempo_label → {hmr, heart_counts, mediastinum_counts}
 
         root = QVBoxLayout(self)
@@ -187,9 +200,9 @@ class AmyloidWindow(QDialog):
         root.setSpacing(4)
 
         # ── Info del paciente ──────────────────────────────────────
-        patient = getattr(study, "patient_name", "") or "N/D"
-        date = getattr(study, "study_date", "") or "N/D"
-        series = getattr(study, "series_description", "") or "N/D"
+        patient = self._metadata["patient"]
+        date = self._metadata["date"]
+        series = self._metadata["series"]
         self._info_lbl = QLabel(f"Paciente: {patient}  ·  Fecha: {date}  ·  Serie: {series}")
         self._info_lbl.setStyleSheet("font-size: 11px; color: #94a3b8; padding: 2px 0;")
         root.addWidget(self._info_lbl)
@@ -207,10 +220,12 @@ class AmyloidWindow(QDialog):
         self._layout_combo.currentIndexChanged.connect(self._on_layout_changed)
         toolbar.addWidget(self._layout_combo)
 
-        # Botón cargar imágenes.
-        btn_load = QPushButton("Cargar imágenes...")
-        btn_load.clicked.connect(self._load_images)
-        toolbar.addWidget(btn_load)
+        btn_load_1h = QPushButton("Cargar imágenes 1h")
+        btn_load_1h.clicked.connect(lambda: self._load_time_images("1h"))
+        toolbar.addWidget(btn_load_1h)
+        btn_load_3h = QPushButton("Cargar imágenes 3h")
+        btn_load_3h.clicked.connect(lambda: self._load_time_images("3h"))
+        toolbar.addWidget(btn_load_3h)
 
         toolbar.addStretch(1)
 
@@ -313,6 +328,13 @@ class AmyloidWindow(QDialog):
         self._btn_analyze.clicked.connect(self._analyze_selected)
         sidebar.addWidget(self._btn_analyze)
 
+        self._washout_preview = QLabel()
+        self._washout_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._washout_preview.setWordWrap(True)
+        self._washout_preview.setMinimumHeight(90)
+        self._washout_preview.setStyleSheet("color:#94a3b8; border:1px solid #334155; padding:4px;")
+        sidebar.addWidget(self._washout_preview)
+
         # Paginación: anterior/siguiente.
         pag_layout = QHBoxLayout()
         btn_prev = QPushButton("◀")
@@ -372,7 +394,8 @@ class AmyloidWindow(QDialog):
         lbl_time.setStyleSheet(self._lbl_css)
         time_row.addWidget(lbl_time)
         self._time_combo = QComboBox()
-        self._time_combo.addItems(["1h", "2h", "3h", "4h", "5h", "Otro"])
+        self._time_combo.addItems(["1h", "3h"])
+        self._time_combo.setEnabled(False)
         self._time_combo.setStyleSheet("QComboBox { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; padding: 4px; border-radius: 4px; } QComboBox QAbstractItemView { background: #1e293b; color: #e2e8f0; selection-background-color: #2563eb; }")
         time_row.addWidget(self._time_combo)
         analysis_layout.addLayout(time_row)
@@ -407,9 +430,12 @@ class AmyloidWindow(QDialog):
 
         # ── Inicializar ────────────────────────────────────────────
         if image is not None:
-            self._loaded_images.append(("Imagen 1", image))
+            self._time_images["1h"]["ap"] = {"image": np.asarray(image, dtype=np.float64), "label": "AP", "path": ""}
+            self._active_time = "1h"
         self._rebuild_layout()
-        self._update_hmr(0, 0, 0, 0)
+        self._update_washout_preview()
+        if image is not None:
+            self._update_hmr(0, 0, 0, 0)
 
     # ── Modo ────────────────────────────────────────────────────────
 
@@ -420,6 +446,8 @@ class AmyloidWindow(QDialog):
             self._stack.setCurrentIndex(1)
             self._btn_mode.setText("← Visor cuadrantes")
         else:
+            if self._active_time in self._roi_state and self._original_image is not None:
+                self._roi_state[self._active_time] = [dict(roi) for roi in self._roi_widget._rois]
             self._current_mode = "visor"
             self._stack.setCurrentIndex(0)
             self._btn_mode.setText("Análisis ROI →")
@@ -433,33 +461,31 @@ class AmyloidWindow(QDialog):
             self._page_offset = 0  # reiniciar paginación al cambiar layout
             self._rebuild_layout(force_layout=n)
 
-    def _rebuild_layout(self, force_layout: int = None):
-        """Reconstruye el layout con las imágenes cargadas. Preserva posiciones
-        por índice y maneja paginación si hay más imágenes que cuadrantes."""
-        all_imgs = [img for _, img in self._loaded_images]
-        all_labels = [lbl for lbl, _ in self._loaded_images]
-        n_imgs = len(all_imgs)
-
-        if force_layout is not None:
-            n = force_layout
-        else:
-            if n_imgs <= 4:
-                n = 4
-            elif n_imgs <= 8:
-                n = 8
-            elif n_imgs <= 9:
-                n = 9
-            elif n_imgs <= 12:
-                n = 12
-            else:
-                n = 16
+    def _rebuild_layout(self, force_layout: int | None = None):
+        """Reconstruye la presentación desde las fuentes canónicas 1 h/3 h."""
+        n = force_layout or self._current_layout_n
         self._current_layout_n = n
 
-        # Paginación: mostrar solo la página actual.
-        start = self._page_offset
-        end = start + n
-        imgs = all_imgs[start:end]
-        labels = all_labels[start:end]
+        def _slots(time_label: str) -> tuple[list[np.ndarray | None], list[str]]:
+            source = self._time_images[time_label]
+            ap_entry = source["ap"]
+            ap = ap_entry["image"] if ap_entry else None
+            processed = self._processed_images[time_label]
+            images = [
+                processed.get("roi", ap), processed.get("clean", ap),
+                source["oai"]["image"] if source["oai"] else None,
+                source["lat"]["image"] if source["lat"] else None,
+            ]
+            labels = [
+                f"AP + ROIs ({time_label})" if "roi" in processed else f"AP cuantificación ({time_label})",
+                f"AP limpio ({time_label})", f"OAI ({time_label})", f"LAT. IZQ. ({time_label})",
+            ]
+            return images, labels
+
+        imgs_1h, labels_1h = _slots("1h")
+        imgs_3h, labels_3h = _slots("3h")
+        imgs = imgs_1h + imgs_3h
+        labels = labels_1h + labels_3h
 
         if n == 4:
             layout = layout_4q(
@@ -467,16 +493,17 @@ class AmyloidWindow(QDialog):
                 ap_clean=imgs[1] if len(imgs) > 1 else None,
                 oai=imgs[2] if len(imgs) > 2 else None,
                 lat=imgs[3] if len(imgs) > 3 else None,
-                ap_label=labels[0] if len(labels) > 0 else "AP",
+                ap_label="AP cuantificación (1h)",
                 oai_label=labels[2] if len(labels) > 2 else "OAI 45°",
                 lat_label=labels[3] if len(labels) > 3 else "LAT. IZQ.",
             )
+            layout.quadrants[0].label = labels[0]
+            layout.quadrants[1].label = labels[1]
         elif n == 8:
-            half = max(1, len(imgs) // 2)
             layout = layout_8q(
-                images_1h=imgs[:half],
-                images_3h=imgs[half:half*2],
-                labels=labels[:4] if len(labels) >= 4 else None,
+                images_1h=imgs_1h,
+                images_3h=imgs_3h,
+                labels=["AP + ROIs", "AP limpio", "OAI", "LAT. IZQ."],
             )
         elif n == 9:
             layout = layout_9q(images=imgs, labels=labels[:3] if len(labels) >= 3 else None)
@@ -486,23 +513,15 @@ class AmyloidWindow(QDialog):
             layout = layout_16q(images=imgs, labels=labels[:4] if len(labels) >= 4 else None)
         else:
             return
-        self._quadrant_viewer.set_layout(layout)
-        # Restaurar imágenes procesadas (ROIs + limpia) si existen.
-        for idx, img in self._processed_images.items():
+        for idx, label in enumerate(labels):
             if idx < len(layout.quadrants):
-                layout.quadrants[idx].image = img
-                if idx == 0:
-                    layout.quadrants[idx].label = f"AP + ROIs (HMR={layout.quadrants[idx].hmr:.2f})" if layout.quadrants[idx].hmr else "AP + ROIs"
-                    layout.quadrants[idx].roi_overlay = True
-                elif idx == 1:
-                    layout.quadrants[idx].label = "AP (limpio)"
-                    layout.quadrants[idx].roi_overlay = False
+                layout.quadrants[idx].label = label
+        self._quadrant_viewer.set_layout(layout)
         self._quadrant_viewer._rebuild_pixmaps()
         self._quadrant_viewer.update()
         self._on_quadrant_selected(0)
         # Actualizar info de paginación.
-        total_pages = (len(all_imgs) + n - 1) // n if n > 0 else 1
-        self._lbl_pagination.setText(f"Página {self._page_offset // n + 1}/{total_pages}")
+        self._lbl_pagination.setText("Página 1/1")
 
     def get_layout_images(self) -> list[np.ndarray]:
         """Devuelve las imágenes del layout actual como arrays RGB."""
@@ -606,7 +625,7 @@ class AmyloidWindow(QDialog):
             iw, ih = pil_img.size
             scale = min(cell_w / max(1, iw), cell_h / max(1, ih))
             new_w, new_h = int(iw * scale), int(ih * scale)
-            pil_img = pil_img.resize((new_w, new_h), PILImage.LANCZOS)
+            pil_img = pil_img.resize((new_w, new_h), PILImage.Resampling.LANCZOS)
 
             ox = x0 + (cell_w - new_w) // 2
             oy = y0 + (cell_h - new_h) // 2
@@ -626,8 +645,8 @@ class AmyloidWindow(QDialog):
 
     # ── Cargar imágenes ─────────────────────────────────────────────
 
-    def _load_images(self):
-        """Abre el navegador DICOM con thumbnails para seleccionar imágenes."""
+    def _load_time_images(self, time_label: str):
+        """Carga exactamente AP, OAI y lateral para un tiempo canónico."""
         from ui.dicom_browser import DicomBrowserDialog
         # Determinar directorio inicial.
         start_dir = ""
@@ -641,23 +660,80 @@ class AmyloidWindow(QDialog):
         browser = DicomBrowserDialog(self, start_dir=start_dir)
         if browser.exec() == QDialog.DialogCode.Accepted:
             paths = browser.selected_paths()
+            if len(paths) != 3:
+                QMessageBox.information(
+                    self, "SINCRO — Amyloidosis",
+                    "Seleccioná exactamente tres DICOM: AP, OAI y lateral izquierda."
+                )
+                return
+            records = []
             for p in paths:
                 try:
-                    if p.lower().endswith((".dcm",)):
-                        import pydicom
-                        ds = pydicom.dcmread(p)
-                        img = ds.pixel_array.astype(np.float64)
-                        label = getattr(ds, "SeriesDescription", "") or os.path.basename(p)
-                    else:
-                        from PIL import Image as PILImage
-                        img = np.array(PILImage.open(p)).astype(np.float64)
-                        if img.ndim == 3:
-                            img = img.mean(axis=2)
-                        label = os.path.basename(p)
-                    self._loaded_images.append((label, img))
+                    import pydicom
+                    ds = pydicom.dcmread(p, force=True)
+                    img = np.asarray(ds.pixel_array, dtype=np.float64)
+                    while img.ndim > 2:
+                        img = img[img.shape[0] // 2]
+                    if img.ndim != 2:
+                        raise ValueError(f"Imagen no planar: shape={img.shape}")
+                    description = " ".join(filter(None, [
+                        str(getattr(ds, "SeriesDescription", "") or ""),
+                        str(getattr(ds, "ViewPosition", "") or ""),
+                    ])).upper()
+                    records.append({"image": img, "label": description or os.path.basename(p),
+                                    "path": p, "view": self._classify_planar_view(description), "ds": ds})
                 except Exception as exc:
                     QMessageBox.warning(self, "SINCRO", f"Error cargando {os.path.basename(p)}:\n{exc}")
-            self._rebuild_layout()
+                    return
+
+            assigned: dict[str, dict] = {}
+            used: set[int] = set()
+            for idx, record in enumerate(records):
+                view = record["view"]
+                if view and view not in assigned:
+                    assigned[view] = record
+                    used.add(idx)
+            for role in ("ap", "oai", "lat"):
+                if role not in assigned:
+                    idx = next(i for i in range(len(records)) if i not in used)
+                    assigned[role] = records[idx]
+                    used.add(idx)
+
+            self._time_images[time_label] = {role: assigned[role] for role in ("ap", "oai", "lat")}
+            self._processed_images[time_label].clear()
+            self._roi_state[time_label] = None
+            self._washout_data.pop(time_label, None)
+            first_ds = records[0]["ds"]
+            self._metadata = {
+                "patient": str(getattr(first_ds, "PatientName", "") or "N/D"),
+                "date": str(getattr(first_ds, "StudyDate", "") or "N/D"),
+                "series": str(getattr(first_ds, "SeriesDescription", "") or "N/D"),
+            }
+            self._info_lbl.setText(
+                f"Paciente: {self._metadata['patient']}  ·  Fecha: {self._metadata['date']}  ·  Serie: {self._metadata['series']}"
+            )
+            target_layout = 8 if self._time_images["3h"]["ap"] is not None else 4
+            combo_idx = self._layout_combo.findData(target_layout)
+            self._layout_combo.blockSignals(True)
+            self._layout_combo.setCurrentIndex(combo_idx)
+            self._layout_combo.blockSignals(False)
+            self._current_layout_n = target_layout
+            self._page_offset = 0
+            self._rebuild_layout(force_layout=target_layout)
+            self._update_washout_preview()
+
+    @staticmethod
+    def _classify_planar_view(text: str) -> str | None:
+        """Clasifica ViewPosition/SeriesDescription; None activa fallback por orden."""
+        normalized = " ".join(text.upper().replace("_", " ").replace("-", " ").split())
+        words = set(normalized.split())
+        if "LAT" in words or any(token in normalized for token in ("LATERAL", "LAT IZQ", "LEFT LAT", "LLAT")):
+            return "lat"
+        if any(token in normalized for token in ("OAI", "LAO", "OBLICUA ANTERIOR IZQ", "LEFT ANTERIOR OBLIQUE")):
+            return "oai"
+        if "AP" in words or "ANTERIOR" in words or "ANT" in words:
+            return "ap"
+        return None
 
     # ── Controles del cuadrante ─────────────────────────────────────
 
@@ -765,37 +841,62 @@ class AmyloidWindow(QDialog):
 
     def _analyze_selected(self):
         """Abre la imagen del cuadrante seleccionado en modo análisis ROI."""
+        idx = self._quadrant_viewer._selected
         q = self._quadrant_viewer.selected_quadrant()
         if q is None or q.image is None:
             QMessageBox.information(self, "SINCRO", "Selecciona un cuadrante con imagen primero.")
             return
-        # Usar la imagen original 2D si existe; si no, usar la del cuadrante.
-        img = self._original_image if self._original_image is not None else q.image
-        # Si la imagen es RGB (3D), convertir a gris para el análisis ROI.
-        if img.ndim == 3:
-            img = img.mean(axis=2)
+        if self._current_layout_n >= 8:
+            slot_to_time = {0: "1h", 1: "1h", 4: "3h", 5: "3h"}
+        else:
+            slot_to_time = {0: "1h", 1: "1h"}
+        time_label = slot_to_time.get(idx)
+        if time_label is None:
+            QMessageBox.information(
+                self, "SINCRO — Amyloidosis",
+                "La cuantificación HMR solo se realiza sobre una celda AP.\n"
+                "Seleccioná AP cuantificación o AP limpio del tiempo correspondiente."
+            )
+            return
+        ap_entry = self._time_images[time_label]["ap"]
+        if ap_entry is None:
+            QMessageBox.information(self, "SINCRO — Amyloidosis", f"No hay AP cargada para {time_label}.")
+            return
+        img = np.asarray(ap_entry["image"], dtype=np.float64)
         self._image = img  # imagen actual para display/render
         self._original_image = img.copy()  # original 2D para análisis
+        self._active_time = time_label
+        self._time_combo.setCurrentText(time_label)
         self._roi_widget = ROIDragWidget(img)
+        saved_rois = self._roi_state.get(time_label)
+        if saved_rois:
+            self._roi_widget._rois = [dict(roi) for roi in saved_rois]
         self._roi_widget.roiChanged.connect(self._update_hmr)
         # Reemplazar el widget de ROI en la página de análisis.
         old = self._stack.widget(1)
+        if old is None:
+            return
         old_layout = old.layout()
         if old_layout:
             # Quitar el widget viejo y poner el nuevo.
             for i in range(old_layout.count()):
-                w = old_layout.itemAt(i).widget()
+                item = old_layout.itemAt(i)
+                if item is None:
+                    continue
+                w = item.widget()
                 if isinstance(w, ROIDragWidget):
                     old_layout.removeWidget(w)
                     w.deleteLater()
-                    old_layout.insertWidget(0, self._roi_widget, 1)
+                    if isinstance(old_layout, QVBoxLayout):
+                        old_layout.insertWidget(0, self._roi_widget, 1)
                     break
         self._toggle_mode()
         self._update_hmr(0, 0, 0, 0)
 
     def _apply_rois_to_quadrant(self):
-        """Renderiza la imagen con ROIs + HMR y la asigna al cuadrante 0 (AP+ROIs)."""
-        if self._original_image is None:
+        """Aplica el análisis al par AP+ROI/AP limpio del tiempo activo."""
+        time_label = self._active_time
+        if self._original_image is None or time_label not in ("1h", "3h"):
             return
         try:
             roi_h = ROICircle(
@@ -814,21 +915,12 @@ class AmyloidWindow(QDialog):
             return
 
         # Guardar datos para curva de washout.
-        time_label = self._time_combo.currentText()
         self._washout_data[time_label] = {
             "hmr": result.hmr,
             "heart_counts": result.heart_counts,
             "mediastinum_counts": result.mediastinum_counts,
         }
-        # Actualizar label de estado de washout.
-        times_done = ", ".join(sorted(self._washout_data.keys()))
-        n = len(self._washout_data)
-        if n >= 2:
-            self._lbl_washout_status.setText(f"✓ Washout: {times_done} (curva lista para informe)")
-            self._lbl_washout_status.setStyleSheet("font-size: 10px; color: #4ade80; padding: 4px;")
-        else:
-            self._lbl_washout_status.setText(f"Washout: {times_done} (cargá otra hora para generar curva)")
-            self._lbl_washout_status.setStyleSheet("font-size: 10px; color: #fbbf24; padding: 4px;")
+        self._roi_state[time_label] = [dict(roi) for roi in self._roi_widget._rois]
 
         # Renderizar imagen con ROIs dibujados + leyenda al pie.
         report_img = self.get_report_image()
@@ -869,26 +961,19 @@ class AmyloidWindow(QDialog):
         tw = bbox[2] - bbox[0]
         draw.text((w_img - tw - 10, h_img - band_h + 6), hmr_text, fill=hmr_color, font=font12)
 
-        # Asignar al cuadrante 0 (AP+ROIs) — imagen RGB.
         img_rgb = np.array(pil, dtype=np.float64)
+        self._processed_images[time_label]["roi"] = img_rgb
+        self._processed_images[time_label]["clean"] = self._original_image.copy()
+        self._rebuild_layout(force_layout=self._current_layout_n)
         layout = self._quadrant_viewer._layout
-        if layout is not None and len(layout.quadrants) > 0:
-            layout.quadrants[0].image = img_rgb
-            layout.quadrants[0].label = f"AP + ROIs (HMR={result.hmr:.2f})"
-            layout.quadrants[0].roi_overlay = True
-            layout.quadrants[0].hmr = result.hmr
-            # Guardar imagen procesada para restaurarla al cambiar de layout.
-            self._processed_images[0] = img_rgb
-            # Copia limpia al cuadrante 1 (reservado para AP limpia).
-            if len(layout.quadrants) > 1:
-                clean_img = self._original_image.copy()
-                layout.quadrants[1].image = clean_img
-                layout.quadrants[1].label = "AP (limpio)"
-                layout.quadrants[1].roi_overlay = False
-                # Guardar imagen limpia también.
-                self._processed_images[1] = clean_img
+        roi_idx = 0 if time_label == "1h" else 4
+        if layout is not None and roi_idx < len(layout.quadrants):
+            layout.quadrants[roi_idx].label = f"AP + ROIs ({time_label}, HMR={result.hmr:.2f})"
+            layout.quadrants[roi_idx].hmr = result.hmr
+            layout.quadrants[roi_idx].roi_overlay = True
             self._quadrant_viewer._rebuild_pixmaps()
             self._quadrant_viewer.update()
+        self._update_washout_preview()
 
         # Volver al modo visor.
         if self._current_mode == "analisis":
@@ -896,6 +981,8 @@ class AmyloidWindow(QDialog):
 
     def get_report_image(self) -> np.ndarray:
         """Renderiza la imagen con los ROIs como array RGB para el informe."""
+        if self._original_image is None:
+            return np.zeros((1, 1, 3), dtype=np.uint8)
         img = self._original_image.copy()
         h, w = img.shape
         rgb = np.zeros((h, w, 3), dtype=np.uint8)
@@ -916,6 +1003,10 @@ class AmyloidWindow(QDialog):
         return np.asarray(pil)
 
     def _update_hmr(self, roi_id: int, cy: float, cx: float, radius: float):
+        if self._original_image is None:
+            self._lbl_hmr.setText("HMR = N/D")
+            self._lbl_class.setText("Seleccioná una imagen AP para analizar.")
+            return
         try:
             roi_h = ROICircle(
                 cy=self._roi_widget._rois[0]["cy"],
@@ -937,6 +1028,8 @@ class AmyloidWindow(QDialog):
             self._lbl_class.setText(f"Error: {exc}")
 
     def _reset_rois(self):
+        if self._original_image is None:
+            return
         h, w = self._original_image.shape
         self._roi_widget._rois[0]["cy"] = 0.4 * h
         self._roi_widget._rois[0]["cx"] = 0.4 * w
@@ -945,12 +1038,39 @@ class AmyloidWindow(QDialog):
         self._roi_widget._rois[1]["cx"] = 0.6 * w
         self._roi_widget._rois[1]["radius"] = 12.0
         self._roi_widget.update()
+        if self._active_time in self._roi_state:
+            self._roi_state[self._active_time] = [dict(roi) for roi in self._roi_widget._rois]
         self._update_hmr(0, 0, 0, 0)
+
+    def _update_washout_preview(self):
+        """Actualiza estado y curva en vivo solo con 1 h y 3 h cuantificadas."""
+        done = [time for time in ("1h", "3h") if time in self._washout_data]
+        missing = [time for time in ("1h", "3h") if time not in self._washout_data]
+        if missing:
+            done_text = ", ".join(done) if done else "ninguno"
+            missing_text = " y ".join(missing)
+            status = f"Cuantificado: {done_text}. Falta cuantificar {missing_text}."
+            self._lbl_washout_status.setText(status)
+            self._lbl_washout_status.setStyleSheet("font-size:10px; color:#fbbf24; padding:4px;")
+            self._washout_preview.clear()
+            self._washout_preview.setText(status)
+            self._washout_preview.setVisible(True)
+            return
+        curve_b64 = self._generate_washout_curve_b64()
+        pixmap = QPixmap()
+        if curve_b64 and pixmap.loadFromData(base64.b64decode(curve_b64), "PNG"):
+            self._washout_preview.setPixmap(pixmap.scaledToWidth(145, Qt.TransformationMode.SmoothTransformation))
+            self._washout_preview.setVisible(True)
+        self._lbl_washout_status.setText("Washout 1h/3h cuantificado: curva lista para el informe.")
+        self._lbl_washout_status.setStyleSheet("font-size:10px; color:#4ade80; padding:4px;")
 
     def _generate_report(self):
         """Genera el informe PDF + HTML de amiloidosis."""
-        if self._image is None or self._study is None:
-            QMessageBox.warning(self, "SINCRO — Amyloidosis", "No hay imagen cargada.")
+        if self._original_image is None or self._active_time not in self._washout_data:
+            QMessageBox.warning(
+                self, "SINCRO — Amyloidosis",
+                "Seleccioná y cuantificá una imagen AP antes de generar el informe."
+            )
             return
         try:
             roi_h = ROICircle(
@@ -1020,9 +1140,9 @@ class AmyloidWindow(QDialog):
         story.append(Spacer(1, 4*mm))
 
         # Datos del paciente
-        patient = getattr(self._study, "patient_name", "") or "N/D"
-        date = getattr(self._study, "study_date", "") or "N/D"
-        series = getattr(self._study, "series_description", "") or "N/D"
+        patient = self._metadata["patient"]
+        date = self._metadata["date"]
+        series = self._metadata["series"]
         info_data = [
             ["Paciente", patient],
             ["Fecha de estudio", date],
@@ -1049,6 +1169,14 @@ class AmyloidWindow(QDialog):
         story.append(RLImage(img_path, width=iw*scale, height=ih*scale))
         story.append(Paragraph("Imagen planar con ROI cardíaco (rojo) y ROI mediastinal (azul).", small_style))
         story.append(Spacer(1, 3*mm))
+
+        if composite_path and os.path.isfile(composite_path):
+            story.append(Paragraph("Layout completo", section_style))
+            composite = ImageReader(composite_path)
+            cw, ch = composite.getSize()
+            composite_scale = min(170*mm / cw, 110*mm / ch)
+            story.append(RLImage(composite_path, width=cw*composite_scale, height=ch*composite_scale))
+            story.append(Spacer(1, 3*mm))
 
         # HMR
         story.append(Paragraph("3. Métrica principal: HMR", section_style))
@@ -1089,6 +1217,17 @@ class AmyloidWindow(QDialog):
         """
         story.append(Paragraph(interp, body_style))
         story.append(Spacer(1, 4*mm))
+
+        washout_b64 = self._generate_washout_curve_b64()
+        if washout_b64:
+            import io
+            washout_stream = io.BytesIO(base64.b64decode(washout_b64))
+            washout_reader = ImageReader(washout_stream)
+            ww, wh = washout_reader.getSize()
+            washout_scale = min(170*mm / ww, 75*mm / wh)
+            story.append(Paragraph("6. Curva de washout 1h vs 3h", section_style))
+            story.append(RLImage(washout_stream, width=ww*washout_scale, height=wh*washout_scale))
+            story.append(Spacer(1, 4*mm))
 
         story.append(HRFlowable(width="100%", thickness=0.5, color=HexColor("#9aa7b5")))
         story.append(Paragraph(
@@ -1297,18 +1436,56 @@ class AmyloidWindow(QDialog):
         return base64.b64encode(buf.read()).decode('ascii')
 
     def _generate_html(self, html_path, img_path, composite_path, result, perugini):
-        """Genera el informe HTML de amiloidosis."""
+        """Genera el informe HTML con bloques para cada tiempo cuantificado."""
         import base64
         with open(img_path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode("ascii")
-        hmr_bar_b64 = self._generate_hmr_bar_b64(result.hmr)
-        hist_b64 = self._generate_roi_histogram_b64()
         washout_b64 = self._generate_washout_curve_b64()
-        patient = getattr(self._study, "patient_name", "") or "N/D"
-        date = getattr(self._study, "study_date", "") or "N/D"
-        series = getattr(self._study, "series_description", "") or "N/D"
+        hist_b64 = self._generate_roi_histogram_b64()
+        patient = self._metadata["patient"]
+        date = self._metadata["date"]
+        series = self._metadata["series"]
 
-        # Construir sección de layout compuesto.
+        # Construir bloques HMR/Perugini por cada tiempo cuantificado.
+        time_results_html = ""
+        for time_label, data in sorted(self._washout_data.items()):
+            hmr = data["hmr"]
+            heart = data["heart_counts"]
+            medi = data["mediastinum_counts"]
+            cls = ("POSITIVO" if hmr >= 1.5 else ("EQUIVOCO" if hmr >= 1.0 else "NEGATIVO"))
+            color_class = "positive" if hmr >= 1.5 else ("equivocal" if hmr >= 1.0 else "negative")
+            perugini_time = self._perugini_combo.currentData()
+            time_results_html += f"""
+<div class="card">
+  <h3>Resultados {time_label}</h3>
+  <div class="metric {color_class}">{hmr:.2f}</div>
+  <table>
+    <tr><th>Métrica</th><th>Valor</th><th>Referencia</th></tr>
+    <tr><td>HMR ({time_label})</td><td>{hmr:.2f}</td><td>≥1.5 sugiere ATTR</td></tr>
+    <tr><td>Cuentas cardíacas</td><td>{heart:,.0f}</td><td></td></tr>
+    <tr><td>Cuentas mediastinales</td><td>{medi:,.0f}</td><td></td></tr>
+    <tr><td>Clasificación</td><td>{cls}</td><td></td></tr>
+    <tr><td>Perugini</td><td>{perugini_time}</td><td>0–3</td></tr>
+  </table>
+</div>"""
+
+        if not time_results_html:
+            # Bloque único (solo el resultado actual).
+            color_class = "positive" if result.hmr >= 1.5 else ("equivocal" if result.hmr >= 1.0 else "negative")
+            time_results_html = f"""
+<div class="card">
+  <h3>Resultados</h3>
+  <div class="metric {color_class}">{result.hmr:.2f}</div>
+  <table>
+    <tr><th>Métrica</th><th>Valor</th><th>Referencia</th></tr>
+    <tr><td>HMR</td><td>{result.hmr:.2f}</td><td>≥1.5 sugiere ATTR</td></tr>
+    <tr><td>Cuentas cardíacas</td><td>{result.heart_counts:,.0f}</td><td></td></tr>
+    <tr><td>Cuentas mediastinales</td><td>{result.mediastinum_counts:,.0f}</td><td></td></tr>
+    <tr><td>Clasificación</td><td>{result.classification}</td><td></td></tr>
+    <tr><td>Perugini</td><td>{perugini}</td><td>0–3</td></tr>
+  </table>
+</div>"""
+
         layout_html = ""
         if composite_path and os.path.isfile(composite_path):
             with open(composite_path, "rb") as f:
@@ -1320,90 +1497,74 @@ class AmyloidWindow(QDialog):
                 f'alt="Layout completo"></div>'
             )
 
+        header_html = f"""
+<div class="header">
+  <h1>SINCRO</h1>
+  <div class="subtitle">Informe de Amiloidosis Cardíaca</div>
+  <div style="margin-top:12px; font-size:0.85rem; color:#94a3b8;">Paciente: {patient} · Fecha: {date} · Serie: {series}</div>
+</div>"""
+        roi_html = f"""
+<div class="card">
+  <h3>Imagen planar con ROIs</h3>
+  <img src="data:image/png;base64,{img_b64}" style="max-width:100%; border-radius:8px; border:1px solid #475569;" alt="Imagen planar">
+</div>"""
+
+        histogram_html = ""
+        if hist_b64:
+            histogram_html = f"""
+<div class="card"><h3>Distribución de cuentas ROI cardíaco</h3>
+  <img src="data:image/png;base64,{hist_b64}" style="max-width:100%; border-radius:8px;" alt="Histograma ROI cardíaco">
+</div>"""
+
+        washout_html = ""
+        if washout_b64:
+            washout_html = f"""
+<div class="card"><h3>Curva de washout (1h vs 3h)</h3>
+  <img src="data:image/png;base64,{washout_b64}" style="max-width:100%; border-radius:8px;" alt="Curva de washout">
+</div>"""
+
+        interpretation_html = f"""
+<div class="card">
+  <h3>Interpretación clínica</h3>
+  <p>HMR = {result.hmr:.2f}. <b>{result.classification}</b></p>
+  <p>Si EQUÍVOCO (HMR 1.0–1.5), considerar SPECT/CT o planar a 3h para descartar pool sanguíneo residual.</p>
+  <p>Perugini ≥ 2 + ausencia de gammapatía monoclonal confirma ATTR.</p>
+</div>"""
+
         html = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<title>SINCRO — Informe de Amiloidosis</title>
+<title>SINCRO — Amiloidosis</title>
 <style>
-body {{ font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; max-width: 900px; margin: 0 auto; padding: 24px; }}
-.header {{ background: linear-gradient(135deg, #1a3a5c, #0f172a); border-bottom: 3px solid #38bdf8; padding: 24px; text-align: center; border-radius: 12px; margin-bottom: 24px; }}
-.header h1 {{ color: #38bdf8; font-size: 1.8rem; margin: 0; }}
-.header .subtitle {{ color: #94a3b8; font-size: 0.95rem; }}
-.card {{ background: #1e293b; border-radius: 12px; padding: 20px; margin: 16px 0; border: 1px solid #475569; }}
-.top-row {{ display: flex; gap: 20px; align-items: flex-start; }}
-.top-row .img-col {{ flex: 1; min-width: 0; }}
-.top-row .img-col img {{ width: 100%; border-radius: 8px; border: 1px solid #475569; }}
-.top-row .data-col {{ flex: 1; min-width: 0; }}
-.metric {{ font-size: 2.5rem; font-weight: 800; color: #38bdf8; }}
-.metric.positive {{ color: #f87171; }}
-.metric.equivocal {{ color: #fbbf24; }}
-.metric.negative {{ color: #4ade80; }}
-table {{ width: 100%; border-collapse: collapse; }}
-th {{ background: #1a3a5c; color: white; padding: 8px; text-align: left; }}
-td {{ padding: 8px; border-bottom: 1px solid #475569; }}
-.footer {{ text-align: center; padding: 16px; border-top: 1px solid #475569; color: #94a3b8; font-size: 0.8rem; }}
+body {{ font-family:'Segoe UI',sans-serif; background:#0f172a; color:#e2e8f0; max-width:900px; margin:0 auto; padding:24px; }}
+.header {{ background:linear-gradient(135deg,#1a3a5c,#0f172a); border-bottom:3px solid #38bdf8; padding:24px; text-align:center; border-radius:12px; margin-bottom:24px; }}
+.header h1 {{ color:#38bdf8; font-size:1.8rem; margin:0; }}
+.header .subtitle {{ color:#94a3b8; font-size:0.95rem; }}
+.card {{ background:#1e293b; border-radius:12px; padding:20px; margin:16px 0; border:1px solid #475569; }}
+.metric {{ font-size:2.5rem; font-weight:800; color:#38bdf8; }}
+.metric.positive {{ color:#f87171; }}
+.metric.equivocal {{ color:#fbbf24; }}
+.metric.negative {{ color:#4ade80; }}
+table {{ width:100%; border-collapse:collapse; }}
+th {{ background:#1a3a5c; color:white; padding:8px; text-align:left; }}
+td {{ padding:8px; border-bottom:1px solid #475569; }}
+.footer {{ text-align:center; padding:16px; border-top:1px solid #475569; color:#94a3b8; font-size:0.8rem; }}
 </style>
 </head>
-<body>
-<div class="header">
-  <h1>SINCRO</h1>
-  <div class="subtitle">Informe de Amiloidosis Cardíaca — Análisis planar</div>
-  <div style="margin-top: 12px; font-size: 0.85rem; color: #94a3b8;">Paciente: {patient} · Fecha: {date} · Serie: {series}</div>
-</div>
-<div class="card">
-  <div class="top-row">
-    <div class="img-col">
-      <h3>Imagen planar con ROIs</h3>
-      <img src="data:image/png;base64,{img_b64}" alt="Imagen planar">
-    </div>
-    <div class="data-col">
-      <h3>HMR</h3>
-      <div class="metric {"positive" if result.hmr >= 1.5 else "equivocal" if result.hmr >= 1.0 else "negative"}">{result.hmr:.2f}</div>
-      <img src="data:image/png;base64,{hmr_bar_b64}" style="width:100%; border-radius:6px; margin: 12px 0;" alt="Barra de referencia HMR">
-      <table>
-        <tr><th>Métrica</th><th>Valor</th><th>Referencia</th></tr>
-        <tr><td>HMR</td><td>{result.hmr:.2f}</td><td>≥1.5 sugiere ATTR</td></tr>
-        <tr><td>Cuentas cardíacas</td><td>{result.heart_counts:,.0f}</td><td></td></tr>
-        <tr><td>Cuentas mediastinales</td><td>{result.mediastinum_counts:,.0f}</td><td></td></tr>
-        <tr><td>Clasificación</td><td>{result.classification}</td><td></td></tr>
-      </table>
-      <h3 style="margin-top:16px;">Perugini visual score</h3>
-      <p><b>Score {perugini}</b> — {PERUGINI_SCORES.get(perugini, 'N/D')}</p>
-      <p style="font-size:0.85rem; color:#94a3b8;">0 = sin captación · 1 = leve (&lt; hueso) · 2 = moderado (= hueso) · 3 = intenso (&gt; hueso)</p>
-    </div>
-  </div>
-</div>
-<div class="card">
-  <h3>Interpretación clínica</h3>
-  <p>El estudio muestra HMR de {result.hmr:.2f}. <b>{result.classification}</b></p>
-  <p>Si el resultado es equívoco (HMR 1.0–1.5), considerar imagen SPECT/CT o repetir planar a 3 horas para descartar pool sanguíneo residual.</p>
-  <p>La interpretación debe integrarse con laboratorio (cadenas livianas libres, proteínas monoclonales) y contexto clínico. El Perugini score ≥2 en presencia de gammapatía monoclonal ausente confirma ATTR.</p>
-</div>
-{'<div class="card"><h3>Distribución de cuentas en ROI cardíaco</h3><img src="data:image/png;base64,' + hist_b64 + '" style="max-width:100%; border-radius:8px;" alt="Histograma ROI cardíaco"></div>' if hist_b64 else ''}
-{'<div class="card"><h3>Curva de washout (1h vs 3h)</h3><img src="data:image/png;base64,' + washout_b64 + '" style="max-width:100%; border-radius:8px;" alt="Curva de washout"></div>' if washout_b64 else ''}
-{layout_html}
-<div class="footer">
-  Informe generado por SINCRO — Análisis de amiloidosis cardíaca.<br>
-  Resultados orientativos para apoyo clínico.
-</div>
-</body>
-</html>"""
+<body>{header_html}{roi_html}{time_results_html}{interpretation_html}{histogram_html}{washout_html}{layout_html}
+<div class="footer">Informe SINCRO — Amiloidosis. Resultados orientativos.</div>
+</body></html>"""
         with open(html_path, "wb") as f:
             f.write(html.encode("utf-8"))
 
     # ── Paginación de layouts ───────────────────────────────────────
 
     def _prev_page(self):
-        """Ir a la página anterior."""
-        if self._page_offset > 0:
-            self._page_offset -= self._current_layout_n
-            self._rebuild_layout(force_layout=self._current_layout_n)
+        """El flujo 1 h/3 h usa posiciones fijas y no requiere paginación."""
+        self._page_offset = 0
 
     def _next_page(self):
-        """Ir a la página siguiente."""
-        n = self._current_layout_n
-        if self._page_offset + n < len(self._loaded_images):
-            self._page_offset += n
-            self._rebuild_layout(force_layout=n)
+        """El flujo 1 h/3 h usa posiciones fijas y no requiere paginación."""
+        self._page_offset = 0
 
