@@ -183,11 +183,27 @@ class AmyloidWindow(QDialog):
         self._lbl_class.setStyleSheet("font-size: 12px; color: #94a3b8;")
         root.addWidget(self._lbl_class)
 
-        # Perugini.
+        # Perugini pre-cargado: sugiere score basado en HMR automático.
         self._perugini_combo = QComboBox()
         for score, desc in PERUGINI_SCORES.items():
             self._perugini_combo.addItem(f"{score} — {desc}", score)
-        self._perugini_combo.setCurrentIndex(0)
+        # Pre-cargar con score sugerido.
+        try:
+            roi_h = ROICircle(
+                cy=self._roi_widget._rois[0]["cy"],
+                cx=self._roi_widget._rois[0]["cx"],
+                radius=self._roi_widget._rois[0]["radius"],
+            )
+            roi_m = ROICircle(
+                cy=self._roi_widget._rois[1]["cy"],
+                cx=self._roi_widget._rois[1]["cx"],
+                radius=self._roi_widget._rois[1]["radius"],
+            )
+            result = compute_hmr(self._image, roi_h, roi_m)
+            suggested = 3 if result.hmr >= 1.5 else (2 if result.hmr >= 1.0 else 0)
+            self._perugini_combo.setCurrentIndex(suggested)
+        except Exception:
+            self._perugini_combo.setCurrentIndex(0)
         root.addWidget(self._perugini_combo)
 
         # Botones.
