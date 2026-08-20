@@ -170,6 +170,7 @@ class AmyloidWindow(QDialog):
     def __init__(self, parent=None, image=None, study=None):
         super().__init__(parent)
         self.setWindowTitle("SINCRO — Amiloidosis")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowMinMaxButtonsHint)
         self.resize(1100, 700)
         self._image = image          # imagen single-análisis
         self._study = study
