@@ -1132,12 +1132,75 @@ class AmyloidWindow(QDialog):
         buf.seek(0)
         return base64.b64encode(buf.read()).decode('ascii')
 
+    def _generate_roi_histogram_b64(self) -> str:
+        """Genera histograma de intensidades dentro del ROI cardíaco como base64."""
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import io, base64
+        from scipy.stats import skew
+
+        image = self._original_image
+        if image is None:
+            return ""
+
+        roi_data = self._roi_widget._rois[0]
+        roi = ROICircle(cy=roi_data["cy"], cx=roi_data["cx"], radius=roi_data["radius"])
+        mask = roi.mask(image.shape)
+        pixels = image[mask].astype(np.float64)
+
+        if pixels.size == 0:
+            return ""
+
+        mean_val = float(np.mean(pixels))
+        median_val = float(np.median(pixels))
+        std_val = float(np.std(pixels))
+        skew_val = float(skew(pixels))
+
+        fig, ax = plt.subplots(figsize=(6, 2), dpi=100)
+        fig.patch.set_facecolor('#0f172a')
+        ax.set_facecolor('#0f172a')
+
+        ax.hist(pixels, bins=60, color='#f87171', alpha=0.75, edgecolor='#fca5a5', linewidth=0.5)
+
+        ax.axvline(mean_val, color='white', lw=1.5, ls='--', label=f'Media: {mean_val:.1f}')
+        ax.axvline(median_val, color='#fbbf24', lw=1.5, ls='--', label=f'Mediana: {median_val:.1f}')
+
+        tail_text = f"σ = {std_val:.1f}  |  Skew = {skew_val:.2f}"
+        if skew_val > 1.0:
+            tail_text += "\n⚠ Cola derecha → pool sanguíneo posible"
+        else:
+            tail_text += "\n✓ Distribución razonablemente simétrica"
+
+        ax.text(
+            0.98, 0.95, tail_text,
+            transform=ax.transAxes, ha='right', va='top',
+            fontsize=8, color='#e2e8f0',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='#1e293b', edgecolor='#475569', alpha=0.9),
+        )
+
+        ax.set_xlabel('Intensidad (cuentas)', color='#e2e8f0', fontsize=9)
+        ax.set_ylabel('Frecuencia', color='#e2e8f0', fontsize=9)
+        ax.set_title('Distribución de cuentas — ROI cardíaco', color='#e2e8f0', fontsize=10, fontweight='bold')
+        ax.tick_params(colors='#94a3b8', labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_color('#475569')
+        ax.legend(fontsize=8, facecolor='#1e293b', edgecolor='#475569', labelcolor='#e2e8f0')
+
+        fig.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode('ascii')
+
     def _generate_html(self, html_path, img_path, composite_path, result, perugini):
         """Genera el informe HTML de amiloidosis."""
         import base64
         with open(img_path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode("ascii")
         hmr_bar_b64 = self._generate_hmr_bar_b64(result.hmr)
+        hist_b64 = self._generate_roi_histogram_b64()
         patient = getattr(self._study, "patient_name", "") or "N/D"
         date = getattr(self._study, "study_date", "") or "N/D"
         series = getattr(self._study, "series_description", "") or "N/D"
@@ -1214,6 +1277,7 @@ td {{ padding: 8px; border-bottom: 1px solid #475569; }}
   <p>Si el resultado es equívoco (HMR 1.0–1.5), considerar imagen SPECT/CT o repetir planar a 3 horas para descartar pool sanguíneo residual.</p>
   <p>La interpretación debe integrarse con laboratorio (cadenas livianas libres, proteínas monoclonales) y contexto clínico. El Perugini score ≥2 en presencia de gammapatía monoclonal ausente confirma ATTR.</p>
 </div>
+{'<div class="card"><h3>Distribución de cuentas en ROI cardíaco</h3><img src="data:image/png;base64,' + hist_b64 + '" style="max-width:100%; border-radius:8px;" alt="Histograma ROI cardíaco"></div>' if hist_b64 else ''}
 {layout_html}
 <div class="footer">
   Informe generado por SINCRO — Análisis de amiloidosis cardíaca.<br>
