@@ -196,7 +196,8 @@ class AmyloidWindow(QDialog):
         # Selector de layout.
         toolbar.addWidget(QLabel("Layout:"))
         self._layout_combo = QComboBox()
-        for n, name in LAYOUT_NAMES.items():
+        for key, name in LAYOUT_NAMES:
+            n = int(key.replace("q", ""))
             self._layout_combo.addItem(name, n)
         self._layout_combo.currentIndexChanged.connect(self._on_layout_changed)
         toolbar.addWidget(self._layout_combo)
