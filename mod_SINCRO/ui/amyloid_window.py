@@ -323,6 +323,12 @@ class AmyloidWindow(QDialog):
             self._perugini_combo.setCurrentIndex(0)
         analysis_layout.addWidget(self._perugini_combo)
 
+        # Botón Aplicar: renderiza ROIs + HMR y asigna al cuadrante AP+ROIs.
+        btn_apply = QPushButton("Aplicar ROIs al cuadrante")
+        btn_apply.setStyleSheet("font-size: 13px; font-weight: bold; padding: 8px; background: #2563eb; color: white; border-radius: 6px;")
+        btn_apply.clicked.connect(self._apply_rois_to_quadrant)
+        analysis_layout.addWidget(btn_apply)
+
         self._stack.addWidget(page_analysis)
 
         # ── Botones inferiores ─────────────────────────────────────
@@ -499,7 +505,57 @@ class AmyloidWindow(QDialog):
         self._toggle_mode()
         self._update_hmr(0, 0, 0, 0)
 
-    def get_report_image(self) -> np.ndarray:
+    def _apply_rois_to_quadrant(self):
+        """Renderiza la imagen con ROIs + HMR y la asigna al cuadrante 0 (AP+ROIs)."""
+        if self._image is None:
+            return
+        try:
+            roi_h = ROICircle(
+                cy=self._roi_widget._rois[0]["cy"],
+                cx=self._roi_widget._rois[0]["cx"],
+                radius=self._roi_widget._rois[0]["radius"],
+            )
+            roi_m = ROICircle(
+                cy=self._roi_widget._rois[1]["cy"],
+                cx=self._roi_widget._rois[1]["cx"],
+                radius=self._roi_widget._rois[1]["radius"],
+            )
+            result = compute_hmr(self._image, roi_h, roi_m)
+        except Exception as exc:
+            QMessageBox.warning(self, "SINCRO", f"Error calculando HMR:\n{exc}")
+            return
+
+        # Renderizar imagen con ROIs dibujados + texto HMR.
+        report_img = self.get_report_image()
+        from PIL import Image as PILImage, ImageDraw, ImageFont
+        pil = PILImage.fromarray(report_img)
+        draw = ImageDraw.Draw(pil)
+        # Texto HMR en la esquina superior izquierda.
+        hmr_text = f"HMR = {result.hmr:.2f}  {result.classification}"
+        color = (248, 113, 113) if result.hmr >= 1.5 else ((251, 191, 36) if result.hmr >= 1.0 else (74, 222, 128))
+        # Fondo semitransparente para legibilidad.
+        try:
+            font = ImageFont.truetype("arial.ttf", 18)
+        except Exception:
+            font = ImageFont.load_default()
+        bbox = draw.textbbox((8, 8), hmr_text, font=font)
+        draw.rectangle([bbox[0]-4, bbox[1]-4, bbox[2]+4, bbox[3]+4], fill=(0, 0, 0, 180))
+        draw.text((8, 8), hmr_text, fill=color, font=font)
+
+        # Asignar al cuadrante 0 (AP+ROIs).
+        img_gray = np.array(pil.convert("L"), dtype=np.float64)
+        layout = self._quadrant_viewer._layout
+        if layout is not None and len(layout.quadrants) > 0:
+            layout.quadrants[0].image = img_gray
+            layout.quadrants[0].label = f"AP + ROIs (HMR={result.hmr:.2f})"
+            layout.quadrants[0].roi_overlay = True
+            layout.quadrants[0].hmr = result.hmr
+            self._quadrant_viewer._rebuild_pixmaps()
+            self._quadrant_viewer.update()
+
+        # Volver al modo visor.
+        if self._current_mode == "analisis":
+            self._toggle_mode()
         """Renderiza la imagen con los ROIs como array RGB para el informe."""
         img = self._image.copy()
         h, w = img.shape
