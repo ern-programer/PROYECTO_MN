@@ -556,6 +556,8 @@ class AmyloidWindow(QDialog):
         # Volver al modo visor.
         if self._current_mode == "analisis":
             self._toggle_mode()
+
+    def get_report_image(self) -> np.ndarray:
         """Renderiza la imagen con los ROIs como array RGB para el informe."""
         img = self._image.copy()
         h, w = img.shape
