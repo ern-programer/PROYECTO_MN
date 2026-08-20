@@ -397,25 +397,30 @@ class AmyloidWindow(QDialog):
         n = self._layout_combo.currentData()
         if n and n != self._current_layout_n:
             self._current_layout_n = n
-            self._rebuild_layout()
+            # Forzar el layout elegido por el usuario, no el auto.
+            self._rebuild_layout(force_layout=n)
 
-    def _rebuild_layout(self):
-        """Reconstruye el layout con las imágenes cargadas. El layout se adapta
-        a la cantidad de imágenes: 4q si ≤4, 8q si ≤8, 9q si ≤9, etc."""
+    def _rebuild_layout(self, force_layout: int = None):
+        """Reconstruye el layout con las imágenes cargadas. Si force_layout
+        está definido, usa ese layout en lugar del auto."""
         imgs = [img for _, img in self._loaded_images]
         labels = [lbl for lbl, _ in self._loaded_images]
         n_imgs = len(imgs)
-        # Elegir layout automáticamente según cantidad de imágenes.
-        if n_imgs <= 4:
-            n = 4
-        elif n_imgs <= 8:
-            n = 8
-        elif n_imgs <= 9:
-            n = 9
-        elif n_imgs <= 12:
-            n = 12
+        # Elegir layout automáticamente según cantidad de imágenes, a menos que
+        # el usuario haya elegido uno específico.
+        if force_layout is not None:
+            n = force_layout
         else:
-            n = 16
+            if n_imgs <= 4:
+                n = 4
+            elif n_imgs <= 8:
+                n = 8
+            elif n_imgs <= 9:
+                n = 9
+            elif n_imgs <= 12:
+                n = 12
+            else:
+                n = 16
         self._current_layout_n = n
         if n == 4:
             layout = layout_4q(
@@ -444,6 +449,30 @@ class AmyloidWindow(QDialog):
             return
         self._quadrant_viewer.set_layout(layout)
         self._on_quadrant_selected(0)
+
+    def get_layout_images(self) -> list[np.ndarray]:
+        """Devuelve las imágenes del layout actual como arrays RGB."""
+        layout = self._quadrant_viewer._layout
+        if layout is None:
+            return []
+        images = []
+        for q in layout.quadrants:
+            if q.image is None:
+                continue
+            img = np.asarray(q.image, dtype=np.float64)
+            if img.ndim == 3:
+                # Ya es RGB.
+                images.append(img)
+            else:
+                # Convertir 2D a RGB.
+                h, w = img.shape
+                norm = img / max(float(img.max()), 1e-8) if img.size else img
+                rgb = np.zeros((h, w, 3), dtype=np.uint8)
+                rgb[..., 0] = np.clip(norm * 255, 0, 255).astype(np.uint8)
+                rgb[..., 1] = rgb[..., 0]
+                rgb[..., 2] = rgb[..., 0]
+                images.append(rgb)
+        return images
 
     # ── Cargar imágenes ─────────────────────────────────────────────
 
@@ -766,18 +795,26 @@ class AmyloidWindow(QDialog):
             result = compute_hmr(self._original_image, roi_h, roi_m)
             perugini = int(self._perugini_combo.currentData())
             report_img = self.get_report_image()
+            # Obtener las imágenes del layout tal cual las organizó el usuario.
+            layout_imgs = self.get_layout_images()
             output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output_demo")
             os.makedirs(output_dir, exist_ok=True)
             # Guardar imagen con ROIs.
             img_path = os.path.join(output_dir, "amyloid_planar.png")
             from PIL import Image
             Image.fromarray(report_img).save(img_path, "PNG")
+            # Guardar imágenes del layout.
+            layout_paths = []
+            for i, img in enumerate(layout_imgs):
+                img_p = os.path.join(output_dir, f"amyloid_layout_{i}.png")
+                Image.fromarray(img.astype(np.uint8)).save(img_p, "PNG")
+                layout_paths.append(img_p)
             # PDF
             pdf_path = os.path.join(output_dir, "informe_amyloid.pdf")
-            self._generate_pdf(pdf_path, img_path, result, perugini)
+            self._generate_pdf(pdf_path, img_path, layout_paths, result, perugini)
             # HTML
             html_path = os.path.join(output_dir, "informe_amyloid.html")
-            self._generate_html(html_path, img_path, result, perugini)
+            self._generate_html(html_path, img_path, layout_paths, result, perugini)
             QMessageBox.information(
                 self, "SINCRO — Amyloidosis",
                 f"Informe generado:\nPDF: {pdf_path}\nHTML: {html_path}"
@@ -785,7 +822,7 @@ class AmyloidWindow(QDialog):
         except Exception as exc:
             QMessageBox.critical(self, "SINCRO — Amyloidosis", f"Error al generar informe:\n{exc}")
 
-    def _generate_pdf(self, pdf_path, img_path, result, perugini):
+    def _generate_pdf(self, pdf_path, img_path, layout_paths, result, perugini):
         """Genera el informe PDF de amiloidosis."""
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.units import mm
@@ -890,7 +927,7 @@ class AmyloidWindow(QDialog):
         ))
         doc.build(story)
 
-    def _generate_html(self, html_path, img_path, result, perugini):
+    def _generate_html(self, html_path, img_path, layout_paths, result, perugini):
         """Genera el informe HTML de amiloidosis."""
         import base64
         with open(img_path, "rb") as f:
@@ -898,6 +935,19 @@ class AmyloidWindow(QDialog):
         patient = getattr(self._study, "patient_name", "") or "N/D"
         date = getattr(self._study, "study_date", "") or "N/D"
         series = getattr(self._study, "series_description", "") or "N/D"
+
+        # Construir secciones de layout como texto.
+        layout_html = ""
+        for i, layout_path in enumerate(layout_paths):
+            with open(layout_path, "rb") as f:
+                layout_b64 = base64.b64encode(f.read()).decode("ascii")
+            layout_html += (
+                f'<div class="card"><h3>Layout — Imagen {i+1}</h3>'
+                f'<img src="data:image/png;base64,{layout_b64}" '
+                f'style="max-width:100%; border-radius:8px; border:1px solid #475569;" '
+                f'alt="Layout {i+1}"></div>'
+            )
+
         html = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -929,6 +979,7 @@ td {{ padding: 8px; border-bottom: 1px solid #475569; }}
   <h3>1. Imagen planar con ROIs</h3>
   <img src="data:image/png;base64,{img_b64}" style="max-width:100%; border-radius:8px; border:1px solid #475569;" alt="Imagen planar">
 </div>
+{layout_html}
 <div class="card">
   <h3>2. Métrica principal: HMR</h3>
   <div class="metric {"positive" if result.hmr >= 1.5 else "equivocal" if result.hmr >= 1.0 else "negative"}">{result.hmr:.2f}</div>
