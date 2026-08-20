@@ -1077,7 +1077,7 @@ class AmyloidWindow(QDialog):
             with open(composite_path, "rb") as f:
                 composite_b64 = base64.b64encode(f.read()).decode("ascii")
             layout_html = (
-                f'<div class="card"><h3>2. Layout completo</h3>'
+                f'<div class="card"><h3>out completo</h3>'
                 f'<img src="data:image/png;base64,{composite_b64}" '
                 f'style="max-width:100%; border-radius:8px; border:1px solid #475569;" '
                 f'alt="Layout completo"></div>'
@@ -1094,6 +1094,10 @@ body {{ font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0
 .header h1 {{ color: #38bdf8; font-size: 1.8rem; margin: 0; }}
 .header .subtitle {{ color: #94a3b8; font-size: 0.95rem; }}
 .card {{ background: #1e293b; border-radius: 12px; padding: 20px; margin: 16px 0; border: 1px solid #475569; }}
+.top-row {{ display: flex; gap: 20px; align-items: flex-start; }}
+.top-row .img-col {{ flex: 1; min-width: 0; }}
+.top-row .img-col img {{ width: 100%; border-radius: 8px; border: 1px solid #475569; }}
+.top-row .data-col {{ flex: 1; min-width: 0; }}
 .metric {{ font-size: 2.5rem; font-weight: 800; color: #38bdf8; }}
 .metric.positive {{ color: #f87171; }}
 .metric.equivocal {{ color: #fbbf24; }}
@@ -1111,32 +1115,34 @@ td {{ padding: 8px; border-bottom: 1px solid #475569; }}
   <div style="margin-top: 12px; font-size: 0.85rem; color: #94a3b8;">Paciente: {patient} · Fecha: {date} · Serie: {series}</div>
 </div>
 <div class="card">
-  <h3>1. Imagen planar con ROIs</h3>
-  <img src="data:image/png;base64,{img_b64}" style="max-width:100%; border-radius:8px; border:1px solid #475569;" alt="Imagen planar">
+  <div class="top-row">
+    <div class="img-col">
+      <h3>Imagen planar con ROIs</h3>
+      <img src="data:image/png;base64,{img_b64}" alt="Imagen planar">
+    </div>
+    <div class="data-col">
+      <h3>HMR</h3>
+      <div class="metric {"positive" if result.hmr >= 1.5 else "equivocal" if result.hmr >= 1.0 else "negative"}">{result.hmr:.2f}</div>
+      <table>
+        <tr><th>Métrica</th><th>Valor</th><th>Referencia</th></tr>
+        <tr><td>HMR</td><td>{result.hmr:.2f}</td><td>≥1.5 sugiere ATTR</td></tr>
+        <tr><td>Cuentas cardíacas</td><td>{result.heart_counts:,.0f}</td><td></td></tr>
+        <tr><td>Cuentas mediastinales</td><td>{result.mediastinum_counts:,.0f}</td><td></td></tr>
+        <tr><td>Clasificación</td><td>{result.classification}</td><td></td></tr>
+      </table>
+      <h3 style="margin-top:16px;">Perugini visual score</h3>
+      <p><b>Score {perugini}</b> — {PERUGINI_SCORES.get(perugini, 'N/D')}</p>
+      <p style="font-size:0.85rem; color:#94a3b8;">0 = sin captación · 1 = leve (&lt; hueso) · 2 = moderado (= hueso) · 3 = intenso (&gt; hueso)</p>
+    </div>
+  </div>
 </div>
-{layout_html}
 <div class="card">
-  <h3>3. Métrica principal: HMR</h3>
-  <div class="metric {"positive" if result.hmr >= 1.5 else "equivocal" if result.hmr >= 1.0 else "negative"}">{result.hmr:.2f}</div>
-  <table>
-    <tr><th>Métrica</th><th>Valor</th><th>Referencia</th></tr>
-    <tr><td>HMR (Heart-to-Mediastinum)</td><td>{result.hmr:.2f}</td><td>≥1.5 sugiere ATTR</td></tr>
-    <tr><td>Cuentas cardíacas</td><td>{result.heart_counts:,.0f}</td><td></td></tr>
-    <tr><td>Cuentas mediastinales</td><td>{result.mediastinum_counts:,.0f}</td><td></td></tr>
-    <tr><td>Clasificación</td><td>{result.classification}</td><td></td></tr>
-  </table>
-</div>
-<div class="card">
-  <h3>4. Perugini visual score</h3>
-  <p><b>Score {perugini}</b> — {PERUGINI_SCORES.get(perugini, 'N/D')}</p>
-  <p style="font-size:0.85rem; color:#94a3b8;">Referencia: 0 = sin captación; 1 = leve; 2 = moderado (= hueso); 3 = intenso (> hueso).</p>
-</div>
-<div class="card">
-  <h3>5. Interpretación clínica</h3>
+  <h3>Interpretación clínica</h3>
   <p>El estudio muestra HMR de {result.hmr:.2f}. <b>{result.classification}</b></p>
   <p>Si el resultado es equívoco (HMR 1.0–1.5), considerar imagen SPECT/CT o repetir planar a 3 horas para descartar pool sanguíneo residual.</p>
   <p>La interpretación debe integrarse con laboratorio (cadenas livianas libres, proteínas monoclonales) y contexto clínico. El Perugini score ≥2 en presencia de gammapatía monoclonal ausente confirma ATTR.</p>
 </div>
+{layout_html}
 <div class="footer">
   Informe generado por SINCRO — Análisis de amiloidosis cardíaca.<br>
   Resultados orientativos para apoyo clínico.
