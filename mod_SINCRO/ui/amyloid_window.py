@@ -1116,7 +1116,9 @@ class AmyloidWindow(QDialog):
             QMessageBox.critical(self, "SINCRO — Amyloidosis", f"Error al generar informe:\n{exc}")
 
     def _generate_pdf(self, pdf_path, img_path, composite_path, result, perugini):
-        """Genera el informe PDF de amiloidosis."""
+        """Genera el informe PDF de amiloidosis con bloques 1h/3h y gráficos."""
+        import base64, io
+        from PIL import Image as PILImage
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.units import mm
         from reportlab.lib.colors import HexColor, white, black
@@ -1164,73 +1166,169 @@ class AmyloidWindow(QDialog):
         story.append(info_table)
         story.append(Spacer(1, 4*mm))
 
-        # Imagen con ROIs
-        story.append(Paragraph("2. Imagen planar con ROIs", section_style))
-        img = ImageReader(img_path)
-        iw, ih = img.getSize()
-        scale = min(160*mm / iw, 120*mm / ih)
-        story.append(RLImage(img_path, width=iw*scale, height=ih*scale))
-        story.append(Paragraph("Imagen planar con ROI cardíaco (rojo) y ROI mediastinal (azul).", small_style))
-        story.append(Spacer(1, 3*mm))
+        # Imagen con ROIs (solo si no hay bloques temporales)
+        if not self._washout_data:
+            story.append(Paragraph("2. Imagen planar con ROIs", section_style))
+            img = ImageReader(img_path)
+            iw, ih = img.getSize()
+            scale = min(160*mm / iw, 120*mm / ih)
+            story.append(RLImage(img_path, width=iw*scale, height=ih*scale))
+            story.append(Spacer(1, 3*mm))
 
+        # Bloques por tiempo (1h, 3h)
+        sec_num = 2
+        for time_label in ("1h", "3h"):
+            data = self._washout_data.get(time_label)
+            if data is None:
+                continue
+            hmr = data["hmr"]
+            heart = data["heart_counts"]
+            medi = data["mediastinum_counts"]
+            cls = data.get("classification", "")
+            perugini_time = self._perugini_by_time.get(time_label, perugini)
+
+            story.append(Paragraph(f"{sec_num}. Resultados {time_label}", section_style))
+
+            # Imagen ROI de este tiempo
+            roi_img = self._processed_images.get(time_label, {}).get("roi")
+            if roi_img is not None:
+                roi_pil = PILImage.fromarray(np.asarray(roi_img, dtype=np.uint8))
+                roi_buf = io.BytesIO()
+                roi_pil.save(roi_buf, format="PNG")
+                roi_buf.seek(0)
+                roi_reader = ImageReader(roi_buf)
+                riw, rih = roi_reader.getSize()
+                roi_scale = min(120*mm / riw, 90*mm / rih)
+                story.append(RLImage(roi_buf, width=riw*roi_scale, height=rih*roi_scale))
+                story.append(Spacer(1, 2*mm))
+
+            hmr_data = [
+                ["Métrica", "Valor", "Referencia"],
+                [f"HMR ({time_label})", f"{hmr:.2f}", "≥1.5 sugiere ATTR"],
+                ["Cuentas cardíacas", f"{heart:,.0f}", ""],
+                ["Cuentas mediastinales", f"{medi:,.0f}", ""],
+                ["Clasificación", cls, ""],
+                ["Perugini", str(perugini_time), "0–3"],
+            ]
+            hmr_table = Table(hmr_data, colWidths=[50*mm, 40*mm, 76*mm])
+            hmr_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), DARK_BLUE),
+                ("TEXTCOLOR", (0, 0), (-1, 0), white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cccccc")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 3*mm),
+            ]))
+            story.append(hmr_table)
+            story.append(Spacer(1, 4*mm))
+            sec_num += 1
+
+        # Si no hubo bloques temporales, mostrar resultado único
+        if not self._washout_data:
+            story.append(Paragraph("3. Métrica principal: HMR", section_style))
+            hmr_data = [
+                ["Métrica", "Valor", "Referencia"],
+                ["HMR", f"{result.hmr:.2f}", "≥1.5 sugiere ATTR"],
+                ["Cuentas cardíacas", f"{result.heart_counts:,.0f}", ""],
+                ["Cuentas mediastinales", f"{result.mediastinum_counts:,.0f}", ""],
+                ["Clasificación", result.classification, ""],
+                ["Perugini", str(perugini), "0–3"],
+            ]
+            hmr_table = Table(hmr_data, colWidths=[50*mm, 40*mm, 76*mm])
+            hmr_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), DARK_BLUE),
+                ("TEXTCOLOR", (0, 0), (-1, 0), white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cccccc")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 3*mm),
+            ]))
+            story.append(hmr_table)
+            story.append(Spacer(1, 3*mm))
+            sec_num += 1
+
+        # Perugini visual strip
+        perugini_strip_b64 = self._generate_perugini_strip_b64(perugini)
+        if perugini_strip_b64:
+            strip_buf = io.BytesIO(base64.b64decode(perugini_strip_b64))
+            strip_reader = ImageReader(strip_buf)
+            sw, sh = strip_reader.getSize()
+            strip_scale = min(170*mm / sw, 25*mm / sh)
+            story.append(Paragraph(f"{sec_num}. Escala Perugini visual", section_style))
+            story.append(RLImage(strip_buf, width=sw*strip_scale, height=sh*strip_scale))
+            story.append(Spacer(1, 3*mm))
+            sec_num += 1
+
+        # Histograma
+        hist_b64 = self._generate_roi_histogram_b64()
+        if hist_b64:
+            hist_buf = io.BytesIO(base64.b64decode(hist_b64))
+            hist_reader = ImageReader(hist_buf)
+            hw, hh = hist_reader.getSize()
+            hist_scale = min(170*mm / hw, 60*mm / hh)
+            story.append(Paragraph(f"{sec_num}. Distribución de cuentas ROI cardíaco", section_style))
+            story.append(RLImage(hist_buf, width=hw*hist_scale, height=hh*hist_scale))
+            story.append(Paragraph("La distribución de intensidades permite evaluar homogeneidad de captación. Cola derecha sugiere pool sanguíneo residual.", small_style))
+            story.append(Spacer(1, 3*mm))
+            sec_num += 1
+
+        # Bar chart corazón vs mediastino
+        comparison_b64 = self._generate_comparison_bar_b64()
+        if comparison_b64:
+            comp_buf = io.BytesIO(base64.b64decode(comparison_b64))
+            comp_reader = ImageReader(comp_buf)
+            compw, comph = comp_reader.getSize()
+            comp_scale = min(170*mm / compw, 60*mm / comph)
+            story.append(Paragraph(f"{sec_num}. Cuentas corazón vs mediastino", section_style))
+            story.append(RLImage(comp_buf, width=compw*comp_scale, height=comph*comp_scale))
+            story.append(Spacer(1, 3*mm))
+            sec_num += 1
+
+        # Curva de washout
+        washout_b64 = self._generate_washout_curve_b64()
+        if washout_b64:
+            washout_buf = io.BytesIO(base64.b64decode(washout_b64))
+            washout_reader = ImageReader(washout_buf)
+            ww, wh = washout_reader.getSize()
+            washout_scale = min(170*mm / ww, 75*mm / wh)
+            story.append(Paragraph(f"{sec_num}. Curva de washout 1h vs 3h", section_style))
+            story.append(RLImage(washout_buf, width=ww*washout_scale, height=wh*washout_scale))
+            story.append(Spacer(1, 3*mm))
+            sec_num += 1
+
+        # Layout compuesto
         if composite_path and os.path.isfile(composite_path):
-            story.append(Paragraph("Layout completo", section_style))
+            story.append(Paragraph(f"{sec_num}. Layout completo", section_style))
             composite = ImageReader(composite_path)
             cw, ch = composite.getSize()
             composite_scale = min(170*mm / cw, 110*mm / ch)
             story.append(RLImage(composite_path, width=cw*composite_scale, height=ch*composite_scale))
             story.append(Spacer(1, 3*mm))
-
-        # HMR
-        story.append(Paragraph("3. Métrica principal: HMR", section_style))
-        hmr_data = [
-            ["Métrica", "Valor", "Referencia"],
-            ["HMR (Heart-to-Mediastinum)", f"{result.hmr:.2f}", "≥1.5 sugiere ATTR"],
-            ["Cuentas cardíacas", f"{result.heart_counts:,.0f}", ""],
-            ["Cuentas mediastinales", f"{result.mediastinum_counts:,.0f}", ""],
-            ["Clasificación", result.classification, ""],
-        ]
-        hmr_table = Table(hmr_data, colWidths=[50*mm, 40*mm, 76*mm])
-        hmr_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), DARK_BLUE),
-            ("TEXTCOLOR", (0, 0), (-1, 0), white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cccccc")),
-            ("LEFTPADDING", (0, 0), (-1, -1), 3*mm),
-        ]))
-        story.append(hmr_table)
-        story.append(Spacer(1, 3*mm))
-
-        # Perugini
-        story.append(Paragraph("4. Perugini visual score", section_style))
-        story.append(Paragraph(f"Score: {perugini} — {PERUGINI_SCORES.get(perugini, 'N/D')}", body_style))
-        story.append(Spacer(1, 2*mm))
-        story.append(Paragraph("Referencia: 0 = sin captación; 1 = leve (< hueso); 2 = moderado (= hueso); 3 = intenso (> hueso).", small_style))
-        story.append(Spacer(1, 4*mm))
+            sec_num += 1
 
         # Interpretación
-        story.append(Paragraph("5. Interpretación clínica", section_style))
-        interp = f"""
-        El estudio muestra HMR de {result.hmr:.2f}. <b>{result.classification}</b><br/><br/>
-        Si el resultado es equívoco (HMR 1.0–1.5), considerar imagen SPECT/CT o repetir planar a 3 horas
-        para descartar pool sanguíneo residual.<br/><br/>
-        La interpretación debe integrarse con laboratorio (cadenas livianas libres, proteínas monoclonales)
-        y contexto clínico. El Perugini score ≥2 en presencia de gammapatía monoclonal ausente confirma ATTR.
-        """
+        story.append(Paragraph(f"{sec_num}. Interpretación clínica", section_style))
+        if "1h" in self._washout_data and "3h" in self._washout_data:
+            h1 = self._washout_data["1h"]["hmr"]
+            h3 = self._washout_data["3h"]["hmr"]
+            interp = f"""
+            HMR 1h: {h1:.2f} ({self._washout_data["1h"].get("classification", "")}). 
+            HMR 3h: {h3:.2f} ({self._washout_data["3h"].get("classification", "")}).<br/><br/>
+            Si el resultado es equívoco (HMR 1.0–1.5), considerar imagen SPECT/CT o repetir planar a 3 horas
+            para descartar pool sanguíneo residual.<br/><br/>
+            La interpretación debe integrarse con laboratorio (cadenas livianas libres, proteínas monoclonales)
+            y contexto clínico. El Perugini score ≥2 en presencia de gammapatía monoclonal ausente confirma ATTR.
+            """
+        else:
+            interp = f"""
+            El estudio muestra HMR de {result.hmr:.2f}. <b>{result.classification}</b><br/><br/>
+            Si el resultado es equívoco (HMR 1.0–1.5), considerar imagen SPECT/CT o repetir planar a 3 horas
+            para descartar pool sanguíneo residual.<br/><br/>
+            La interpretación debe integrarse con laboratorio (cadenas livianas libres, proteínas monoclonales)
+            y contexto clínico. El Perugini score ≥2 en presencia de gammapatía monoclonal ausente confirma ATTR.
+            """
         story.append(Paragraph(interp, body_style))
         story.append(Spacer(1, 4*mm))
-
-        washout_b64 = self._generate_washout_curve_b64()
-        if washout_b64:
-            import io
-            washout_stream = io.BytesIO(base64.b64decode(washout_b64))
-            washout_reader = ImageReader(washout_stream)
-            ww, wh = washout_reader.getSize()
-            washout_scale = min(170*mm / ww, 75*mm / wh)
-            story.append(Paragraph("6. Curva de washout 1h vs 3h", section_style))
-            story.append(RLImage(washout_stream, width=ww*washout_scale, height=wh*washout_scale))
-            story.append(Spacer(1, 4*mm))
 
         story.append(HRFlowable(width="100%", thickness=0.5, color=HexColor("#9aa7b5")))
         story.append(Paragraph(
@@ -1438,6 +1536,96 @@ class AmyloidWindow(QDialog):
         buf.seek(0)
         return base64.b64encode(buf.read()).decode('ascii')
 
+    def _generate_comparison_bar_b64(self) -> str | None:
+        """Genera bar chart corazón vs mediastino como base64."""
+        if not self._washout_data:
+            return None
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import io, base64
+
+        times = sorted(self._washout_data.keys(), key=lambda t: t.replace('h', ''))
+        heart_vals = [self._washout_data[t]["heart_counts"] for t in times]
+        medi_vals = [self._washout_data[t]["mediastinum_counts"] for t in times]
+
+        fig, ax = plt.subplots(figsize=(5, 2.5), dpi=100)
+        fig.patch.set_facecolor('#0f172a')
+        ax.set_facecolor('#1e293b')
+
+        x = range(len(times))
+        bar_w = 0.35
+        bars_h = ax.bar([i - bar_w/2 for i in x], heart_vals, bar_w, color='#f87171', label='Corazón')
+        bars_m = ax.bar([i + bar_w/2 for i in x], medi_vals, bar_w, color='#38bdf8', label='Mediastino')
+
+        for bar in bars_h:
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(heart_vals)*0.02,
+                    f'{bar.get_height():.0f}', ha='center', va='bottom', fontsize=8, color='#f87171')
+        for bar in bars_m:
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(medi_vals)*0.02,
+                    f'{bar.get_height():.0f}', ha='center', va='bottom', fontsize=8, color='#38bdf8')
+
+        ax.set_xticks(list(x))
+        ax.set_xticklabels(times, color='#e2e8f0', fontsize=9)
+        ax.set_ylabel('Cuentas promedio', color='#94a3b8', fontsize=9)
+        ax.set_title('Cuentas corazón vs mediastino', color='#e2e8f0', fontsize=10, fontweight='bold')
+        ax.tick_params(colors='#94a3b8', labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_color('#475569')
+        ax.legend(fontsize=8, facecolor='#1e293b', edgecolor='#475569', labelcolor='#e2e8f0')
+
+        fig.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode('ascii')
+
+    def _generate_perugini_strip_b64(self, perugini_score: int) -> str:
+        """Genera escala Perugini visual como base64."""
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        import io, base64
+
+        labels = ["0 — Sin captación", "1 — Leve (< hueso)", "2 — Moderado (= hueso)", "3 — Intenso (> hueso)"]
+        colors = ['#4ade80', '#fbbf24', '#f97316', '#f87171']
+
+        fig, ax = plt.subplots(figsize=(6, 0.8), dpi=100)
+        fig.patch.set_facecolor('#0f172a')
+        ax.set_facecolor('#0f172a')
+
+        for i, (lbl, col) in enumerate(zip(labels, colors)):
+            is_active = (i == perugini_score)
+            alpha = 1.0 if is_active else 0.35
+            edgecolor = 'white' if is_active else '#475569'
+            lw = 3 if is_active else 1
+            rect = mpatches.FancyBboxPatch((i * 1.5 + 0.05, 0.1), 1.4, 0.6,
+                                           boxstyle="round,pad=0.05",
+                                           facecolor=col, edgecolor=edgecolor,
+                                           linewidth=lw, alpha=alpha)
+            ax.add_patch(rect)
+            ax.text(i * 1.5 + 0.75, 0.4, str(i), ha='center', va='center',
+                    fontsize=16 if is_active else 12, fontweight='bold',
+                    color='#0f172a' if is_active else '#1e293b')
+
+        ax.set_xlim(-0.1, 6.1)
+        ax.set_ylim(0, 1)
+        ax.set_xticks([i * 1.5 + 0.75 for i in range(4)])
+        ax.set_xticklabels(labels, fontsize=7, color='#94a3b8')
+        ax.set_yticks([])
+        ax.set_title('Perugini visual score', color='#e2e8f0', fontsize=9, fontweight='bold', pad=6)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+        fig.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode('ascii')
+
     def _generate_html(self, html_path, img_path, composite_path, result, perugini):
                 """Genera el informe HTML con bloques para cada tiempo cuantificado."""
                 import base64
@@ -1450,6 +1638,8 @@ class AmyloidWindow(QDialog):
 
                 hist_b64 = self._generate_roi_histogram_b64()
                 washout_b64 = self._generate_washout_curve_b64()
+                comparison_b64 = self._generate_comparison_bar_b64()
+                perugini_strip_b64 = self._generate_perugini_strip_b64(perugini)
                 patient = escape(str(self._metadata["patient"]))
                 date = escape(str(self._metadata["date"]))
                 series = escape(str(self._metadata["series"]))
@@ -1555,6 +1745,24 @@ class AmyloidWindow(QDialog):
 <section class="card">
     <h2>Distribución de cuentas ROI cardíaco</h2>
     <img class="report-image" src="data:image/png;base64,{hist_b64}" alt="Histograma ROI cardíaco">
+    <p style="font-size:0.85rem; color:#94a3b8; margin-top:8px;">La distribución de intensidades dentro del ROI cardíaco permite evaluar la homogeneidad de la captación. Una cola derecha (asimetría positiva) sugiere posible pool sanguíneo residual. Una distribución simétrica indica captación miocárdica homogénea.</p>
+</section>"""
+
+                comparison_html = ""
+                if comparison_b64:
+                        comparison_html = f"""
+<section class="card">
+    <h2>Cuentas corazón vs mediastino</h2>
+    <img class="report-image" src="data:image/png;base64,{comparison_b64}" alt="Comparación cuentas">
+    <p style="font-size:0.85rem; color:#94a3b8; margin-top:8px;">Comparación directa de cuentas promedio entre el ROI cardíaco y el mediastinal. La diferencia justifica el valor de HMR calculado.</p>
+</section>"""
+
+                perugini_strip_html = ""
+                if perugini_strip_b64:
+                        perugini_strip_html = f"""
+<section class="card">
+    <h2>Escala Perugini visual</h2>
+    <img class="report-image" src="data:image/png;base64,{perugini_strip_b64}" alt="Perugini visual">
 </section>"""
 
                 washout_html = ""
@@ -1628,6 +1836,8 @@ td {{ padding:9px; border-bottom:1px solid #475569; }}
     <p>Perugini ≥ 2 + ausencia de gammapatía monoclonal confirma ATTR.</p>
 </section>
 {histogram_html}
+{comparison_html}
+{perugini_strip_html}
 {washout_html}
 {layout_html}
 <footer class="footer">Informe SINCRO — Amiloidosis. Resultados orientativos.</footer>
