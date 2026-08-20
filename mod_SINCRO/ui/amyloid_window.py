@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Ventana de amiloidosis cardíaca: imagen planar + ROI draggable + HMR + Perugini.
+"""Ventana de amiloidosis cardíaca: visor de cuadrantes + análisis ROI + HMR + Perugini.
 
-Permite dibujar dos ROIs circulares (corazón y mediastino contralateral).
-Calcula HMR (Heart-to-Mediastinum Ratio) y muestra la clasificación.
+Dos modos:
+1. Visor de cuadrantes: layouts de 4/8/9/12/16 imágenes con selección, colormaps y filtros.
+2. Análisis ROI: imagen planar + ROIs draggable + HMR + Perugini score.
 
 Referencias:
 - HMR ≥1.5: POSITIVO (sugiere ATTR).
@@ -18,11 +19,17 @@ from PyQt6.QtCore import Qt, QPointF, pyqtSignal
 from PyQt6.QtGui import QMouseEvent, QPainter, QPen, QColor, QBrush, QPolygonF
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
-    QComboBox, QWidget, QSizePolicy, QMessageBox,
+    QComboBox, QWidget, QSizePolicy, QMessageBox, QStackedWidget,
+    QSlider, QFileDialog, QFrame,
 )
 import os
 
 from core.amyloid_planar import ROICircle, compute_hmr, PERUGINI_SCORES
+from core.amyloid_layouts import (
+    Quadrant, Layout, LAYOUT_CATALOG, LAYOUT_NAMES,
+    layout_4q, layout_8q, layout_9q, layout_12q, layout_16q,
+)
+from ui.quadrant_viewer import QuadrantViewer
 
 
 class ROIDragWidget(QWidget):
@@ -149,64 +156,174 @@ class ROIDragWidget(QWidget):
 
 
 class AmyloidWindow(QDialog):
-    """Ventana de amiloidosis: imagen planar + ROIs + HMR + Perugini."""
+    """Ventana de amiloidosis: visor de cuadrantes + análisis ROI + HMR + Perugini."""
+
+    # Layouts disponibles: nombre → función constructora.
+    _LAYOUT_BUILDERS = {
+        4: layout_4q,
+        8: layout_8q,
+        9: layout_9q,
+        12: layout_12q,
+        16: layout_16q,
+    }
 
     def __init__(self, parent=None, image=None, study=None):
         super().__init__(parent)
         self.setWindowTitle("SINCRO — Amiloidosis")
-        self.resize(900, 640)
-        self._image = image
+        self.resize(1100, 700)
+        self._image = image          # imagen single-análisis
         self._study = study
+        self._loaded_images: list[tuple[str, np.ndarray]] = []  # (label, img) para cuadrantes
+        self._current_layout_n = 4
+        self._current_mode = "visor"  # "visor" | "analisis"
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(6)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(4)
 
-        # Info del paciente.
+        # ── Info del paciente ──────────────────────────────────────
         patient = getattr(study, "patient_name", "") or "N/D"
         date = getattr(study, "study_date", "") or "N/D"
         series = getattr(study, "series_description", "") or "N/D"
-        self._info_lbl = QLabel(f"Paciente: {patient} · Fecha: {date} · Serie: {series}")
+        self._info_lbl = QLabel(f"Paciente: {patient}  ·  Fecha: {date}  ·  Serie: {series}")
+        self._info_lbl.setStyleSheet("font-size: 11px; color: #94a3b8; padding: 2px 0;")
         root.addWidget(self._info_lbl)
 
-        # Widget de ROI.
-        self._roi_widget = ROIDragWidget(image)
-        self._roi_widget.roiChanged.connect(self._update_hmr)
-        root.addWidget(self._roi_widget, 1)
+        # ── Toolbar ────────────────────────────────────────────────
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(8)
 
-        # Resultado.
+        # Selector de layout.
+        toolbar.addWidget(QLabel("Layout:"))
+        self._layout_combo = QComboBox()
+        for n, name in LAYOUT_NAMES.items():
+            self._layout_combo.addItem(name, n)
+        self._layout_combo.currentIndexChanged.connect(self._on_layout_changed)
+        toolbar.addWidget(self._layout_combo)
+
+        # Botón cargar imágenes.
+        btn_load = QPushButton("Cargar imágenes...")
+        btn_load.clicked.connect(self._load_images)
+        toolbar.addWidget(btn_load)
+
+        toolbar.addStretch(1)
+
+        # Botón modo análisis (solo visible si hay imagen single).
+        self._btn_mode = QPushButton("Análisis ROI →")
+        self._btn_mode.clicked.connect(self._toggle_mode)
+        toolbar.addWidget(self._btn_mode)
+
+        root.addLayout(toolbar)
+
+        # ── Línea separadora ───────────────────────────────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #334155;")
+        root.addWidget(sep)
+
+        # ── Contenido principal: stacked widget ────────────────────
+        self._stack = QStackedWidget()
+        root.addWidget(self._stack, 1)
+
+        # ── Página 0: Visor de cuadrantes ──────────────────────────
+        page_visor = QWidget()
+        visor_layout = QHBoxLayout(page_visor)
+        visor_layout.setContentsMargins(0, 0, 0, 0)
+        visor_layout.setSpacing(6)
+
+        self._quadrant_viewer = QuadrantViewer()
+        self._quadrant_viewer.quadrantSelected.connect(self._on_quadrant_selected)
+        visor_layout.addWidget(self._quadrant_viewer, 1)
+
+        # Sidebar de controles del cuadrante seleccionado.
+        sidebar = QVBoxLayout()
+        sidebar.setSpacing(6)
+        sidebar.addWidget(QLabel("Cuadrante seleccionado:"))
+        self._lbl_sel_quad = QLabel("#1")
+        self._lbl_sel_quad.setStyleSheet("font-size: 14px; font-weight: bold; color: #38bdf8;")
+        sidebar.addWidget(self._lbl_sel_quad)
+
+        sidebar.addWidget(QLabel("Colormap:"))
+        self._cmap_combo = QComboBox()
+        self._cmap_combo.addItems(["grey", "hot", "cool", "viridis"])
+        self._cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
+        sidebar.addWidget(self._cmap_combo)
+
+        sidebar.addWidget(QLabel("Ventana baja (%):"))
+        self._win_low_slider = QSlider(Qt.Orientation.Horizontal)
+        self._win_low_slider.setRange(0, 95)
+        self._win_low_slider.setValue(0)
+        self._win_low_slider.valueChanged.connect(self._on_window_changed)
+        sidebar.addWidget(self._win_low_slider)
+
+        sidebar.addWidget(QLabel("Ventana alta (%):"))
+        self._win_high_slider = QSlider(Qt.Orientation.Horizontal)
+        self._win_high_slider.setRange(5, 100)
+        self._win_high_slider.setValue(100)
+        self._win_high_slider.valueChanged.connect(self._on_window_changed)
+        sidebar.addWidget(self._win_high_slider)
+
+        sidebar.addWidget(QLabel("Filtros:"))
+        btn_smooth = QPushButton("Suavizar")
+        btn_smooth.clicked.connect(lambda: self._toggle_filter("smooth"))
+        sidebar.addWidget(btn_smooth)
+        btn_invert = QPushButton("Invertir")
+        btn_invert.clicked.connect(lambda: self._toggle_filter("invert"))
+        sidebar.addWidget(btn_invert)
+        btn_eq = QPushButton("Ecualizar")
+        btn_eq.clicked.connect(lambda: self._toggle_filter("equalize"))
+        sidebar.addWidget(btn_eq)
+
+        sidebar.addStretch(1)
+
+        # Botón para abrir la imagen seleccionada en modo análisis ROI.
+        self._btn_analyze = QPushButton("Analizar ROI")
+        self._btn_analyze.clicked.connect(self._analyze_selected)
+        sidebar.addWidget(self._btn_analyze)
+
+        sidebar_frame = QFrame()
+        sidebar_frame.setLayout(sidebar)
+        sidebar_frame.setFixedWidth(160)
+        sidebar_frame.setStyleSheet("QFrame { background: #1e293b; border-radius: 8px; padding: 8px; }")
+        visor_layout.addWidget(sidebar_frame)
+
+        self._stack.addWidget(page_visor)
+
+        # ── Página 1: Análisis ROI (modo clásico) ──────────────────
+        page_analysis = QWidget()
+        analysis_layout = QVBoxLayout(page_analysis)
+        analysis_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._roi_widget = ROIDragWidget(image if image is not None else np.zeros((64, 64)))
+        self._roi_widget.roiChanged.connect(self._update_hmr)
+        analysis_layout.addWidget(self._roi_widget, 1)
+
         self._lbl_hmr = QLabel("HMR = N/D")
         self._lbl_hmr.setStyleSheet("font-size: 16px; font-weight: bold; color: #e2e8f0;")
-        root.addWidget(self._lbl_hmr)
+        analysis_layout.addWidget(self._lbl_hmr)
 
         self._lbl_class = QLabel("")
         self._lbl_class.setStyleSheet("font-size: 12px; color: #94a3b8;")
-        root.addWidget(self._lbl_class)
+        analysis_layout.addWidget(self._lbl_class)
 
-        # Perugini pre-cargado: sugiere score basado en HMR automático.
+        # Perugini.
         self._perugini_combo = QComboBox()
         for score, desc in PERUGINI_SCORES.items():
             self._perugini_combo.addItem(f"{score} — {desc}", score)
-        # Pre-cargar con score sugerido.
         try:
-            roi_h = ROICircle(
-                cy=self._roi_widget._rois[0]["cy"],
-                cx=self._roi_widget._rois[0]["cx"],
-                radius=self._roi_widget._rois[0]["radius"],
-            )
-            roi_m = ROICircle(
-                cy=self._roi_widget._rois[1]["cy"],
-                cx=self._roi_widget._rois[1]["cx"],
-                radius=self._roi_widget._rois[1]["radius"],
-            )
-            result = compute_hmr(self._image, roi_h, roi_m)
-            suggested = 3 if result.hmr >= 1.5 else (2 if result.hmr >= 1.0 else 0)
-            self._perugini_combo.setCurrentIndex(suggested)
+            if image is not None:
+                roi_h = ROICircle(cy=0.4*image.shape[0], cx=0.4*image.shape[1], radius=12.0)
+                roi_m = ROICircle(cy=0.6*image.shape[0], cx=0.6*image.shape[1], radius=12.0)
+                result = compute_hmr(image, roi_h, roi_m)
+                suggested = 3 if result.hmr >= 1.5 else (2 if result.hmr >= 1.0 else 0)
+                self._perugini_combo.setCurrentIndex(suggested)
         except Exception:
             self._perugini_combo.setCurrentIndex(0)
-        root.addWidget(self._perugini_combo)
+        analysis_layout.addWidget(self._perugini_combo)
 
-        # Botones.
+        self._stack.addWidget(page_analysis)
+
+        # ── Botones inferiores ─────────────────────────────────────
         btns = QHBoxLayout()
         btn_reset = QPushButton("Reset ROIs")
         btn_reset.clicked.connect(self._reset_rois)
@@ -220,6 +337,164 @@ class AmyloidWindow(QDialog):
         btns.addWidget(btn_close)
         root.addLayout(btns)
 
+        # ── Inicializar ────────────────────────────────────────────
+        if image is not None:
+            self._loaded_images.append(("Imagen 1", image))
+        self._rebuild_layout()
+        self._update_hmr(0, 0, 0, 0)
+
+    # ── Modo ────────────────────────────────────────────────────────
+
+    def _toggle_mode(self):
+        """Alterna entre visor de cuadrantes y análisis ROI."""
+        if self._current_mode == "visor":
+            self._current_mode = "analisis"
+            self._stack.setCurrentIndex(1)
+            self._btn_mode.setText("← Visor cuadrantes")
+        else:
+            self._current_mode = "visor"
+            self._stack.setCurrentIndex(0)
+            self._btn_mode.setText("Análisis ROI →")
+
+    # ── Layout ──────────────────────────────────────────────────────
+
+    def _on_layout_changed(self, idx: int):
+        n = self._layout_combo.currentData()
+        if n and n != self._current_layout_n:
+            self._current_layout_n = n
+            self._rebuild_layout()
+
+    def _rebuild_layout(self):
+        """Reconstruye el layout con las imágenes cargadas."""
+        imgs = [img for _, img in self._loaded_images]
+        labels = [lbl for lbl, _ in self._loaded_images]
+        n = self._current_layout_n
+        if n == 4:
+            layout = layout_4q(
+                ap_roi=imgs[0] if len(imgs) > 0 else None,
+                ap_clean=imgs[1] if len(imgs) > 1 else None,
+                oai=imgs[2] if len(imgs) > 2 else None,
+                lat=imgs[3] if len(imgs) > 3 else None,
+                ap_label=labels[0] if len(labels) > 0 else "AP",
+                oai_label=labels[2] if len(labels) > 2 else "OAI 45°",
+                lat_label=labels[3] if len(labels) > 3 else "LAT. IZQ.",
+            )
+        elif n == 8:
+            half = max(1, len(imgs) // 2)
+            layout = layout_8q(
+                images_1h=imgs[:half],
+                images_3h=imgs[half:half*2],
+                labels=labels[:4] if len(labels) >= 4 else None,
+            )
+        elif n == 9:
+            layout = layout_9q(images=imgs, labels=labels[:3] if len(labels) >= 3 else None)
+        elif n == 12:
+            layout = layout_12q(images=imgs, labels=labels[:3] if len(labels) >= 3 else None)
+        elif n == 16:
+            layout = layout_16q(images=imgs, labels=labels[:4] if len(labels) >= 4 else None)
+        else:
+            return
+        self._quadrant_viewer.set_layout(layout)
+        self._on_quadrant_selected(0)
+
+    # ── Cargar imágenes ─────────────────────────────────────────────
+
+    def _load_images(self):
+        """Abre diálogo para cargar imágenes planar adicionales."""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Cargar imágenes DICOM", "",
+            "DICOM (*.dcm *.DCM);;Imágenes (*.png *.jpg *.tif);;Todos (*)"
+        )
+        if not paths:
+            return
+        for p in paths:
+            try:
+                if p.lower().endswith((".dcm",)):
+                    import pydicom
+                    ds = pydicom.dcmread(p)
+                    img = ds.pixel_array.astype(np.float64)
+                    label = getattr(ds, "SeriesDescription", "") or os.path.basename(p)
+                else:
+                    from PIL import Image as PILImage
+                    img = np.array(PILImage.open(p)).astype(np.float64)
+                    if img.ndim == 3:
+                        img = img.mean(axis=2)
+                    label = os.path.basename(p)
+                self._loaded_images.append((label, img))
+            except Exception as exc:
+                QMessageBox.warning(self, "SINCRO", f"Error cargando {os.path.basename(p)}:\n{exc}")
+        self._rebuild_layout()
+
+    # ── Controles del cuadrante ─────────────────────────────────────
+
+    def _on_quadrant_selected(self, idx: int):
+        q = self._quadrant_viewer.selected_quadrant()
+        if q is None:
+            return
+        self._lbl_sel_quad.setText(f"#{idx+1}: {q.label}")
+        # Actualizar controles sin disparar señales.
+        self._cmap_combo.blockSignals(True)
+        self._cmap_combo.setCurrentText(q.cmap)
+        self._cmap_combo.blockSignals(False)
+        self._win_low_slider.blockSignals(True)
+        self._win_low_slider.setValue(int(q.win_low))
+        self._win_low_slider.blockSignals(False)
+        self._win_high_slider.blockSignals(True)
+        self._win_high_slider.setValue(int(q.win_high))
+        self._win_high_slider.blockSignals(False)
+
+    def _on_cmap_changed(self, cmap: str):
+        q = self._quadrant_viewer.selected_quadrant()
+        if q is None:
+            return
+        q.cmap = cmap
+        self._quadrant_viewer._rebuild_pixmaps()
+        self._quadrant_viewer.update()
+
+    def _on_window_changed(self):
+        q = self._quadrant_viewer.selected_quadrant()
+        if q is None:
+            return
+        q.win_low = float(self._win_low_slider.value())
+        q.win_high = float(self._win_high_slider.value())
+        self._quadrant_viewer._rebuild_pixmaps()
+        self._quadrant_viewer.update()
+
+    def _toggle_filter(self, filt: str):
+        q = self._quadrant_viewer.selected_quadrant()
+        if q is None:
+            return
+        if filt in q.filters:
+            q.filters.remove(filt)
+        else:
+            q.filters.append(filt)
+        self._quadrant_viewer._rebuild_pixmaps()
+        self._quadrant_viewer.update()
+
+    # ── Análisis ROI del cuadrante seleccionado ─────────────────────
+
+    def _analyze_selected(self):
+        """Abre la imagen del cuadrante seleccionado en modo análisis ROI."""
+        q = self._quadrant_viewer.selected_quadrant()
+        if q is None or q.image is None:
+            QMessageBox.information(self, "SINCRO", "Selecciona un cuadrante con imagen primero.")
+            return
+        self._image = q.image
+        self._roi_widget = ROIDragWidget(q.image)
+        self._roi_widget.roiChanged.connect(self._update_hmr)
+        # Reemplazar el widget de ROI en la página de análisis.
+        old = self._stack.widget(1)
+        old_layout = old.layout()
+        if old_layout:
+            # Quitar el widget viejo y poner el nuevo.
+            for i in range(old_layout.count()):
+                w = old_layout.itemAt(i).widget()
+                if isinstance(w, ROIDragWidget):
+                    old_layout.removeWidget(w)
+                    w.deleteLater()
+                    old_layout.insertWidget(0, self._roi_widget, 1)
+                    break
+        self._toggle_mode()
         self._update_hmr(0, 0, 0, 0)
 
     def get_report_image(self) -> np.ndarray:
