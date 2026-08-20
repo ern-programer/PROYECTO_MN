@@ -598,7 +598,6 @@ class AmyloidWindow(QDialog):
             x1 = int(roi["cx"] + roi["radius"])
             y1 = int(roi["cy"] + roi["radius"])
             draw.ellipse([x0, y0, x1, y1], outline=color, width=2)
-            draw.text((x1 + 4, int(roi["cy"])), roi["name"], fill=color)
         return np.asarray(pil)
 
     def _update_hmr(self, roi_id: int, cy: float, cx: float, radius: float):
