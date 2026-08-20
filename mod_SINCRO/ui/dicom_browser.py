@@ -24,6 +24,17 @@ from PyQt6.QtWidgets import (
 )
 
 
+def _is_dicom_file(path: str) -> bool:
+    """Detecta si un archivo es DICOM leyendo el magic number (DICM en offset 128)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(128)
+            magic = f.read(4)
+            return magic == b"DICM"
+    except Exception:
+        return False
+
+
 def _read_dicom_thumb(path: str, thumb_size: int = 96) -> tuple[QPixmap, dict]:
     """Lee un DICOM y devuelve (thumbnail, metadata_dict)."""
     try:
@@ -175,18 +186,19 @@ class DicomBrowserDialog(QDialog):
         self._items.clear()
         self._progress.setValue(0)
 
-        # Recolectar archivos .dcm.
+        # Recolectar archivos DICOM (por extensión o por magic number).
         extensions = (".dcm", ".DCM")
         files = []
         if self._chk_subdirs.isChecked():
             for root_dir, _, fnames in os.walk(folder):
                 for fn in fnames:
-                    if fn.endswith(extensions):
-                        files.append(os.path.join(root_dir, fn))
+                    full = os.path.join(root_dir, fn)
+                    if fn.endswith(extensions) or _is_dicom_file(full):
+                        files.append(full)
         else:
             for fn in os.listdir(folder):
                 full = os.path.join(folder, fn)
-                if os.path.isfile(full) and fn.endswith(extensions):
+                if os.path.isfile(full) and (fn.endswith(extensions) or _is_dicom_file(full)):
                     files.append(full)
 
         if not files:
