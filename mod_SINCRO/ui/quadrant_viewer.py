@@ -67,8 +67,14 @@ class QuadrantViewer(QWidget):
                 self._pixmaps.append(None)
 
     def _image_to_qpixmap(self, q: Quadrant) -> QPixmap:
-        """Convierte una imagen 2D a QPixmap con colormap y ventana."""
+        """Convierte una imagen 2D o RGB a QPixmap con colormap y ventana."""
         img = np.asarray(q.image, dtype=np.float64)
+        if img.ndim == 3:
+            # Imagen RGB pre-rendered (H, W, 3) — respetar colores directamente.
+            rgb = np.clip(img, 0, 255).astype(np.uint8)
+            h, w = rgb.shape[:2]
+            qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+            return QPixmap.fromImage(qimg.copy())
         h, w = img.shape
         # Aplicar ventana.
         p_low = np.percentile(img, q.win_low) if q.win_low > 0 else float(img.min())

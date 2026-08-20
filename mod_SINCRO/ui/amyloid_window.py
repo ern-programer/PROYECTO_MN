@@ -525,28 +525,50 @@ class AmyloidWindow(QDialog):
             QMessageBox.warning(self, "SINCRO", f"Error calculando HMR:\n{exc}")
             return
 
-        # Renderizar imagen con ROIs dibujados + texto HMR.
+        # Renderizar imagen con ROIs dibujados + leyenda al pie.
         report_img = self.get_report_image()
         from PIL import Image as PILImage, ImageDraw, ImageFont
-        pil = PILImage.fromarray(report_img)
+        pil = PILImage.fromarray(report_img).convert("RGB")
         draw = ImageDraw.Draw(pil)
-        # Texto HMR en la esquina superior izquierda.
-        hmr_text = f"HMR = {result.hmr:.2f}  {result.classification}"
-        color = (248, 113, 113) if result.hmr >= 1.5 else ((251, 191, 36) if result.hmr >= 1.0 else (74, 222, 128))
-        # Fondo semitransparente para legibilidad.
-        try:
-            font = ImageFont.truetype("arial.ttf", 18)
-        except Exception:
-            font = ImageFont.load_default()
-        bbox = draw.textbbox((8, 8), hmr_text, font=font)
-        draw.rectangle([bbox[0]-4, bbox[1]-4, bbox[2]+4, bbox[3]+4], fill=(0, 0, 0, 180))
-        draw.text((8, 8), hmr_text, fill=color, font=font)
+        w_img, h_img = pil.size
 
-        # Asignar al cuadrante 0 (AP+ROIs).
-        img_gray = np.array(pil.convert("L"), dtype=np.float64)
+        # Fuentes.
+        try:
+            font8 = ImageFont.truetype("arial.ttf", 8)
+            font12 = ImageFont.truetype("arial.ttf", 12)
+        except Exception:
+            font8 = ImageFont.load_default()
+            font12 = font8
+
+        # ── Leyenda al pie: ROI labels + HMR ───────────────────────
+        # Fondo negro en la franja inferior (30px).
+        band_h = 30
+        draw.rectangle([0, h_img - band_h, w_img, h_img], fill=(15, 23, 42))
+
+        # ROI labels a la izquierda, font 8.
+        roi_labels = [
+            ("Corazón", (255, 102, 102)),   # rojo
+            ("Mediastino", (56, 189, 248)),  # azul
+        ]
+        x_pos = 8
+        for label, color in roi_labels:
+            # Cuadradito de color + nombre.
+            draw.rectangle([x_pos, h_img - band_h + 6, x_pos + 8, h_img - band_h + 14], fill=color)
+            draw.text((x_pos + 12, h_img - band_h + 4), label, fill=color, font=font8)
+            x_pos += len(label) * 6 + 30
+
+        # HMR a la derecha, font 12, color según resultado.
+        hmr_color = (248, 113, 113) if result.hmr >= 1.5 else ((251, 191, 36) if result.hmr >= 1.0 else (74, 222, 128))
+        hmr_text = f"HMR = {result.hmr:.2f}"
+        bbox = draw.textbbox((0, 0), hmr_text, font=font12)
+        tw = bbox[2] - bbox[0]
+        draw.text((w_img - tw - 10, h_img - band_h + 6), hmr_text, fill=hmr_color, font=font12)
+
+        # Asignar al cuadrante 0 (AP+ROIs) — imagen RGB.
+        img_rgb = np.array(pil, dtype=np.float64)
         layout = self._quadrant_viewer._layout
         if layout is not None and len(layout.quadrants) > 0:
-            layout.quadrants[0].image = img_gray
+            layout.quadrants[0].image = img_rgb
             layout.quadrants[0].label = f"AP + ROIs (HMR={result.hmr:.2f})"
             layout.quadrants[0].roi_overlay = True
             layout.quadrants[0].hmr = result.hmr
