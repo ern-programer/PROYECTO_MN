@@ -186,20 +186,40 @@ class DicomBrowserDialog(QDialog):
         self._items.clear()
         self._progress.setValue(0)
 
-        # Recolectar archivos DICOM (por extensión o por magic number).
+        # Recolectar archivos DICOM: primero por extensión .dcm (rápido),
+        # luego por magic number solo si no hay .dcm (fallback lento).
         extensions = (".dcm", ".DCM")
         files = []
         if self._chk_subdirs.isChecked():
             for root_dir, _, fnames in os.walk(folder):
                 for fn in fnames:
-                    full = os.path.join(root_dir, fn)
-                    if fn.endswith(extensions) or _is_dicom_file(full):
-                        files.append(full)
+                    if fn.endswith(extensions):
+                        files.append(os.path.join(root_dir, fn))
         else:
             for fn in os.listdir(folder):
                 full = os.path.join(folder, fn)
-                if os.path.isfile(full) and (fn.endswith(extensions) or _is_dicom_file(full)):
+                if os.path.isfile(full) and fn.endswith(extensions):
                     files.append(full)
+
+        # Si no encontró .dcm, buscar por magic number (más lento).
+        if not files:
+            self._lbl_count.setText("Buscando DICOM por contenido (sin extensión)...")
+            if self._chk_subdirs.isChecked():
+                for root_dir, _, fnames in os.walk(folder):
+                    for fn in fnames:
+                        full = os.path.join(root_dir, fn)
+                        if _is_dicom_file(full):
+                            files.append(full)
+            else:
+                for fn in os.listdir(folder):
+                    full = os.path.join(folder, fn)
+                    if os.path.isfile(full) and _is_dicom_file(full):
+                        files.append(full)
+
+        # Limitar a 200 archivos para no colgar la UI.
+        if len(files) > 200:
+            files = files[:200]
+            self._lbl_count.setText(f"Mostrando primeros 200 de {len(files)} archivos")
 
         if not files:
             self._lbl_preview.setText("No se encontraron archivos .dcm")
