@@ -172,7 +172,8 @@ class AmyloidWindow(QDialog):
         self.setWindowTitle("SINCRO — Amiloidosis")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowMinMaxButtonsHint)
         self.resize(1100, 700)
-        self._image = image          # imagen single-análisis
+        self._image = image          # imagen renderizada (puede ser RGB)
+        self._original_image = image  # imagen original 2D para análisis ROI
         self._study = study
         self._loaded_images: list[tuple[str, np.ndarray]] = []  # (label, img) para cuadrantes
         self._current_layout_n = 4
@@ -589,8 +590,14 @@ class AmyloidWindow(QDialog):
         if q is None or q.image is None:
             QMessageBox.information(self, "SINCRO", "Selecciona un cuadrante con imagen primero.")
             return
-        self._image = q.image
-        self._roi_widget = ROIDragWidget(q.image)
+        # Usar la imagen original 2D si existe; si no, usar la del cuadrante.
+        img = self._original_image if self._original_image is not None else q.image
+        # Si la imagen es RGB (3D), convertir a gris para el análisis ROI.
+        if img.ndim == 3:
+            img = img.mean(axis=2)
+        self._image = img  # imagen actual para display/render
+        self._original_image = img.copy()  # original 2D para análisis
+        self._roi_widget = ROIDragWidget(img)
         self._roi_widget.roiChanged.connect(self._update_hmr)
         # Reemplazar el widget de ROI en la página de análisis.
         old = self._stack.widget(1)
@@ -609,7 +616,7 @@ class AmyloidWindow(QDialog):
 
     def _apply_rois_to_quadrant(self):
         """Renderiza la imagen con ROIs + HMR y la asigna al cuadrante 0 (AP+ROIs)."""
-        if self._image is None:
+        if self._original_image is None:
             return
         try:
             roi_h = ROICircle(
@@ -622,7 +629,7 @@ class AmyloidWindow(QDialog):
                 cx=self._roi_widget._rois[1]["cx"],
                 radius=self._roi_widget._rois[1]["radius"],
             )
-            result = compute_hmr(self._image, roi_h, roi_m)
+            result = compute_hmr(self._original_image, roi_h, roi_m)
         except Exception as exc:
             QMessageBox.warning(self, "SINCRO", f"Error calculando HMR:\n{exc}")
             return
@@ -676,7 +683,7 @@ class AmyloidWindow(QDialog):
             layout.quadrants[0].hmr = result.hmr
             # Copia limpia al cuadrante 1 (reservado para AP limpia).
             if len(layout.quadrants) > 1:
-                clean_img = self._image.copy()
+                clean_img = self._original_image.copy()
                 layout.quadrants[1].image = clean_img
                 layout.quadrants[1].label = "AP (limpio)"
                 layout.quadrants[1].roi_overlay = False
@@ -689,7 +696,7 @@ class AmyloidWindow(QDialog):
 
     def get_report_image(self) -> np.ndarray:
         """Renderiza la imagen con los ROIs como array RGB para el informe."""
-        img = self._image.copy()
+        img = self._original_image.copy()
         h, w = img.shape
         rgb = np.zeros((h, w, 3), dtype=np.uint8)
         norm = img / max(float(img.max()), 1e-8) if img.size else img
@@ -720,7 +727,7 @@ class AmyloidWindow(QDialog):
                 cx=self._roi_widget._rois[1]["cx"],
                 radius=self._roi_widget._rois[1]["radius"],
             )
-            result = compute_hmr(self._image, roi_h, roi_m)
+            result = compute_hmr(self._original_image, roi_h, roi_m)
             self._lbl_hmr.setText(f"HMR = {result.hmr:.2f}")
             self._lbl_class.setText(result.classification)
             color = "#f87171" if result.hmr >= 1.5 else ("#fbbf24" if result.hmr >= 1.0 else "#4ade80")
@@ -730,7 +737,7 @@ class AmyloidWindow(QDialog):
             self._lbl_class.setText(f"Error: {exc}")
 
     def _reset_rois(self):
-        h, w = self._image.shape
+        h, w = self._original_image.shape
         self._roi_widget._rois[0]["cy"] = 0.4 * h
         self._roi_widget._rois[0]["cx"] = 0.4 * w
         self._roi_widget._rois[0]["radius"] = 12.0
@@ -756,7 +763,7 @@ class AmyloidWindow(QDialog):
                 cx=self._roi_widget._rois[1]["cx"],
                 radius=self._roi_widget._rois[1]["radius"],
             )
-            result = compute_hmr(self._image, roi_h, roi_m)
+            result = compute_hmr(self._original_image, roi_h, roi_m)
             perugini = int(self._perugini_combo.currentData())
             report_img = self.get_report_image()
             output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output_demo")
