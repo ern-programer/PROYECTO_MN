@@ -290,6 +290,12 @@ class AmyloidWindow(QDialog):
 
         sidebar.addStretch(1)
 
+        # Botón para borrar el cuadrante seleccionado.
+        self._btn_delete = QPushButton("Borrar cuadrante")
+        self._btn_delete.setStyleSheet("background: #dc2626; color: white; font-weight: bold; padding: 4px;")
+        self._btn_delete.clicked.connect(self._delete_selected_quadrant)
+        sidebar.addWidget(self._btn_delete)
+
         # Swap: intercambiar imágenes entre cuadrantes.
         self._swap_mode = False
         self._swap_first = -1
@@ -393,10 +399,23 @@ class AmyloidWindow(QDialog):
             self._rebuild_layout()
 
     def _rebuild_layout(self):
-        """Reconstruye el layout con las imágenes cargadas."""
+        """Reconstruye el layout con las imágenes cargadas. El layout se adapta
+        a la cantidad de imágenes: 4q si ≤4, 8q si ≤8, 9q si ≤9, etc."""
         imgs = [img for _, img in self._loaded_images]
         labels = [lbl for lbl, _ in self._loaded_images]
-        n = self._current_layout_n
+        n_imgs = len(imgs)
+        # Elegir layout automáticamente según cantidad de imágenes.
+        if n_imgs <= 4:
+            n = 4
+        elif n_imgs <= 8:
+            n = 8
+        elif n_imgs <= 9:
+            n = 9
+        elif n_imgs <= 12:
+            n = 12
+        else:
+            n = 16
+        self._current_layout_n = n
         if n == 4:
             layout = layout_4q(
                 ap_roi=imgs[0] if len(imgs) > 0 else None,
@@ -519,6 +538,18 @@ class AmyloidWindow(QDialog):
         self._quadrant_viewer.update()
 
     # ── Swap entre cuadrantes ───────────────────────────────────────
+
+    def _delete_selected_quadrant(self):
+        """Borra el cuadrante seleccionado (limpia su imagen)."""
+        q = self._quadrant_viewer.selected_quadrant()
+        if q is None:
+            return
+        q.image = None
+        q.label = "(vacío)"
+        q.hmr = None
+        q.roi_overlay = False
+        self._quadrant_viewer._rebuild_pixmaps()
+        self._quadrant_viewer.update()
 
     def _toggle_swap_mode(self):
         """Activa/desactiva el modo swap entre cuadrantes."""
@@ -643,6 +674,12 @@ class AmyloidWindow(QDialog):
             layout.quadrants[0].label = f"AP + ROIs (HMR={result.hmr:.2f})"
             layout.quadrants[0].roi_overlay = True
             layout.quadrants[0].hmr = result.hmr
+            # Copia limpia al cuadrante 1 (reservado para AP limpia).
+            if len(layout.quadrants) > 1:
+                clean_img = self._image.copy()
+                layout.quadrants[1].image = clean_img
+                layout.quadrants[1].label = "AP (limpio)"
+                layout.quadrants[1].roi_overlay = False
             self._quadrant_viewer._rebuild_pixmaps()
             self._quadrant_viewer.update()
 
