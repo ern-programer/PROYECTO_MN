@@ -459,6 +459,12 @@ class AmyloidWindow(QDialog):
                 except Exception as exc:
                     QMessageBox.warning(self, "SINCRO", f"Error cargando {os.path.basename(p)}:\n{exc}")
             self._rebuild_layout()
+
+    # ── Controles del cuadrante ─────────────────────────────────────
+
+    def _on_quadrant_selected(self, idx: int):
+        # Si estamos en modo swap, ejecutar el intercambio.
+        if self._swap_mode and self._swap_first >= 0 and idx != self._swap_first:
             self._do_swap(self._swap_first, idx)
             self._swap_mode = False
             self._swap_first = -1
