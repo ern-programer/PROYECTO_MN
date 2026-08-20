@@ -510,6 +510,102 @@ class AmyloidWindow(QDialog):
                 images.append(rgb)
         return images
 
+    def get_layout_composite_image(self) -> np.ndarray | None:
+        """Renderiza todo el layout como una única imagen PIL (grilla rows×cols)."""
+        from PIL import Image as PILImage, ImageDraw, ImageFont
+
+        layout = self._quadrant_viewer._layout
+        if layout is None or not layout.quadrants:
+            return None
+
+        rows, cols = layout.rows, layout.cols
+
+        # Recopilar imágenes y labels.
+        items = []
+        for q in layout.quadrants:
+            if q.image is None:
+                items.append(None)
+                continue
+            img = np.asarray(q.image, dtype=np.float64)
+            if img.ndim == 2:
+                h, w = img.shape
+                norm = img / max(float(img.max()), 1e-8) if img.size else img
+                rgb = np.zeros((h, w, 3), dtype=np.uint8)
+                rgb[..., 0] = np.clip(norm * 255, 0, 255).astype(np.uint8)
+                rgb[..., 1] = rgb[..., 0]
+                rgb[..., 2] = rgb[..., 0]
+                items.append((rgb, q.label))
+            else:
+                if img.max() <= 1.0:
+                    img = (img * 255).astype(np.uint8)
+                else:
+                    img = img.astype(np.uint8)
+                items.append((img, q.label))
+
+        # Determinar tamaño de celda (máximo de todas las imágenes).
+        max_w, max_h = 0, 0
+        for item in items:
+            if item is not None:
+                arr, _ = item
+                max_w = max(max_w, arr.shape[1])
+                max_h = max(max_h, arr.shape[0])
+
+        if max_w == 0 or max_h == 0:
+            return None
+
+        cell_w = max_w
+        cell_h = max_h
+        label_h = 24
+        border = 2
+        pad = 4
+
+        total_w = cols * cell_w + (cols + 1) * border + 2 * pad
+        total_h = rows * (cell_h + label_h) + (rows + 1) * border + 2 * pad
+
+        composite = PILImage.new("RGB", (total_w, total_h), (15, 23, 42))
+        draw = ImageDraw.Draw(composite)
+
+        try:
+            font = ImageFont.truetype("arial.ttf", 11)
+        except Exception:
+            font = ImageFont.load_default()
+
+        for idx, item in enumerate(items):
+            row = idx // cols
+            col = idx % cols
+
+            x0 = pad + col * (cell_w + border) + border
+            y0 = pad + row * (cell_h + label_h + border) + border
+
+            if item is None:
+                draw.rectangle([x0, y0, x0 + cell_w - 1, y0 + cell_h - 1],
+                               outline=(71, 85, 105), width=1)
+                continue
+
+            arr, label = item
+            pil_img = PILImage.fromarray(arr)
+
+            iw, ih = pil_img.size
+            scale = min(cell_w / max(1, iw), cell_h / max(1, ih))
+            new_w, new_h = int(iw * scale), int(ih * scale)
+            pil_img = pil_img.resize((new_w, new_h), PILImage.LANCZOS)
+
+            ox = x0 + (cell_w - new_w) // 2
+            oy = y0 + (cell_h - new_h) // 2
+            composite.paste(pil_img, (ox, oy))
+
+            draw.rectangle([x0, y0, x0 + cell_w - 1, y0 + cell_h - 1],
+                           outline=(71, 85, 105), width=1)
+
+            lbl = label if len(label) <= 40 else label[:37] + "..."
+            bbox = draw.textbbox((0, 0), lbl, font=font)
+            tw = bbox[2] - bbox[0]
+            lx = x0 + (cell_w - tw) // 2
+            ly = y0 + cell_h + 2
+            draw.text((lx, ly), lbl, fill=(148, 163, 184), font=font)
+
+        return np.asarray(composite)
+
     # ── Cargar imágenes ─────────────────────────────────────────────
 
     def _load_images(self):
@@ -835,26 +931,25 @@ class AmyloidWindow(QDialog):
             result = compute_hmr(self._original_image, roi_h, roi_m)
             perugini = int(self._perugini_combo.currentData())
             report_img = self.get_report_image()
-            # Obtener las imágenes del layout tal cual las organizó el usuario.
-            layout_imgs = self.get_layout_images()
+            # Obtener imagen compuesta del layout.
+            composite_img = self.get_layout_composite_image()
             output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output_demo")
             os.makedirs(output_dir, exist_ok=True)
             # Guardar imagen con ROIs.
             img_path = os.path.join(output_dir, "amyloid_planar.png")
             from PIL import Image
             Image.fromarray(report_img).save(img_path, "PNG")
-            # Guardar imágenes del layout.
-            layout_paths = []
-            for i, img in enumerate(layout_imgs):
-                img_p = os.path.join(output_dir, f"amyloid_layout_{i}.png")
-                Image.fromarray(img.astype(np.uint8)).save(img_p, "PNG")
-                layout_paths.append(img_p)
+            # Guardar imagen compuesta del layout.
+            composite_path = ""
+            if composite_img is not None:
+                composite_path = os.path.join(output_dir, "amyloid_layout_composite.png")
+                Image.fromarray(composite_img.astype(np.uint8)).save(composite_path, "PNG")
             # PDF
             pdf_path = os.path.join(output_dir, "informe_amyloid.pdf")
-            self._generate_pdf(pdf_path, img_path, layout_paths, result, perugini)
+            self._generate_pdf(pdf_path, img_path, composite_path, result, perugini)
             # HTML
             html_path = os.path.join(output_dir, "informe_amyloid.html")
-            self._generate_html(html_path, img_path, layout_paths, result, perugini)
+            self._generate_html(html_path, img_path, composite_path, result, perugini)
             QMessageBox.information(
                 self, "SINCRO — Amyloidosis",
                 f"Informe generado:\nPDF: {pdf_path}\nHTML: {html_path}"
@@ -862,7 +957,7 @@ class AmyloidWindow(QDialog):
         except Exception as exc:
             QMessageBox.critical(self, "SINCRO — Amyloidosis", f"Error al generar informe:\n{exc}")
 
-    def _generate_pdf(self, pdf_path, img_path, layout_paths, result, perugini):
+    def _generate_pdf(self, pdf_path, img_path, composite_path, result, perugini):
         """Genera el informe PDF de amiloidosis."""
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.units import mm
@@ -967,7 +1062,7 @@ class AmyloidWindow(QDialog):
         ))
         doc.build(story)
 
-    def _generate_html(self, html_path, img_path, layout_paths, result, perugini):
+    def _generate_html(self, html_path, img_path, composite_path, result, perugini):
         """Genera el informe HTML de amiloidosis."""
         import base64
         with open(img_path, "rb") as f:
@@ -976,16 +1071,16 @@ class AmyloidWindow(QDialog):
         date = getattr(self._study, "study_date", "") or "N/D"
         series = getattr(self._study, "series_description", "") or "N/D"
 
-        # Construir secciones de layout como texto.
+        # Construir sección de layout compuesto.
         layout_html = ""
-        for i, layout_path in enumerate(layout_paths):
-            with open(layout_path, "rb") as f:
-                layout_b64 = base64.b64encode(f.read()).decode("ascii")
-            layout_html += (
-                f'<div class="card"><h3>Layout — Imagen {i+1}</h3>'
-                f'<img src="data:image/png;base64,{layout_b64}" '
+        if composite_path and os.path.isfile(composite_path):
+            with open(composite_path, "rb") as f:
+                composite_b64 = base64.b64encode(f.read()).decode("ascii")
+            layout_html = (
+                f'<div class="card"><h3>2. Layout completo</h3>'
+                f'<img src="data:image/png;base64,{composite_b64}" '
                 f'style="max-width:100%; border-radius:8px; border:1px solid #475569;" '
-                f'alt="Layout {i+1}"></div>'
+                f'alt="Layout completo"></div>'
             )
 
         html = f"""<!DOCTYPE html>
@@ -1021,7 +1116,7 @@ td {{ padding: 8px; border-bottom: 1px solid #475569; }}
 </div>
 {layout_html}
 <div class="card">
-  <h3>2. Métrica principal: HMR</h3>
+  <h3>3. Métrica principal: HMR</h3>
   <div class="metric {"positive" if result.hmr >= 1.5 else "equivocal" if result.hmr >= 1.0 else "negative"}">{result.hmr:.2f}</div>
   <table>
     <tr><th>Métrica</th><th>Valor</th><th>Referencia</th></tr>
@@ -1032,12 +1127,12 @@ td {{ padding: 8px; border-bottom: 1px solid #475569; }}
   </table>
 </div>
 <div class="card">
-  <h3>3. Perugini visual score</h3>
+  <h3>4. Perugini visual score</h3>
   <p><b>Score {perugini}</b> — {PERUGINI_SCORES.get(perugini, 'N/D')}</p>
   <p style="font-size:0.85rem; color:#94a3b8;">Referencia: 0 = sin captación; 1 = leve; 2 = moderado (= hueso); 3 = intenso (> hueso).</p>
 </div>
 <div class="card">
-  <h3>4. Interpretación clínica</h3>
+  <h3>5. Interpretación clínica</h3>
   <p>El estudio muestra HMR de {result.hmr:.2f}. <b>{result.classification}</b></p>
   <p>Si el resultado es equívoco (HMR 1.0–1.5), considerar imagen SPECT/CT o repetir planar a 3 horas para descartar pool sanguíneo residual.</p>
   <p>La interpretación debe integrarse con laboratorio (cadenas livianas libres, proteínas monoclonales) y contexto clínico. El Perugini score ≥2 en presencia de gammapatía monoclonal ausente confirma ATTR.</p>
