@@ -428,36 +428,37 @@ class AmyloidWindow(QDialog):
     # ── Cargar imágenes ─────────────────────────────────────────────
 
     def _load_images(self):
-        """Abre diálogo para cargar imágenes planar adicionales."""
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "Cargar imágenes DICOM", "",
-            "DICOM (*.dcm *.DCM);;Imágenes (*.png *.jpg *.tif);;Todos (*)"
-        )
-        if not paths:
-            return
-        for p in paths:
-            try:
-                if p.lower().endswith((".dcm",)):
-                    import pydicom
-                    ds = pydicom.dcmread(p)
-                    img = ds.pixel_array.astype(np.float64)
-                    label = getattr(ds, "SeriesDescription", "") or os.path.basename(p)
-                else:
-                    from PIL import Image as PILImage
-                    img = np.array(PILImage.open(p)).astype(np.float64)
-                    if img.ndim == 3:
-                        img = img.mean(axis=2)
-                    label = os.path.basename(p)
-                self._loaded_images.append((label, img))
-            except Exception as exc:
-                QMessageBox.warning(self, "SINCRO", f"Error cargando {os.path.basename(p)}:\n{exc}")
-        self._rebuild_layout()
-
-    # ── Controles del cuadrante ─────────────────────────────────────
-
-    def _on_quadrant_selected(self, idx: int):
-        # Si estamos en modo swap, ejecutar el intercambio.
-        if self._swap_mode and self._swap_first >= 0 and idx != self._swap_first:
+        """Abre el navegador DICOM con thumbnails para seleccionar imágenes."""
+        from ui.dicom_browser import DicomBrowserDialog
+        # Determinar directorio inicial.
+        start_dir = ""
+        if self._study:
+            # Intentar obtener la ruta del estudio actual.
+            start_dir = getattr(self._study, "_source_path", "") or ""
+            if start_dir and os.path.isfile(start_dir):
+                start_dir = os.path.dirname(start_dir)
+        if not start_dir:
+            start_dir = os.path.expanduser("~")
+        browser = DicomBrowserDialog(self, start_dir=start_dir)
+        if browser.exec() == QDialog.DialogCode.Accepted:
+            paths = browser.selected_paths()
+            for p in paths:
+                try:
+                    if p.lower().endswith((".dcm",)):
+                        import pydicom
+                        ds = pydicom.dcmread(p)
+                        img = ds.pixel_array.astype(np.float64)
+                        label = getattr(ds, "SeriesDescription", "") or os.path.basename(p)
+                    else:
+                        from PIL import Image as PILImage
+                        img = np.array(PILImage.open(p)).astype(np.float64)
+                        if img.ndim == 3:
+                            img = img.mean(axis=2)
+                        label = os.path.basename(p)
+                    self._loaded_images.append((label, img))
+                except Exception as exc:
+                    QMessageBox.warning(self, "SINCRO", f"Error cargando {os.path.basename(p)}:\n{exc}")
+            self._rebuild_layout()
             self._do_swap(self._swap_first, idx)
             self._swap_mode = False
             self._swap_first = -1
