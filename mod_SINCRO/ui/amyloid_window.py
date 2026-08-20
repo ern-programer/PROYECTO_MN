@@ -179,6 +179,7 @@ class AmyloidWindow(QDialog):
         self._current_layout_n = 4
         self._current_mode = "visor"  # "visor" | "analisis"
         self._page_offset = 0  # índice de inicio de la página actual
+        self._processed_images: dict[int, np.ndarray] = {}  # índice → imagen procesada (ROIs/limpia)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
@@ -468,6 +469,18 @@ class AmyloidWindow(QDialog):
         else:
             return
         self._quadrant_viewer.set_layout(layout)
+        # Restaurar imágenes procesadas (ROIs + limpia) si existen.
+        for idx, img in self._processed_images.items():
+            if idx < len(layout.quadrants):
+                layout.quadrants[idx].image = img
+                if idx == 0:
+                    layout.quadrants[idx].label = f"AP + ROIs (HMR={layout.quadrants[idx].hmr:.2f})" if layout.quadrants[idx].hmr else "AP + ROIs"
+                    layout.quadrants[idx].roi_overlay = True
+                elif idx == 1:
+                    layout.quadrants[idx].label = "AP (limpio)"
+                    layout.quadrants[idx].roi_overlay = False
+        self._quadrant_viewer._rebuild_pixmaps()
+        self._quadrant_viewer.update()
         self._on_quadrant_selected(0)
         # Actualizar info de paginación.
         total_pages = (len(all_imgs) + n - 1) // n if n > 0 else 1
@@ -733,12 +746,16 @@ class AmyloidWindow(QDialog):
             layout.quadrants[0].label = f"AP + ROIs (HMR={result.hmr:.2f})"
             layout.quadrants[0].roi_overlay = True
             layout.quadrants[0].hmr = result.hmr
+            # Guardar imagen procesada para restaurarla al cambiar de layout.
+            self._processed_images[0] = img_rgb
             # Copia limpia al cuadrante 1 (reservado para AP limpia).
             if len(layout.quadrants) > 1:
                 clean_img = self._original_image.copy()
                 layout.quadrants[1].image = clean_img
                 layout.quadrants[1].label = "AP (limpio)"
                 layout.quadrants[1].roi_overlay = False
+                # Guardar imagen limpia también.
+                self._processed_images[1] = clean_img
             self._quadrant_viewer._rebuild_pixmaps()
             self._quadrant_viewer.update()
 
