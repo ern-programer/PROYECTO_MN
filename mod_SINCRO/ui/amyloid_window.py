@@ -368,10 +368,12 @@ class AmyloidWindow(QDialog):
 
         # Selector de tiempo para washout.
         time_row = QHBoxLayout()
-        time_row.addWidget(QLabel("Tiempo:"))
+        lbl_time = QLabel("Tiempo:")
+        lbl_time.setStyleSheet(self._lbl_css)
+        time_row.addWidget(lbl_time)
         self._time_combo = QComboBox()
-        self._time_combo.addItems(["1h", "3h", "Otro"])
-        self._time_combo.setStyleSheet("color: #e2e8f0;")
+        self._time_combo.addItems(["1h", "2h", "3h", "4h", "5h", "Otro"])
+        self._time_combo.setStyleSheet("QComboBox { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; padding: 4px; border-radius: 4px; } QComboBox QAbstractItemView { background: #1e293b; color: #e2e8f0; selection-background-color: #2563eb; }")
         time_row.addWidget(self._time_combo)
         analysis_layout.addLayout(time_row)
 
@@ -380,6 +382,12 @@ class AmyloidWindow(QDialog):
         btn_apply.setStyleSheet("font-size: 13px; font-weight: bold; padding: 8px; background: #2563eb; color: white; border-radius: 6px;")
         btn_apply.clicked.connect(self._apply_rois_to_quadrant)
         analysis_layout.addWidget(btn_apply)
+
+        # Label de estado de washout.
+        self._lbl_washout_status = QLabel("")
+        self._lbl_washout_status.setStyleSheet("font-size: 10px; color: #94a3b8; padding: 4px;")
+        self._lbl_washout_status.setWordWrap(True)
+        analysis_layout.addWidget(self._lbl_washout_status)
 
         self._stack.addWidget(page_analysis)
 
@@ -812,6 +820,15 @@ class AmyloidWindow(QDialog):
             "heart_counts": result.heart_counts,
             "mediastinum_counts": result.mediastinum_counts,
         }
+        # Actualizar label de estado de washout.
+        times_done = ", ".join(sorted(self._washout_data.keys()))
+        n = len(self._washout_data)
+        if n >= 2:
+            self._lbl_washout_status.setText(f"✓ Washout: {times_done} (curva lista para informe)")
+            self._lbl_washout_status.setStyleSheet("font-size: 10px; color: #4ade80; padding: 4px;")
+        else:
+            self._lbl_washout_status.setText(f"Washout: {times_done} (cargá otra hora para generar curva)")
+            self._lbl_washout_status.setStyleSheet("font-size: 10px; color: #fbbf24; padding: 4px;")
 
         # Renderizar imagen con ROIs dibujados + leyenda al pie.
         report_img = self.get_report_image()
