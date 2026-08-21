@@ -31,6 +31,7 @@ from core.amyloid_layouts import (
     layout_4q, layout_8q, layout_9q, layout_12q, layout_16q,
 )
 from ui.quadrant_viewer import QuadrantViewer
+from ui.anatomical_3d_panel import Anatomical3DPanel
 
 
 class ROIDragWidget(QWidget):
@@ -236,6 +237,10 @@ class AmyloidWindow(QDialog):
         btn_kinetic_help = QPushButton("Ayuda cinética")
         btn_kinetic_help.clicked.connect(self._show_kinetic_help)
         toolbar.addWidget(btn_kinetic_help)
+        btn_anatomical_3d = QPushButton("3D anatómico")
+        btn_anatomical_3d.setToolTip("Visualización anatómica 3D (experimental)")
+        btn_anatomical_3d.clicked.connect(self._open_anatomical_3d)
+        toolbar.addWidget(btn_anatomical_3d)
 
         toolbar.addStretch(1)
 
@@ -763,6 +768,23 @@ class AmyloidWindow(QDialog):
         close_btn = QPushButton("Cerrar")
         close_btn.clicked.connect(dlg.accept)
         layout.addWidget(close_btn)
+        dlg.exec()
+
+    def _open_anatomical_3d(self):
+        """Abre el visor anatómico 3D como prueba de concepto."""
+        uptake_values = None
+        try:
+            if self._active_time in ("1h", "3h"):
+                ap_entry = self._time_images[self._active_time]["ap"]
+            else:
+                ap_entry = self._time_images["1h"]["ap"]
+            if ap_entry is not None:
+                img = np.asarray(ap_entry["image"], dtype=np.float64)
+                uptake_values = img.ravel()
+        except Exception:
+            uptake_values = None
+
+        dlg = Anatomical3DPanel(self, uptake_values=uptake_values, title="Corazón 3D anatómico")
         dlg.exec()
 
     def _load_time_images(self, time_label: str):
