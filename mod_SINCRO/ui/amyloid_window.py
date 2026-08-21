@@ -1257,6 +1257,8 @@ class AmyloidWindow(QDialog):
                 story.append(RLImage(roi_buf, width=riw*roi_scale, height=rih*roi_scale))
                 story.append(Spacer(1, 2*mm))
 
+            q_bone_val = data.get("q_bone")
+            q_bone_text = f"{q_bone_val:.2f}" if q_bone_val is not None else "N/D"
             hmr_data = [
                 ["Métrica", "Valor", "Referencia"],
                 [f"HMR ({time_label})", f"{hmr:.2f}", "≥1.5 sugiere ATTR"],
@@ -1264,6 +1266,7 @@ class AmyloidWindow(QDialog):
                 ["Cuentas mediastinales", f"{medi:,.0f}", ""],
                 ["Clasificación", cls, ""],
                 ["Perugini", str(perugini_time), "0–3"],
+                ["Q_bone (calidad ósea)", q_bone_text, "≈1 homogéneo"],
             ]
             hmr_table = Table(hmr_data, colWidths=[50*mm, 40*mm, 76*mm])
             hmr_table.setStyle(TableStyle([
@@ -1721,6 +1724,12 @@ class AmyloidWindow(QDialog):
                         )
                         color_class = "positive" if hmr >= 1.5 else ("equivocal" if hmr >= 1.0 else "negative")
                         perugini_time = self._perugini_by_time.get(time_label, perugini)
+                        q_bone_val = data.get("q_bone")
+                        q_bone_text = f"{q_bone_val:.2f}" if q_bone_val is not None else "N/D"
+                        q_bone_val = data.get("q_bone")
+                        q_bone_text = f"{q_bone_val:.2f}" if q_bone_val is not None else "N/D"
+                        q_bone_val = data.get("q_bone")
+                        q_bone_text = f"{q_bone_val:.2f}" if q_bone_val is not None else "N/D"
                         temporal_hmr[time_label] = hmr
 
                         roi_html = '<div class="roi-placeholder">Imagen ROI no disponible</div>'
@@ -1751,6 +1760,7 @@ class AmyloidWindow(QDialog):
                 <tr><td>Cuentas mediastinales</td><td>{mediastinum_counts:,.0f}</td><td></td></tr>
                 <tr><td>Clasificación</td><td>{escape(str(classification))}</td><td></td></tr>
                 <tr><td>Perugini</td><td>{escape(str(perugini_time))}</td><td>0–3</td></tr>
+                <tr><td>Q_bone (calidad ósea)</td><td>{escape(q_bone_text)}</td><td>≈1 homogéneo</td></tr>
             </table>
         </div>
     </div>
