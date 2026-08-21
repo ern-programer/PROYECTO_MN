@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import numpy as np
 import base64
+import json
+from datetime import datetime, date, time, timedelta
 
-from PyQt6.QtCore import Qt, QPointF, pyqtSignal
+from PyQt6.QtCore import Qt, QPointF, pyqtSignal, QSettings
 from PyQt6.QtGui import QMouseEvent, QPainter, QPen, QColor, QBrush, QPixmap
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
     QComboBox, QWidget, QSizePolicy, QMessageBox, QStackedWidget,
-    QSlider, QFrame, QFileDialog, QTextEdit,
+    QSlider, QFrame, QFileDialog, QTextEdit, QInputDialog, QCheckBox,
 )
 import os
 
@@ -52,7 +54,15 @@ class ROIDragWidget(QWidget):
             {"cy": 0.4 * image.shape[0], "cx": 0.4 * image.shape[1], "radius": 12.0, "color": "#ff6666", "name": "Corazón"},
             {"cy": 0.6 * image.shape[0], "cx": 0.6 * image.shape[1], "radius": 12.0, "color": "#38bdf8", "name": "Mediastino"},
         ]
+        self._show_aux_rois = False
         self._drag_roi = -1
+
+    def set_aux_rois_visible(self, visible: bool):
+        self._show_aux_rois = bool(visible)
+        self.update()
+
+    def _is_roi_visible(self, idx: int) -> bool:
+        return idx < 2 or self._show_aux_rois
 
     def set_zoom(self, zoom: float):
         self._zoom = max(0.2, min(20.0, zoom))
@@ -84,6 +94,8 @@ class ROIDragWidget(QWidget):
 
         # Dibujar ROIs.
         for i, roi in enumerate(self._rois):
+            if not self._is_roi_visible(i):
+                continue
             rcx = ox + roi["cx"] * scale
             rcy = oy + roi["cy"] * scale
             rr = roi["radius"] * scale
@@ -94,15 +106,35 @@ class ROIDragWidget(QWidget):
                 painter.setBrush(QBrush(color))
                 painter.drawEllipse(QPointF(rcx, rcy), rr, rr)
             else:
-                painter.setPen(QPen(color, 2.0, Qt.PenStyle.DashLine))
-                painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 60)))
+                style = Qt.PenStyle.DashLine if i < 2 else Qt.PenStyle.DotLine
+                painter.setPen(QPen(color, 2.0, style))
+                fill_alpha = 60 if i < 2 else 95
+                painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), fill_alpha)))
                 painter.drawEllipse(QPointF(rcx, rcy), rr, rr)
+            # Centro de ROI para referencia visual fina.
+            painter.setPen(QPen(color, 1.6, Qt.PenStyle.SolidLine))
+            painter.drawLine(int(rcx - 4), int(rcy), int(rcx + 4), int(rcy))
+            painter.drawLine(int(rcx), int(rcy - 4), int(rcx), int(rcy + 4))
             # Etiqueta.
             painter.setPen(QPen(color, 1.5))
             painter.drawText(int(rcx + rr + 5), int(rcy), roi["name"])
 
+        # Leyenda breve cuando ROIs auxiliares están activas.
+        if self._show_aux_rois:
+            legend_x = 8
+            legend_y = 8
+            painter.setPen(QPen(QColor("#cbd5e1"), 1.0))
+            painter.setBrush(QBrush(QColor(15, 23, 42, 220)))
+            painter.drawRoundedRect(legend_x, legend_y, 230, 40, 6, 6)
+            painter.setPen(QPen(QColor("#fbbf24"), 1.5))
+            painter.drawText(legend_x + 10, legend_y + 17, "Esternón: amarillo")
+            painter.setPen(QPen(QColor("#a78bfa"), 1.5))
+            painter.drawText(legend_x + 10, legend_y + 33, "Costilla: violeta")
+
     def mousePressEvent(self, event: QMouseEvent):
         for i, roi in enumerate(self._rois):
+            if not self._is_roi_visible(i):
+                continue
             rcx = event.position().x()
             rcy = event.position().y()
             scale = self._scale()
@@ -139,15 +171,21 @@ class ROIDragWidget(QWidget):
         oy = (self.height() - self._image.shape[0] * scale) // 2
         delta = 1 if event.angleDelta().y() > 0 else -1
         for i, roi in enumerate(self._rois):
+            if not self._is_roi_visible(i):
+                continue
             rcx = event.position().x()
             rcy = event.position().y()
             dist = np.sqrt((rcx - ox - roi["cx"] * scale) ** 2 + (rcy - oy - roi["cy"] * scale) ** 2)
             if dist < roi["radius"] * 1.5 * scale:
                 new_radius = max(3.0, min(64.0, roi["radius"] + delta * 1.0))
-                # Actualizar AMBOS ROIs con el mismo radio (tienen que ser igual).
-                for r in self._rois:
-                    r["radius"] = new_radius
-                self.roiChanged.emit(i, self._rois[i]["cy"], self._rois[i]["cx"], new_radius)
+                if i < 2:
+                    # Corazón + mediastino mantienen radio común.
+                    self._rois[0]["radius"] = new_radius
+                    self._rois[1]["radius"] = new_radius
+                    self.roiChanged.emit(i, self._rois[i]["cy"], self._rois[i]["cx"], new_radius)
+                else:
+                    self._rois[i]["radius"] = new_radius
+                    self.roiChanged.emit(i, self._rois[i]["cy"], self._rois[i]["cx"], new_radius)
                 break
         self.update()
 
@@ -194,10 +232,14 @@ class AmyloidWindow(QDialog):
         self._processed_images: dict[str, dict[str, np.ndarray]] = {"1h": {}, "3h": {}}
         self._roi_state: dict[str, list[dict] | None] = {"1h": None, "3h": None}
         self._perugini_by_time: dict[str, int] = {}
+        self._perugini_confirmed_by_time: dict[str, bool] = {}
+        self._qbone_mode_by_time: dict[str, str] = {"1h": "auto", "3h": "auto"}
+        self._time_hours_by_label: dict[str, float] = {"1h": 1.0, "3h": 3.0}
         self._active_time: str | None = None
         self._washout_data: dict[str, dict] = {}  # tiempo_label → {hmr, heart_counts, mediastinum_counts}
         self._early_dynamic: dict | None = None
         self._kinetic_result = None
+        self._quadrant_state: dict[int, dict] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
@@ -230,6 +272,10 @@ class AmyloidWindow(QDialog):
         btn_load_3h = QPushButton("Cargar imágenes 3h")
         btn_load_3h.clicked.connect(lambda: self._load_time_images("3h"))
         toolbar.addWidget(btn_load_3h)
+        btn_load_auto = QPushButton("Washout automático (metadata)")
+        btn_load_auto.setToolTip("Detecta 1h/3h automáticamente desde metadata DICOM (mantiene modo manual disponible)")
+        btn_load_auto.clicked.connect(self._load_washout_auto)
+        toolbar.addWidget(btn_load_auto)
         btn_load_dynamic = QPushButton("Cargar dinámico temprano")
         btn_load_dynamic.setToolTip("Método experimental: dinámico 0–5 min para TAC y localización cardíaca")
         btn_load_dynamic.clicked.connect(self._load_early_dynamic)
@@ -343,6 +389,11 @@ class AmyloidWindow(QDialog):
         self._btn_analyze.clicked.connect(self._analyze_selected)
         sidebar.addWidget(self._btn_analyze)
 
+        self._lbl_filters_active = QLabel("Activos: ninguno")
+        self._lbl_filters_active.setStyleSheet("color:#94a3b8; font-size:10px;")
+        self._lbl_filters_active.setWordWrap(True)
+        sidebar.addWidget(self._lbl_filters_active)
+
         self._washout_preview = QLabel()
         self._washout_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._washout_preview.setWordWrap(True)
@@ -401,11 +452,16 @@ class AmyloidWindow(QDialog):
                 roi_h = ROICircle(cy=0.4*image.shape[0], cx=0.4*image.shape[1], radius=12.0)
                 roi_m = ROICircle(cy=0.6*image.shape[0], cx=0.6*image.shape[1], radius=12.0)
                 result = compute_hmr(image, roi_h, roi_m)
-                suggested = 3 if result.hmr >= 1.5 else (2 if result.hmr >= 1.0 else 0)
-                self._perugini_combo.setCurrentIndex(suggested)
+                suggested = self._suggest_perugini_from_hmr(result.hmr)
+                self._set_perugini_score(suggested)
         except Exception:
             self._perugini_combo.setCurrentIndex(0)
         analysis_layout.addWidget(self._perugini_combo)
+
+        self._perugini_confirm_chk = QCheckBox("Perugini confirmado manualmente")
+        self._perugini_confirm_chk.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        self._perugini_confirm_chk.setChecked(False)
+        analysis_layout.addWidget(self._perugini_confirm_chk)
 
         # Selector de tiempo para washout.
         time_row = QHBoxLayout()
@@ -434,6 +490,24 @@ class AmyloidWindow(QDialog):
         filter_row.addWidget(self._filter_combo)
         analysis_layout.addLayout(filter_row)
 
+        # Q_bone: modo automático/manual.
+        qbone_row = QHBoxLayout()
+        lbl_qbone_mode = QLabel("Q_bone:")
+        lbl_qbone_mode.setStyleSheet(self._lbl_css)
+        qbone_row.addWidget(lbl_qbone_mode)
+        self._qbone_mode_combo = QComboBox()
+        self._qbone_mode_combo.addItem("Automático", "auto")
+        self._qbone_mode_combo.addItem("Manual (ROIs esternón/costilla)", "manual")
+        self._qbone_mode_combo.setStyleSheet("QComboBox { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; padding: 4px; border-radius: 4px; } QComboBox QAbstractItemView { background: #1e293b; color: #e2e8f0; selection-background-color: #2563eb; }")
+        self._qbone_mode_combo.currentIndexChanged.connect(self._on_qbone_mode_changed)
+        qbone_row.addWidget(self._qbone_mode_combo)
+        analysis_layout.addLayout(qbone_row)
+
+        self._qbone_hint_lbl = QLabel("Q_bone automático: esternón/costilla se estiman desde ROI cardíaco.")
+        self._qbone_hint_lbl.setStyleSheet("font-size:10px; color:#94a3b8; padding:2px;")
+        self._qbone_hint_lbl.setWordWrap(True)
+        analysis_layout.addWidget(self._qbone_hint_lbl)
+
         # Botón Aplicar: renderiza ROIs + HMR y asigna al cuadrante AP+ROIs.
         btn_apply = QPushButton("Aplicar ROIs al cuadrante")
         btn_apply.setStyleSheet("font-size: 13px; font-weight: bold; padding: 8px; background: #2563eb; color: white; border-radius: 6px;")
@@ -457,6 +531,9 @@ class AmyloidWindow(QDialog):
         btn_report = QPushButton("Generar Informe")
         btn_report.clicked.connect(self._generate_report)
         btns.addWidget(btn_report)
+        btn_export = QPushButton("Exportar PNG/JPG")
+        btn_export.clicked.connect(self._export_png_jpg)
+        btns.addWidget(btn_export)
         btn_close = QPushButton("Cerrar")
         btn_close.clicked.connect(self.accept)
         btns.addWidget(btn_close)
@@ -466,10 +543,148 @@ class AmyloidWindow(QDialog):
         if image is not None:
             self._time_images["1h"]["ap"] = {"image": np.asarray(image, dtype=np.float64), "label": "AP", "path": ""}
             self._active_time = "1h"
+        self._ensure_aux_rois()
+        self._restore_user_state()
         self._rebuild_layout()
         self._update_washout_preview()
         if image is not None:
             self._update_hmr(0, 0, 0, 0)
+
+    def _settings_group_key(self) -> str:
+        patient = str(self._metadata.get("patient") or "N_D")
+        date = str(self._metadata.get("date") or "N_D")
+        series = str(self._metadata.get("series") or "N_D")
+        key = f"{patient}|{date}|{series}"
+        return "".join(ch if ch.isalnum() or ch in "._-|" else "_" for ch in key)
+
+    def _settings(self) -> QSettings:
+        return QSettings("GAMMASYS", "SINCRO_AMYLO")
+
+    @staticmethod
+    def _suggest_perugini_from_hmr(hmr: float) -> int:
+        """Sugerencia heurística de Perugini basada en HMR (no reemplaza lectura visual)."""
+        if hmr >= 1.5:
+            return 3
+        if hmr >= 1.2:
+            return 2
+        if hmr >= 1.0:
+            return 1
+        return 0
+
+    def _set_perugini_score(self, score: int):
+        idx = self._perugini_combo.findData(int(score))
+        if idx >= 0:
+            self._perugini_combo.setCurrentIndex(idx)
+
+    def _ensure_aux_rois(self):
+        if len(self._roi_widget._rois) >= 4:
+            return
+        if self._original_image is None:
+            h, w = 64, 64
+        else:
+            h, w = self._original_image.shape
+        base_r = self._roi_widget._rois[0]["radius"] if self._roi_widget._rois else 12.0
+        self._roi_widget._rois.append(
+            {"cy": 0.25 * h, "cx": 0.50 * w, "radius": base_r * 0.6, "color": "#fbbf24", "name": "Esternón"}
+        )
+        self._roi_widget._rois.append(
+            {"cy": 0.60 * h, "cx": 0.20 * w, "radius": base_r * 0.5, "color": "#a78bfa", "name": "Costilla"}
+        )
+
+    def _serialize_rois(self, rois: list[dict] | None) -> list[dict] | None:
+        if not rois:
+            return None
+        out: list[dict] = []
+        for roi in rois:
+            out.append({
+                "cy": float(roi.get("cy", 0.0)),
+                "cx": float(roi.get("cx", 0.0)),
+                "radius": float(roi.get("radius", 0.0)),
+                "color": str(roi.get("color", "#ffffff")),
+                "name": str(roi.get("name", "ROI")),
+            })
+        return out
+
+    def _persist_user_state(self):
+        try:
+            self._ensure_aux_rois()
+            key = self._settings_group_key()
+            settings = self._settings()
+            settings.beginGroup(f"amyloid/{key}")
+            payload = {
+                "roi_state": {
+                    "1h": self._serialize_rois(self._roi_state.get("1h")),
+                    "3h": self._serialize_rois(self._roi_state.get("3h")),
+                },
+                "qbone_mode_by_time": {
+                    "1h": str(self._qbone_mode_by_time.get("1h", "auto")),
+                    "3h": str(self._qbone_mode_by_time.get("3h", "auto")),
+                },
+                "perugini_by_time": {
+                    "1h": int(self._perugini_by_time.get("1h", 0)),
+                    "3h": int(self._perugini_by_time.get("3h", 0)),
+                },
+                "perugini_confirmed_by_time": {
+                    "1h": bool(self._perugini_confirmed_by_time.get("1h", False)),
+                    "3h": bool(self._perugini_confirmed_by_time.get("3h", False)),
+                },
+                "quadrant_state": self._quadrant_state,
+                "layout_n": int(self._current_layout_n),
+                "active_time": str(self._active_time or "1h"),
+                "time_hours_by_label": {
+                    "1h": float(self._time_hours_by_label.get("1h", 1.0)),
+                    "3h": float(self._time_hours_by_label.get("3h", 3.0)),
+                },
+            }
+            settings.setValue("state_json", json.dumps(payload, ensure_ascii=False))
+            settings.endGroup()
+            settings.sync()
+        except Exception:
+            pass
+
+    def _restore_user_state(self):
+        try:
+            key = self._settings_group_key()
+            settings = self._settings()
+            settings.beginGroup(f"amyloid/{key}")
+            raw = settings.value("state_json", "")
+            settings.endGroup()
+            if not raw:
+                return
+            payload = json.loads(str(raw))
+            roi_state = payload.get("roi_state", {}) or {}
+            for time_label in ("1h", "3h"):
+                rois = roi_state.get(time_label)
+                if rois:
+                    self._roi_state[time_label] = self._serialize_rois(rois)
+            qmode = payload.get("qbone_mode_by_time", {}) or {}
+            self._qbone_mode_by_time["1h"] = str(qmode.get("1h", "auto"))
+            self._qbone_mode_by_time["3h"] = str(qmode.get("3h", "auto"))
+            pvals = payload.get("perugini_by_time", {}) or {}
+            self._perugini_by_time["1h"] = int(pvals.get("1h", self._perugini_by_time.get("1h", 0)))
+            self._perugini_by_time["3h"] = int(pvals.get("3h", self._perugini_by_time.get("3h", 0)))
+            pconf = payload.get("perugini_confirmed_by_time", {}) or {}
+            self._perugini_confirmed_by_time["1h"] = bool(pconf.get("1h", False))
+            self._perugini_confirmed_by_time["3h"] = bool(pconf.get("3h", False))
+            self._quadrant_state = payload.get("quadrant_state", {}) or {}
+            th = payload.get("time_hours_by_label", {}) or {}
+            self._time_hours_by_label["1h"] = float(th.get("1h", 1.0))
+            self._time_hours_by_label["3h"] = float(th.get("3h", 3.0))
+            saved_layout = int(payload.get("layout_n", self._current_layout_n))
+            idx = self._layout_combo.findData(saved_layout)
+            if idx >= 0:
+                self._layout_combo.blockSignals(True)
+                self._layout_combo.setCurrentIndex(idx)
+                self._layout_combo.blockSignals(False)
+                self._current_layout_n = saved_layout
+            self._active_time = str(payload.get("active_time", self._active_time or "1h"))
+            self._sync_qbone_mode_ui()
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        self._persist_user_state()
+        super().closeEvent(event)
 
     # ── Modo ────────────────────────────────────────────────────────
 
@@ -551,6 +766,7 @@ class AmyloidWindow(QDialog):
             if idx < len(layout.quadrants):
                 layout.quadrants[idx].label = label
         self._quadrant_viewer.set_layout(layout)
+        self._restore_quadrant_states()
         self._quadrant_viewer._rebuild_pixmaps()
         self._quadrant_viewer.update()
         self._on_quadrant_selected(0)
@@ -706,6 +922,159 @@ class AmyloidWindow(QDialog):
             return float(frame_time) / 1000.0
         return None
 
+    @staticmethod
+    def _parse_dicom_tm(tm_val) -> time | None:
+        """Parsea TM DICOM (HHMMSS.frac) a objeto time."""
+        if tm_val is None:
+            return None
+        s = str(tm_val).strip()
+        if not s:
+            return None
+        s = s.split(".")[0]
+        digits = "".join(ch for ch in s if ch.isdigit())
+        if len(digits) < 2:
+            return None
+        hh = int(digits[0:2])
+        mm = int(digits[2:4]) if len(digits) >= 4 else 0
+        ss = int(digits[4:6]) if len(digits) >= 6 else 0
+        if hh > 23 or mm > 59 or ss > 59:
+            return None
+        return time(hour=hh, minute=mm, second=ss)
+
+    @staticmethod
+    def _parse_dicom_dt(dt_val) -> datetime | None:
+        """Parsea DT DICOM (YYYYMMDDHHMMSS.frac) a datetime."""
+        if dt_val is None:
+            return None
+        s = str(dt_val).strip()
+        if not s:
+            return None
+        s = s.split("+")[0].split("-")[0].split(".")[0]
+        digits = "".join(ch for ch in s if ch.isdigit())
+        if len(digits) < 8:
+            return None
+        try:
+            y = int(digits[0:4])
+            m = int(digits[4:6])
+            d = int(digits[6:8])
+            hh = int(digits[8:10]) if len(digits) >= 10 else 0
+            mm = int(digits[10:12]) if len(digits) >= 12 else 0
+            ss = int(digits[12:14]) if len(digits) >= 14 else 0
+            return datetime(y, m, d, hh, mm, ss)
+        except Exception:
+            return None
+
+    def _dicom_acquisition_datetime(self, ds) -> datetime | None:
+        """Intenta construir datetime de adquisición con prioridad a tags temporales robustos."""
+        for dt_attr in (
+            "AcquisitionDateTime",
+            "SeriesDateTime",
+            "StudyDateTime",
+            "RadiopharmaceuticalStartDateTime",
+        ):
+            dt_obj = self._parse_dicom_dt(getattr(ds, dt_attr, None))
+            if dt_obj is not None:
+                return dt_obj
+
+        date_candidates = [
+            getattr(ds, "AcquisitionDate", None),
+            getattr(ds, "SeriesDate", None),
+            getattr(ds, "StudyDate", None),
+            getattr(ds, "ContentDate", None),
+        ]
+        tm_candidates = [
+            getattr(ds, "AcquisitionTime", None),
+            getattr(ds, "SeriesTime", None),
+            getattr(ds, "StudyTime", None),
+            getattr(ds, "ContentTime", None),
+        ]
+
+        d_obj = None
+        for d in date_candidates:
+            ds_str = str(d or "").strip()
+            digits = "".join(ch for ch in ds_str if ch.isdigit())
+            if len(digits) >= 8:
+                try:
+                    d_obj = date(int(digits[0:4]), int(digits[4:6]), int(digits[6:8]))
+                    break
+                except Exception:
+                    continue
+
+        t_obj = None
+        for t in tm_candidates:
+            t_obj = self._parse_dicom_tm(t)
+            if t_obj is not None:
+                break
+
+        if d_obj is None and t_obj is None:
+            return None
+        if d_obj is None:
+            d_obj = datetime.today().date()
+        if t_obj is None:
+            t_obj = time(hour=0, minute=0, second=0)
+        return datetime.combine(d_obj, t_obj)
+
+    def _extract_planar_record(self, path: str) -> dict:
+        """Carga DICOM planar y devuelve registro estándar para AP/OAI/LAT."""
+        import pydicom
+
+        ds = pydicom.dcmread(path, force=True)
+        img = np.asarray(ds.pixel_array, dtype=np.float64)
+        while img.ndim > 2:
+            img = img[img.shape[0] // 2]
+        if img.ndim != 2:
+            raise ValueError(f"Imagen no planar: shape={img.shape}")
+
+        description = " ".join(filter(None, [
+            str(getattr(ds, "SeriesDescription", "") or ""),
+            str(getattr(ds, "ViewPosition", "") or ""),
+        ])).upper()
+        dt = self._dicom_acquisition_datetime(ds)
+        return {
+            "image": img,
+            "label": description or os.path.basename(path),
+            "path": path,
+            "view": self._classify_planar_view(description),
+            "ds": ds,
+            "duration_s": self._dicom_static_duration_s(ds),
+            "acq_dt": dt,
+        }
+
+    @staticmethod
+    def _relative_hours(first: datetime, current: datetime) -> float:
+        """Horas relativas desde la primera adquisición, ajustando rollover de día."""
+        cur = current
+        if cur < first:
+            cur = cur + timedelta(days=1)
+        return max(0.0, (cur - first).total_seconds() / 3600.0)
+
+    @staticmethod
+    def _closest_label_from_hours(hours: float) -> str:
+        """Asigna etiqueta canónica 1h/3h por cercanía temporal."""
+        return "1h" if abs(hours - 1.0) <= abs(hours - 3.0) else "3h"
+
+    @staticmethod
+    def _fmt_dt(dt: datetime | None) -> str:
+        if dt is None:
+            return "N/D"
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _assign_views_for_time(self, records: list[dict]) -> dict[str, dict]:
+        """Asigna AP/OAI/LAT con heurística por metadatos o fallback por orden."""
+        assigned: dict[str, dict] = {}
+        used: set[int] = set()
+        for idx, record in enumerate(records):
+            view = record["view"]
+            if view and view not in assigned:
+                assigned[view] = record
+                used.add(idx)
+        for role in ("ap", "oai", "lat"):
+            if role not in assigned:
+                idx = next(i for i in range(len(records)) if i not in used)
+                assigned[role] = records[idx]
+                used.add(idx)
+        return {role: assigned[role] for role in ("ap", "oai", "lat")}
+
     def _load_early_dynamic(self):
         """Carga dinámico 0–5 min. No realiza QC de inyección."""
         path, _ = QFileDialog.getOpenFileName(
@@ -773,6 +1142,7 @@ class AmyloidWindow(QDialog):
     def _open_anatomical_3d(self):
         """Abre el visor anatómico 3D como prueba de concepto."""
         uptake_values = None
+        image_ap = None
         try:
             if self._active_time in ("1h", "3h"):
                 ap_entry = self._time_images[self._active_time]["ap"]
@@ -780,11 +1150,18 @@ class AmyloidWindow(QDialog):
                 ap_entry = self._time_images["1h"]["ap"]
             if ap_entry is not None:
                 img = np.asarray(ap_entry["image"], dtype=np.float64)
+                image_ap = img
                 uptake_values = img.ravel()
         except Exception:
             uptake_values = None
+            image_ap = None
 
-        dlg = Anatomical3DPanel(self, uptake_values=uptake_values, title="Corazón 3D anatómico")
+        dlg = Anatomical3DPanel(
+            self,
+            uptake_values=uptake_values,
+            image_ap=image_ap,
+            title="Corazón 3D anatómico",
+        )
         dlg.exec()
 
     def _load_time_images(self, time_label: str):
@@ -811,41 +1188,18 @@ class AmyloidWindow(QDialog):
             records = []
             for p in paths:
                 try:
-                    import pydicom
-                    ds = pydicom.dcmread(p, force=True)
-                    img = np.asarray(ds.pixel_array, dtype=np.float64)
-                    while img.ndim > 2:
-                        img = img[img.shape[0] // 2]
-                    if img.ndim != 2:
-                        raise ValueError(f"Imagen no planar: shape={img.shape}")
-                    description = " ".join(filter(None, [
-                        str(getattr(ds, "SeriesDescription", "") or ""),
-                        str(getattr(ds, "ViewPosition", "") or ""),
-                    ])).upper()
-                    records.append({"image": img, "label": description or os.path.basename(p),
-                                    "path": p, "view": self._classify_planar_view(description), "ds": ds,
-                                    "duration_s": self._dicom_static_duration_s(ds)})
+                    records.append(self._extract_planar_record(p))
                 except Exception as exc:
                     QMessageBox.warning(self, "SINCRO", f"Error cargando {os.path.basename(p)}:\n{exc}")
                     return
 
-            assigned: dict[str, dict] = {}
-            used: set[int] = set()
-            for idx, record in enumerate(records):
-                view = record["view"]
-                if view and view not in assigned:
-                    assigned[view] = record
-                    used.add(idx)
-            for role in ("ap", "oai", "lat"):
-                if role not in assigned:
-                    idx = next(i for i in range(len(records)) if i not in used)
-                    assigned[role] = records[idx]
-                    used.add(idx)
-
-            self._time_images[time_label] = {role: assigned[role] for role in ("ap", "oai", "lat")}
+            self._time_images[time_label] = self._assign_views_for_time(records)
             self._processed_images[time_label].clear()
-            self._roi_state[time_label] = None
+            # Mantener ROIs persistidas si existen; inicializar solo cuando no hay estado previo.
+            if not self._roi_state.get(time_label):
+                self._roi_state[time_label] = None
             self._washout_data.pop(time_label, None)
+            self._time_hours_by_label[time_label] = 1.0 if time_label == "1h" else 3.0
             first_ds = records[0]["ds"]
             self._metadata = {
                 "patient": str(getattr(first_ds, "PatientName", "") or "N/D"),
@@ -863,8 +1217,139 @@ class AmyloidWindow(QDialog):
             self._current_layout_n = target_layout
             self._page_offset = 0
             self._rebuild_layout(force_layout=target_layout)
+            self._persist_user_state()
             self._update_washout_preview()
             self._update_kinetic_analysis()
+
+    def _load_washout_auto(self):
+        """Carga 6 DICOM planares y asigna 1h/3h automáticamente por metadata temporal."""
+        from ui.dicom_browser import DicomBrowserDialog
+
+        start_dir = ""
+        if self._study:
+            start_dir = getattr(self._study, "_source_path", "") or ""
+            if start_dir and os.path.isfile(start_dir):
+                start_dir = os.path.dirname(start_dir)
+        if not start_dir:
+            start_dir = os.path.expanduser("~")
+
+        browser = DicomBrowserDialog(self, start_dir=start_dir)
+        if browser.exec() != QDialog.DialogCode.Accepted:
+            return
+        paths = browser.selected_paths()
+        if len(paths) != 6:
+            QMessageBox.information(
+                self,
+                "SINCRO — Washout automático",
+                "Seleccioná exactamente 6 DICOM planares: 3 de ~1h y 3 de ~3h.",
+            )
+            return
+
+        try:
+            records = [self._extract_planar_record(p) for p in paths]
+        except Exception as exc:
+            QMessageBox.warning(self, "SINCRO", f"Error cargando selección:\n{exc}")
+            return
+
+        dts = [r.get("acq_dt") for r in records if r.get("acq_dt") is not None]
+        if len(dts) < 2:
+            QMessageBox.warning(
+                self,
+                "SINCRO — Washout automático",
+                "Metadata temporal insuficiente. Usá la carga manual 1h/3h.",
+            )
+            return
+
+        t0 = min(dts)
+        for r in records:
+            dt = r.get("acq_dt")
+            r["rel_h"] = self._relative_hours(t0, dt) if dt is not None else 0.0
+            r["time_label_guess"] = self._closest_label_from_hours(r["rel_h"])
+
+        g1 = [r for r in records if r.get("time_label_guess") == "1h"]
+        g3 = [r for r in records if r.get("time_label_guess") == "3h"]
+        if len(g1) < 3 or len(g3) < 3:
+            # fallback robusto: split temporal 3+3 por orden relativo
+            ordered = sorted(records, key=lambda x: x.get("rel_h", 0.0))
+            g1 = ordered[:3]
+            g3 = ordered[3:6]
+
+        if len(g1) != 3 or len(g3) != 3:
+            QMessageBox.warning(
+                self,
+                "SINCRO — Washout automático",
+                "No se pudo separar en 2 tiempos (3+3). Usá la carga manual.",
+            )
+            return
+
+        self._time_images["1h"] = self._assign_views_for_time(g1)
+        self._time_images["3h"] = self._assign_views_for_time(g3)
+        self._processed_images["1h"].clear()
+        self._processed_images["3h"].clear()
+        self._washout_data.pop("1h", None)
+        self._washout_data.pop("3h", None)
+
+        # Horas reales para curvas e informe.
+        self._time_hours_by_label["1h"] = float(np.mean([r.get("rel_h", 1.0) for r in g1]))
+        self._time_hours_by_label["3h"] = float(np.mean([r.get("rel_h", 3.0) for r in g3]))
+
+        first_ds = g1[0]["ds"]
+        self._metadata = {
+            "patient": str(getattr(first_ds, "PatientName", "") or "N/D"),
+            "date": str(getattr(first_ds, "StudyDate", "") or "N/D"),
+            "series": str(getattr(first_ds, "SeriesDescription", "") or "N/D"),
+        }
+        self._info_lbl.setText(
+            f"Paciente: {self._metadata['patient']}  ·  Fecha: {self._metadata['date']}  ·  Serie: {self._metadata['series']}"
+        )
+
+        target_layout = 8
+        combo_idx = self._layout_combo.findData(target_layout)
+        self._layout_combo.blockSignals(True)
+        self._layout_combo.setCurrentIndex(combo_idx)
+        self._layout_combo.blockSignals(False)
+        self._current_layout_n = target_layout
+        self._page_offset = 0
+        self._rebuild_layout(force_layout=target_layout)
+        self._persist_user_state()
+        self._update_washout_preview()
+        self._update_kinetic_analysis()
+
+        QMessageBox.information(
+            self,
+            "SINCRO — Washout automático",
+            (
+                "Asignación automática completada.\n"
+                f"Tiempo temprano: ~{self._time_hours_by_label['1h']:.2f} h\n"
+                f"Tiempo tardío: ~{self._time_hours_by_label['3h']:.2f} h\n"
+                "Podés seguir usando el modo manual 1h/3h cuando quieras."
+            ),
+        )
+
+        choice = QMessageBox.question(
+            self,
+            "SINCRO — Washout automático",
+            "¿Querés ver el detalle temporal detectado por archivo?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if choice == QMessageBox.StandardButton.Yes:
+            def _block(title: str, group: list[dict]) -> str:
+                lines = [f"{title}:"]
+                for r in sorted(group, key=lambda x: x.get("rel_h", 0.0)):
+                    lines.append(
+                        f"- {os.path.basename(str(r.get('path', '')))} | "
+                        f"{self._fmt_dt(r.get('acq_dt'))} | "
+                        f"t={float(r.get('rel_h', 0.0)):.2f} h"
+                    )
+                return "\n".join(lines)
+
+            detail = (
+                _block("Grupo temprano (1h)", g1)
+                + "\n\n"
+                + _block("Grupo tardío (3h)", g3)
+            )
+            QMessageBox.information(self, "SINCRO — Detalle temporal", detail)
 
     @staticmethod
     def _classify_planar_view(text: str) -> str | None:
@@ -908,12 +1393,47 @@ class AmyloidWindow(QDialog):
         self._win_high_slider.blockSignals(True)
         self._win_high_slider.setValue(int(q.win_high))
         self._win_high_slider.blockSignals(False)
+        self._update_quadrant_filter_label(q)
+
+    def _update_quadrant_filter_label(self, q):
+        active = list(getattr(q, "filters", []) or [])
+        txt = ", ".join(active) if active else "ninguno"
+        self._lbl_filters_active.setText(f"Activos: {txt}")
+
+    def _save_selected_quadrant_state(self):
+        idx = self._quadrant_viewer._selected
+        q = self._quadrant_viewer.selected_quadrant()
+        if q is None or idx < 0:
+            return
+        self._quadrant_state[int(idx)] = {
+            "cmap": str(q.cmap),
+            "win_low": float(q.win_low),
+            "win_high": float(q.win_high),
+            "filters": list(q.filters),
+        }
+
+    def _restore_quadrant_states(self):
+        layout = self._quadrant_viewer._layout
+        if layout is None:
+            return
+        for idx, q in enumerate(layout.quadrants):
+            state = self._quadrant_state.get(idx) or self._quadrant_state.get(str(idx))
+            if not state:
+                continue
+            try:
+                q.cmap = str(state.get("cmap", q.cmap))
+                q.win_low = float(state.get("win_low", q.win_low))
+                q.win_high = float(state.get("win_high", q.win_high))
+                q.filters = list(state.get("filters", q.filters))
+            except Exception:
+                continue
 
     def _on_cmap_changed(self, cmap: str):
         q = self._quadrant_viewer.selected_quadrant()
         if q is None:
             return
         q.cmap = cmap
+        self._save_selected_quadrant_state()
         self._quadrant_viewer._rebuild_pixmaps()
         self._quadrant_viewer.update()
 
@@ -923,6 +1443,7 @@ class AmyloidWindow(QDialog):
             return
         q.win_low = float(self._win_low_slider.value())
         q.win_high = float(self._win_high_slider.value())
+        self._save_selected_quadrant_state()
         self._quadrant_viewer._rebuild_pixmaps()
         self._quadrant_viewer.update()
 
@@ -934,6 +1455,8 @@ class AmyloidWindow(QDialog):
             q.filters.remove(filt)
         else:
             q.filters.append(filt)
+        self._update_quadrant_filter_label(q)
+        self._save_selected_quadrant_state()
         self._quadrant_viewer._rebuild_pixmaps()
         self._quadrant_viewer.update()
 
@@ -978,6 +1501,7 @@ class AmyloidWindow(QDialog):
         qa.win_high, qb.win_high = qb.win_high, qa.win_high
         qa.hmr, qb.hmr = qb.hmr, qa.hmr
         qa.roi_overlay, qb.roi_overlay = qb.roi_overlay, qa.roi_overlay
+        self._quadrant_state[idx_a], self._quadrant_state[idx_b] = self._quadrant_state.get(idx_b, {}), self._quadrant_state.get(idx_a, {})
         self._quadrant_viewer._rebuild_pixmaps()
         self._quadrant_viewer.update()
 
@@ -1011,7 +1535,9 @@ class AmyloidWindow(QDialog):
         self._original_image = img.copy()  # original 2D para análisis
         self._active_time = time_label
         self._time_combo.setCurrentText(time_label)
+        self._qbone_mode_by_time[time_label] = self._qbone_mode_by_time.get(time_label, "auto")
         self._roi_widget = ROIDragWidget(img)
+        self._ensure_aux_rois()
         saved_rois = self._roi_state.get(time_label)
         if saved_rois:
             self._roi_widget._rois = [dict(roi) for roi in saved_rois]
@@ -1034,8 +1560,56 @@ class AmyloidWindow(QDialog):
                     if isinstance(old_layout, QVBoxLayout):
                         old_layout.insertWidget(0, self._roi_widget, 1)
                     break
+        # Cargar score guardado por tiempo o sugerir uno nuevo por HMR actual.
+        if time_label in self._perugini_by_time:
+            self._set_perugini_score(int(self._perugini_by_time[time_label]))
+        else:
+            try:
+                roi_h = ROICircle(
+                    cy=self._roi_widget._rois[0]["cy"],
+                    cx=self._roi_widget._rois[0]["cx"],
+                    radius=self._roi_widget._rois[0]["radius"],
+                )
+                roi_m = ROICircle(
+                    cy=self._roi_widget._rois[1]["cy"],
+                    cx=self._roi_widget._rois[1]["cx"],
+                    radius=self._roi_widget._rois[1]["radius"],
+                )
+                hmr_now = compute_hmr(self._original_image, roi_h, roi_m).hmr
+                self._set_perugini_score(self._suggest_perugini_from_hmr(hmr_now))
+            except Exception:
+                pass
+            self._perugini_confirm_chk.setChecked(bool(self._perugini_confirmed_by_time.get(time_label, False)))
+        self._sync_qbone_mode_ui()
         self._toggle_mode()
         self._update_hmr(0, 0, 0, 0)
+
+    def _sync_qbone_mode_ui(self):
+        time_label = self._active_time if self._active_time in ("1h", "3h") else "1h"
+        mode = self._qbone_mode_by_time.get(time_label, "auto")
+        idx = self._qbone_mode_combo.findData(mode)
+        self._qbone_mode_combo.blockSignals(True)
+        if idx >= 0:
+            self._qbone_mode_combo.setCurrentIndex(idx)
+        self._qbone_mode_combo.blockSignals(False)
+        self._roi_widget.set_aux_rois_visible(mode == "manual")
+        self._qbone_hint_lbl.setText(
+            "Q_bone manual: ajustar ROI Esternón y ROI Costilla." if mode == "manual"
+            else "Q_bone automático: esternón/costilla se estiman desde ROI cardíaco."
+        )
+
+    def _on_qbone_mode_changed(self, idx: int):
+        mode = str(self._qbone_mode_combo.currentData() or "auto")
+        time_label = self._active_time if self._active_time in ("1h", "3h") else "1h"
+        self._qbone_mode_by_time[time_label] = mode
+        if self._active_time in self._roi_state:
+            self._roi_state[self._active_time] = [dict(roi) for roi in self._roi_widget._rois]
+        self._roi_widget.set_aux_rois_visible(mode == "manual")
+        self._qbone_hint_lbl.setText(
+            "Q_bone manual: ajustar ROI Esternón y ROI Costilla." if mode == "manual"
+            else "Q_bone automático: esternón/costilla se estiman desde ROI cardíaco."
+        )
+        self._persist_user_state()
 
     def _apply_rois_to_quadrant(self):
         """Aplica el análisis al par AP+ROI/AP limpio del tiempo activo."""
@@ -1062,18 +1636,30 @@ class AmyloidWindow(QDialog):
         from core.amyloid_planar import compute_q_bone
         q_bone_val = None
         try:
-            # Estimar posiciones de esternón y costilla relativas al corazón.
-            h_img, w_img = self._original_image.shape
-            roi_sternum = ROICircle(
-                cy=max(roi_h.cy - roi_h.radius * 1.8, roi_h.radius),
-                cx=roi_h.cx,
-                radius=roi_h.radius * 0.6,
-            )
-            roi_rib = ROICircle(
-                cy=roi_h.cy + roi_h.radius * 0.5,
-                cx=max(roi_h.cx - roi_h.radius * 2.0, roi_h.radius),
-                radius=roi_h.radius * 0.5,
-            )
+            mode = self._qbone_mode_by_time.get(time_label, "auto")
+            if mode == "manual" and len(self._roi_widget._rois) >= 4:
+                roi_sternum = ROICircle(
+                    cy=self._roi_widget._rois[2]["cy"],
+                    cx=self._roi_widget._rois[2]["cx"],
+                    radius=self._roi_widget._rois[2]["radius"],
+                )
+                roi_rib = ROICircle(
+                    cy=self._roi_widget._rois[3]["cy"],
+                    cx=self._roi_widget._rois[3]["cx"],
+                    radius=self._roi_widget._rois[3]["radius"],
+                )
+            else:
+                # Estimación automática relativa al corazón.
+                roi_sternum = ROICircle(
+                    cy=max(roi_h.cy - roi_h.radius * 1.8, roi_h.radius),
+                    cx=roi_h.cx,
+                    radius=roi_h.radius * 0.6,
+                )
+                roi_rib = ROICircle(
+                    cy=roi_h.cy + roi_h.radius * 0.5,
+                    cx=max(roi_h.cx - roi_h.radius * 2.0, roi_h.radius),
+                    radius=roi_h.radius * 0.5,
+                )
             q_result = compute_q_bone(self._original_image, roi_sternum, roi_rib)
             q_bone_val = q_result.q_bone
         except Exception:
@@ -1085,10 +1671,13 @@ class AmyloidWindow(QDialog):
             "mediastinum_counts": result.mediastinum_counts,
             "classification": result.classification,
             "q_bone": q_bone_val,
+            "q_bone_mode": self._qbone_mode_by_time.get(time_label, "auto"),
         }
         self._perugini_by_time[time_label] = int(self._perugini_combo.currentData())
+        self._perugini_confirmed_by_time[time_label] = bool(self._perugini_confirm_chk.isChecked())
         self._roi_state[time_label] = [dict(roi) for roi in self._roi_widget._rois]
         self._update_kinetic_analysis()
+        self._persist_user_state()
 
         # Renderizar imagen con ROIs dibujados + leyenda al pie.
         report_img = self.get_report_image()
@@ -1161,7 +1750,10 @@ class AmyloidWindow(QDialog):
         from PIL import Image, ImageDraw
         pil = Image.fromarray(rgb)
         draw = ImageDraw.Draw(pil)
-        for roi in self._roi_widget._rois:
+        mode = self._qbone_mode_by_time.get(self._active_time if self._active_time in ("1h", "3h") else "1h", "auto")
+        for idx, roi in enumerate(self._roi_widget._rois):
+            if idx >= 2 and mode != "manual":
+                continue
             color = roi["color"]
             x0 = int(roi["cx"] - roi["radius"])
             y0 = int(roi["cy"] - roi["radius"])
@@ -1205,9 +1797,17 @@ class AmyloidWindow(QDialog):
         self._roi_widget._rois[1]["cy"] = 0.6 * h
         self._roi_widget._rois[1]["cx"] = 0.6 * w
         self._roi_widget._rois[1]["radius"] = 12.0
+        self._ensure_aux_rois()
+        self._roi_widget._rois[2]["cy"] = 0.25 * h
+        self._roi_widget._rois[2]["cx"] = 0.50 * w
+        self._roi_widget._rois[2]["radius"] = 7.2
+        self._roi_widget._rois[3]["cy"] = 0.60 * h
+        self._roi_widget._rois[3]["cx"] = 0.20 * w
+        self._roi_widget._rois[3]["radius"] = 6.0
         self._roi_widget.update()
         if self._active_time in self._roi_state:
             self._roi_state[self._active_time] = [dict(roi) for roi in self._roi_widget._rois]
+        self._persist_user_state()
         self._update_hmr(0, 0, 0, 0)
 
     def _on_visual_filter_changed(self, idx: int):
@@ -1250,6 +1850,61 @@ class AmyloidWindow(QDialog):
             self._roi_widget.update()
         except Exception:
             pass  # Si falla el filtro, dejar la imagen raw.
+
+    def _export_png_jpg(self):
+        """Exporta ROI actual o layout completo a PNG/JPG."""
+        from PIL import Image
+
+        choice, ok = QInputDialog.getItem(
+            self,
+            "SINCRO — Exportar",
+            "¿Qué deseas exportar?",
+            ["Layout completo", "ROI actual"],
+            0,
+            False,
+        )
+        if not ok:
+            return
+
+        options = "PNG (*.png);;JPEG (*.jpg *.jpeg)"
+        path, selected = QFileDialog.getSaveFileName(
+            self,
+            "Exportar imagen",
+            os.path.expanduser("~"),
+            options,
+        )
+        if not path:
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if not ext:
+            ext = ".png" if "PNG" in selected.upper() else ".jpg"
+            path = path + ext
+
+        if choice == "ROI actual":
+            img = self.get_report_image()
+        else:
+            img = self.get_layout_composite_image()
+        if img is None or img.size == 0:
+            if choice == "Layout completo":
+                QMessageBox.warning(self, "SINCRO — Exportar", "No hay layout para exportar. Cargá imágenes primero.")
+                return
+            QMessageBox.warning(self, "SINCRO — Exportar", "No hay imagen para exportar.")
+            return
+
+        try:
+            arr = np.asarray(img)
+            if arr.dtype != np.uint8:
+                arr = np.clip(arr, 0, 255).astype(np.uint8)
+            pil = Image.fromarray(arr)
+            if ext in (".jpg", ".jpeg"):
+                if pil.mode != "RGB":
+                    pil = pil.convert("RGB")
+                pil.save(path, "JPEG", quality=95)
+            else:
+                pil.save(path, "PNG")
+            QMessageBox.information(self, "SINCRO — Exportar", f"Imagen exportada:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "SINCRO — Exportar", f"No se pudo exportar:\n{exc}")
 
     def _update_kinetic_analysis(self):
         """Calcula métricas temporales cuando están disponibles los tres tiempos."""
@@ -1440,6 +2095,7 @@ class AmyloidWindow(QDialog):
             medi = data["mediastinum_counts"]
             cls = data.get("classification", "")
             perugini_time = self._perugini_by_time.get(time_label, perugini)
+            perugini_confirmed = bool(self._perugini_confirmed_by_time.get(time_label, False))
 
             story.append(Paragraph(f"{sec_num}. Resultados {time_label}", section_style))
 
@@ -1458,6 +2114,8 @@ class AmyloidWindow(QDialog):
 
             q_bone_val = data.get("q_bone")
             q_bone_text = f"{q_bone_val:.2f}" if q_bone_val is not None else "N/D"
+            q_bone_mode = str(data.get("q_bone_mode", "auto"))
+            q_bone_ref = "manual (ROI esternón/costilla)" if q_bone_mode == "manual" else "auto (estimado)"
             hmr_data = [
                 ["Métrica", "Valor", "Referencia"],
                 [f"HMR ({time_label})", f"{hmr:.2f}", "≥1.5 sugiere ATTR"],
@@ -1465,7 +2123,8 @@ class AmyloidWindow(QDialog):
                 ["Cuentas mediastinales", f"{medi:,.0f}", ""],
                 ["Clasificación", cls, ""],
                 ["Perugini", str(perugini_time), "0–3"],
-                ["Q_bone (calidad ósea)", q_bone_text, "≈1 homogéneo"],
+                ["Perugini estado", "Final" if perugini_confirmed else "Sugerido", "Confirmación manual"],
+                ["Q_bone (calidad ósea)", q_bone_text, f"≈1 homogéneo · {q_bone_ref}"],
             ]
             hmr_table = Table(hmr_data, colWidths=[50*mm, 40*mm, 76*mm])
             hmr_table.setStyle(TableStyle([
@@ -1635,6 +2294,11 @@ class AmyloidWindow(QDialog):
         import io, base64
 
         def _time_hours(label: str) -> float:
+            if label in self._time_hours_by_label:
+                try:
+                    return float(self._time_hours_by_label[label])
+                except Exception:
+                    pass
             try:
                 return float(label.replace("h", "").strip())
             except Exception:
@@ -1953,12 +2617,12 @@ class AmyloidWindow(QDialog):
                         )
                         color_class = "positive" if hmr >= 1.5 else ("equivocal" if hmr >= 1.0 else "negative")
                         perugini_time = self._perugini_by_time.get(time_label, perugini)
+                        perugini_confirmed = bool(self._perugini_confirmed_by_time.get(time_label, False))
+                        perugini_state_text = "Final (confirmado manualmente)" if perugini_confirmed else "Sugerido por HMR"
                         q_bone_val = data.get("q_bone")
                         q_bone_text = f"{q_bone_val:.2f}" if q_bone_val is not None else "N/D"
-                        q_bone_val = data.get("q_bone")
-                        q_bone_text = f"{q_bone_val:.2f}" if q_bone_val is not None else "N/D"
-                        q_bone_val = data.get("q_bone")
-                        q_bone_text = f"{q_bone_val:.2f}" if q_bone_val is not None else "N/D"
+                        q_bone_mode = str(data.get("q_bone_mode", "auto"))
+                        q_bone_mode_text = "manual (ROI esternón/costilla)" if q_bone_mode == "manual" else "auto (estimado)"
                         temporal_hmr[time_label] = hmr
 
                         roi_html = '<div class="roi-placeholder">Imagen ROI no disponible</div>'
@@ -1989,8 +2653,17 @@ class AmyloidWindow(QDialog):
                 <tr><td>Cuentas mediastinales</td><td>{mediastinum_counts:,.0f}</td><td></td></tr>
                 <tr><td>Clasificación</td><td>{escape(str(classification))}</td><td></td></tr>
                 <tr><td>Perugini</td><td>{escape(str(perugini_time))}</td><td>0–3</td></tr>
-                <tr><td>Q_bone (calidad ósea)</td><td>{escape(q_bone_text)}</td><td>≈1 homogéneo</td></tr>
+                <tr><td>Perugini estado</td><td>{escape(perugini_state_text)}</td><td>Control clínico</td></tr>
+                <tr><td>Q_bone (calidad ósea)</td><td>{escape(q_bone_text)}</td><td>{escape(q_bone_mode_text)}</td></tr>
             </table>
+            <p style="font-size:0.85rem; color:#94a3b8; margin-top:8px;">
+                <strong>Índice Q_bone:</strong> razón entre cuentas promedio en ROI esternal y ROI costal,
+                calculada como <code>Q_bone = mean(sternum) / mean(rib)</code>.
+                Se usa como control interno de homogeneidad de captación ósea y posible contaminación de fondo.
+                Referencia práctica: valores cercanos a 1 sugieren distribución ósea homogénea;
+                desviaciones marcadas (&gt;1 o &lt;1) indican predominio esternal o costal.
+                <em>No es criterio diagnóstico de amiloidosis por sí solo.</em>
+            </p>
         </div>
     </div>
 </section>""")
@@ -2022,6 +2695,7 @@ class AmyloidWindow(QDialog):
     <h2>Imagen planar con ROIs</h2>
     <img class="report-image" src="data:image/png;base64,{img_b64}" alt="Imagen planar con ROIs">
 </section>"""
+
 
                 layout_html = ""
                 if composite_path and os.path.isfile(composite_path):
