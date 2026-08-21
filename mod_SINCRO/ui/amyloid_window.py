@@ -401,6 +401,20 @@ class AmyloidWindow(QDialog):
         time_row.addWidget(self._time_combo)
         analysis_layout.addLayout(time_row)
 
+        # Selector de filtro visual (solo para posicionamiento de ROIs).
+        from core.amyloid_planar import VISUAL_FILTERS
+        filter_row = QHBoxLayout()
+        lbl_filt = QLabel("Filtro visual:")
+        lbl_filt.setStyleSheet(self._lbl_css)
+        filter_row.addWidget(lbl_filt)
+        self._filter_combo = QComboBox()
+        for key, (name, _) in VISUAL_FILTERS.items():
+            self._filter_combo.addItem(name, key)
+        self._filter_combo.setStyleSheet("QComboBox { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; padding: 4px; border-radius: 4px; } QComboBox QAbstractItemView { background: #1e293b; color: #e2e8f0; selection-background-color: #2563eb; }")
+        self._filter_combo.currentIndexChanged.connect(self._on_visual_filter_changed)
+        filter_row.addWidget(self._filter_combo)
+        analysis_layout.addLayout(filter_row)
+
         # Botón Aplicar: renderiza ROIs + HMR y asigna al cuadrante AP+ROIs.
         btn_apply = QPushButton("Aplicar ROIs al cuadrante")
         btn_apply.setStyleSheet("font-size: 13px; font-weight: bold; padding: 8px; background: #2563eb; color: white; border-radius: 6px;")
@@ -915,12 +929,33 @@ class AmyloidWindow(QDialog):
             QMessageBox.warning(self, "SINCRO", f"Error calculando HMR:\n{exc}")
             return
 
-        # Guardar datos para curva de washout.
+        # Guardar datos para curva de washout + Q_bone.
+        from core.amyloid_planar import compute_q_bone
+        q_bone_val = None
+        try:
+            # Estimar posiciones de esternón y costilla relativas al corazón.
+            h_img, w_img = self._original_image.shape
+            roi_sternum = ROICircle(
+                cy=max(roi_h.cy - roi_h.radius * 1.8, roi_h.radius),
+                cx=roi_h.cx,
+                radius=roi_h.radius * 0.6,
+            )
+            roi_rib = ROICircle(
+                cy=roi_h.cy + roi_h.radius * 0.5,
+                cx=max(roi_h.cx - roi_h.radius * 2.0, roi_h.radius),
+                radius=roi_h.radius * 0.5,
+            )
+            q_result = compute_q_bone(self._original_image, roi_sternum, roi_rib)
+            q_bone_val = q_result.q_bone
+        except Exception:
+            pass
+
         self._washout_data[time_label] = {
             "hmr": result.hmr,
             "heart_counts": result.heart_counts,
             "mediastinum_counts": result.mediastinum_counts,
             "classification": result.classification,
+            "q_bone": q_bone_val,
         }
         self._perugini_by_time[time_label] = int(self._perugini_combo.currentData())
         self._roi_state[time_label] = [dict(roi) for roi in self._roi_widget._rois]
@@ -1044,6 +1079,26 @@ class AmyloidWindow(QDialog):
         if self._active_time in self._roi_state:
             self._roi_state[self._active_time] = [dict(roi) for roi in self._roi_widget._rois]
         self._update_hmr(0, 0, 0, 0)
+
+    def _on_visual_filter_changed(self, idx: int):
+        """Aplica/quita filtro visual al widget de ROIs (solo display, no raw)."""
+        from core.amyloid_planar import apply_visual_filter, VISUAL_FILTERS
+        filter_key = self._filter_combo.currentData()
+        if filter_key is None or filter_key == "none":
+            # Restaurar imagen raw.
+            if self._original_image is not None:
+                self._roi_widget._image = np.asarray(self._original_image, dtype=np.float64)
+                self._roi_widget.update()
+            return
+        if self._original_image is None:
+            return
+        _, kwargs = VISUAL_FILTERS.get(filter_key, ("", {}))
+        try:
+            filtered = apply_visual_filter(self._original_image, filter_key, **kwargs)
+            self._roi_widget._image = np.asarray(filtered, dtype=np.float64)
+            self._roi_widget.update()
+        except Exception:
+            pass  # Si falla el filtro, dejar la imagen raw.
 
     def _update_washout_preview(self):
         """Actualiza estado y curva en vivo solo con 1 h y 3 h cuantificadas."""
