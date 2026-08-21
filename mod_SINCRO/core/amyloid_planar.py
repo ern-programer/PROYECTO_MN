@@ -98,7 +98,7 @@ def compute_hmr(
         heart_area_px=roi_heart.area_px(img.shape),
         mediastinum_area_px=roi_mediastinum.area_px(img.shape),
         roi_heart=roi_heart,
-    roi_mediastinum=roi_mediastinum,
+        roi_mediastinum=roi_mediastinum,
     )
 
 
@@ -209,7 +209,7 @@ def apply_visual_filter(image: np.ndarray, filter_name: str, **kwargs) -> np.nda
         norm = np.clip((img - p_low) / max(p_high - p_low, 1e-8), 0, 1)
         # CLAHE con clip limit.
         clip_limit = kwargs.get("clip_limit", 0.02)
-        result = exposure.equalize_adapthisttt(norm, clip_limit=clip_limit)
+        result = exposure.equalize_adapthist(norm, clip_limit=clip_limit)
         return result * (p_high - p_low) + p_low
 
     elif filter_name == "high_contrast":

@@ -21,7 +21,7 @@ from PyQt6.QtGui import QMouseEvent, QPainter, QPen, QColor, QBrush, QPixmap
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
     QComboBox, QWidget, QSizePolicy, QMessageBox, QStackedWidget,
-    QSlider, QFrame,
+    QSlider, QFrame, QFileDialog, QTextEdit,
 )
 import os
 
@@ -195,6 +195,8 @@ class AmyloidWindow(QDialog):
         self._perugini_by_time: dict[str, int] = {}
         self._active_time: str | None = None
         self._washout_data: dict[str, dict] = {}  # tiempo_label → {hmr, heart_counts, mediastinum_counts}
+        self._early_dynamic: dict | None = None
+        self._kinetic_result = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
@@ -227,6 +229,13 @@ class AmyloidWindow(QDialog):
         btn_load_3h = QPushButton("Cargar imágenes 3h")
         btn_load_3h.clicked.connect(lambda: self._load_time_images("3h"))
         toolbar.addWidget(btn_load_3h)
+        btn_load_dynamic = QPushButton("Cargar dinámico temprano")
+        btn_load_dynamic.setToolTip("Método experimental: dinámico 0–5 min para TAC y localización cardíaca")
+        btn_load_dynamic.clicked.connect(self._load_early_dynamic)
+        toolbar.addWidget(btn_load_dynamic)
+        btn_kinetic_help = QPushButton("Ayuda cinética")
+        btn_kinetic_help.clicked.connect(self._show_kinetic_help)
+        toolbar.addWidget(btn_kinetic_help)
 
         toolbar.addStretch(1)
 
@@ -335,6 +344,10 @@ class AmyloidWindow(QDialog):
         self._washout_preview.setMinimumHeight(90)
         self._washout_preview.setStyleSheet("color:#94a3b8; border:1px solid #334155; padding:4px;")
         sidebar.addWidget(self._washout_preview)
+        self._kinetic_status = QLabel("Cinética experimental: dinámico temprano no cargado.")
+        self._kinetic_status.setWordWrap(True)
+        self._kinetic_status.setStyleSheet("color:#94a3b8; border:1px solid #334155; padding:4px; font-size:10px;")
+        sidebar.addWidget(self._kinetic_status)
 
         # Paginación: anterior/siguiente.
         pag_layout = QHBoxLayout()
@@ -410,6 +423,7 @@ class AmyloidWindow(QDialog):
         self._filter_combo = QComboBox()
         for key, (name, _) in VISUAL_FILTERS.items():
             self._filter_combo.addItem(name, key)
+        self._filter_combo.addItem("Dinámico temprano (localización)", "early_dynamic")
         self._filter_combo.setStyleSheet("QComboBox { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; padding: 4px; border-radius: 4px; } QComboBox QAbstractItemView { background: #1e293b; color: #e2e8f0; selection-background-color: #2563eb; }")
         self._filter_combo.currentIndexChanged.connect(self._on_visual_filter_changed)
         filter_row.addWidget(self._filter_combo)
@@ -660,6 +674,97 @@ class AmyloidWindow(QDialog):
 
     # ── Cargar imágenes ─────────────────────────────────────────────
 
+    @staticmethod
+    def _dicom_frame_durations_s(ds, n_frames: int) -> np.ndarray:
+        """Extrae duración de cada frame dinámico en segundos."""
+        vector = getattr(ds, "FrameTimeVector", None)
+        if vector is not None:
+            values = np.asarray(vector, dtype=np.float64).reshape(-1) / 1000.0
+            if values.size == n_frames and np.all(values > 0):
+                return values
+        frame_time = getattr(ds, "FrameTime", None)
+        if frame_time is not None and float(frame_time) > 0:
+            return np.full(n_frames, float(frame_time) / 1000.0)
+        actual = getattr(ds, "ActualFrameDuration", None)
+        if actual is not None and float(actual) > 0:
+            return np.full(n_frames, float(actual) / 1000.0)
+        raise ValueError("El DICOM dinámico no informa FrameTime/FrameTimeVector")
+
+    @staticmethod
+    def _dicom_static_duration_s(ds) -> float | None:
+        """Extrae duración de la adquisición estática si está disponible."""
+        actual = getattr(ds, "ActualFrameDuration", None)
+        if actual is not None and float(actual) > 0:
+            return float(actual) / 1000.0
+        frame_time = getattr(ds, "FrameTime", None)
+        if frame_time is not None and float(frame_time) > 0:
+            return float(frame_time) / 1000.0
+        return None
+
+    def _load_early_dynamic(self):
+        """Carga dinámico 0–5 min. No realiza QC de inyección."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Seleccionar dinámico temprano PYP (0–5 min)",
+            os.path.expanduser("~"),
+            "DICOM (*.dcm *.DCM);;Todos (*)",
+        )
+        if not path:
+            return
+        try:
+            import pydicom
+            from core.amyloid_kinetic import normalize_dynamic_frames
+
+            ds = pydicom.dcmread(path, force=True)
+            frames = np.asarray(ds.pixel_array, dtype=np.float64)
+            if frames.ndim != 3 or frames.shape[0] < 3:
+                raise ValueError(f"Se esperaba dinámico [frames, rows, cols], recibido {frames.shape}")
+            durations = self._dicom_frame_durations_s(ds, frames.shape[0])
+            dynamic = normalize_dynamic_frames(frames, durations, decay_correct=True)
+            self._early_dynamic = {
+                "path": path,
+                "dataset": ds,
+                "dynamic": dynamic,
+                "summed_cps": dynamic.frames_cps.sum(axis=0),
+            }
+            total_min = float(np.sum(durations) / 60.0)
+            self._lbl_washout_status.setText(
+                f"Dinámico temprano cargado: {frames.shape[0]} frames, {total_min:.1f} min. "
+                "Método experimental; falta cuantificar 1h y 3h para análisis temporal."
+            )
+            self._lbl_washout_status.setStyleSheet("font-size:10px; color:#38bdf8; padding:4px;")
+            self._update_kinetic_analysis()
+        except Exception as exc:
+            QMessageBox.critical(self, "SINCRO — Cinética experimental", f"No se pudo cargar el dinámico:\n{exc}")
+
+    def _show_kinetic_help(self):
+        """Muestra fundamento, utilidad y limitaciones del método experimental."""
+        from core.amyloid_kinetic import EXPERIMENTAL_EXPLANATION
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Análisis temporal PYP — Método experimental")
+        dlg.resize(720, 560)
+        layout = QVBoxLayout(dlg)
+        warning = QLabel("MÉTODO EXPERIMENTAL — NO DIAGNÓSTICO / NO TERAPÉUTICO")
+        warning.setStyleSheet("color:#fbbf24; font-weight:bold; font-size:14px; padding:8px;")
+        warning.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(warning)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setHtml(
+            f"<h2>{EXPERIMENTAL_EXPLANATION['title']}</h2>"
+            f"<h3>Qué hace</h3><p>{EXPERIMENTAL_EXPLANATION['summary']}</p>"
+            f"<h3>Fundamento físico</h3><p>{EXPERIMENTAL_EXPLANATION['physics']}</p>"
+            f"<h3>Posible utilidad diferencial</h3><p>{EXPERIMENTAL_EXPLANATION['differential']}</p>"
+            f"<h3>Limitaciones</h3><p>{EXPERIMENTAL_EXPLANATION['limitations']}</p>"
+            f"<h3>Advertencia clínica</h3><p><b>{EXPERIMENTAL_EXPLANATION['clinical_warning']}</b></p>"
+        )
+        layout.addWidget(text)
+        close_btn = QPushButton("Cerrar")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn)
+        dlg.exec()
+
     def _load_time_images(self, time_label: str):
         """Carga exactamente AP, OAI y lateral para un tiempo canónico."""
         from ui.dicom_browser import DicomBrowserDialog
@@ -696,7 +801,8 @@ class AmyloidWindow(QDialog):
                         str(getattr(ds, "ViewPosition", "") or ""),
                     ])).upper()
                     records.append({"image": img, "label": description or os.path.basename(p),
-                                    "path": p, "view": self._classify_planar_view(description), "ds": ds})
+                                    "path": p, "view": self._classify_planar_view(description), "ds": ds,
+                                    "duration_s": self._dicom_static_duration_s(ds)})
                 except Exception as exc:
                     QMessageBox.warning(self, "SINCRO", f"Error cargando {os.path.basename(p)}:\n{exc}")
                     return
@@ -736,6 +842,7 @@ class AmyloidWindow(QDialog):
             self._page_offset = 0
             self._rebuild_layout(force_layout=target_layout)
             self._update_washout_preview()
+            self._update_kinetic_analysis()
 
     @staticmethod
     def _classify_planar_view(text: str) -> str | None:
@@ -959,6 +1066,7 @@ class AmyloidWindow(QDialog):
         }
         self._perugini_by_time[time_label] = int(self._perugini_combo.currentData())
         self._roi_state[time_label] = [dict(roi) for roi in self._roi_widget._rois]
+        self._update_kinetic_analysis()
 
         # Renderizar imagen con ROIs dibujados + leyenda al pie.
         report_img = self.get_report_image()
@@ -1084,6 +1192,27 @@ class AmyloidWindow(QDialog):
         """Aplica/quita filtro visual al widget de ROIs (solo display, no raw)."""
         from core.amyloid_planar import apply_visual_filter, VISUAL_FILTERS
         filter_key = self._filter_combo.currentData()
+        if filter_key == "early_dynamic":
+            if self._early_dynamic is None:
+                QMessageBox.information(
+                    self,
+                    "SINCRO — Cinética experimental",
+                    "Cargá primero un dinámico temprano. El dinámico se usa solo como guía visual; HMR permanece raw.",
+                )
+                self._filter_combo.setCurrentIndex(0)
+                return
+            guide = np.asarray(self._early_dynamic["summed_cps"], dtype=np.float64)
+            if self._original_image is not None and guide.shape != self._original_image.shape:
+                QMessageBox.warning(
+                    self,
+                    "SINCRO — Cinética experimental",
+                    "La matriz del dinámico no coincide con la planar tardía. Se requiere registro espacial antes de usarla como guía.",
+                )
+                self._filter_combo.setCurrentIndex(0)
+                return
+            self._roi_widget._image = guide
+            self._roi_widget.update()
+            return
         if filter_key is None or filter_key == "none":
             # Restaurar imagen raw.
             if self._original_image is not None:
@@ -1099,6 +1228,54 @@ class AmyloidWindow(QDialog):
             self._roi_widget.update()
         except Exception:
             pass  # Si falla el filtro, dejar la imagen raw.
+
+    def _update_kinetic_analysis(self):
+        """Calcula métricas temporales cuando están disponibles los tres tiempos."""
+        if self._early_dynamic is None:
+            self._kinetic_status.setText("Cinética experimental: dinámico temprano no cargado.")
+            return
+        ap_1h = self._time_images["1h"]["ap"]
+        ap_3h = self._time_images["3h"]["ap"]
+        if ap_1h is None or ap_3h is None:
+            self._kinetic_status.setText("Dinámico cargado. Faltan AP de 1h y/o 3h para análisis temporal.")
+            return
+        duration_1h = ap_1h.get("duration_s")
+        duration_3h = ap_3h.get("duration_s")
+        if not duration_1h or not duration_3h:
+            self._kinetic_status.setText(
+                "Cinética pendiente: los DICOM tardíos no informan duración. "
+                "No se comparan cuentas brutas de adquisiciones con distinta duración."
+            )
+            return
+        roi_state = self._roi_state.get("1h") or self._roi_state.get("3h")
+        if not roi_state:
+            self._kinetic_status.setText("Cinética pendiente: cuantificá una AP para definir ROIs cardíaco y mediastinal.")
+            return
+        try:
+            from core.amyloid_kinetic import normalize_static_image, temporal_metrics
+
+            heart = ROICircle(**{k: roi_state[0][k] for k in ("cy", "cx", "radius")})
+            medi = ROICircle(**{k: roi_state[1][k] for k in ("cy", "cx", "radius")})
+            image_1h = normalize_static_image(
+                np.asarray(ap_1h["image"], dtype=np.float64), duration_1h, 60.0, decay_correct=True
+            )
+            image_3h = normalize_static_image(
+                np.asarray(ap_3h["image"], dtype=np.float64), duration_3h, 180.0, decay_correct=True
+            )
+            metrics = temporal_metrics(self._early_dynamic["dynamic"], image_1h, image_3h, heart, medi)
+            self._kinetic_result = metrics
+            self._kinetic_status.setText(
+                "EXPERIMENTAL — "
+                f"Retención cardíaca 3h/1h: {metrics.heart_retention_3h_over_1h:.2f}; "
+                f"cambio: {metrics.heart_change_pct:+.1f}%; ΔHMR: {metrics.hmr_change:+.2f}. "
+                "No subtipifica ATTR/AL ni guía tratamiento."
+            )
+            self._kinetic_status.setStyleSheet(
+                "color:#38bdf8; border:1px solid #334155; padding:4px; font-size:10px;"
+            )
+        except Exception as exc:
+            self._kinetic_result = None
+            self._kinetic_status.setText(f"Cinética experimental no disponible: {exc}")
 
     def _update_washout_preview(self):
         """Actualiza estado y curva en vivo solo con 1 h y 3 h cuantificadas."""
@@ -1351,6 +1528,36 @@ class AmyloidWindow(QDialog):
             washout_scale = min(170*mm / ww, 75*mm / wh)
             story.append(Paragraph(f"{sec_num}. Curva de washout 1h vs 3h", section_style))
             story.append(RLImage(washout_buf, width=ww*washout_scale, height=wh*washout_scale))
+            story.append(Spacer(1, 3*mm))
+            sec_num += 1
+
+        # Análisis temporal experimental
+        if self._kinetic_result is not None:
+            km = self._kinetic_result
+            story.append(Paragraph(f"{sec_num}. Análisis temporal PYP — EXPERIMENTAL", section_style))
+            kinetic_data = [
+                ["Métrica observable", "Valor"],
+                ["Retención cardíaca 3h/1h (cps corregidas)", f"{km.heart_retention_3h_over_1h:.2f}"],
+                ["Cambio cardíaco 1h→3h", f"{km.heart_change_pct:+.1f}%"],
+                ["HMR temporal 1h", f"{km.hmr_1h:.2f}"],
+                ["HMR temporal 3h", f"{km.hmr_3h:.2f}"],
+                ["ΔHMR", f"{km.hmr_change:+.2f}"],
+            ]
+            kinetic_table = Table(kinetic_data, colWidths=[110*mm, 55*mm])
+            kinetic_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), DARK_BLUE),
+                ("TEXTCOLOR", (0, 0), (-1, 0), white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cccccc")),
+            ]))
+            story.append(kinetic_table)
+            story.append(Paragraph(
+                "MÉTODO EXPERIMENTAL, NO DIAGNÓSTICO Y NO TERAPÉUTICO. "
+                "Describe retención/lavado en cps corregidas por duración y decaimiento; "
+                "no subtipifica ATTR/AL ni reemplaza laboratorio, SPECT/CT o biopsia.",
+                small_style,
+            ))
             story.append(Spacer(1, 3*mm))
             sec_num += 1
 
@@ -1838,6 +2045,24 @@ class AmyloidWindow(QDialog):
     <img class="report-image" src="data:image/png;base64,{washout_b64}" alt="Curva de washout">
 </section>"""
 
+                kinetic_html = ""
+                if self._kinetic_result is not None:
+                        km = self._kinetic_result
+                        kinetic_html = f"""
+<section class="card">
+    <h2>Análisis temporal PYP — EXPERIMENTAL</h2>
+    <p class="pending"><strong>No diagnóstico / no terapéutico.</strong> No subtipifica ATTR/AL.</p>
+    <table>
+        <tr><th>Métrica observable</th><th>Valor</th></tr>
+        <tr><td>Retención cardíaca 3h/1h (cps corregidas)</td><td>{km.heart_retention_3h_over_1h:.2f}</td></tr>
+        <tr><td>Cambio cardíaco 1h→3h</td><td>{km.heart_change_pct:+.1f}%</td></tr>
+        <tr><td>HMR temporal 1h</td><td>{km.hmr_1h:.2f}</td></tr>
+        <tr><td>HMR temporal 3h</td><td>{km.hmr_3h:.2f}</td></tr>
+        <tr><td>ΔHMR</td><td>{km.hmr_change:+.2f}</td></tr>
+    </table>
+    <p style="font-size:.85rem;color:#94a3b8;">Las imágenes se normalizan a cuentas por segundo y se corrigen por decaimiento físico de Tc-99m. El método describe retención y lavado; no identifica de forma validada amiloide, hueso o subtipo ATTR/AL.</p>
+</section>"""
+
                 if "1h" in temporal_hmr and "3h" in temporal_hmr:
                         interpretation_summary = (
                                 f'HMR 1h = {temporal_hmr["1h"]:.2f} y '
@@ -1904,6 +2129,7 @@ td {{ padding:9px; border-bottom:1px solid #475569; }}
 {comparison_html}
 {perugini_strip_html}
 {washout_html}
+{kinetic_html}
 {layout_html}
 <footer class="footer">Informe SINCRO — Amiloidosis. Resultados orientativos.</footer>
 </main>
