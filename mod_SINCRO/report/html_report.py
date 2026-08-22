@@ -379,7 +379,9 @@ def generate_html_report(
     stress_rest: dict | None = None,
     perfusion_phase_rows: list | None = None,
     editor_html: str = "",
-) -> str:
+    hash_max_files: int = 200,
+    hash_max_days: int = 90,
+  ) -> tuple[str, str, dict | None]:
     """Genera un informe HTML clínico autocontenido.
 
     Parameters
@@ -398,7 +400,8 @@ def generate_html_report(
 
     Returns
     -------
-    Ruta del archivo HTML generado.
+    tuple[str, str, dict | None]
+      (ruta_html, resumen_ejecutivo_html, entrada_hash)
     """
     os.makedirs(os.path.dirname(output_html) or ".", exist_ok=True)
 
@@ -816,7 +819,7 @@ def generate_html_report(
             study_date=study_date,
         )
         # Limpiar hashes antiguos (configurable).
-        store.cleanup(max_files=200, max_days=90)
+        store.cleanup(max_files=int(hash_max_files), max_days=int(hash_max_days))
     except Exception:
         pass
 

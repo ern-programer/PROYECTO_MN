@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import os
 import base64
+import json
 import numpy as np
 
 from PyQt6.QtCore import QObject, Qt, QSettings, QThread, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPdfWriter, QPageSize
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
+    QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
@@ -25,6 +27,9 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QDoubleSpinBox,
     QSpinBox,
+    QScrollArea,
+    QMessageBox,
+    QInputDialog,
 )
 
 from scipy import ndimage as ndi
@@ -44,7 +49,6 @@ from core.amyloid_spect import (
     apply_attenuation_correction_chang,
     resample_volume_to_spect_grid,
     register_ct_to_spect_rigid,
-    align_ct_orientation_to_spect,
     refine_ct_to_spect_translation,
 )
 
@@ -92,6 +96,586 @@ class _AmyloidReconWorker(QObject):
             self.finished.emit(bundle)
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class FusionReportLayoutDialog(QDialog):
+    """Vista de presentación para informe: tiras SPECT + panel fusión 3x3 con referencias."""
+
+    _PRESET_LAYOUTS = {
+        "Clásico vertical": {"strip_w": 980, "strip_h": 130, "grid_w": 280, "grid_h": 220, "line_px": 1},
+        "Compacto": {"strip_w": 860, "strip_h": 110, "grid_w": 250, "grid_h": 200, "line_px": 1},
+        "Presentación amplia": {"strip_w": 1080, "strip_h": 160, "grid_w": 300, "grid_h": 235, "line_px": 1},
+        "Informe clínico A4": {"strip_w": 920, "strip_h": 124, "grid_w": 245, "grid_h": 188, "line_px": 1},
+    }
+
+    def __init__(
+        self,
+        parent,
+        spect_vol: np.ndarray,
+        ct_vol: np.ndarray | None,
+        fusion_pct: int,
+        spect_window_fn,
+        ct_window_fn,
+        cmap_fn,
+        slice_idx: dict,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("SINCRO — Vista informe fusión")
+        self.resize(1240, 860)
+        self.setMinimumSize(980, 680)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMinMaxButtonsHint
+        )
+
+        self._spect_vol = np.asarray(spect_vol, dtype=np.float64)
+        if self._spect_vol.ndim != 3:
+            raise ValueError(f"SPECT inválido para vista informe (se esperaba 3D, recibido {self._spect_vol.shape}).")
+        self._ct_vol = None if ct_vol is None else np.asarray(ct_vol, dtype=np.float64)
+        if self._ct_vol is not None and self._ct_vol.ndim != 3:
+            self._ct_vol = None
+        self._fusion_pct = int(np.clip(fusion_pct, 0, 100))
+        self._spect_window_fn = spect_window_fn
+        self._ct_window_fn = ct_window_fn
+        self._cmap_fn = cmap_fn
+        self._slice_idx = {
+            "axial": int(slice_idx.get("axial", self._spect_vol.shape[0] // 2)),
+            "coronal": int(slice_idx.get("coronal", self._spect_vol.shape[1] // 2)),
+            "sagittal": int(slice_idx.get("sagittal", self._spect_vol.shape[2] // 2)),
+        }
+        self._settings = QSettings("GAMMASYS", "SINCRO_AMYLO_SPECT")
+        self._custom_layouts = self._load_custom_layouts()
+        self._line_px = 1
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        hdr = QLabel(
+            "Presentación de fusión · Filas: SPECT / CT / Fusión · "
+            "Columnas: Axial / Coronal / Sagital · Referencias de corte activas"
+        )
+        hdr.setStyleSheet("color:#cbd5e1; font-weight:600;")
+        root.addWidget(hdr)
+
+        ctl = QHBoxLayout()
+        ctl.addWidget(QLabel("Layout:"))
+        self._layout_combo = QComboBox()
+        self._layout_combo.addItems(list(self._PRESET_LAYOUTS.keys()) + list(self._custom_layouts.keys()))
+        self._layout_combo.currentIndexChanged.connect(self._on_layout_changed)
+        ctl.addWidget(self._layout_combo)
+
+        self._btn_save_layout = QPushButton("Guardar layout")
+        self._btn_save_layout.clicked.connect(self._save_custom_layout)
+        ctl.addWidget(self._btn_save_layout)
+
+        self._btn_rename_layout = QPushButton("Renombrar layout")
+        self._btn_rename_layout.clicked.connect(self._rename_custom_layout)
+        ctl.addWidget(self._btn_rename_layout)
+
+        self._btn_delete_layout = QPushButton("Eliminar layout")
+        self._btn_delete_layout.clicked.connect(self._delete_custom_layout)
+        ctl.addWidget(self._btn_delete_layout)
+
+        ctl.addWidget(QLabel("Tiras W/H:"))
+        self._strip_w_spin = QSpinBox()
+        self._strip_w_spin.setRange(500, 1800)
+        self._strip_w_spin.setValue(980)
+        self._strip_w_spin.valueChanged.connect(self._render)
+        ctl.addWidget(self._strip_w_spin)
+        self._strip_h_spin = QSpinBox()
+        self._strip_h_spin.setRange(70, 260)
+        self._strip_h_spin.setValue(130)
+        self._strip_h_spin.valueChanged.connect(self._render)
+        ctl.addWidget(self._strip_h_spin)
+
+        ctl.addWidget(QLabel("Grilla W/H:"))
+        self._grid_w_spin = QSpinBox()
+        self._grid_w_spin.setRange(180, 420)
+        self._grid_w_spin.setValue(280)
+        self._grid_w_spin.valueChanged.connect(self._render)
+        ctl.addWidget(self._grid_w_spin)
+        self._grid_h_spin = QSpinBox()
+        self._grid_h_spin.setRange(150, 360)
+        self._grid_h_spin.setValue(220)
+        self._grid_h_spin.valueChanged.connect(self._render)
+        ctl.addWidget(self._grid_h_spin)
+
+        ctl.addWidget(QLabel("Línea px:"))
+        self._line_px_spin = QSpinBox()
+        self._line_px_spin.setRange(1, 3)
+        self._line_px_spin.setValue(1)
+        self._line_px_spin.valueChanged.connect(self._on_line_width_changed)
+        ctl.addWidget(self._line_px_spin)
+
+        self._pdf_a4_mode_check = QCheckBox("PDF A4 clínico")
+        self._pdf_a4_mode_check.setToolTip("Si está activo, al exportar PDF se usa temporalmente el preset 'Informe clínico A4'.")
+        self._pdf_a4_mode_check.setChecked(
+            bool(int(self._settings.value("fusion_report/pdf_use_a4_clinical", 1) or 1))
+        )
+        self._pdf_a4_mode_check.toggled.connect(self._on_pdf_a4_mode_toggled)
+        ctl.addWidget(self._pdf_a4_mode_check)
+        ctl.addStretch(1)
+        root.addLayout(ctl)
+
+        self._body = QWidget()
+        body_lay = QVBoxLayout(self._body)
+        body_lay.setContentsMargins(0, 0, 0, 0)
+        body_lay.setSpacing(8)
+
+        strip_title = QLabel("Tiras SPECT (axial/coronal/sagital)")
+        strip_title.setStyleSheet("color:#94a3b8; font-weight:600;")
+        body_lay.addWidget(strip_title)
+
+        self._strip_col = QVBoxLayout()
+        self._strip_col.setSpacing(6)
+        body_lay.addLayout(self._strip_col)
+
+        grid_title = QLabel("Muestra típica fusión 3x3")
+        grid_title.setStyleSheet("color:#94a3b8; font-weight:600;")
+        body_lay.addWidget(grid_title)
+
+        self._grid = QGridLayout()
+        self._grid.setHorizontalSpacing(8)
+        self._grid.setVerticalSpacing(8)
+        body_lay.addLayout(self._grid)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._body)
+        root.addWidget(scroll, 1)
+
+        btns = QHBoxLayout()
+        btn_export_png = QPushButton("Exportar PNG")
+        btn_export_png.clicked.connect(self._export_png)
+        btns.addWidget(btn_export_png)
+        btn_export_pdf = QPushButton("Exportar PDF")
+        btn_export_pdf.clicked.connect(self._export_pdf)
+        btns.addWidget(btn_export_pdf)
+        btns.addStretch(1)
+        btn_close = QPushButton("Cerrar")
+        btn_close.clicked.connect(self.accept)
+        btns.addWidget(btn_close)
+        root.addLayout(btns)
+
+        selected = str(self._settings.value("fusion_report/layout_selected", "Clásico vertical") or "Clásico vertical")
+        idx = self._layout_combo.findText(selected)
+        if idx >= 0:
+            self._layout_combo.setCurrentIndex(idx)
+        else:
+            self._apply_layout_values(self._PRESET_LAYOUTS["Clásico vertical"])
+
+        try:
+            self._render()
+        except Exception as exc:
+            QMessageBox.critical(self, "SINCRO", f"Error armando vista de informe:\n{exc}")
+
+    def _load_custom_layouts(self) -> dict[str, dict]:
+        raw = str(self._settings.value("fusion_report/layouts_json", "") or "")
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+            out = {}
+            for k, v in dict(data).items():
+                if not isinstance(v, dict):
+                    continue
+                out[str(k)] = {
+                    "strip_w": int(v.get("strip_w", 980)),
+                    "strip_h": int(v.get("strip_h", 130)),
+                    "grid_w": int(v.get("grid_w", 280)),
+                    "grid_h": int(v.get("grid_h", 220)),
+                    "line_px": int(v.get("line_px", 1)),
+                }
+            return out
+        except Exception:
+            return {}
+
+    def _save_custom_layouts(self) -> None:
+        try:
+            self._settings.setValue("fusion_report/layouts_json", json.dumps(self._custom_layouts, ensure_ascii=False))
+            self._settings.sync()
+        except Exception:
+            pass
+
+    def _current_layout_values(self) -> dict:
+        return {
+            "strip_w": int(self._strip_w_spin.value()),
+            "strip_h": int(self._strip_h_spin.value()),
+            "grid_w": int(self._grid_w_spin.value()),
+            "grid_h": int(self._grid_h_spin.value()),
+            "line_px": int(self._line_px_spin.value()),
+        }
+
+    def _apply_layout_values(self, values: dict) -> None:
+        self._strip_w_spin.blockSignals(True)
+        self._strip_h_spin.blockSignals(True)
+        self._grid_w_spin.blockSignals(True)
+        self._grid_h_spin.blockSignals(True)
+        self._line_px_spin.blockSignals(True)
+        self._strip_w_spin.setValue(int(values.get("strip_w", 980)))
+        self._strip_h_spin.setValue(int(values.get("strip_h", 130)))
+        self._grid_w_spin.setValue(int(values.get("grid_w", 280)))
+        self._grid_h_spin.setValue(int(values.get("grid_h", 220)))
+        self._line_px_spin.setValue(int(values.get("line_px", 1)))
+        self._line_px_spin.blockSignals(False)
+        self._grid_h_spin.blockSignals(False)
+        self._grid_w_spin.blockSignals(False)
+        self._strip_h_spin.blockSignals(False)
+        self._strip_w_spin.blockSignals(False)
+        self._line_px = int(self._line_px_spin.value())
+        self._render()
+
+    def _on_layout_changed(self):
+        name = str(self._layout_combo.currentText() or "")
+        values = self._PRESET_LAYOUTS.get(name) or self._custom_layouts.get(name)
+        if values:
+            self._apply_layout_values(values)
+        self._settings.setValue("fusion_report/layout_selected", name)
+
+    def _on_line_width_changed(self, value: int):
+        self._line_px = max(1, int(value))
+        self._render()
+
+    def _on_pdf_a4_mode_toggled(self, checked: bool):
+        self._settings.setValue("fusion_report/pdf_use_a4_clinical", 1 if checked else 0)
+        self._settings.sync()
+
+    def _save_custom_layout(self):
+        name, ok = QInputDialog.getText(self, "Guardar layout", "Nombre del layout:")
+        if not ok or not str(name).strip():
+            return
+        layout_name = str(name).strip()
+        self._custom_layouts[layout_name] = self._current_layout_values()
+        self._save_custom_layouts()
+        self._refresh_layout_combo(layout_name)
+
+    def _refresh_layout_combo(self, selected_name: str = "") -> None:
+        current = selected_name or str(self._layout_combo.currentText() or "")
+        self._layout_combo.blockSignals(True)
+        self._layout_combo.clear()
+        self._layout_combo.addItems(list(self._PRESET_LAYOUTS.keys()) + list(self._custom_layouts.keys()))
+        idx = self._layout_combo.findText(current)
+        if idx >= 0:
+            self._layout_combo.setCurrentIndex(idx)
+        elif self._layout_combo.count() > 0:
+            self._layout_combo.setCurrentIndex(0)
+        self._layout_combo.blockSignals(False)
+        self._on_layout_changed()
+
+    def _rename_custom_layout(self):
+        current = str(self._layout_combo.currentText() or "").strip()
+        if not current:
+            return
+        if current in self._PRESET_LAYOUTS:
+            QMessageBox.information(self, "SINCRO", "Solo se pueden renombrar layouts personalizados.")
+            return
+        if current not in self._custom_layouts:
+            return
+        new_name, ok = QInputDialog.getText(self, "Renombrar layout", f"Nuevo nombre para '{current}':")
+        if not ok:
+            return
+        new_name = str(new_name).strip()
+        if not new_name:
+            return
+        if new_name == current:
+            return
+        if new_name in self._PRESET_LAYOUTS or new_name in self._custom_layouts:
+            QMessageBox.warning(self, "SINCRO", "Ya existe un layout con ese nombre.")
+            return
+        self._custom_layouts[new_name] = dict(self._custom_layouts[current])
+        self._custom_layouts.pop(current, None)
+        self._save_custom_layouts()
+        self._refresh_layout_combo(new_name)
+
+    def _delete_custom_layout(self):
+        current = str(self._layout_combo.currentText() or "").strip()
+        if not current:
+            return
+        if current in self._PRESET_LAYOUTS:
+            QMessageBox.information(self, "SINCRO", "Solo se pueden eliminar layouts personalizados.")
+            return
+        if current not in self._custom_layouts:
+            return
+        answer = QMessageBox.question(
+            self,
+            "SINCRO",
+            f"¿Eliminar layout personalizado '{current}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._custom_layouts.pop(current, None)
+        self._save_custom_layouts()
+        fallback = "Clásico vertical" if "Clásico vertical" in self._PRESET_LAYOUTS else next(iter(self._PRESET_LAYOUTS.keys()), "")
+        self._refresh_layout_combo(fallback)
+
+    @staticmethod
+    def _clear_layout(layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            child_w = item.widget()
+            child_l = item.layout()
+            if child_l is not None:
+                FusionReportLayoutDialog._clear_layout(child_l)
+            if child_w is not None:
+                child_w.deleteLater()
+
+    @staticmethod
+    def _norm(img: np.ndarray) -> np.ndarray:
+        a = np.asarray(img, dtype=np.float64)
+        mn, mx = float(np.min(a)), float(np.max(a))
+        if mx - mn < 1e-9:
+            return np.zeros_like(a, dtype=np.float64)
+        return np.clip((a - mn) / (mx - mn), 0.0, 1.0)
+
+    def _mk_strip(self, arr3d: np.ndarray, n_tiles: int = 10) -> np.ndarray:
+        img = np.asarray(arr3d, dtype=np.float64)
+        n = max(1, int(img.shape[0]))
+        idxs = np.linspace(0, n - 1, min(n_tiles, n)).round().astype(int)
+        tiles = [self._norm(img[i]) for i in idxs]
+        h = max(t.shape[0] for t in tiles)
+        w = max(t.shape[1] for t in tiles)
+        canvas = np.zeros((h, w * len(tiles)), dtype=np.float64)
+        for k, t in enumerate(tiles):
+            y0 = (h - t.shape[0]) // 2
+            x0 = k * w + (w - t.shape[1]) // 2
+            canvas[y0:y0 + t.shape[0], x0:x0 + t.shape[1]] = t
+        return canvas
+
+    @staticmethod
+    def _to_pix(arr: np.ndarray) -> QPixmap:
+        a = np.asarray(arr, dtype=np.float64)
+        if a.ndim == 2:
+            a = np.stack([a, a, a], axis=-1)
+        if a.max() <= 1.0:
+            a = np.clip(a * 255.0, 0, 255)
+        rgb = np.ascontiguousarray(a.astype(np.uint8))
+        h, w = rgb.shape[:2]
+        qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format.Format_RGB888)
+        return QPixmap.fromImage(qimg.copy())
+
+    def _make_fusion_rgb(self, sp2d: np.ndarray, ct2d: np.ndarray) -> np.ndarray:
+        sp = np.clip(np.asarray(sp2d, dtype=np.float64), 0.0, 1.0)
+        ct = np.clip(np.asarray(ct2d, dtype=np.float64), 0.0, 1.0)
+        rgb_sp = self._cmap_fn(sp)
+        rgb_ct = np.stack([ct, ct, ct], axis=-1)
+        mix = float(self._fusion_pct) / 100.0
+        alpha = np.clip(sp * 1.35, 0.0, 1.0)[..., None] * mix
+        out = (1.0 - alpha) * rgb_ct + alpha * rgb_sp
+        return np.clip(out, 0.0, 1.0)
+
+    @staticmethod
+    def _draw_refs(rgb: np.ndarray, axis: str, idx: dict, line_px: int = 1) -> np.ndarray:
+        arr = np.ascontiguousarray(np.asarray(rgb, dtype=np.uint8).copy())
+        h, w = arr.shape[:2]
+        z = int(idx.get("axial", 0))
+        y = int(idx.get("coronal", 0))
+        x = int(idx.get("sagittal", 0))
+
+        width = max(1, int(line_px))
+
+        def hline(py: int):
+            py = int(np.clip(py, 0, h - 1))
+            a = width // 2
+            b = width - a
+            arr[max(0, py - a):min(h, py + b), :, 0] = 255
+            arr[max(0, py - a):min(h, py + b), :, 1] = 208
+            arr[max(0, py - a):min(h, py + b), :, 2] = 64
+
+        def vline(px: int):
+            px = int(np.clip(px, 0, w - 1))
+            a = width // 2
+            b = width - a
+            arr[:, max(0, px - a):min(w, px + b), 0] = 255
+            arr[:, max(0, px - a):min(w, px + b), 1] = 208
+            arr[:, max(0, px - a):min(w, px + b), 2] = 64
+
+        if axis == "axial":
+            hline(int(round((y / max(1, h - 1)) * (h - 1))))
+            vline(int(round((x / max(1, w - 1)) * (w - 1))))
+        elif axis == "coronal":
+            hline(int(round((z / max(1, h - 1)) * (h - 1))))
+            vline(int(round((x / max(1, w - 1)) * (w - 1))))
+        else:
+            hline(int(round((z / max(1, h - 1)) * (h - 1))))
+            vline(int(round((y / max(1, w - 1)) * (w - 1))))
+        return arr
+
+    def _view2d(self, vol: np.ndarray, axis: str) -> np.ndarray:
+        z = int(np.clip(self._slice_idx["axial"], 0, vol.shape[0] - 1))
+        y = int(np.clip(self._slice_idx["coronal"], 0, vol.shape[1] - 1))
+        x = int(np.clip(self._slice_idx["sagittal"], 0, vol.shape[2] - 1))
+        if axis == "axial":
+            return vol[z]
+        if axis == "coronal":
+            return vol[:, y, :]
+        return vol[:, :, x]
+
+    def _render(self):
+        self._clear_layout(self._strip_col)
+        self._clear_layout(self._grid)
+
+        strip_w = int(self._strip_w_spin.value())
+        strip_h = int(self._strip_h_spin.value())
+        grid_w = int(self._grid_w_spin.value())
+        grid_h = int(self._grid_h_spin.value())
+
+        z_strip = self._mk_strip(self._spect_vol)
+        y_strip = self._mk_strip(np.transpose(self._spect_vol, (1, 0, 2)))
+        x_strip = self._mk_strip(np.transpose(self._spect_vol, (2, 0, 1)))
+        for title, arr in (("Axial", z_strip), ("Coronal", y_strip), ("Sagital", x_strip)):
+            box = QHBoxLayout()
+            t = QLabel(title)
+            t.setStyleSheet("color:#cbd5e1; font-weight:600;")
+            t.setMinimumWidth(70)
+            img = QLabel()
+            img.setStyleSheet("background:#0b1220; border:1px solid #334155;")
+            img.setPixmap(self._to_pix(arr).scaled(strip_w, strip_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            box.addWidget(t)
+            box.addWidget(img, 1)
+            w = QWidget()
+            w.setLayout(box)
+            self._strip_col.addWidget(w)
+
+        axes = ("axial", "coronal", "sagittal")
+        col_names = ("Axial", "Coronal", "Sagital")
+        row_names = ("SPECT", "CT", "Fusión")
+        for c, name in enumerate(col_names):
+            h = QLabel(name)
+            h.setStyleSheet("color:#cbd5e1; font-weight:600;")
+            self._grid.addWidget(h, 0, c + 1)
+        for r, name in enumerate(row_names):
+            h = QLabel(name)
+            h.setStyleSheet("color:#cbd5e1; font-weight:600;")
+            self._grid.addWidget(h, r + 1, 0)
+
+        for c, axis in enumerate(axes):
+            sp2d = self._spect_window_fn(self._view2d(self._spect_vol, axis))
+            sp_rgb = self._draw_refs((self._cmap_fn(sp2d) * 255.0).astype(np.uint8), axis, self._slice_idx, self._line_px)
+            sp_lbl = QLabel()
+            sp_lbl.setStyleSheet("background:#0b1220; border:1px solid #334155;")
+            sp_lbl.setPixmap(self._to_pix(sp_rgb).scaled(grid_w, grid_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            self._grid.addWidget(sp_lbl, 1, c + 1)
+
+            if self._ct_vol is not None:
+                ct2d = self._ct_window_fn(self._view2d(self._ct_vol, axis))
+                ct_rgb = self._draw_refs((np.stack([ct2d, ct2d, ct2d], axis=-1) * 255.0).astype(np.uint8), axis, self._slice_idx, self._line_px)
+                fx_rgb = self._draw_refs((self._make_fusion_rgb(sp2d, ct2d) * 255.0).astype(np.uint8), axis, self._slice_idx, self._line_px)
+            else:
+                ct_rgb = self._draw_refs((np.stack([sp2d, sp2d, sp2d], axis=-1) * 255.0).astype(np.uint8), axis, self._slice_idx, self._line_px)
+                fx_rgb = sp_rgb
+
+            ct_lbl = QLabel()
+            ct_lbl.setStyleSheet("background:#0b1220; border:1px solid #334155;")
+            ct_lbl.setPixmap(self._to_pix(ct_rgb).scaled(grid_w, grid_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            self._grid.addWidget(ct_lbl, 2, c + 1)
+
+            fx_lbl = QLabel()
+            fx_lbl.setStyleSheet("background:#0b1220; border:1px solid #334155;")
+            fx_lbl.setPixmap(self._to_pix(fx_rgb).scaled(grid_w, grid_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            self._grid.addWidget(fx_lbl, 3, c + 1)
+
+    def _render_body_to_pixmap(self) -> QPixmap:
+        self._body.adjustSize()
+        size = self._body.sizeHint()
+        w = max(1, int(size.width()))
+        h = max(1, int(size.height()))
+        pix = QPixmap(w, h)
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        self._body.render(painter)
+        painter.end()
+        return pix
+
+    @staticmethod
+    def _last_dir(default_path: str = "") -> str:
+        s = QSettings("GAMMASYS", "SINCRO_AMYLO_SPECT")
+        remembered = str(s.value("global/last_dir", "") or "")
+        if remembered and os.path.isdir(remembered):
+            return remembered
+        if default_path and os.path.isdir(default_path):
+            return default_path
+        return os.path.expanduser("~")
+
+    @staticmethod
+    def _remember_path(path: str) -> None:
+        if not path:
+            return
+        folder = path if os.path.isdir(path) else os.path.dirname(path)
+        if folder and os.path.isdir(folder):
+            s = QSettings("GAMMASYS", "SINCRO_AMYLO_SPECT")
+            s.setValue("global/last_dir", folder)
+            s.sync()
+
+    def _export_png(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exportar vista de fusión a PNG",
+            self._last_dir(),
+            "PNG (*.png)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+        try:
+            pix = self._render_body_to_pixmap()
+            ok = pix.save(path, "PNG")
+            if not ok:
+                raise RuntimeError("No se pudo escribir PNG")
+            self._remember_path(path)
+            QMessageBox.information(self, "SINCRO", f"PNG exportado:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "SINCRO", f"Error exportando PNG:\n{exc}")
+
+    def _export_pdf(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exportar vista de fusión a PDF",
+            self._last_dir(),
+            "PDF (*.pdf)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        try:
+            use_clinical_a4 = bool(self._pdf_a4_mode_check.isChecked())
+            current_layout_name = str(self._layout_combo.currentText() or "")
+            current_values = self._current_layout_values()
+            a4_values = self._PRESET_LAYOUTS.get("Informe clínico A4") if use_clinical_a4 else None
+            try:
+                if a4_values:
+                    self._apply_layout_values(a4_values)
+                pix = self._render_body_to_pixmap()
+            finally:
+                if a4_values:
+                    self._apply_layout_values(current_values)
+                    if current_layout_name:
+                        self._settings.setValue("fusion_report/layout_selected", current_layout_name)
+            writer = QPdfWriter(path)
+            writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+            writer.setResolution(300)
+            painter = QPainter(writer)
+            page_w = writer.width()
+            page_h = writer.height()
+            sw = max(1, pix.width())
+            sh = max(1, pix.height())
+            scale = min(page_w / float(sw), page_h / float(sh))
+            dw = int(sw * scale)
+            dh = int(sh * scale)
+            dx = int((page_w - dw) / 2)
+            dy = int((page_h - dh) / 2)
+            painter.drawPixmap(dx, dy, dw, dh, pix)
+            painter.end()
+            self._remember_path(path)
+            QMessageBox.information(self, "SINCRO", f"PDF exportado:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "SINCRO", f"Error exportando PDF:\n{exc}")
 
 
 class AmyloidSpectPanel(QDialog):
@@ -151,7 +735,17 @@ class AmyloidSpectPanel(QDialog):
         self._spect_win_low = 0
         self._spect_win_high = 100
         self._fusion_pct = 55
+        self._spect_flip_x_test = False
+        self._spect_flip_y_test = False
+        self._spect_flip_z_test = False
+        self._ct_flip_x_test = False
+        self._ct_flip_y_test = False
+        self._ct_flip_z_test = False
         self._ct_window = "bone"
+        self._workflow_tag = "perf_spect_ct"
+        self._dicom_profile_info = {}
+        self._pending_camera_profile_adjust = None
+        self._pre_bone_volume = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -227,6 +821,18 @@ class AmyloidSpectPanel(QDialog):
         self._btn_register.setEnabled(False)
         flow.addWidget(self._btn_register, 1, 4, 1, 2)
 
+        self._btn_save_cam_preset = QPushButton("4a. Guardar preset cámara")
+        self._btn_save_cam_preset.clicked.connect(self._save_camera_profile_preset)
+        self._btn_save_cam_preset.setEnabled(False)
+        self._btn_save_cam_preset.setToolTip("Guarda flips/rotaciones/offsets para esta cámara+protocolo en flujo perfusión SPECT/CT.")
+        flow.addWidget(self._btn_save_cam_preset, 2, 4)
+
+        self._btn_apply_cam_preset = QPushButton("4a'. Aplicar preset cámara")
+        self._btn_apply_cam_preset.clicked.connect(lambda: self._apply_camera_profile_preset(auto=False))
+        self._btn_apply_cam_preset.setEnabled(False)
+        self._btn_apply_cam_preset.setToolTip("Aplica preset guardado para esta cámara+protocolo (si existe).")
+        flow.addWidget(self._btn_apply_cam_preset, 2, 5)
+
         self._btn_load_att = QPushButton("4b. Cargar ATT MAP")
         self._btn_load_att.clicked.connect(self._load_att_map)
         self._btn_load_att.setEnabled(False)
@@ -247,6 +853,12 @@ class AmyloidSpectPanel(QDialog):
         self._btn_export_axes_dcm.clicked.connect(self._export_axes_dicom)
         self._btn_export_axes_dcm.setEnabled(False)
         flow.addWidget(self._btn_export_axes_dcm, 1, 8)
+
+        self._btn_fusion_layout = QPushButton("6b. Vista informe fusión")
+        self._btn_fusion_layout.clicked.connect(self._show_fusion_report_layout)
+        self._btn_fusion_layout.setEnabled(False)
+        self._btn_fusion_layout.setToolTip("Muestra tiras SPECT y panel 3x3 (SPECT/CT/Fusión) con referencias de corte.")
+        flow.addWidget(self._btn_fusion_layout, 2, 8)
         flow.setColumnStretch(9, 1)
         root.addWidget(flow_box)
 
@@ -496,6 +1108,30 @@ class AmyloidSpectPanel(QDialog):
             self._spect_cmap_combo.setCurrentText("hot")
         self._spect_cmap_combo.currentIndexChanged.connect(self._render_current_with_overlay)
         visual_row.addWidget(self._spect_cmap_combo)
+        self._spect_flipx_check = QCheckBox("SPECT flip X (prueba)")
+        self._spect_flipx_check.setToolTip("Prueba de orientación: espeja SPECT en eje X para comparar contra CT (display + registro).")
+        self._spect_flipx_check.toggled.connect(self._on_spect_orientation_test_toggled)
+        visual_row.addWidget(self._spect_flipx_check)
+        self._spect_flipy_check = QCheckBox("SPECT flip Y (prueba)")
+        self._spect_flipy_check.setToolTip("Prueba de orientación: espeja SPECT en eje Y para comparar contra CT (display + registro).")
+        self._spect_flipy_check.toggled.connect(self._on_spect_orientation_test_toggled)
+        visual_row.addWidget(self._spect_flipy_check)
+        self._spect_flipz_check = QCheckBox("SPECT flip Z (prueba)")
+        self._spect_flipz_check.setToolTip("Prueba de orientación: espeja SPECT en eje Z (flip vertical del volumen) para comparar contra CT.")
+        self._spect_flipz_check.toggled.connect(self._on_spect_orientation_test_toggled)
+        visual_row.addWidget(self._spect_flipz_check)
+        self._ct_flipx_check = QCheckBox("CT flip X (prueba)")
+        self._ct_flipx_check.setToolTip("Prueba de orientación: espeja TC en eje X para comparar contra SPECT (display + registro).")
+        self._ct_flipx_check.toggled.connect(self._on_ct_orientation_test_toggled)
+        visual_row.addWidget(self._ct_flipx_check)
+        self._ct_flipy_check = QCheckBox("CT flip Y (prueba)")
+        self._ct_flipy_check.setToolTip("Prueba de orientación: espeja TC en eje Y para comparar contra SPECT (display + registro).")
+        self._ct_flipy_check.toggled.connect(self._on_ct_orientation_test_toggled)
+        visual_row.addWidget(self._ct_flipy_check)
+        self._ct_flipz_check = QCheckBox("CT flip Z (prueba)")
+        self._ct_flipz_check.setToolTip("Prueba de orientación: espeja TC en eje Z (flip vertical del volumen) para comparar contra SPECT.")
+        self._ct_flipz_check.toggled.connect(self._on_ct_orientation_test_toggled)
+        visual_row.addWidget(self._ct_flipz_check)
         self._btn_range_base = QPushButton("Base 0")
         self._btn_range_base.clicked.connect(lambda: self._set_spect_range(0, self._spect_win_high))
         self._btn_range_top = QPushButton("Top 100")
@@ -535,10 +1171,24 @@ class AmyloidSpectPanel(QDialog):
         nudge_row.addWidget(self._nudge_z)
         nudge_row.addWidget(self._nudge_y)
         nudge_row.addWidget(self._nudge_x)
+        nudge_row.addWidget(QLabel("Rot CT z/y/x:"))
+        self._rot_z = self._mk_rotate_spin()
+        self._rot_y = self._mk_rotate_spin()
+        self._rot_x = self._mk_rotate_spin()
+        for spin in (self._rot_z, self._rot_y, self._rot_x):
+            spin.valueChanged.connect(self._apply_ct_nudge)
+            spin.setEnabled(False)
+        nudge_row.addWidget(self._rot_z)
+        nudge_row.addWidget(self._rot_y)
+        nudge_row.addWidget(self._rot_x)
         self._btn_reset_nudge = QPushButton("Reset ajuste")
         self._btn_reset_nudge.clicked.connect(self._reset_ct_nudge)
         self._btn_reset_nudge.setEnabled(False)
         nudge_row.addWidget(self._btn_reset_nudge)
+        self._btn_reset_rot = QPushButton("Reset rot")
+        self._btn_reset_rot.clicked.connect(self._reset_ct_rotation)
+        self._btn_reset_rot.setEnabled(False)
+        nudge_row.addWidget(self._btn_reset_rot)
         self._btn_reset_offsets = QPushButton("Reset offsets vista")
         self._btn_reset_offsets.clicked.connect(self._reset_view_offsets)
         self._btn_reset_offsets.setToolTip("Resetea offsets relativos y zoom visual SPECT/CT.")
@@ -597,12 +1247,240 @@ class AmyloidSpectPanel(QDialog):
         return spin
 
     @staticmethod
+    def _mk_rotate_spin() -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setRange(-45.0, 45.0)
+        spin.setSingleStep(0.5)
+        spin.setDecimals(1)
+        spin.setSuffix("°")
+        spin.setToolTip("Rotación manual post-registro CT→SPECT. z=axial, y=cabeceo coronal, x=cabeceo sagital.")
+        return spin
+
+    @staticmethod
     def _settings_id(path: str) -> str:
         raw = os.path.abspath(str(path or "")).encode("utf-8", errors="ignore")
         return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=") or "sin_estudio"
 
+    def _last_dir(self, fallback: str = "") -> str:
+        remembered = str(self._settings.value("global/last_dir", "") or "")
+        if remembered and os.path.isdir(remembered):
+            return remembered
+        if fallback and os.path.isdir(fallback):
+            return fallback
+        return os.path.expanduser("~")
+
+    def _remember_path(self, path: str) -> None:
+        if not path:
+            return
+        folder = path if os.path.isdir(path) else os.path.dirname(path)
+        if folder and os.path.isdir(folder):
+            self._settings.setValue("global/last_dir", folder)
+
     def _study_settings_prefix(self) -> str:
         return f"studies/{self._settings_id(self._current_spect_path)}"
+
+    @staticmethod
+    def _norm_token(value: str) -> str:
+        text = "".join(ch.lower() if ch.isalnum() else "_" for ch in str(value or ""))
+        while "__" in text:
+            text = text.replace("__", "_")
+        return text.strip("_") or "na"
+
+    def _profile_compact_text(self) -> str:
+        if not self._dicom_profile_info:
+            return "perfil N/D"
+        mf = str(self._dicom_profile_info.get("manufacturer") or "N/D")
+        model = str(self._dicom_profile_info.get("model") or "N/D")
+        proto = str(self._dicom_profile_info.get("protocol") or "N/D")
+        return f"{mf} · {model} · {proto}"
+
+    def _camera_profile_key(self) -> str:
+        info = dict(self._dicom_profile_info or {})
+        parts = [
+            self._norm_token(self._workflow_tag),
+            self._norm_token(info.get("manufacturer", "")),
+            self._norm_token(info.get("model", "")),
+            self._norm_token(info.get("station", "")),
+            self._norm_token(info.get("protocol", "") or info.get("series_description", "") or info.get("study_description", "")),
+        ]
+        return "|".join(parts)
+
+    def _read_dicom_profile_info(self, path: str) -> dict:
+        info = {
+            "manufacturer": "",
+            "model": "",
+            "station": "",
+            "protocol": "",
+            "study_description": "",
+            "series_description": "",
+            "modality": "",
+            "patient_name": "",
+            "patient_id": "",
+            "study_date": "",
+            "path": str(path or ""),
+        }
+        try:
+            import pydicom
+
+            ds = pydicom.dcmread(str(path), stop_before_pixels=True, force=True)
+            info["manufacturer"] = str(getattr(ds, "Manufacturer", "") or "")
+            info["model"] = str(getattr(ds, "ManufacturerModelName", "") or "")
+            info["station"] = str(getattr(ds, "StationName", "") or "")
+            info["protocol"] = str(getattr(ds, "ProtocolName", "") or "")
+            info["study_description"] = str(getattr(ds, "StudyDescription", "") or "")
+            info["series_description"] = str(getattr(ds, "SeriesDescription", "") or "")
+            info["modality"] = str(getattr(ds, "Modality", "") or "")
+            info["patient_name"] = str(getattr(ds, "PatientName", "") or "")
+            info["patient_id"] = str(getattr(ds, "PatientID", "") or "")
+            info["study_date"] = str(getattr(ds, "StudyDate", "") or "")
+        except Exception:
+            pass
+        return info
+
+    def _persist_report_bridge_state(self):
+        try:
+            bridge = QSettings("GAMMASYS", "SINCRO_AMYLO_BRIDGE")
+            payload = {
+                "spect_path": str(self._current_spect_path or ""),
+                "ct_path": str(self._ct_path or ""),
+                "att_path": str(self._att_path or ""),
+                "workflow_tag": str(self._workflow_tag or ""),
+                "profile": dict(self._dicom_profile_info or {}),
+                "camera_profile_key": str(self._camera_profile_key() if self._current_spect_path else ""),
+                "preset": str(self._preset_combo.currentData() or "manual") if hasattr(self, "_preset_combo") else "manual",
+                "ac_iter": bool(self._ac_iter_check.isChecked()) if hasattr(self, "_ac_iter_check") else False,
+                "ac_mu_scale": float(self._ac_mu_scale_spin.value()) if hasattr(self, "_ac_mu_scale_spin") else 1.0,
+                "qc_mode": str(self._qc_mode.currentData() or "off") if hasattr(self, "_qc_mode") else "off",
+                "fusion_pct": int(self._fusion_slider.value()) if hasattr(self, "_fusion_slider") else int(getattr(self, "_fusion_pct", 55)),
+                "spect_flip_x": bool(self._spect_flip_x_test),
+                "spect_flip_y": bool(self._spect_flip_y_test),
+                "spect_flip_z": bool(self._spect_flip_z_test),
+                "ct_flip_x": bool(self._ct_flip_x_test),
+                "ct_flip_y": bool(self._ct_flip_y_test),
+                "ct_flip_z": bool(self._ct_flip_z_test),
+                "ct_nudge_zyx": [float(self._nudge_z.value()), float(self._nudge_y.value()), float(self._nudge_x.value())] if hasattr(self, "_nudge_z") else [0.0, 0.0, 0.0],
+                "ct_rot_zyx": [float(self._rot_z.value()), float(self._rot_y.value()), float(self._rot_x.value())] if hasattr(self, "_rot_z") else [0.0, 0.0, 0.0],
+            }
+            bridge.setValue("last_spect_ct_session_json", json.dumps(payload, ensure_ascii=False))
+            bridge.sync()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _infer_workflow_tag(info: dict) -> str:
+        txt = " ".join(
+            [
+                str(info.get("protocol", "") or ""),
+                str(info.get("study_description", "") or ""),
+                str(info.get("series_description", "") or ""),
+            ]
+        ).lower()
+        if any(k in txt for k in ("amylo", "amilo", "pyp", "pyrophosphate")):
+            return "amylo"
+        if any(k in txt for k in ("perfusion", "perfusion", "mibi", "sestamibi", "cardio", "spect/ct")):
+            return "perf_spect_ct"
+        return "perf_spect_ct"
+
+    def _camera_preset_settings_key(self) -> str:
+        return f"camera_presets/{self._camera_profile_key()}"
+
+    def _collect_current_adjustments(self) -> dict:
+        return {
+            "workflow_tag": self._workflow_tag,
+            "profile_info": dict(self._dicom_profile_info or {}),
+            "spect_flip_x": bool(self._spect_flipx_check.isChecked()),
+            "spect_flip_y": bool(self._spect_flipy_check.isChecked()),
+            "spect_flip_z": bool(self._spect_flipz_check.isChecked()),
+            "ct_flip_x": bool(self._ct_flipx_check.isChecked()),
+            "ct_flip_y": bool(self._ct_flipy_check.isChecked()),
+            "ct_flip_z": bool(self._ct_flipz_check.isChecked()),
+            "nudge_z": float(self._nudge_z.value()),
+            "nudge_y": float(self._nudge_y.value()),
+            "nudge_x": float(self._nudge_x.value()),
+            "rot_z": float(self._rot_z.value()),
+            "rot_y": float(self._rot_y.value()),
+            "rot_x": float(self._rot_x.value()),
+        }
+
+    def _apply_adjustments_to_ui(self, payload: dict, *, auto: bool = False) -> None:
+        if not payload:
+            return
+        for check, key in (
+            (self._spect_flipx_check, "spect_flip_x"),
+            (self._spect_flipy_check, "spect_flip_y"),
+            (self._spect_flipz_check, "spect_flip_z"),
+            (self._ct_flipx_check, "ct_flip_x"),
+            (self._ct_flipy_check, "ct_flip_y"),
+            (self._ct_flipz_check, "ct_flip_z"),
+        ):
+            if key in payload:
+                check.blockSignals(True)
+                check.setChecked(bool(payload.get(key, False)))
+                check.blockSignals(False)
+        self._on_spect_orientation_test_toggled(True)
+        self._on_ct_orientation_test_toggled(True)
+
+        if self._ct_auto_registered is not None:
+            for spin, key in (
+                (self._nudge_z, "nudge_z"),
+                (self._nudge_y, "nudge_y"),
+                (self._nudge_x, "nudge_x"),
+                (self._rot_z, "rot_z"),
+                (self._rot_y, "rot_y"),
+                (self._rot_x, "rot_x"),
+            ):
+                if key in payload:
+                    spin.blockSignals(True)
+                    spin.setValue(float(payload.get(key, 0.0)))
+                    spin.blockSignals(False)
+            self._apply_ct_nudge()
+            self._pending_camera_profile_adjust = None
+        else:
+            self._pending_camera_profile_adjust = dict(payload)
+
+        mode = "auto" if auto else "manual"
+        self._status.setText(f"Preset cámara aplicado ({mode}) · {self._profile_compact_text()}")
+        self._metrics.append(
+            "\n--- Preset cámara aplicado ---\n"
+            f"- modo: {mode}\n"
+            f"- workflow: {self._workflow_tag}\n"
+            f"- perfil: {self._profile_compact_text()}"
+        )
+        self._persist_ui_state()
+
+    def _save_camera_profile_preset(self):
+        if not self._current_spect_path:
+            self._status.setText("Cargar primero un SPECT para guardar preset de cámara.")
+            return
+        payload = self._collect_current_adjustments()
+        try:
+            self._settings.setValue(self._camera_preset_settings_key(), json.dumps(payload, ensure_ascii=False))
+            self._status.setText(f"Preset cámara guardado · {self._profile_compact_text()}")
+            self._metrics.append(
+                "\n--- Preset cámara guardado ---\n"
+                f"- key: {self._camera_profile_key()}\n"
+                f"- workflow: {self._workflow_tag}"
+            )
+        except Exception as exc:
+            self._status.setText(f"No se pudo guardar preset cámara: {exc}")
+
+    def _apply_camera_profile_preset(self, *, auto: bool):
+        if not self._current_spect_path:
+            return
+        raw = self._settings.value(self._camera_preset_settings_key(), "")
+        payload = None
+        if raw:
+            try:
+                payload = json.loads(str(raw))
+            except Exception:
+                payload = None
+        if not payload:
+            if not auto:
+                self._status.setText("No hay preset guardado para esta cámara/protocolo.")
+            return
+        if auto and str(payload.get("workflow_tag", "")) != "perf_spect_ct":
+            return
+        self._apply_adjustments_to_ui(payload, auto=auto)
 
     @staticmethod
     def _set_combo_by_data(combo: QComboBox, value: str) -> None:
@@ -654,6 +1532,7 @@ class AmyloidSpectPanel(QDialog):
             self._settings.setValue(f"{prefix}/fusion_pct", fusion)
             if self._ct_path:
                 self._settings.setValue(f"{prefix}/ct_path", self._ct_path)
+        self._persist_report_bridge_state()
 
     def _restore_global_ui_state(self):
         self._set_combo_by_data(self._preset_combo, str(self._settings.value("global/preset", "amylo360_std128") or "amylo360_std128"))
@@ -911,6 +1790,50 @@ class AmyloidSpectPanel(QDialog):
         self._persist_ui_state()
         self._render_current_with_overlay()
 
+    def _on_spect_orientation_test_toggled(self, checked: bool):
+        self._spect_flip_x_test = bool(self._spect_flipx_check.isChecked())
+        self._spect_flip_y_test = bool(self._spect_flipy_check.isChecked())
+        self._spect_flip_z_test = bool(self._spect_flipz_check.isChecked())
+        self._status.setText(
+            "Prueba orientación SPECT: "
+            f"flip X {'ON' if self._spect_flip_x_test else 'OFF'} · "
+            f"flip Y {'ON' if self._spect_flip_y_test else 'OFF'} · "
+            f"flip Z {'ON' if self._spect_flip_z_test else 'OFF'}"
+        )
+        self._render_current_with_overlay()
+
+    def _on_ct_orientation_test_toggled(self, checked: bool):
+        self._ct_flip_x_test = bool(self._ct_flipx_check.isChecked())
+        self._ct_flip_y_test = bool(self._ct_flipy_check.isChecked())
+        self._ct_flip_z_test = bool(self._ct_flipz_check.isChecked())
+        self._status.setText(
+            "Prueba orientación CT: "
+            f"flip X {'ON' if self._ct_flip_x_test else 'OFF'} · "
+            f"flip Y {'ON' if self._ct_flip_y_test else 'OFF'} · "
+            f"flip Z {'ON' if self._ct_flip_z_test else 'OFF'}"
+        )
+        self._render_current_with_overlay()
+
+    def _spect_transform_3d(self, volume: np.ndarray) -> np.ndarray:
+        vol = np.asarray(volume, dtype=np.float64)
+        if bool(getattr(self, "_spect_flip_x_test", False)):
+            vol = np.ascontiguousarray(np.flip(vol, axis=2))
+        if bool(getattr(self, "_spect_flip_y_test", False)):
+            vol = np.ascontiguousarray(np.flip(vol, axis=1))
+        if bool(getattr(self, "_spect_flip_z_test", False)):
+            vol = np.ascontiguousarray(np.flip(vol, axis=0))
+        return vol
+
+    def _ct_transform_3d(self, volume: np.ndarray) -> np.ndarray:
+        vol = np.asarray(volume, dtype=np.float64)
+        if bool(getattr(self, "_ct_flip_x_test", False)):
+            vol = np.ascontiguousarray(np.flip(vol, axis=2))
+        if bool(getattr(self, "_ct_flip_y_test", False)):
+            vol = np.ascontiguousarray(np.flip(vol, axis=1))
+        if bool(getattr(self, "_ct_flip_z_test", False)):
+            vol = np.ascontiguousarray(np.flip(vol, axis=0))
+        return vol
+
     def _task_progress_start(self, message: str):
         self._progress.setValue(3)
         self._progress.setFormat(f"3% · {message}")
@@ -948,6 +1871,7 @@ class AmyloidSpectPanel(QDialog):
             lbl.mouseMoveEvent = lambda ev, axis="sagittal": self._on_image_mouse_move(ev, axis)
             lbl.mouseReleaseEvent = lambda ev, axis="sagittal": self._on_image_mouse_release(ev, axis)
         return lbl
+
 
     @staticmethod
     def _arr_to_pixmap(arr: np.ndarray) -> QPixmap:
@@ -1224,6 +2148,35 @@ class AmyloidSpectPanel(QDialog):
         self._ct_window = str(self._ct_window_combo.currentData() or "bone")
         self._render_current_with_overlay()
 
+    def keyPressEvent(self, event):
+        key = event.key()
+        mods = event.modifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+
+        if ctrl and key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            self._ct_zoom_slider.setValue(int(np.clip(self._ct_zoom_slider.value() + 5, 50, 200)))
+            self._status.setText(f"Ctrl +: zoom CT {self._ct_zoom_slider.value()}%")
+            event.accept()
+            return
+        if ctrl and key in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
+            self._ct_zoom_slider.setValue(int(np.clip(self._ct_zoom_slider.value() - 5, 50, 200)))
+            self._status.setText(f"Ctrl -: zoom CT {self._ct_zoom_slider.value()}%")
+            event.accept()
+            return
+        if shift and key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            self._spect_zoom_slider.setValue(int(np.clip(self._spect_zoom_slider.value() + 5, 50, 200)))
+            self._status.setText(f"Shift +: zoom SPECT {self._spect_zoom_slider.value()}%")
+            event.accept()
+            return
+        if shift and key in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
+            self._spect_zoom_slider.setValue(int(np.clip(self._spect_zoom_slider.value() - 5, 50, 200)))
+            self._status.setText(f"Shift -: zoom SPECT {self._spect_zoom_slider.value()}%")
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
+
     def _on_image_wheel(self, event, axis: str):
         delta = int(event.angleDelta().y())
         if delta == 0:
@@ -1232,15 +2185,22 @@ class AmyloidSpectPanel(QDialog):
         step = 1 if delta > 0 else -1
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
         if ctrl:
-            self._ct_zoom_slider.setValue(int(np.clip(self._ct_zoom_slider.value() + step * 5, 50, 200)))
-            self._status.setText(f"Ctrl+rueda: zoom CT {self._ct_zoom_slider.value()}%")
+            self._rot_z.setValue(float(np.clip(self._rot_z.value() + step * 0.5, -45.0, 45.0)))
+            self._status.setText(f"Ctrl+rueda: rotación CT eje z = {self._rot_z.value():.1f}°")
             self._render_current_with_overlay()
             event.accept()
             return
         if shift:
-            self._spect_zoom_slider.setValue(int(np.clip(self._spect_zoom_slider.value() + step * 5, 50, 200)))
-            self._status.setText(f"Shift+rueda: zoom SPECT {self._spect_zoom_slider.value()}%")
+            self._rot_y.setValue(float(np.clip(self._rot_y.value() + step * 0.5, -45.0, 45.0)))
+            self._status.setText(f"Shift+rueda: cabeceo CT eje y = {self._rot_y.value():.1f}°")
+            self._render_current_with_overlay()
+            event.accept()
+            return
+        if alt:
+            self._rot_x.setValue(float(np.clip(self._rot_x.value() + step * 0.5, -45.0, 45.0)))
+            self._status.setText(f"Alt+rueda: rotación CT eje x = {self._rot_x.value():.1f}°")
             self._render_current_with_overlay()
             event.accept()
             return
@@ -1336,7 +2296,7 @@ class AmyloidSpectPanel(QDialog):
         return (float(dy_px) * sz * sens, float(dx_px) * sy * sens, 0.0)
 
     def _slices_preview_at(self, volume: np.ndarray) -> dict[str, np.ndarray]:
-        vol = np.asarray(volume, dtype=np.float64)
+        vol = self._spect_transform_3d(np.asarray(volume, dtype=np.float64))
         if vol.ndim != 3:
             return central_slices_preview(vol)
         z = int(np.clip(self._slice_idx.get("axial", vol.shape[0] // 2), 0, vol.shape[0] - 1))
@@ -1370,26 +2330,15 @@ class AmyloidSpectPanel(QDialog):
         self._render_current_with_overlay()
 
     def _ct_slices_preview_at(self, volume: np.ndarray) -> dict[str, np.ndarray]:
-        vol = np.asarray(volume, dtype=np.float64)
+        vol = self._ct_transform_3d(np.asarray(volume, dtype=np.float64))
         if vol.ndim != 3:
             return self._slices_preview_at(vol)
         z = int(np.clip(self._slice_idx.get("axial", vol.shape[0] // 2) + self._ct_view_offset.get("axial", 0), 0, vol.shape[0] - 1))
         y = int(np.clip(self._slice_idx.get("coronal", vol.shape[1] // 2) + self._ct_view_offset.get("coronal", 0), 0, vol.shape[1] - 1))
-        # El eje AP/PA del CT queda invertido respecto del SPECT en esta exportación:
-        # al pedir el corte y=N del SPECT, el CT equivalente está en y espejado.
-        y_ct = int(vol.shape[1] - 1 - y)
         x = int(np.clip(self._slice_idx.get("sagittal", vol.shape[2] // 2) + self._ct_view_offset.get("sagittal", 0), 0, vol.shape[2] - 1))
         axial = self._window_ct(vol[z])
-        coronal = self._window_ct(vol[:, y_ct, :])
+        coronal = self._window_ct(vol[:, y, :])
         sagittal = self._window_ct(vol[:, :, x])
-
-        # Corrección visual por eje (consenso clínico actual):
-        # - CT y global AP/PA espejado frente al SPECT.
-        # - Axial: flip vertical.
-        # - Eje X (sagital): flip horizontal.
-        # - Coronal (eje Y): usa y_ct espejado, sin flip extra en pantalla.
-        axial = np.flipud(axial)
-        sagittal = np.fliplr(sagittal)
 
         return {
             "axial": self._pan_2d_center(self._zoom_2d_center(axial, self._ct_zoom_pct), self._ct_pan_px["axial"]),
@@ -1535,15 +2484,61 @@ class AmyloidSpectPanel(QDialog):
         self._cor_lbl.setPixmap(co)
         self._sag_lbl.setPixmap(sa)
 
+    def _show_fusion_report_layout(self):
+        try:
+            if self._base_spect_volume is None and self._current_volume is None:
+                self._status.setText("Cargar primero un SPECT.")
+                return
+            spect_vol = np.asarray(
+                self._base_spect_volume if self._base_spect_volume is not None else self._current_volume,
+                dtype=np.float64,
+            )
+            spect_vol = self._spect_transform_3d(spect_vol)
+            if spect_vol.ndim != 3:
+                raise ValueError(f"SPECT inválido para informe: {spect_vol.shape}")
+
+            ct_vol = None
+            if self._ct_registered is not None:
+                ct_vol = self._ct_transform_3d(np.asarray(self._ct_registered, dtype=np.float64))
+            elif self._ct_volume is not None:
+                tmp = self._ct_transform_3d(np.asarray(self._ct_volume, dtype=np.float64))
+                ct_vol = tmp if tmp.ndim == 3 else None
+
+            dlg = FusionReportLayoutDialog(
+                self,
+                spect_vol=spect_vol,
+                ct_vol=ct_vol,
+                fusion_pct=int(self._fusion_slider.value()) if hasattr(self, "_fusion_slider") else int(getattr(self, "_fusion_pct", 55)),
+                spect_window_fn=self._window_spect,
+                ct_window_fn=self._window_ct,
+                cmap_fn=self._apply_cmap,
+                slice_idx=dict(self._slice_idx),
+            )
+            dlg.exec()
+        except Exception as exc:
+            self._status.setText(f"Error abriendo vista informe fusión: {exc}")
+            QMessageBox.critical(self, "SINCRO", f"No se pudo abrir la vista informe fusión:\n{exc}")
+
+    def _clear_bone_overlay(self):
+        self._bone_mask = None
+        if self._pre_bone_volume is not None:
+            self._current_volume = np.asarray(self._pre_bone_volume, dtype=np.float64)
+        self._pre_bone_volume = None
+        self._blend_slider.setEnabled(False)
+        self._btn_bone.setText("5. Sustracción ósea visual")
+        self._status.setText("Sustracción ósea desactivada.")
+        self._render_current_with_overlay()
+
     def _load_spect(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Seleccionar DICOM SPECT",
-            os.path.expanduser("~"),
+            self._last_dir(),
             "DICOM (*.dcm *.DCM);;Todos (*)",
         )
         if not path:
             return
+        self._remember_path(path)
 
         try:
             self._task_progress_start("Cargando SPECT...")
@@ -1552,6 +2547,8 @@ class AmyloidSpectPanel(QDialog):
             selected_method = str(self._recon_combo.currentData() or "fbp")
             self._analysis = run_amyloid_spect_analysis(path, recon_method=method)
             self._task_progress_step(55, "Preparando volumen base...")
+            self._dicom_profile_info = self._read_dicom_profile_info(path)
+            self._workflow_tag = self._infer_workflow_tag(self._dicom_profile_info)
             self._study_is_gated = int(getattr(self._analysis, "n_gates", 1) or 1) >= 2
             self._spect_spacing_zyx = getattr(self._analysis, "spacing_zyx", None)
             self._spect_affine_ijk_to_lps = getattr(self._analysis, "affine_ijk_to_lps", None)
@@ -1560,6 +2557,8 @@ class AmyloidSpectPanel(QDialog):
             self._current_volume = np.asarray(self._analysis.volume, dtype=np.float64)
             self._base_spect_volume = np.asarray(self._analysis.volume, dtype=np.float64)
             self._bone_mask = None
+            self._pre_bone_volume = None
+            self._btn_bone.setText("5. Sustracción ósea visual")
             self._qc_mode.setEnabled(False)
             self._qc_split_slider.setEnabled(False)
             self._fusion_slider.setEnabled(False)
@@ -1571,6 +2570,8 @@ class AmyloidSpectPanel(QDialog):
             self._btn_load_ct_dir.setEnabled(True)
             self._btn_load_att.setEnabled(True)
             self._btn_register.setEnabled(self._ct_volume is not None)
+            self._btn_save_cam_preset.setEnabled(True)
+            self._btn_apply_cam_preset.setEnabled(True)
             self._btn_apply_ac.setEnabled(self._att_map_volume is not None)
             self._btn_export_axes_dcm.setEnabled(False)
             self._blend_slider.setEnabled(False)
@@ -1590,6 +2591,11 @@ class AmyloidSpectPanel(QDialog):
             if self._ct_path:
                 self._metrics.append(f"\nCT asociado guardado: {self._ct_path}")
                 self._metrics.append(self._matrix_recommendation(self._current_volume.shape))
+            self._metrics.append("\n--- Perfil DICOM SPECT ---")
+            self._metrics.append(f"- workflow detectado: {self._workflow_tag}")
+            self._metrics.append(f"- perfil: {self._profile_compact_text()}")
+            if self._workflow_tag == "perf_spect_ct":
+                self._apply_camera_profile_preset(auto=True)
             self._persist_ui_state()
             self._task_progress_done("SPECT listo")
         except Exception as exc:
@@ -1606,6 +2612,18 @@ class AmyloidSpectPanel(QDialog):
             return
         try:
             cfg = self._build_recon_config()
+            if not bool(getattr(self._analysis, "was_raw", False)):
+                self._metrics.append(
+                    "\n[WARN] El estudio cargado ya está reconstruido: los filtros de proyección "
+                    "(none/lowpass/butterworth/wiener) no se pueden reaplicar sobre proyecciones crudas."
+                )
+            self._metrics.append(
+                "\n--- Solicitud recon actual ---\n"
+                f"- método ungated: {str(cfg.reconstruction_method).upper()}\n"
+                f"- filtro ungated: {cfg.ungated_filter.kind} (cutoff={float(cfg.ungated_filter.cutoff):.2f}, orden={int(cfg.ungated_filter.order)})\n"
+                f"- método gated: {str(cfg.gated_method or cfg.reconstruction_method).upper()}\n"
+                f"- filtro gated: {cfg.gated_filter.kind} (cutoff={float(cfg.gated_filter.cutoff):.2f}, orden={int(cfg.gated_filter.order)})"
+            )
             cuts_mode = str(self._cuts_mode_combo.currentData() or "mixed")
             if not self._study_is_gated and cuts_mode == "cardiac":
                 cuts_mode = "tomo"
@@ -1618,6 +2636,11 @@ class AmyloidSpectPanel(QDialog):
             self._pending_recon_cuts_mode = cuts_mode
             ac_iter_enabled = bool(getattr(cfg, "attenuation_correction", False))
             self._pending_recon_ac_iter = ac_iter_enabled
+            self._status.setText(
+                "Recon solicitada: "
+                f"{str(cfg.reconstruction_method).upper()} · "
+                f"filtro={cfg.ungated_filter.kind}({float(cfg.ungated_filter.cutoff):.2f}/{int(cfg.ungated_filter.order)})"
+            )
 
             att_rs_for_iter = None
             att_px_cm = None
@@ -1685,6 +2708,8 @@ class AmyloidSpectPanel(QDialog):
             self._spect_spacing_zyx = getattr(self._recon_bundle, "spacing_zyx", self._spect_spacing_zyx)
             self._spect_affine_ijk_to_lps = getattr(self._recon_bundle, "affine_ijk_to_lps", self._spect_affine_ijk_to_lps)
             self._bone_mask = None
+            self._pre_bone_volume = None
+            self._btn_bone.setText("5. Sustracción ósea visual")
             self._update_slice_controls()
             self._btn_export_axes_dcm.setEnabled(bool(self._recon_bundle.cardiac_axes))
             self._view_combo.setEnabled(bool(self._recon_bundle.tomo_cuts or self._recon_bundle.cardiac_axes))
@@ -1753,10 +2778,13 @@ class AmyloidSpectPanel(QDialog):
             self._btn_load_ct,
             self._btn_load_ct_dir,
             self._btn_register,
+            self._btn_save_cam_preset,
+            self._btn_apply_cam_preset,
             self._btn_load_att,
             self._btn_apply_ac,
             self._btn_bone,
             self._btn_recon_pipeline,
+            self._btn_fusion_layout,
             self._btn_export_axes_dcm,
         ):
             widget.setEnabled(not busy and widget.isEnabled())
@@ -1773,9 +2801,12 @@ class AmyloidSpectPanel(QDialog):
             self._btn_load_ct_dir.setEnabled(self._analysis is not None)
             self._btn_load_att.setEnabled(self._analysis is not None)
             self._btn_register.setEnabled(self._ct_volume is not None and self._base_spect_volume is not None)
+            self._btn_save_cam_preset.setEnabled(self._analysis is not None)
+            self._btn_apply_cam_preset.setEnabled(self._analysis is not None)
             self._btn_apply_ac.setEnabled(self._att_map_volume is not None and self._base_spect_volume is not None)
             self._btn_bone.setEnabled(self._current_volume is not None)
             self._btn_recon_pipeline.setEnabled(self._analysis is not None)
+            self._btn_fusion_layout.setEnabled(self._current_volume is not None)
             self._btn_export_axes_dcm.setEnabled(self._recon_bundle is not None and bool(self._recon_bundle.cardiac_axes))
             self._btn_cancel_recon.setEnabled(False)
 
@@ -1786,10 +2817,11 @@ class AmyloidSpectPanel(QDialog):
         out_dir = QFileDialog.getExistingDirectory(
             self,
             "Seleccionar carpeta para ejes DICOM",
-            os.path.expanduser("~"),
+            self._last_dir(),
         )
         if not out_dir:
             return
+        self._remember_path(out_dir)
         try:
             exported = export_amyloid_cardiac_axes_dicom(
                 self._recon_bundle,
@@ -1810,21 +2842,23 @@ class AmyloidSpectPanel(QDialog):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Seleccionar DICOM CT",
-            os.path.expanduser("~"),
+            self._last_dir(),
             "DICOM (*.dcm *.DCM);;Todos (*)",
         )
         if not path:
             return
+        self._remember_path(path)
         self._load_ct_path(path)
 
     def _load_ct_dir(self):
         path = QFileDialog.getExistingDirectory(
             self,
             "Seleccionar carpeta con serie CT",
-            os.path.dirname(self._ct_path) if self._ct_path else os.path.expanduser("~"),
+            self._last_dir(os.path.dirname(self._ct_path) if self._ct_path else ""),
         )
         if not path:
             return
+        self._remember_path(path)
         self._load_ct_path(path)
 
     def _load_ct_path(self, path: str):
@@ -1838,6 +2872,7 @@ class AmyloidSpectPanel(QDialog):
             self._ct_path = ct.source_path
             self._ct_registered = None
             self._ct_auto_registered = None
+            self._pending_camera_profile_adjust = None
             self._reset_ct_nudge(update_view=False)
             self._qc_mode.setEnabled(False)
             self._qc_split_slider.setEnabled(False)
@@ -1859,11 +2894,12 @@ class AmyloidSpectPanel(QDialog):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Seleccionar DICOM ATT MAP",
-            os.path.dirname(self._att_path) if self._att_path else os.path.expanduser("~"),
+            self._last_dir(os.path.dirname(self._att_path) if self._att_path else ""),
             "DICOM (*.dcm *.DCM);;Todos (*)",
         )
         if not path:
             return
+        self._remember_path(path)
         try:
             self._task_progress_start("Cargando ATT MAP...")
             att = load_attenuation_map_from_path(path)
@@ -1919,6 +2955,8 @@ class AmyloidSpectPanel(QDialog):
             self._task_progress_step(90, "Renderizando volumen corregido...")
             self._current_volume = np.asarray(corrected, dtype=np.float64)
             self._bone_mask = None
+            self._pre_bone_volume = None
+            self._btn_bone.setText("5. Sustracción ósea visual")
             self._update_slice_controls()
             self._render_current_with_overlay()
             self._status.setText("AC Chang aplicada con ATT MAP (experimental).")
@@ -1939,10 +2977,12 @@ class AmyloidSpectPanel(QDialog):
             self._status.setText("Cargar primero SPECT y CT.")
             return
         try:
+            spect_ref = self._spect_transform_3d(self._base_spect_volume)
+            ct_ref = self._ct_transform_3d(self._ct_volume)
             self._task_progress_start("Registrando CT↔SPECT...")
             ct_reg, shift_zyx, notes = register_ct_to_spect_rigid(
-                self._ct_volume,
-                self._base_spect_volume,
+                ct_ref,
+                spect_ref,
                 ct_spacing_zyx=self._ct_spacing_zyx,
                 spect_spacing_zyx=self._spect_spacing_zyx,
                 ct_affine_ijk_to_lps=self._ct_affine_ijk_to_lps,
@@ -1950,21 +2990,10 @@ class AmyloidSpectPanel(QDialog):
                 refine_ncc=True,
                 ncc_search_radius_zyx=(2, 4, 4),
             )
-            self._task_progress_step(45, "Ajustando orientación CT...")
-            ct_reg, orient_flags, orient_notes = align_ct_orientation_to_spect(
-                ct_reg,
-                self._base_spect_volume,
-                try_flip_x=True,
-                try_flip_y=True,
-                try_flip_z=False,
-                try_flip_xy=True,
-                min_score_gain=0.03,
-                min_abs_score=0.05,
-            )
             self._task_progress_step(70, "Refinando traslación fina...")
             ct_reg, fine_shift_zyx, fine_notes = refine_ct_to_spect_translation(
                 ct_reg,
-                self._base_spect_volume,
+                spect_ref,
                 search_radius_zyx=(3, 8, 8),
                 ct_bone_hu_threshold=200.0,
                 spect_focus_percentile=85.0,
@@ -1972,12 +3001,13 @@ class AmyloidSpectPanel(QDialog):
             self._task_progress_step(90, "Renderizando registro...")
             self._ct_auto_registered = np.asarray(ct_reg, dtype=np.float64)
             self._ct_registered = np.asarray(ct_reg, dtype=np.float64)
-            for spin in (self._nudge_z, self._nudge_y, self._nudge_x):
+            for spin in (self._nudge_z, self._nudge_y, self._nudge_x, self._rot_z, self._rot_y, self._rot_x):
                 spin.blockSignals(True)
                 spin.setValue(0.0)
                 spin.blockSignals(False)
                 spin.setEnabled(True)
             self._btn_reset_nudge.setEnabled(True)
+            self._btn_reset_rot.setEnabled(True)
             self._qc_mode.setEnabled(True)
             self._qc_split_slider.setEnabled(True)
             self._fusion_slider.setEnabled(True)
@@ -1989,22 +3019,28 @@ class AmyloidSpectPanel(QDialog):
             self._metrics.append("\n--- Registro CT↔SPECT ---")
             for n in notes:
                 self._metrics.append(n)
-            for n in orient_notes:
-                self._metrics.append(n)
             for n in fine_notes:
                 self._metrics.append(n)
-            self._metrics.append(
-                "Auto-orientación CT aplicada: "
-                f"rot={int(orient_flags.get('rot_k', 0))*90}°, "
-                f"flip_z={bool(orient_flags.get('flip_z', False))}, "
-                f"flip_y={bool(orient_flags.get('flip_y', False))}, "
-                f"flip_x={bool(orient_flags.get('flip_x', False))}."
-            )
+            self._metrics.append("Auto-orientación CT: OFF (se respeta orientación nativa de la TC).")
             self._metrics.append(
                 "Refinamiento fino incremental Δ(z,y,x)="
                 f"({float(fine_shift_zyx[0]):.1f},{float(fine_shift_zyx[1]):.1f},{float(fine_shift_zyx[2]):.1f}) px."
             )
+            self._metrics.append(
+                "Prueba orientación SPECT: "
+                f"flip X={'ON' if self._spect_flip_x_test else 'OFF'} · "
+                f"flip Y={'ON' if self._spect_flip_y_test else 'OFF'} · "
+                f"flip Z={'ON' if self._spect_flip_z_test else 'OFF'}"
+            )
+            self._metrics.append(
+                "Prueba orientación CT: "
+                f"flip X={'ON' if self._ct_flip_x_test else 'OFF'} · "
+                f"flip Y={'ON' if self._ct_flip_y_test else 'OFF'} · "
+                f"flip Z={'ON' if self._ct_flip_z_test else 'OFF'}"
+            )
             self._append_grid_report()
+            if self._pending_camera_profile_adjust:
+                self._apply_adjustments_to_ui(self._pending_camera_profile_adjust, auto=True)
             self._render_current_with_overlay()
             self._task_progress_done("Registro CT↔SPECT listo")
         except Exception as exc:
@@ -2015,13 +3051,24 @@ class AmyloidSpectPanel(QDialog):
         if self._ct_auto_registered is None:
             return
         shift = (float(self._nudge_z.value()), float(self._nudge_y.value()), float(self._nudge_x.value()))
-        self._ct_registered = ndi.shift(self._ct_auto_registered, shift=shift, order=1, mode="nearest")
-        self._status.setText(f"Ajuste CT manual aplicado Δ(z,y,x)=({shift[0]:.1f},{shift[1]:.1f},{shift[2]:.1f}) px")
+        rot = (float(self._rot_z.value()), float(self._rot_y.value()), float(self._rot_x.value()))
+        ct = np.asarray(self._ct_auto_registered, dtype=np.float64)
+        if abs(rot[0]) > 1e-6:
+            ct = ndi.rotate(ct, angle=rot[0], axes=(1, 2), reshape=False, order=1, mode="nearest")
+        if abs(rot[1]) > 1e-6:
+            ct = ndi.rotate(ct, angle=rot[1], axes=(0, 2), reshape=False, order=1, mode="nearest")
+        if abs(rot[2]) > 1e-6:
+            ct = ndi.rotate(ct, angle=rot[2], axes=(0, 1), reshape=False, order=1, mode="nearest")
+        self._ct_registered = ndi.shift(ct, shift=shift, order=1, mode="nearest")
+        self._status.setText(
+            f"Ajuste CT manual Δ(z,y,x)=({shift[0]:.1f},{shift[1]:.1f},{shift[2]:.1f}) px · "
+            f"rot(z,y,x)=({rot[0]:.1f},{rot[1]:.1f},{rot[2]:.1f})°"
+        )
         self._render_current_with_overlay()
         self._persist_ui_state()
 
     def _reset_ct_nudge(self, update_view: bool = True):
-        for spin in (self._nudge_z, self._nudge_y, self._nudge_x):
+        for spin in (self._nudge_z, self._nudge_y, self._nudge_x, self._rot_z, self._rot_y, self._rot_x):
             spin.blockSignals(True)
             spin.setValue(0.0)
             spin.blockSignals(False)
@@ -2031,11 +3078,22 @@ class AmyloidSpectPanel(QDialog):
             self._render_current_with_overlay()
             self._persist_ui_state()
 
+    def _reset_ct_rotation(self):
+        for spin in (self._rot_z, self._rot_y, self._rot_x):
+            spin.blockSignals(True)
+            spin.setValue(0.0)
+            spin.blockSignals(False)
+        self._apply_ct_nudge()
+
     def _apply_bone_suppression(self):
         if self._current_volume is None:
             return
+        if self._bone_mask is not None:
+            self._clear_bone_overlay()
+            return
         try:
             self._task_progress_start("Aplicando sustracción ósea...")
+            self._pre_bone_volume = np.asarray(self._current_volume, dtype=np.float64)
             ct_vol = None
             if self._ct_check.isChecked():
                 ct_vol = self._ct_registered if self._ct_registered is not None else self._ct_volume
@@ -2047,6 +3105,7 @@ class AmyloidSpectPanel(QDialog):
             self._current_volume = np.asarray(res.enhanced_volume, dtype=np.float64)
             self._bone_mask = np.asarray(res.bone_mask, dtype=np.uint8)
             self._blend_slider.setEnabled(True)
+            self._btn_bone.setText("5. Quitar sustracción ósea")
             self._render_current_with_overlay()
             self._status.setText(f"Sustracción ósea visual aplicada ({res.method}).")
             self._metrics.append("\n--- Sustracción ósea ---")

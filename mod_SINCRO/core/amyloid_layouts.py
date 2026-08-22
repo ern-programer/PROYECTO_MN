@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Layouts de cuadrantes para el visor de amiloidosis.
 
-Define layouts de 4, 8, 9, 12 y 16 cuadrantes para mostrar imágenes
+Define layouts de 3, 4, 6, 8, 9, 12 y 16 cuadrantes para mostrar imágenes
 planar/SPECT con diferentes configuraciones.
 
 Cada cuadrante tiene:
@@ -73,6 +73,58 @@ def layout_4q(
             Quadrant(image=oai, label=oai_label),
             Quadrant(image=lat, label=lat_label),
         ],
+    )
+
+
+def layout_3q(
+    ap_roi: np.ndarray | None = None,
+    ap_clean: np.ndarray | None = None,
+    oai: np.ndarray | None = None,
+    ap_label: str = "AP",
+    oai_label: str = "OAI 45°",
+) -> Layout:
+    """Layout de 3 cuadrantes (1×3): AP+ROIs, AP limpia, OAI."""
+    return Layout(
+        name="3 cuadrantes (1×3, AP/OAI)",
+        description="AP con ROIs · AP limpia · OAI",
+        rows=1,
+        cols=3,
+        quadrants=[
+            Quadrant(image=ap_roi, label=f"{ap_label} + ROIs", roi_overlay=True),
+            Quadrant(image=ap_clean, label=f"{ap_label} (limpio)"),
+            Quadrant(image=oai, label=oai_label),
+        ],
+    )
+
+
+def layout_6q(
+    images_1h: list[np.ndarray | None] | None = None,
+    images_3h: list[np.ndarray | None] | None = None,
+    labels: list[str] | None = None,
+) -> Layout:
+    """Layout de 6 cuadrantes (2×3): AP+ROIs, AP limpia, OAI para 1h y 3h."""
+    labels = labels or ["AP + ROIs", "AP (limpio)", "OAI 45°"]
+    imgs_1h = images_1h or [None, None, None]
+    imgs_3h = images_3h or [None, None, None]
+    quads: list[Quadrant] = []
+
+    for i, lbl in enumerate(labels[:3]):
+        q = Quadrant(image=imgs_1h[i] if i < len(imgs_1h) else None, label=f"{lbl} (1h)")
+        if i == 0:
+            q.roi_overlay = True
+        quads.append(q)
+    for i, lbl in enumerate(labels[:3]):
+        q = Quadrant(image=imgs_3h[i] if i < len(imgs_3h) else None, label=f"{lbl} (3h)")
+        if i == 0:
+            q.roi_overlay = True
+        quads.append(q)
+
+    return Layout(
+        name="6 cuadrantes (2×3, AP/OAI 1h vs 3h)",
+        description="1h arriba (AP+ROIs · AP limpia · OAI) · 3h abajo",
+        rows=2,
+        cols=3,
+        quadrants=quads,
     )
 
 
@@ -163,6 +215,34 @@ def layout_12q(
     )
 
 
+def layout_12q_3x4(
+    images: list[np.ndarray | None] | None = None,
+    labels: list[str] | None = None,
+) -> Layout:
+    """Layout de 12 cuadrantes (3×4): 3 estudios × 4 vistas."""
+    labels = labels or ["AP + ROIs", "AP (limpio)", "OAI 45°", "LAT. IZQ."]
+    imgs = images or [None] * 12
+    quads = []
+    for row in range(3):
+        for col in range(4):
+            idx = row * 4 + col
+            lbl = labels[col] if col < len(labels) else f"Img {idx+1}"
+            q = Quadrant(
+                image=imgs[idx] if idx < len(imgs) else None,
+                label=lbl,
+            )
+            if col == 0:
+                q.roi_overlay = True
+            quads.append(q)
+    return Layout(
+        name="12 cuadrantes (3 estudios × 4 vistas)",
+        description="3 estudios comparados en 4 vistas: AP+ROIs, AP limpia, OAI, LAT",
+        rows=3,
+        cols=4,
+        quadrants=quads,
+    )
+
+
 def layout_16q(
     images: list[np.ndarray | None] | None = None,
     labels: list[str] | None = None,
@@ -193,17 +273,23 @@ def layout_16q(
 
 # Catálogo de layouts disponibles.
 LAYOUT_CATALOG: dict[str, callable] = {
+    "3q": layout_3q,
     "4q": layout_4q,
+    "6q": layout_6q,
     "8q": layout_8q,
     "9q": layout_9q,
     "12q": layout_12q,
+    "12q_3x4": layout_12q_3x4,
     "16q": layout_16q,
 }
 
 LAYOUT_NAMES: list[tuple[str, str]] = [
+    ("3q", "3 cuadrantes (1×3, AP/OAI)"),
     ("4q", "4 cuadrantes (planar básico)"),
+    ("6q", "6 cuadrantes (2×3, AP/OAI 1h vs 3h)"),
     ("8q", "8 cuadrantes (washout 1h vs 3h)"),
     ("9q", "9 cuadrantes (3 estudios × 3 vistas)"),
     ("12q", "12 cuadrantes (4 estudios × 3 vistas)"),
+    ("12q_3x4", "12 cuadrantes (3 estudios × 4 vistas)"),
     ("16q", "16 cuadrantes (4 tiempos × 4 vistas)"),
 ]

@@ -19,7 +19,7 @@ import json
 from datetime import datetime, date, time, timedelta
 
 from PyQt6.QtCore import Qt, QPointF, pyqtSignal, QSettings
-from PyQt6.QtGui import QMouseEvent, QPainter, QPen, QColor, QBrush, QPixmap
+from PyQt6.QtGui import QMouseEvent, QPainter, QPen, QColor, QBrush, QPixmap, QImage
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
     QComboBox, QWidget, QSizePolicy, QMessageBox, QStackedWidget,
@@ -30,7 +30,7 @@ import os
 from core.amyloid_planar import ROICircle, compute_hmr, PERUGINI_SCORES
 from core.amyloid_layouts import (
     LAYOUT_NAMES,
-    layout_4q, layout_8q, layout_9q, layout_12q, layout_16q,
+    layout_3q, layout_4q, layout_6q, layout_8q, layout_9q, layout_12q, layout_12q_3x4, layout_16q,
 )
 from ui.quadrant_viewer import QuadrantViewer
 from ui.anatomical_3d_panel import Anatomical3DPanel
@@ -201,10 +201,13 @@ class AmyloidWindow(QDialog):
 
     # Layouts disponibles: nombre → función constructora.
     _LAYOUT_BUILDERS = {
+        3: layout_3q,
         4: layout_4q,
+        6: layout_6q,
         8: layout_8q,
         9: layout_9q,
         12: layout_12q,
+        1234: layout_12q_3x4,
         16: layout_16q,
     }
 
@@ -239,15 +242,20 @@ class AmyloidWindow(QDialog):
         self._page_offset = 0  # índice de inicio de la página actual
         self._processed_images: dict[str, dict[str, np.ndarray]] = {"1h": {}, "3h": {}}
         self._roi_state: dict[str, list[dict] | None] = {"1h": None, "3h": None}
+        self._roi_state_oai: dict[str, list[dict] | None] = {"1h": None, "3h": None}
         self._perugini_by_time: dict[str, int] = {}
         self._perugini_confirmed_by_time: dict[str, bool] = {}
         self._qbone_mode_by_time: dict[str, str] = {"1h": "auto", "3h": "auto"}
         self._time_hours_by_label: dict[str, float] = {"1h": 1.0, "3h": 3.0}
         self._active_time: str | None = None
+        self._active_view_role: str = "ap"
         self._washout_data: dict[str, dict] = {}  # tiempo_label → {hmr, heart_counts, mediastinum_counts}
+        self._oai_washout_data: dict[str, dict] = {}  # tiempo_label → {heart_counts, heart_area_px}
         self._early_dynamic: dict | None = None
         self._kinetic_result = None
         self._quadrant_state: dict[int, dict] = {}
+        self._linked_spect_ct = None
+        self._layout_12q3x4_lat_hidden = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
@@ -269,10 +277,33 @@ class AmyloidWindow(QDialog):
         toolbar.addWidget(QLabel("Layout:"))
         self._layout_combo = QComboBox()
         for key, name in LAYOUT_NAMES:
-            n = int(key.replace("q", ""))
+            if key == "12q_3x4":
+                n = 1234
+            else:
+                n = int(key.replace("q", ""))
             self._layout_combo.addItem(name, n)
         self._layout_combo.currentIndexChanged.connect(self._on_layout_changed)
         toolbar.addWidget(self._layout_combo)
+
+        toolbar.addWidget(QLabel("Plantilla informe:"))
+        self._report_template_combo = QComboBox()
+        self._report_template_combo.addItem("Auto", "auto")
+        self._report_template_combo.addItem("AMILO Clínico Completo", "AMILO Clínico Completo")
+        self._report_template_combo.addItem("AMILO Planar", "AMILO Planar")
+        self._report_template_combo.addItem("AMILO SPECT", "AMILO SPECT")
+        self._report_template_combo.addItem("AMILO Básico", "AMILO Básico")
+        self._report_template_combo.currentIndexChanged.connect(lambda _=0: self._persist_user_state())
+        toolbar.addWidget(self._report_template_combo)
+
+        self._btn_report_template_preview = QPushButton("Preview plantillas")
+        self._btn_report_template_preview.setToolTip("Vista previa visual para elegir plantilla de informe")
+        self._btn_report_template_preview.clicked.connect(self._open_report_template_preview)
+        toolbar.addWidget(self._btn_report_template_preview)
+
+        self._btn_report_template_matrix = QPushButton("Matriz escenarios")
+        self._btn_report_template_matrix.setToolTip("Compara en una sola vista cómo se arma el informe por escenario clínico")
+        self._btn_report_template_matrix.clicked.connect(self._open_report_template_matrix)
+        toolbar.addWidget(self._btn_report_template_matrix)
 
         btn_load_1h = QPushButton("Cargar imágenes 1h")
         btn_load_1h.clicked.connect(lambda: self._load_time_images("1h"))
@@ -327,6 +358,7 @@ class AmyloidWindow(QDialog):
 
         self._quadrant_viewer = QuadrantViewer()
         self._quadrant_viewer.quadrantSelected.connect(self._on_quadrant_selected)
+        self._quadrant_viewer.quadrantLabelEditRequested.connect(self._edit_quadrant_label)
         visor_layout.addWidget(self._quadrant_viewer, 1)
 
         # Sidebar de controles del cuadrante seleccionado.
@@ -417,6 +449,41 @@ class AmyloidWindow(QDialog):
         self._kinetic_status.setStyleSheet("color:#94a3b8; border:1px solid #334155; padding:4px; font-size:10px;")
         sidebar.addWidget(self._kinetic_status)
 
+        # Bloque AL (obligatorio para validar ATTR-CM en informe).
+        lbl_al = QLabel("Exclusión AL (informe):")
+        lbl_al.setStyleSheet(self._lbl_css)
+        sidebar.addWidget(lbl_al)
+
+        combo_css = (
+            "QComboBox { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; "
+            "padding: 3px; border-radius: 4px; font-size: 11px; } "
+            "QComboBox QAbstractItemView { background: #1e293b; color: #e2e8f0; selection-background-color: #2563eb; }"
+        )
+
+        self._al_status_combo = QComboBox()
+        self._al_status_combo.addItem("PENDIENTE / NO INFORMADO", "pending")
+        self._al_status_combo.addItem("EXCLUIDA", "excluded")
+        self._al_status_combo.addItem("NO EXCLUIDA", "not_excluded")
+        self._al_status_combo.setStyleSheet(combo_css)
+        self._al_status_combo.currentIndexChanged.connect(lambda _=0: self._persist_user_state())
+        sidebar.addWidget(self._al_status_combo)
+
+        self._free_light_chain_combo = QComboBox()
+        self._free_light_chain_combo.addItem("Cadenas livianas: No informado", "unknown")
+        self._free_light_chain_combo.addItem("Cadenas livianas: Normales", "normal")
+        self._free_light_chain_combo.addItem("Cadenas livianas: Alteradas", "abnormal")
+        self._free_light_chain_combo.setStyleSheet(combo_css)
+        self._free_light_chain_combo.currentIndexChanged.connect(lambda _=0: self._persist_user_state())
+        sidebar.addWidget(self._free_light_chain_combo)
+
+        self._immunofix_combo = QComboBox()
+        self._immunofix_combo.addItem("Inmunofijación: No informada", "unknown")
+        self._immunofix_combo.addItem("Inmunofijación: Negativa", "negative")
+        self._immunofix_combo.addItem("Inmunofijación: Positiva", "positive")
+        self._immunofix_combo.setStyleSheet(combo_css)
+        self._immunofix_combo.currentIndexChanged.connect(lambda _=0: self._persist_user_state())
+        sidebar.addWidget(self._immunofix_combo)
+
         # Paginación: anterior/siguiente.
         pag_layout = QHBoxLayout()
         btn_prev = QPushButton("◀")
@@ -432,7 +499,7 @@ class AmyloidWindow(QDialog):
 
         sidebar_frame = QFrame()
         sidebar_frame.setLayout(sidebar)
-        sidebar_frame.setFixedWidth(160)
+        sidebar_frame.setFixedWidth(260)
         sidebar_frame.setStyleSheet("QFrame { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 8px; }")
         visor_layout.addWidget(sidebar_frame)
 
@@ -485,6 +552,16 @@ class AmyloidWindow(QDialog):
         self._time_combo.setEnabled(False)
         self._time_combo.setStyleSheet("QComboBox { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; padding: 4px; border-radius: 4px; } QComboBox QAbstractItemView { background: #1e293b; color: #e2e8f0; selection-background-color: #2563eb; }")
         time_row.addWidget(self._time_combo)
+
+        lbl_view_role = QLabel("Vista:")
+        lbl_view_role.setStyleSheet(self._lbl_css)
+        time_row.addWidget(lbl_view_role)
+        self._view_role_combo = QComboBox()
+        self._view_role_combo.addItem("AP (HMR)", "ap")
+        self._view_role_combo.addItem("OAI (washout opcional)", "oai")
+        self._view_role_combo.setStyleSheet("QComboBox { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; padding: 4px; border-radius: 4px; } QComboBox QAbstractItemView { background: #1e293b; color: #e2e8f0; selection-background-color: #2563eb; }")
+        self._view_role_combo.currentIndexChanged.connect(self._on_view_role_changed)
+        time_row.addWidget(self._view_role_combo)
         analysis_layout.addLayout(time_row)
 
         # Selector de filtro visual (solo para posicionamiento de ROIs).
@@ -543,6 +620,20 @@ class AmyloidWindow(QDialog):
         btn_report = QPushButton("Generar Informe")
         btn_report.clicked.connect(self._generate_report)
         btns.addWidget(btn_report)
+
+        btns.addWidget(QLabel("Salida:"))
+        self._report_output_combo = QComboBox()
+        self._report_output_combo.addItem("PDF + HTML", "both")
+        self._report_output_combo.addItem("Solo PDF", "pdf")
+        self._report_output_combo.addItem("Solo HTML", "html")
+        self._report_output_combo.currentIndexChanged.connect(lambda _=0: self._persist_user_state())
+        btns.addWidget(self._report_output_combo)
+
+        self._report_output_dir_btn = QPushButton("Carpeta informe")
+        self._report_output_dir_btn.setToolTip("Elegir carpeta de salida para PDF/HTML")
+        self._report_output_dir_btn.clicked.connect(self._select_report_output_dir)
+        btns.addWidget(self._report_output_dir_btn)
+
         btn_export = QPushButton("Exportar PNG/JPG")
         btn_export.clicked.connect(self._export_png_jpg)
         btns.addWidget(btn_export)
@@ -557,6 +648,7 @@ class AmyloidWindow(QDialog):
             self._active_time = "1h"
         self._ensure_aux_rois()
         self._restore_user_state()
+        self._load_spect_ct_bridge_state()
         self._rebuild_layout()
         self._update_washout_preview()
         if image is not None:
@@ -571,6 +663,36 @@ class AmyloidWindow(QDialog):
 
     def _settings(self) -> QSettings:
         return QSettings("GAMMASYS", "SINCRO_AMYLO")
+
+    def _load_spect_ct_bridge_state(self):
+        self._linked_spect_ct = None
+        try:
+            bridge = QSettings("GAMMASYS", "SINCRO_AMYLO_BRIDGE")
+            raw = bridge.value("last_spect_ct_session_json", "")
+            if not raw:
+                return
+            payload = json.loads(str(raw))
+            profile = dict(payload.get("profile") or {})
+            if str(payload.get("workflow_tag") or "") != "perf_spect_ct":
+                return
+            bridge_pid = str(profile.get("patient_id") or "").strip().lower()
+            bridge_pname = str(profile.get("patient_name") or "").strip().lower()
+            bridge_sdate = str(profile.get("study_date") or "").strip()
+            local_pid = str(self._metadata.get("patient_id") or "").strip().lower()
+            local_pname = str(self._metadata.get("patient") or "").strip().lower()
+            local_date = str(self._metadata.get("date") or "").strip()
+            # Si el módulo se abrió sin planar cargado (sin identidad local),
+            # permitir reutilizar la última sesión SPECT/CT.
+            if (not local_pid and not local_pname) and (not local_date or local_date == "N/D"):
+                self._linked_spect_ct = payload
+                return
+            patient_ok = (bridge_pid and local_pid and bridge_pid == local_pid) or (bridge_pname and local_pname and bridge_pname == local_pname)
+            date_ok = (not bridge_sdate) or (not local_date) or (bridge_sdate == local_date)
+            if not patient_ok or not date_ok:
+                return
+            self._linked_spect_ct = payload
+        except Exception:
+            self._linked_spect_ct = None
 
     @staticmethod
     def _suggest_perugini_from_hmr(hmr: float) -> int:
@@ -617,6 +739,33 @@ class AmyloidWindow(QDialog):
             })
         return out
 
+    @staticmethod
+    def _al_status_text_from_code(code: str) -> str:
+        mapping = {
+            "excluded": "EXCLUIDA",
+            "not_excluded": "NO EXCLUIDA",
+            "pending": "PENDIENTE / NO INFORMADO",
+        }
+        return mapping.get(str(code or "").strip(), "PENDIENTE / NO INFORMADO")
+
+    @staticmethod
+    def _flc_text_from_code(code: str) -> str:
+        mapping = {
+            "normal": "Normales",
+            "abnormal": "Alteradas",
+            "unknown": "No informado",
+        }
+        return mapping.get(str(code or "").strip(), "No informado")
+
+    @staticmethod
+    def _immunofix_text_from_code(code: str) -> str:
+        mapping = {
+            "negative": "Negativa",
+            "positive": "Positiva",
+            "unknown": "No informada",
+        }
+        return mapping.get(str(code or "").strip(), "No informada")
+
     def _persist_user_state(self):
         try:
             self._ensure_aux_rois()
@@ -627,6 +776,10 @@ class AmyloidWindow(QDialog):
                 "roi_state": {
                     "1h": self._serialize_rois(self._roi_state.get("1h")),
                     "3h": self._serialize_rois(self._roi_state.get("3h")),
+                },
+                "roi_state_oai": {
+                    "1h": self._serialize_rois(self._roi_state_oai.get("1h")),
+                    "3h": self._serialize_rois(self._roi_state_oai.get("3h")),
                 },
                 "qbone_mode_by_time": {
                     "1h": str(self._qbone_mode_by_time.get("1h", "auto")),
@@ -647,6 +800,17 @@ class AmyloidWindow(QDialog):
                     "1h": float(self._time_hours_by_label.get("1h", 1.0)),
                     "3h": float(self._time_hours_by_label.get("3h", 3.0)),
                 },
+                "report_template": str(self._report_template_combo.currentData() or "auto"),
+                "al_status": str(self._al_status_combo.currentData() or "pending"),
+                "free_light_chain": str(self._free_light_chain_combo.currentData() or "unknown"),
+                "immunofixation": str(self._immunofix_combo.currentData() or "unknown"),
+                "oai_washout_data": {
+                    "1h": dict(self._oai_washout_data.get("1h") or {}),
+                    "3h": dict(self._oai_washout_data.get("3h") or {}),
+                },
+                "active_view_role": str(self._active_view_role or "ap"),
+                "report_output_mode": str(self._report_output_combo.currentData() or "both"),
+                "report_output_dir": str(getattr(self, "_report_output_dir", "") or ""),
             }
             settings.setValue("state_json", json.dumps(payload, ensure_ascii=False))
             settings.endGroup()
@@ -669,6 +833,11 @@ class AmyloidWindow(QDialog):
                 rois = roi_state.get(time_label)
                 if rois:
                     self._roi_state[time_label] = self._serialize_rois(rois)
+            roi_state_oai = payload.get("roi_state_oai", {}) or {}
+            for time_label in ("1h", "3h"):
+                rois_oai = roi_state_oai.get(time_label)
+                if rois_oai:
+                    self._roi_state_oai[time_label] = self._serialize_rois(rois_oai)
             qmode = payload.get("qbone_mode_by_time", {}) or {}
             self._qbone_mode_by_time["1h"] = str(qmode.get("1h", "auto"))
             self._qbone_mode_by_time["3h"] = str(qmode.get("3h", "auto"))
@@ -690,6 +859,55 @@ class AmyloidWindow(QDialog):
                 self._layout_combo.blockSignals(False)
                 self._current_layout_n = saved_layout
             self._active_time = str(payload.get("active_time", self._active_time or "1h"))
+
+            saved_tpl = str(payload.get("report_template", "auto") or "auto")
+            idx_tpl = self._report_template_combo.findData(saved_tpl)
+            if idx_tpl >= 0:
+                self._report_template_combo.blockSignals(True)
+                self._report_template_combo.setCurrentIndex(idx_tpl)
+                self._report_template_combo.blockSignals(False)
+
+            saved_al = str(payload.get("al_status", "pending") or "pending")
+            idx_al = self._al_status_combo.findData(saved_al)
+            if idx_al >= 0:
+                self._al_status_combo.blockSignals(True)
+                self._al_status_combo.setCurrentIndex(idx_al)
+                self._al_status_combo.blockSignals(False)
+
+            saved_flc = str(payload.get("free_light_chain", "unknown") or "unknown")
+            idx_flc = self._free_light_chain_combo.findData(saved_flc)
+            if idx_flc >= 0:
+                self._free_light_chain_combo.blockSignals(True)
+                self._free_light_chain_combo.setCurrentIndex(idx_flc)
+                self._free_light_chain_combo.blockSignals(False)
+
+            saved_if = str(payload.get("immunofixation", "unknown") or "unknown")
+            idx_if = self._immunofix_combo.findData(saved_if)
+            if idx_if >= 0:
+                self._immunofix_combo.blockSignals(True)
+                self._immunofix_combo.setCurrentIndex(idx_if)
+                self._immunofix_combo.blockSignals(False)
+
+            oai_data = payload.get("oai_washout_data", {}) or {}
+            self._oai_washout_data["1h"] = dict(oai_data.get("1h") or {})
+            self._oai_washout_data["3h"] = dict(oai_data.get("3h") or {})
+
+            saved_role = str(payload.get("active_view_role", "ap") or "ap")
+            idx_role = self._view_role_combo.findData(saved_role)
+            if idx_role >= 0:
+                self._view_role_combo.blockSignals(True)
+                self._view_role_combo.setCurrentIndex(idx_role)
+                self._view_role_combo.blockSignals(False)
+                self._active_view_role = saved_role
+
+            saved_out_mode = str(payload.get("report_output_mode", "both") or "both")
+            idx_out = self._report_output_combo.findData(saved_out_mode)
+            if idx_out >= 0:
+                self._report_output_combo.blockSignals(True)
+                self._report_output_combo.setCurrentIndex(idx_out)
+                self._report_output_combo.blockSignals(False)
+            self._report_output_dir = str(payload.get("report_output_dir", "") or "")
+
             self._sync_qbone_mode_ui()
         except Exception:
             pass
@@ -726,6 +944,7 @@ class AmyloidWindow(QDialog):
         """Reconstruye la presentación desde las fuentes canónicas 1 h/3 h."""
         n = force_layout or self._current_layout_n
         self._current_layout_n = n
+        self._layout_12q3x4_lat_hidden = False
 
         def _slots(time_label: str) -> tuple[list[np.ndarray | None], list[str]]:
             source = self._time_images[time_label]
@@ -737,9 +956,14 @@ class AmyloidWindow(QDialog):
                 source["oai"]["image"] if source["oai"] else None,
                 source["lat"]["image"] if source["lat"] else None,
             ]
+            ap_lbl = self._build_label_for_role(source.get("ap"), "ap", time_label)
+            oai_lbl = self._build_label_for_role(source.get("oai"), "oai", time_label)
+            lat_lbl = self._build_label_for_role(source.get("lat"), "lat", time_label)
             labels = [
-                f"AP + ROIs ({time_label})" if "roi" in processed else f"AP cuantificación ({time_label})",
-                f"AP limpio ({time_label})", f"OAI ({time_label})", f"LAT. IZQ. ({time_label})",
+                (ap_lbl + " + ROIs") if "roi" in processed else (ap_lbl + " cuantificación"),
+                ap_lbl + " limpio",
+                oai_lbl,
+                lat_lbl,
             ]
             return images, labels
 
@@ -747,8 +971,20 @@ class AmyloidWindow(QDialog):
         imgs_3h, labels_3h = _slots("3h")
         imgs = imgs_1h + imgs_3h
         labels = labels_1h + labels_3h
+        layout_labels = labels
 
-        if n == 4:
+        if n == 3:
+            layout = layout_3q(
+                ap_roi=imgs[0] if len(imgs) > 0 else None,
+                ap_clean=imgs[1] if len(imgs) > 1 else None,
+                oai=imgs[2] if len(imgs) > 2 else None,
+                ap_label="AP cuantificación (1h)",
+                oai_label=labels[2] if len(labels) > 2 else "OAI 45°",
+            )
+            layout.quadrants[0].label = labels[0]
+            layout.quadrants[1].label = labels[1]
+            layout.quadrants[2].label = labels[2] if len(labels) > 2 else "OAI 45°"
+        elif n == 4:
             layout = layout_4q(
                 ap_roi=imgs[0] if len(imgs) > 0 else None,
                 ap_clean=imgs[1] if len(imgs) > 1 else None,
@@ -760,6 +996,12 @@ class AmyloidWindow(QDialog):
             )
             layout.quadrants[0].label = labels[0]
             layout.quadrants[1].label = labels[1]
+        elif n == 6:
+            layout = layout_6q(
+                images_1h=imgs_1h[:3],
+                images_3h=imgs_3h[:3],
+                labels=["AP + ROIs", "AP limpio", "OAI"],
+            )
         elif n == 8:
             layout = layout_8q(
                 images_1h=imgs_1h,
@@ -770,11 +1012,29 @@ class AmyloidWindow(QDialog):
             layout = layout_9q(images=imgs, labels=labels[:3] if len(labels) >= 3 else None)
         elif n == 12:
             layout = layout_12q(images=imgs, labels=labels[:3] if len(labels) >= 3 else None)
+        elif n == 1234:
+            has_lat_any = any(self._time_images.get(t, {}).get("lat") is not None for t in ("1h", "3h"))
+            if has_lat_any:
+                layout = layout_12q_3x4(images=imgs, labels=labels[:4] if len(labels) >= 4 else None)
+            else:
+                # Si no hay LAT en ningún tiempo, compactar visualmente a 3 columnas.
+                imgs_compact = [
+                    imgs_1h[0], imgs_1h[1], imgs_1h[2],
+                    imgs_3h[0], imgs_3h[1], imgs_3h[2],
+                    None, None, None,
+                ]
+                layout = layout_9q(images=imgs_compact, labels=labels_1h[:3] if len(labels_1h) >= 3 else None)
+                layout_labels = [
+                    labels_1h[0], labels_1h[1], labels_1h[2],
+                    labels_3h[0], labels_3h[1], labels_3h[2],
+                    "", "", "",
+                ]
+                self._layout_12q3x4_lat_hidden = True
         elif n == 16:
             layout = layout_16q(images=imgs, labels=labels[:4] if len(labels) >= 4 else None)
         else:
             return
-        for idx, label in enumerate(labels):
+        for idx, label in enumerate(layout_labels):
             if idx < len(layout.quadrants):
                 layout.quadrants[idx].label = label
         self._quadrant_viewer.set_layout(layout)
@@ -1073,19 +1333,54 @@ class AmyloidWindow(QDialog):
 
     def _assign_views_for_time(self, records: list[dict]) -> dict[str, dict]:
         """Asigna AP/OAI/LAT con heurística por metadatos o fallback por orden."""
-        assigned: dict[str, dict] = {}
+        assigned: dict[str, dict | None] = {"ap": None, "oai": None, "lat": None}
         used: set[int] = set()
+
+        # Prioridad 1: clasificación explícita por metadatos DICOM.
         for idx, record in enumerate(records):
-            view = record["view"]
-            if view and view not in assigned:
+            view = record.get("view")
+            if view in assigned and assigned[view] is None:
                 assigned[view] = record
                 used.add(idx)
-        for role in ("ap", "oai", "lat"):
-            if role not in assigned:
-                idx = next(i for i in range(len(records)) if i not in used)
-                assigned[role] = records[idx]
+
+        # Prioridad 2: completar AP/OAI con remanentes si faltan.
+        for role in ("ap", "oai"):
+            if assigned[role] is None:
+                idx = next((i for i in range(len(records)) if i not in used), None)
+                if idx is not None:
+                    assigned[role] = records[idx]
+                    used.add(idx)
+
+        # LAT es opcional: solo completar si quedó algún remanente.
+        if assigned["lat"] is None:
+            idx = next((i for i in range(len(records)) if i not in used), None)
+            if idx is not None:
+                assigned["lat"] = records[idx]
                 used.add(idx)
-        return {role: assigned[role] for role in ("ap", "oai", "lat")}
+
+        # Si AP faltó (caso extremo), tomar el primero disponible.
+        if assigned["ap"] is None and records:
+            assigned["ap"] = records[0]
+
+        return {
+            "ap": assigned["ap"],
+            "oai": assigned["oai"],
+            "lat": assigned["lat"],
+        }
+
+    @staticmethod
+    def _build_label_for_role(record: dict | None, role: str, time_label: str) -> str:
+        base_map = {
+            "ap": "AP",
+            "oai": "OAI",
+            "lat": "LAT. IZQ.",
+        }
+        if record is None:
+            return f"{base_map.get(role, role.upper())} ({time_label}) · N/D"
+        raw = str(record.get("label") or "").strip()
+        if raw:
+            return f"{raw} ({time_label})"
+        return f"{base_map.get(role, role.upper())} ({time_label})"
 
     def _load_early_dynamic(self):
         """Carga dinámico 0–5 min. No realiza QC de inyección."""
@@ -1182,7 +1477,7 @@ class AmyloidWindow(QDialog):
         dlg.exec()
 
     def _load_time_images(self, time_label: str):
-        """Carga exactamente AP, OAI y lateral para un tiempo canónico."""
+        """Carga 1 a 3 planares y asigna AP/OAI/LAT de forma flexible."""
         from ui.dicom_browser import DicomBrowserDialog
         # Determinar directorio inicial.
         start_dir = ""
@@ -1196,10 +1491,10 @@ class AmyloidWindow(QDialog):
         browser = DicomBrowserDialog(self, start_dir=start_dir)
         if browser.exec() == QDialog.DialogCode.Accepted:
             paths = browser.selected_paths()
-            if len(paths) != 3:
+            if len(paths) < 1 or len(paths) > 3:
                 QMessageBox.information(
                     self, "SINCRO — Amyloidosis",
-                    "Seleccioná exactamente tres DICOM: AP, OAI y lateral izquierda."
+                    "Seleccioná entre 1 y 3 DICOM planares para este tiempo (AP/OAI/LAT opcional)."
                 )
                 return
             records = []
@@ -1238,8 +1533,18 @@ class AmyloidWindow(QDialog):
             self._update_washout_preview()
             self._update_kinetic_analysis()
 
+            loaded_roles = [r for r in ("ap", "oai", "lat") if self._time_images[time_label].get(r) is not None]
+            missing_roles = [r for r in ("ap", "oai", "lat") if self._time_images[time_label].get(r) is None]
+            QMessageBox.information(
+                self,
+                "SINCRO — Amyloidosis",
+                "Carga flexible completada.\n"
+                f"Tiempo {time_label}: cargados {', '.join(loaded_roles) if loaded_roles else 'ninguno'}.\n"
+                f"Faltantes: {', '.join(missing_roles) if missing_roles else 'ninguno'}."
+            )
+
     def _load_washout_auto(self):
-        """Carga 6 DICOM planares y asigna 1h/3h automáticamente por metadata temporal."""
+        """Carga planares (4 a 6) y asigna 1h/3h automáticamente por metadata temporal."""
         from ui.dicom_browser import DicomBrowserDialog
 
         start_dir = ""
@@ -1254,11 +1559,11 @@ class AmyloidWindow(QDialog):
         if browser.exec() != QDialog.DialogCode.Accepted:
             return
         paths = browser.selected_paths()
-        if len(paths) != 6:
+        if len(paths) < 4 or len(paths) > 6:
             QMessageBox.information(
                 self,
                 "SINCRO — Washout automático",
-                "Seleccioná exactamente 6 DICOM planares: 3 de ~1h y 3 de ~3h.",
+                "Seleccioná entre 4 y 6 DICOM planares (ideal: 3 de ~1h y 3 de ~3h).",
             )
             return
 
@@ -1285,17 +1590,18 @@ class AmyloidWindow(QDialog):
 
         g1 = [r for r in records if r.get("time_label_guess") == "1h"]
         g3 = [r for r in records if r.get("time_label_guess") == "3h"]
-        if len(g1) < 3 or len(g3) < 3:
-            # fallback robusto: split temporal 3+3 por orden relativo
+        if len(g1) < 2 or len(g3) < 2:
+            # fallback robusto: split temporal 50/50 por orden relativo
             ordered = sorted(records, key=lambda x: x.get("rel_h", 0.0))
-            g1 = ordered[:3]
-            g3 = ordered[3:6]
+            half = max(2, len(ordered) // 2)
+            g1 = ordered[:half]
+            g3 = ordered[half:]
 
-        if len(g1) != 3 or len(g3) != 3:
+        if len(g1) < 2 or len(g3) < 2:
             QMessageBox.warning(
                 self,
                 "SINCRO — Washout automático",
-                "No se pudo separar en 2 tiempos (3+3). Usá la carga manual.",
+                "No se pudo separar en 2 tiempos con suficiente cobertura (mínimo 2 por grupo). Usá carga manual.",
             )
             return
 
@@ -1339,6 +1645,7 @@ class AmyloidWindow(QDialog):
                 "Asignación automática completada.\n"
                 f"Tiempo temprano: ~{self._time_hours_by_label['1h']:.2f} h\n"
                 f"Tiempo tardío: ~{self._time_hours_by_label['3h']:.2f} h\n"
+                f"Cobertura detectada: 1h={len(g1)} archivos, 3h={len(g3)} archivos.\n"
                 "Podés seguir usando el modo manual 1h/3h cuando quieras."
             ),
         )
@@ -1411,6 +1718,24 @@ class AmyloidWindow(QDialog):
         self._win_high_slider.setValue(int(q.win_high))
         self._win_high_slider.blockSignals(False)
         self._update_quadrant_filter_label(q)
+
+    def _edit_quadrant_label(self, idx: int):
+        """Permite editar rótulo del cuadrante con click directo en el label."""
+        layout = self._quadrant_viewer._layout
+        if layout is None or idx < 0 or idx >= len(layout.quadrants):
+            return
+        q = layout.quadrants[idx]
+        current = str(q.label or f"#{idx+1}")
+        new_label, ok = QInputDialog.getText(self, "Editar rótulo", "Rótulo del cuadrante:", text=current)
+        if not ok:
+            return
+        new_label = str(new_label).strip()
+        if not new_label:
+            return
+        q.label = new_label
+        self._quadrant_viewer.update()
+        self._on_quadrant_selected(idx)
+        self._persist_user_state()
 
     def _update_quadrant_filter_label(self, q):
         active = list(getattr(q, "filters", []) or [])
@@ -1531,31 +1856,61 @@ class AmyloidWindow(QDialog):
         if q is None or q.image is None:
             QMessageBox.information(self, "SINCRO", "Selecciona un cuadrante con imagen primero.")
             return
-        if self._current_layout_n >= 8:
-            slot_to_time = {0: "1h", 1: "1h", 4: "3h", 5: "3h"}
+        slot_to_meta = {}
+        if self._current_layout_n == 6:
+            slot_to_meta = {
+                0: ("1h", "ap"), 1: ("1h", "ap"), 2: ("1h", "oai"),
+                3: ("3h", "ap"), 4: ("3h", "ap"), 5: ("3h", "oai"),
+            }
+        elif self._current_layout_n == 1234:
+            if self._layout_12q3x4_lat_hidden:
+                slot_to_meta = {
+                    0: ("1h", "ap"), 1: ("1h", "ap"), 2: ("1h", "oai"),
+                    3: ("3h", "ap"), 4: ("3h", "ap"), 5: ("3h", "oai"),
+                }
+            else:
+                slot_to_meta = {
+                    0: ("1h", "ap"), 1: ("1h", "ap"), 2: ("1h", "oai"), 3: ("1h", "lat"),
+                    4: ("3h", "ap"), 5: ("3h", "ap"), 6: ("3h", "oai"), 7: ("3h", "lat"),
+                }
+        elif self._current_layout_n >= 8:
+            slot_to_meta = {
+                0: ("1h", "ap"), 1: ("1h", "ap"), 2: ("1h", "oai"), 3: ("1h", "lat"),
+                4: ("3h", "ap"), 5: ("3h", "ap"), 6: ("3h", "oai"), 7: ("3h", "lat"),
+            }
         else:
-            slot_to_time = {0: "1h", 1: "1h"}
-        time_label = slot_to_time.get(idx)
+            slot_to_meta = {
+                0: ("1h", "ap"), 1: ("1h", "ap"), 2: ("1h", "oai"), 3: ("1h", "lat"),
+            }
+
+        meta = slot_to_meta.get(idx)
+        time_label = meta[0] if meta else None
+        view_role = meta[1] if meta else "ap"
         if time_label is None:
             QMessageBox.information(
                 self, "SINCRO — Amyloidosis",
-                "La cuantificación HMR solo se realiza sobre una celda AP.\n"
-                "Seleccioná AP cuantificación o AP limpio del tiempo correspondiente."
+                "Seleccioná un cuadrante válido para análisis (AP/OAI/LAT del tiempo correspondiente)."
             )
             return
-        ap_entry = self._time_images[time_label]["ap"]
-        if ap_entry is None:
-            QMessageBox.information(self, "SINCRO — Amyloidosis", f"No hay AP cargada para {time_label}.")
+        entry = self._time_images[time_label].get(view_role)
+        if entry is None:
+            QMessageBox.information(self, "SINCRO — Amyloidosis", f"No hay vista {view_role.upper()} cargada para {time_label}.")
             return
-        img = np.asarray(ap_entry["image"], dtype=np.float64)
+        img = np.asarray(entry["image"], dtype=np.float64)
         self._image = img  # imagen actual para display/render
         self._original_image = img.copy()  # original 2D para análisis
         self._active_time = time_label
+        self._active_view_role = view_role
         self._time_combo.setCurrentText(time_label)
+        idx_role = self._view_role_combo.findData(view_role)
+        if idx_role >= 0:
+            self._view_role_combo.blockSignals(True)
+            self._view_role_combo.setCurrentIndex(idx_role)
+            self._view_role_combo.blockSignals(False)
         self._qbone_mode_by_time[time_label] = self._qbone_mode_by_time.get(time_label, "auto")
         self._roi_widget = ROIDragWidget(img)
         self._ensure_aux_rois()
-        saved_rois = self._roi_state.get(time_label)
+        saved_rois = self._roi_state_oai.get(time_label) if view_role == "oai" else self._roi_state.get(time_label)
         if saved_rois:
             self._roi_widget._rois = [dict(roi) for roi in saved_rois]
         self._roi_widget.roiChanged.connect(self._update_hmr)
@@ -1578,9 +1933,9 @@ class AmyloidWindow(QDialog):
                         old_layout.insertWidget(0, self._roi_widget, 1)
                     break
         # Cargar score guardado por tiempo o sugerir uno nuevo por HMR actual.
-        if time_label in self._perugini_by_time:
+        if view_role == "ap" and time_label in self._perugini_by_time:
             self._set_perugini_score(int(self._perugini_by_time[time_label]))
-        else:
+        elif view_role == "ap":
             try:
                 roi_h = ROICircle(
                     cy=self._roi_widget._rois[0]["cy"],
@@ -1597,9 +1952,27 @@ class AmyloidWindow(QDialog):
             except Exception:
                 pass
             self._perugini_confirm_chk.setChecked(bool(self._perugini_confirmed_by_time.get(time_label, False)))
+
+        # En OAI la lectura principal no es Perugini/HMR.
+        self._perugini_combo.setEnabled(view_role == "ap")
+        self._perugini_confirm_chk.setEnabled(view_role == "ap")
         self._sync_qbone_mode_ui()
         self._toggle_mode()
         self._update_hmr(0, 0, 0, 0)
+
+    def _roi_slot_index(self, time_label: str) -> int:
+        """Devuelve índice de cuadrante AP+ROIs para el tiempo dado según layout activo."""
+        if time_label == "1h":
+            return 0
+        if self._current_layout_n == 1234 and self._layout_12q3x4_lat_hidden:
+            return 3
+        if self._current_layout_n == 1234:
+            return 4
+        if self._current_layout_n == 6:
+            return 3
+        if self._current_layout_n >= 8:
+            return 4
+        return 0
 
     def _sync_qbone_mode_ui(self):
         time_label = self._active_time if self._active_time in ("1h", "3h") else "1h"
@@ -1628,11 +2001,110 @@ class AmyloidWindow(QDialog):
         )
         self._persist_user_state()
 
+    def _on_view_role_changed(self, idx: int):
+        """Cambia entre análisis AP (HMR) y OAI (washout opcional)."""
+        role = str(self._view_role_combo.currentData() or "ap")
+        self._active_view_role = role
+        if self._active_time not in ("1h", "3h"):
+            return
+        source = self._time_images.get(self._active_time, {})
+        entry = source.get(role)
+        if entry is None:
+            QMessageBox.information(
+                self,
+                "SINCRO — Amyloidosis",
+                f"No hay vista {role.upper()} cargada para {self._active_time}.",
+            )
+            return
+        try:
+            img = np.asarray(entry["image"], dtype=np.float64)
+            self._image = img
+            self._original_image = img.copy()
+            self._roi_widget = ROIDragWidget(img)
+            self._ensure_aux_rois()
+            if role == "oai":
+                saved_rois = self._roi_state_oai.get(self._active_time)
+            else:
+                saved_rois = self._roi_state.get(self._active_time)
+            if saved_rois:
+                self._roi_widget._rois = [dict(roi) for roi in saved_rois]
+            self._roi_widget.roiChanged.connect(self._update_hmr)
+            page = self._stack.widget(1)
+            lay = page.layout()
+            old = lay.itemAt(0).widget()
+            lay.replaceWidget(old, self._roi_widget)
+            old.deleteLater()
+            self._sync_qbone_mode_ui()
+            self._update_hmr(0, 0, 0, 0)
+            # En OAI ocultar mediastino/HMR como métrica principal, queda opcional.
+            if role == "oai":
+                self._lbl_hmr.setText("OAI ROI: métrica opcional washout")
+                self._lbl_class.setText("Comparación 1h vs 3h opcional (no reemplaza HMR AP)")
+        except Exception as exc:
+            QMessageBox.warning(self, "SINCRO", f"No se pudo cambiar a vista {role.upper()}:\n{exc}")
+
     def _apply_rois_to_quadrant(self):
         """Aplica el análisis al par AP+ROI/AP limpio del tiempo activo."""
         time_label = self._active_time
         if self._original_image is None or time_label not in ("1h", "3h"):
             return
+        view_role = self._active_view_role if self._active_view_role in ("ap", "oai") else "ap"
+
+        # Rama OAI opcional: comparar 1h vs 3h de ROI cardíaco (sin HMR/mediastino).
+        if view_role == "oai":
+            try:
+                from core.amyloid_kinetic import normalize_static_image
+                roi_h = ROICircle(
+                    cy=self._roi_widget._rois[0]["cy"],
+                    cx=self._roi_widget._rois[0]["cx"],
+                    radius=self._roi_widget._rois[0]["radius"],
+                )
+                mask = roi_h.mask(self._original_image.shape)
+                if not np.any(mask):
+                    raise ValueError("ROI cardíaco OAI vacío")
+
+                entry = self._time_images.get(time_label, {}).get("oai")
+                if entry is None:
+                    raise ValueError(f"No hay OAI cargada para {time_label}")
+
+                dt = entry.get("acq_dt")
+                if dt is None:
+                    acq_min = 60.0 if time_label == "1h" else 180.0
+                else:
+                    acq_min = float(self._time_hours_by_label.get(time_label, 1.0 if time_label == "1h" else 3.0)) * 60.0
+
+                duration_s = float(entry.get("duration_s") or 1.0)
+                norm = normalize_static_image(
+                    np.asarray(self._original_image, dtype=np.float64),
+                    max(duration_s, 1e-6),
+                    acq_min,
+                    decay_correct=True,
+                    reference_time_min=0.0,
+                )
+                oai_heart_counts = float(np.asarray(norm)[mask].mean())
+                self._oai_washout_data[time_label] = {
+                    "heart_counts": oai_heart_counts,
+                    "heart_area_px": int(np.count_nonzero(mask)),
+                }
+                self._roi_state_oai[time_label] = [dict(roi) for roi in self._roi_widget._rois]
+
+                msg = f"OAI {time_label}: cuentas corazón (norm.) = {oai_heart_counts:.4f}"
+                if "1h" in self._oai_washout_data and "3h" in self._oai_washout_data:
+                    h1 = float(self._oai_washout_data["1h"].get("heart_counts", 0.0))
+                    h3 = float(self._oai_washout_data["3h"].get("heart_counts", 0.0))
+                    if h1 > 0:
+                        ret = h3 / h1
+                        wo = (1.0 - ret) * 100.0
+                        msg += f"\nRetención OAI 3h/1h = {ret:.3f} · Washout OAI = {wo:+.1f}%"
+
+                self._lbl_class.setText("OAI opcional guardado (no reemplaza HMR AP)")
+                self._persist_user_state()
+                self._update_washout_preview()
+                QMessageBox.information(self, "SINCRO — OAI opcional", msg)
+            except Exception as exc:
+                QMessageBox.warning(self, "SINCRO", f"Error guardando OAI opcional:\n{exc}")
+            return
+
         try:
             roi_h = ROICircle(
                 cy=self._roi_widget._rois[0]["cy"],
@@ -1740,7 +2212,7 @@ class AmyloidWindow(QDialog):
         self._processed_images[time_label]["clean"] = self._original_image.copy()
         self._rebuild_layout(force_layout=self._current_layout_n)
         layout = self._quadrant_viewer._layout
-        roi_idx = 0 if time_label == "1h" else 4
+        roi_idx = self._roi_slot_index(time_label)
         if layout is not None and roi_idx < len(layout.quadrants):
             layout.quadrants[roi_idx].label = f"AP + ROIs ({time_label}, HMR={result.hmr:.2f})"
             layout.quadrants[roi_idx].hmr = result.hmr
@@ -1990,58 +2462,414 @@ class AmyloidWindow(QDialog):
         if curve_b64 and pixmap.loadFromData(base64.b64decode(curve_b64), "PNG"):
             self._washout_preview.setPixmap(pixmap.scaledToWidth(145, Qt.TransformationMode.SmoothTransformation))
             self._washout_preview.setVisible(True)
-        self._lbl_washout_status.setText("Washout 1h/3h cuantificado: curva lista para el informe.")
+        oai_txt = ""
+        if "1h" in self._oai_washout_data and "3h" in self._oai_washout_data:
+            h1 = float(self._oai_washout_data["1h"].get("heart_counts", 0.0))
+            h3 = float(self._oai_washout_data["3h"].get("heart_counts", 0.0))
+            if h1 > 0:
+                ret = h3 / h1
+                wo = (1.0 - ret) * 100.0
+                oai_txt = f" · OAI opcional 3h/1h={ret:.3f} (washout {wo:+.1f}%)"
+        self._lbl_washout_status.setText("Washout 1h/3h cuantificado: curva lista para el informe." + oai_txt)
         self._lbl_washout_status.setStyleSheet("font-size:10px; color:#4ade80; padding:4px;")
+
+    def _open_report_template_preview(self):
+        """Abre vista previa visual de plantillas de informe y permite selección."""
+        ctx = self._build_report_context()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("SINCRO — Preview de plantillas AMILO")
+        dlg.resize(980, 680)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
+
+        info = QLabel(
+            "Elegí la plantilla visual. 'Auto' selecciona según cobertura del estudio "
+            f"(actual: <b>{ctx.get('template_name')}</b>)."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#cbd5e1;")
+        lay.addWidget(info)
+
+        selector_row = QHBoxLayout()
+        selector_row.addWidget(QLabel("Plantilla:"))
+        combo = QComboBox()
+        combo.addItem("Auto", "auto")
+        combo.addItem("AMILO Clínico Completo", "AMILO Clínico Completo")
+        combo.addItem("AMILO Planar", "AMILO Planar")
+        combo.addItem("AMILO SPECT", "AMILO SPECT")
+        combo.addItem("AMILO Básico", "AMILO Básico")
+        current_tpl = str(self._report_template_combo.currentData() or "auto")
+        idx = combo.findData(current_tpl)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        selector_row.addWidget(combo)
+        selector_row.addStretch(1)
+        lay.addLayout(selector_row)
+
+        preview_label = QLabel()
+        preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_label.setStyleSheet("background:#0f172a; border:1px solid #334155;")
+        preview_label.setMinimumHeight(500)
+        lay.addWidget(preview_label, 1)
+
+        def _template_display_name(val: str) -> str:
+            if val == "auto":
+                return str(ctx.get("template_name") or "AMILO Básico")
+            return val
+
+        def _draw_preview(template_name: str):
+            w, h = 900, 520
+            canvas = np.zeros((h, w, 3), dtype=np.uint8)
+            canvas[:, :, :] = np.array([15, 23, 42], dtype=np.uint8)
+
+            def fill(x0, y0, x1, y1, rgb):
+                x0 = max(0, min(w - 1, int(x0)))
+                x1 = max(0, min(w, int(x1)))
+                y0 = max(0, min(h - 1, int(y0)))
+                y1 = max(0, min(h, int(y1)))
+                canvas[y0:y1, x0:x1, :] = np.array(rgb, dtype=np.uint8)
+
+            fill(20, 20, w - 20, 80, (26, 58, 92))  # header
+
+            if template_name == "AMILO Clínico Completo":
+                fill(20, 95, 430, 320, (30, 41, 59))
+                fill(450, 95, w - 20, 320, (30, 41, 59))
+                fill(20, 335, w - 20, 430, (30, 41, 59))
+                fill(20, 445, w - 20, h - 20, (22, 78, 99))
+            elif template_name == "AMILO Planar":
+                fill(20, 95, 510, 360, (30, 41, 59))
+                fill(530, 95, w - 20, 360, (30, 41, 59))
+                fill(20, 375, w - 20, h - 20, (22, 78, 99))
+            elif template_name == "AMILO SPECT":
+                fill(20, 95, w - 20, 320, (30, 41, 59))
+                fill(20, 335, w - 20, 430, (30, 41, 59))
+                fill(20, 445, w - 20, h - 20, (22, 78, 99))
+            else:  # AMILO Básico
+                fill(20, 95, w - 20, 300, (30, 41, 59))
+                fill(20, 315, w - 20, 415, (30, 41, 59))
+                fill(20, 430, w - 20, h - 20, (22, 78, 99))
+
+            qimg = QImage(canvas.data, w, h, canvas.strides[0], QImage.Format.Format_RGB888)
+            pix = QPixmap.fromImage(qimg.copy())
+            preview_label.setPixmap(
+                pix.scaled(preview_label.width(), preview_label.height(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            )
+
+        def _refresh_preview():
+            display_tpl = _template_display_name(str(combo.currentData() or "auto"))
+            _draw_preview(display_tpl)
+
+        combo.currentIndexChanged.connect(lambda _=0: _refresh_preview())
+        _refresh_preview()
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        btn_apply = QPushButton("Aplicar selección")
+        btn_cancel = QPushButton("Cancelar")
+        btns.addWidget(btn_cancel)
+        btns.addWidget(btn_apply)
+        lay.addLayout(btns)
+
+        btn_cancel.clicked.connect(dlg.reject)
+
+        def _apply_and_close():
+            selected = str(combo.currentData() or "auto")
+            idx_local = self._report_template_combo.findData(selected)
+            if idx_local >= 0:
+                self._report_template_combo.setCurrentIndex(idx_local)
+                self._persist_user_state()
+            dlg.accept()
+
+        btn_apply.clicked.connect(_apply_and_close)
+        dlg.exec()
+
+        def _open_report_template_matrix(self):
+                """Muestra matriz comparativa de escenarios vs plantilla automática y contenido."""
+                dlg = QDialog(self)
+                dlg.setWindowTitle("SINCRO — Matriz de escenarios AMILO")
+                dlg.resize(980, 620)
+                lay = QVBoxLayout(dlg)
+
+                info = QLabel(
+                        "Matriz de referencia para entender qué plantilla usa AUTO y qué secciones se incluyen/omiten "
+                        "según cobertura del estudio."
+                )
+                info.setWordWrap(True)
+                info.setStyleSheet("color:#cbd5e1; font-size:12px;")
+                lay.addWidget(info)
+
+                scenarios = [
+                        ("Solo planar", True, False, False),
+                        ("Planar + SPECT", True, True, False),
+                        ("Planar + SPECT/CT", True, True, True),
+                        ("Solo SPECT", False, True, False),
+                        ("Solo SPECT/CT", False, True, True),
+                ]
+
+                rows_html = []
+                for name, has_planar, has_spect, has_ct in scenarios:
+                        if has_planar and has_spect:
+                                tpl = "AMILO Clínico Completo"
+                        elif has_planar:
+                                tpl = "AMILO Planar"
+                        elif has_spect:
+                                tpl = "AMILO SPECT"
+                        else:
+                                tpl = "AMILO Básico"
+                        profile = self._template_profile(tpl, has_planar, has_spect, has_ct)
+                        includes = "<br>• " + "<br>• ".join(str(x) for x in profile.get("includes", [])) if profile.get("includes") else "—"
+                        omits = "<br>• " + "<br>• ".join(str(x) for x in profile.get("omits", [])) if profile.get("omits") else "—"
+                        rows_html.append(
+                                f"""
+                                <tr>
+                                    <td><b>{name}</b></td>
+                                    <td>{'Sí' if has_planar else 'No'}</td>
+                                    <td>{'Sí' if has_spect else 'No'}</td>
+                                    <td>{'Sí' if has_ct else 'No'}</td>
+                                    <td><b>{tpl}</b><br><span style='color:#94a3b8'>{profile.get('focus','')}</span></td>
+                                    <td>{includes}</td>
+                                    <td>{omits}</td>
+                                </tr>
+                                """
+                        )
+
+                html = f"""
+                <html><body style='background:#0f172a; color:#e2e8f0; font-family:Segoe UI, Arial;'>
+                <table style='width:100%; border-collapse:collapse; font-size:12px;'>
+                    <thead>
+                        <tr style='background:#1e293b;'>
+                            <th style='border:1px solid #334155; padding:8px;'>Escenario</th>
+                            <th style='border:1px solid #334155; padding:8px;'>Planar</th>
+                            <th style='border:1px solid #334155; padding:8px;'>SPECT</th>
+                            <th style='border:1px solid #334155; padding:8px;'>CT</th>
+                            <th style='border:1px solid #334155; padding:8px;'>AUTO</th>
+                            <th style='border:1px solid #334155; padding:8px;'>Incluye</th>
+                            <th style='border:1px solid #334155; padding:8px;'>Omite</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {''.join(rows_html)}
+                    </tbody>
+                </table>
+                <p style='margin-top:10px; color:#94a3b8;'>
+                    Nota: si el usuario selecciona una plantilla manual (no AUTO), esa selección fuerza el perfil.
+                </p>
+                </body></html>
+                """
+
+                text = QTextEdit()
+                text.setReadOnly(True)
+                text.setHtml(html)
+                text.setStyleSheet("background:#0b1220; border:1px solid #334155; color:#e2e8f0;")
+                lay.addWidget(text, 1)
+
+                row_btn = QHBoxLayout()
+                row_btn.addStretch(1)
+                btn_close = QPushButton("Cerrar")
+                btn_close.clicked.connect(dlg.accept)
+                row_btn.addWidget(btn_close)
+                lay.addLayout(row_btn)
+
+                dlg.exec()
+
+    def _build_report_context(self) -> dict:
+        """Resume la cobertura de datos para elegir plantilla de informe."""
+        has_planar_loaded = any(
+            self._time_images.get(t, {}).get("ap") is not None for t in ("1h", "3h")
+        ) or (self._original_image is not None)
+        has_planar_metrics = bool(self._washout_data)
+        bridge = dict(self._linked_spect_ct or {})
+        workflow = str(bridge.get("workflow_tag") or "").strip().lower()
+        has_spect = bool(bridge) and workflow in ("perf_spect_ct", "amylo")
+        has_ct = bool(str(bridge.get("ct_path") or "").strip())
+
+        auto_template = ""
+        if has_planar_loaded and has_spect:
+            template_name = "AMILO Clínico Completo"
+        elif has_planar_loaded:
+            template_name = "AMILO Planar"
+        elif has_spect:
+            template_name = "AMILO SPECT"
+        else:
+            template_name = "AMILO Básico"
+
+        auto_template = template_name
+        selected_template = str(self._report_template_combo.currentData() or "auto") if hasattr(self, "_report_template_combo") else "auto"
+        if selected_template != "auto":
+            template_name = selected_template
+
+        al_status_code = str(self._al_status_combo.currentData() or "pending") if hasattr(self, "_al_status_combo") else "pending"
+        flc_code = str(self._free_light_chain_combo.currentData() or "unknown") if hasattr(self, "_free_light_chain_combo") else "unknown"
+        ifx_code = str(self._immunofix_combo.currentData() or "unknown") if hasattr(self, "_immunofix_combo") else "unknown"
+
+        return {
+            "template_name": template_name,
+            "auto_template": auto_template,
+            "selected_template": selected_template,
+            "has_planar_loaded": has_planar_loaded,
+            "has_planar_metrics": has_planar_metrics,
+            "has_spect": has_spect,
+            "has_ct": has_ct,
+            "bridge": bridge,
+            "al_status": self._al_status_text_from_code(al_status_code),
+            "free_light_chain": self._flc_text_from_code(flc_code),
+            "immunofixation": self._immunofix_text_from_code(ifx_code),
+            "template_profile": self._template_profile(template_name, has_planar_loaded, has_spect, has_ct),
+        }
+
+    @staticmethod
+    def _template_profile(template_name: str, has_planar_loaded: bool, has_spect: bool, has_ct: bool) -> dict:
+        """Describe perfil visual/funcional de plantilla para hacerla explícita en el informe."""
+        if template_name == "AMILO Clínico Completo":
+            return {
+                "slug": "completo",
+                "accent": "#2563eb",
+                "focus": "Integración multimodal planar + tomográfica",
+                "includes": [
+                    "Cobertura de estudio (Planar/SPECT/CT)",
+                    "Métricas planares (HMR/Perugini/Q_bone)",
+                    "Gráficos avanzados (histograma/washout)",
+                    "Métrica OAI opcional y cinética experimental (si disponible)",
+                    "Layout compuesto de imágenes",
+                ],
+                "omits": [],
+            }
+        if template_name == "AMILO Planar":
+            return {
+                "slug": "planar",
+                "accent": "#0ea5e9",
+                "focus": "Cuantificación planar y evolución temporal",
+                "includes": [
+                    "Métricas planares (HMR/Perugini/Q_bone)",
+                    "Gráficos avanzados (histograma/washout)",
+                    "Interpretación orientada a planar",
+                ],
+                "omits": [
+                    "Cobertura tomográfica detallada",
+                    "Layout compuesto tomográfico",
+                    "Bloques OAI/cinética experimental",
+                ],
+            }
+        if template_name == "AMILO SPECT":
+            modality = "SPECT/CT" if has_ct else ("SPECT" if has_spect else "Tomografía")
+            return {
+                "slug": "spect",
+                "accent": "#7c3aed",
+                "focus": f"Correlación topográfica {modality}",
+                "includes": [
+                    "Cobertura de estudio (Planar/SPECT/CT)",
+                    "Layout compuesto de imágenes",
+                    "Interpretación centrada en topografía miocardio vs blood pool",
+                ],
+                "omits": [
+                    "Métricas planares detalladas HMR/Perugini",
+                    "Gráficos de washout planar",
+                    "Bloques OAI/cinética experimental",
+                ],
+            }
+        return {
+            "slug": "basico",
+            "accent": "#64748b",
+            "focus": "Resumen clínico mínimo y trazabilidad",
+            "includes": [
+                "Datos de estudio y bloque AL",
+                "Cobertura resumida",
+                "Interpretación breve",
+            ],
+            "omits": [
+                "Detalle avanzado de métricas y gráficos",
+                "Bloques experimentales",
+            ],
+        }
+
+    def _select_report_output_dir(self):
+        """Selecciona carpeta de salida para informes PDF/HTML."""
+        start_dir = str(getattr(self, "_report_output_dir", "") or "")
+        if not start_dir or not os.path.isdir(start_dir):
+            start_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output_demo")
+        folder = QFileDialog.getExistingDirectory(self, "Carpeta de salida para informe", start_dir)
+        if not folder:
+            return
+        self._report_output_dir = str(folder)
+        self._persist_user_state()
 
     def _generate_report(self):
         """Genera el informe PDF + HTML de amiloidosis."""
-        if self._original_image is None or self._active_time not in self._washout_data:
+        report_ctx = self._build_report_context()
+        has_planar_metrics = bool(report_ctx.get("has_planar_metrics"))
+        has_spect = bool(report_ctx.get("has_spect"))
+
+        if not has_planar_metrics and not has_spect:
             QMessageBox.warning(
                 self, "SINCRO — Amyloidosis",
-                "Seleccioná y cuantificá una imagen AP antes de generar el informe."
+                "No hay datos suficientes para informe.\n"
+                "Necesitás al menos:\n"
+                "- Planar cuantificado (HMR), o\n"
+                "- Sesión SPECT/CT vinculada."
             )
             return
         try:
-            roi_h = ROICircle(
-                cy=self._roi_widget._rois[0]["cy"],
-                cx=self._roi_widget._rois[0]["cx"],
-                radius=self._roi_widget._rois[0]["radius"],
-            )
-            roi_m = ROICircle(
-                cy=self._roi_widget._rois[1]["cy"],
-                cx=self._roi_widget._rois[1]["cx"],
-                radius=self._roi_widget._rois[1]["radius"],
-            )
-            result = compute_hmr(self._original_image, roi_h, roi_m)
-            perugini = int(self._perugini_combo.currentData())
-            report_img = self.get_report_image()
+            result = None
+            perugini = None
+            report_img = None
+            if self._original_image is not None and has_planar_metrics:
+                roi_h = ROICircle(
+                    cy=self._roi_widget._rois[0]["cy"],
+                    cx=self._roi_widget._rois[0]["cx"],
+                    radius=self._roi_widget._rois[0]["radius"],
+                )
+                roi_m = ROICircle(
+                    cy=self._roi_widget._rois[1]["cy"],
+                    cx=self._roi_widget._rois[1]["cx"],
+                    radius=self._roi_widget._rois[1]["radius"],
+                )
+                result = compute_hmr(self._original_image, roi_h, roi_m)
+                perugini = int(self._perugini_combo.currentData())
+                report_img = self.get_report_image()
+
             # Obtener imagen compuesta del layout.
             composite_img = self.get_layout_composite_image()
-            output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output_demo")
+            output_dir = str(getattr(self, "_report_output_dir", "") or "")
+            if not output_dir:
+                output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output_demo")
             os.makedirs(output_dir, exist_ok=True)
             # Guardar imagen con ROIs.
-            img_path = os.path.join(output_dir, "amyloid_planar.png")
-            from PIL import Image
-            Image.fromarray(report_img).save(img_path, "PNG")
+            img_path = ""
+            if report_img is not None:
+                img_path = os.path.join(output_dir, "amyloid_planar.png")
+                from PIL import Image
+                Image.fromarray(report_img).save(img_path, "PNG")
             # Guardar imagen compuesta del layout.
             composite_path = ""
             if composite_img is not None:
                 composite_path = os.path.join(output_dir, "amyloid_layout_composite.png")
                 Image.fromarray(composite_img.astype(np.uint8)).save(composite_path, "PNG")
+            output_mode = str(self._report_output_combo.currentData() or "both")
+            paths_out = []
+            profile = dict(report_ctx.get("template_profile") or {})
+            suffix = str(profile.get("slug") or "basico")
+
             # PDF
-            pdf_path = os.path.join(output_dir, "informe_amyloid.pdf")
-            self._generate_pdf(pdf_path, img_path, composite_path, result, perugini)
+            pdf_path = os.path.join(output_dir, f"informe_amyloid_{suffix}.pdf")
+            if output_mode in ("both", "pdf"):
+                self._generate_pdf(pdf_path, img_path, composite_path, result, perugini, report_ctx)
+                paths_out.append(f"PDF: {pdf_path}")
+
             # HTML
-            html_path = os.path.join(output_dir, "informe_amyloid.html")
-            self._generate_html(html_path, img_path, composite_path, result, perugini)
+            html_path = os.path.join(output_dir, f"informe_amyloid_{suffix}.html")
+            if output_mode in ("both", "html"):
+                self._generate_html(html_path, img_path, composite_path, result, perugini, report_ctx)
+                paths_out.append(f"HTML: {html_path}")
+
             QMessageBox.information(
                 self, "SINCRO — Amyloidosis",
-                f"Informe generado:\nPDF: {pdf_path}\nHTML: {html_path}"
+                "Informe generado:\n" + "\n".join(paths_out)
             )
         except Exception as exc:
             QMessageBox.critical(self, "SINCRO — Amyloidosis", f"Error al generar informe:\n{exc}")
 
-    def _generate_pdf(self, pdf_path, img_path, composite_path, result, perugini):
+    def _generate_pdf(self, pdf_path, img_path, composite_path, result, perugini, report_ctx):
         """Genera el informe PDF de amiloidosis con bloques 1h/3h y gráficos."""
         import base64, io
         from PIL import Image as PILImage
@@ -2064,8 +2892,26 @@ class AmyloidWindow(QDialog):
         doc = SimpleDocTemplate(pdf_path, pagesize=A4, leftMargin=18*mm, rightMargin=18*mm, topMargin=16*mm, bottomMargin=16*mm)
         story = []
 
+        template_name = str(report_ctx.get("template_name") or "AMILO Básico")
+        profile = dict(report_ctx.get("template_profile") or {})
+        show_coverage = template_name in ("AMILO Clínico Completo", "AMILO SPECT", "AMILO Básico")
+        show_planar_blocks = template_name in ("AMILO Clínico Completo", "AMILO Planar", "AMILO Básico")
+        show_advanced_graphs = template_name in ("AMILO Clínico Completo", "AMILO Planar")
+        show_oai_and_kinetic = template_name == "AMILO Clínico Completo"
+        show_layout = template_name in ("AMILO Clínico Completo", "AMILO SPECT")
         story.append(Paragraph("SINCRO — Informe de Amiloidosis Cardíaca", title_style))
+        story.append(Paragraph(f"Plantilla: {template_name}", small_style))
         story.append(Paragraph("Análisis de captación miocárdica con Tc-99m PYP/DPD/HMDP", small_style))
+        focus = str(profile.get("focus") or "")
+        includes = list(profile.get("includes") or [])
+        omits = list(profile.get("omits") or [])
+        if focus:
+            story.append(Spacer(1, 1.2*mm))
+            story.append(Paragraph(f"<b>Perfil:</b> {focus}", body_style))
+        if includes:
+            story.append(Paragraph("<b>Incluye:</b> " + " · ".join(includes), small_style))
+        if omits:
+            story.append(Paragraph("<b>Omite:</b> " + " · ".join(omits), small_style))
         story.append(Spacer(1, 2*mm))
         story.append(HRFlowable(width="100%", thickness=1.2, color=DARK_BLUE))
         story.append(Spacer(1, 4*mm))
@@ -2092,8 +2938,52 @@ class AmyloidWindow(QDialog):
         story.append(info_table)
         story.append(Spacer(1, 4*mm))
 
+        # Cobertura del estudio + bloque AL obligatorio.
+        bridge = dict(report_ctx.get("bridge") or {})
+        bridge_profile = dict(bridge.get("profile") or {})
+        modality_rows = [
+            ["Planar cargado", "Sí" if report_ctx.get("has_planar_loaded") else "No"],
+            ["Planar cuantificado (HMR)", "Sí" if report_ctx.get("has_planar_metrics") else "No"],
+            ["SPECT vinculado", "Sí" if report_ctx.get("has_spect") else "No"],
+            ["CT vinculado", "Sí" if report_ctx.get("has_ct") else "No"],
+            ["Workflow puente", str(bridge.get("workflow_tag") or "N/D")],
+            ["Serie/Protocolo puente", str(bridge_profile.get("series_description") or bridge_profile.get("protocol") or "N/D")],
+        ]
+        if show_coverage:
+            story.append(Paragraph("2. Cobertura de estudio", section_style))
+            mod_table = Table(modality_rows, colWidths=[60*mm, 106*mm])
+            mod_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (0, -1), LIGHT_BLUE),
+                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cccccc")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 3*mm),
+            ]))
+            story.append(mod_table)
+            story.append(Spacer(1, 3*mm))
+
+        story.append(Paragraph("3. Exclusión de AL (obligatorio para confirmar ATTR-CM)", section_style))
+        al_table = Table([
+            ["Cadenas livianas libres", str(report_ctx.get("free_light_chain") or "No informado")],
+            ["Inmunofijación sérica/urinaria", str(report_ctx.get("immunofixation") or "No informada")],
+            ["Estado AL", str(report_ctx.get("al_status") or "PENDIENTE / NO INFORMADO")],
+        ], colWidths=[60*mm, 106*mm])
+        al_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (0, -1), LIGHT_BLUE),
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cccccc")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3*mm),
+        ]))
+        story.append(al_table)
+        story.append(Paragraph(
+            "La gammagrafía no debe usarse de forma aislada para confirmar ATTR-CM si AL no fue excluida.",
+            small_style,
+        ))
+        story.append(Spacer(1, 4*mm))
+
         # Imagen con ROIs (solo si no hay bloques temporales)
-        if not self._washout_data:
+        if show_planar_blocks and img_path and os.path.isfile(img_path) and not self._washout_data:
             story.append(Paragraph("2. Imagen planar con ROIs", section_style))
             img = ImageReader(img_path)
             iw, ih = img.getSize()
@@ -2104,6 +2994,8 @@ class AmyloidWindow(QDialog):
         # Bloques por tiempo (1h, 3h)
         sec_num = 2
         for time_label in ("1h", "3h"):
+            if not show_planar_blocks:
+                continue
             data = self._washout_data.get(time_label)
             if data is None:
                 continue
@@ -2157,7 +3049,7 @@ class AmyloidWindow(QDialog):
             sec_num += 1
 
         # Si no hubo bloques temporales, mostrar resultado único
-        if not self._washout_data:
+        if show_planar_blocks and not self._washout_data and result is not None:
             story.append(Paragraph("3. Métrica principal: HMR", section_style))
             hmr_data = [
                 ["Métrica", "Valor", "Referencia"],
@@ -2181,7 +3073,7 @@ class AmyloidWindow(QDialog):
             sec_num += 1
 
         # Perugini visual strip
-        perugini_strip_b64 = self._generate_perugini_strip_b64(perugini)
+        perugini_strip_b64 = self._generate_perugini_strip_b64(perugini) if perugini is not None else ""
         if perugini_strip_b64:
             strip_buf = io.BytesIO(base64.b64decode(perugini_strip_b64))
             strip_reader = ImageReader(strip_buf)
@@ -2193,7 +3085,7 @@ class AmyloidWindow(QDialog):
             sec_num += 1
 
         # Histograma
-        hist_b64 = self._generate_roi_histogram_b64()
+        hist_b64 = self._generate_roi_histogram_b64() if show_advanced_graphs else ""
         if hist_b64:
             hist_buf = io.BytesIO(base64.b64decode(hist_b64))
             hist_reader = ImageReader(hist_buf)
@@ -2206,7 +3098,7 @@ class AmyloidWindow(QDialog):
             sec_num += 1
 
         # Bar chart corazón vs mediastino
-        comparison_b64 = self._generate_comparison_bar_b64()
+        comparison_b64 = self._generate_comparison_bar_b64() if show_advanced_graphs else None
         if comparison_b64:
             comp_buf = io.BytesIO(base64.b64decode(comparison_b64))
             comp_reader = ImageReader(comp_buf)
@@ -2218,7 +3110,7 @@ class AmyloidWindow(QDialog):
             sec_num += 1
 
         # Curva de washout
-        washout_b64 = self._generate_washout_curve_b64()
+        washout_b64 = self._generate_washout_curve_b64() if show_advanced_graphs else None
         if washout_b64:
             washout_buf = io.BytesIO(base64.b64decode(washout_b64))
             washout_reader = ImageReader(washout_buf)
@@ -2229,8 +3121,40 @@ class AmyloidWindow(QDialog):
             story.append(Spacer(1, 3*mm))
             sec_num += 1
 
+        # Métrica opcional OAI (si ambos tiempos fueron cuantificados).
+        if show_oai_and_kinetic and "1h" in self._oai_washout_data and "3h" in self._oai_washout_data:
+            h1 = float(self._oai_washout_data["1h"].get("heart_counts", 0.0))
+            h3 = float(self._oai_washout_data["3h"].get("heart_counts", 0.0))
+            if h1 > 0:
+                ret = h3 / h1
+                wo = (1.0 - ret) * 100.0
+                story.append(Paragraph(f"{sec_num}. Washout OAI opcional (ROI corazón)", section_style))
+                oai_data = [
+                    ["Métrica", "Valor", "Nota"],
+                    ["Cuentas OAI 1h (norm.)", f"{h1:.4f}", "cps corregidas por decaimiento"],
+                    ["Cuentas OAI 3h (norm.)", f"{h3:.4f}", "cps corregidas por decaimiento"],
+                    ["Retención OAI 3h/1h", f"{ret:.3f}", "Opcional"],
+                    ["Washout OAI", f"{wo:+.1f}%", "Opcional · no reemplaza HMR AP"],
+                ]
+                oai_table = Table(oai_data, colWidths=[55*mm, 35*mm, 76*mm])
+                oai_table.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, 0), DARK_BLUE),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 9),
+                    ("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cccccc")),
+                ]))
+                story.append(oai_table)
+                story.append(Paragraph(
+                    "Métrica auxiliar. Interpretar junto con AP/HMR y SPECT. "
+                    "No sustituye la confirmación topográfica miocardio vs blood pool.",
+                    small_style,
+                ))
+                story.append(Spacer(1, 3*mm))
+                sec_num += 1
+
         # Análisis temporal experimental
-        if self._kinetic_result is not None:
+        if show_oai_and_kinetic and self._kinetic_result is not None:
             km = self._kinetic_result
             story.append(Paragraph(f"{sec_num}. Análisis temporal PYP — EXPERIMENTAL", section_style))
             kinetic_data = [
@@ -2260,7 +3184,7 @@ class AmyloidWindow(QDialog):
             sec_num += 1
 
         # Layout compuesto
-        if composite_path and os.path.isfile(composite_path):
+        if show_layout and composite_path and os.path.isfile(composite_path):
             story.append(Paragraph(f"{sec_num}. Layout completo", section_style))
             composite = ImageReader(composite_path)
             cw, ch = composite.getSize()
@@ -2271,7 +3195,7 @@ class AmyloidWindow(QDialog):
 
         # Interpretación
         story.append(Paragraph(f"{sec_num}. Interpretación clínica", section_style))
-        if "1h" in self._washout_data and "3h" in self._washout_data:
+        if show_planar_blocks and "1h" in self._washout_data and "3h" in self._washout_data:
             h1 = self._washout_data["1h"]["hmr"]
             h3 = self._washout_data["3h"]["hmr"]
             interp = f"""
@@ -2282,13 +3206,19 @@ class AmyloidWindow(QDialog):
             La interpretación debe integrarse con laboratorio (cadenas livianas libres, proteínas monoclonales)
             y contexto clínico. El Perugini score ≥2 en presencia de gammapatía monoclonal ausente confirma ATTR.
             """
-        else:
+        elif show_planar_blocks and result is not None:
             interp = f"""
             El estudio muestra HMR de {result.hmr:.2f}. <b>{result.classification}</b><br/><br/>
             Si el resultado es equívoco (HMR 1.0–1.5), considerar imagen SPECT/CT o repetir planar a 3 horas
             para descartar pool sanguíneo residual.<br/><br/>
             La interpretación debe integrarse con laboratorio (cadenas livianas libres, proteínas monoclonales)
             y contexto clínico. El Perugini score ≥2 en presencia de gammapatía monoclonal ausente confirma ATTR.
+            """
+        else:
+            interp = """
+            No se dispone de cuantificación planar (HMR) en este estudio.
+            La interpretación se sustenta en disponibilidad tomográfica (SPECT/SPECT-CT) y contexto clínico.
+            Es obligatorio completar exclusión de AL (cadenas livianas libres e inmunofijación) antes de confirmar ATTR-CM.
             """
         story.append(Paragraph(interp, body_style))
         story.append(Spacer(1, 4*mm))
@@ -2594,69 +3524,87 @@ class AmyloidWindow(QDialog):
         buf.seek(0)
         return base64.b64encode(buf.read()).decode('ascii')
 
-    def _generate_html(self, html_path, img_path, composite_path, result, perugini):
-                """Genera el informe HTML con bloques para cada tiempo cuantificado."""
-                import base64
-                import io
-                from html import escape
-                from PIL import Image as PILImage
+    def _generate_html(self, html_path, img_path, composite_path, result, perugini, report_ctx):
+        """Genera el informe HTML con bloques para cada tiempo cuantificado."""
+        import base64
+        import io
+        from html import escape
+        from PIL import Image as PILImage
 
-                with open(img_path, "rb") as f:
-                        img_b64 = base64.b64encode(f.read()).decode("ascii")
+        img_b64 = ""
+        if img_path and os.path.isfile(img_path):
+            with open(img_path, "rb") as f:
+                img_b64 = base64.b64encode(f.read()).decode("ascii")
 
-                hist_b64 = self._generate_roi_histogram_b64()
-                washout_b64 = self._generate_washout_curve_b64()
-                comparison_b64 = self._generate_comparison_bar_b64()
-                perugini_strip_b64 = self._generate_perugini_strip_b64(perugini)
-                patient = escape(str(self._metadata["patient"]))
-                date = escape(str(self._metadata["date"]))
-                series = escape(str(self._metadata["series"]))
+        hist_b64 = self._generate_roi_histogram_b64()
+        washout_b64 = self._generate_washout_curve_b64()
+        comparison_b64 = self._generate_comparison_bar_b64()
+        perugini_strip_b64 = self._generate_perugini_strip_b64(perugini) if perugini is not None else ""
+        patient = escape(str(self._metadata["patient"]))
+        date = escape(str(self._metadata["date"]))
+        series = escape(str(self._metadata["series"]))
+        template_name_raw = str(report_ctx.get("template_name") or "AMILO Básico")
+        template_name = escape(template_name_raw)
+        profile = dict(report_ctx.get("template_profile") or {})
+        profile_focus = escape(str(profile.get("focus") or ""))
+        profile_includes = "".join(f"<li>{escape(str(x))}</li>" for x in list(profile.get("includes") or []))
+        profile_omits = "".join(f"<li>{escape(str(x))}</li>" for x in list(profile.get("omits") or []))
+        profile_accent = str(profile.get("accent") or "#38bdf8")
+        show_coverage = template_name_raw in ("AMILO Clínico Completo", "AMILO SPECT", "AMILO Básico")
+        show_planar_blocks = template_name_raw in ("AMILO Clínico Completo", "AMILO Planar", "AMILO Básico")
+        show_advanced_graphs = template_name_raw in ("AMILO Clínico Completo", "AMILO Planar")
+        show_oai_and_kinetic = template_name_raw == "AMILO Clínico Completo"
+        show_layout = template_name_raw in ("AMILO Clínico Completo", "AMILO SPECT")
+        bridge = dict(report_ctx.get("bridge") or {})
+        bridge_profile = dict(bridge.get("profile") or {})
 
-                temporal_blocks = []
-                temporal_hmr = {}
-                for time_label in ("1h", "3h"):
-                        data = self._washout_data.get(time_label)
-                        has_ap = self._time_images.get(time_label, {}).get("ap") is not None
-                        if data is None:
-                                if has_ap:
-                                        temporal_blocks.append(f"""
+        temporal_blocks = []
+        temporal_hmr = {}
+        for time_label in ("1h", "3h"):
+            if not show_planar_blocks:
+                continue
+            data = self._washout_data.get(time_label)
+            has_ap = self._time_images.get(time_label, {}).get("ap") is not None
+            if data is None:
+                if has_ap:
+                    temporal_blocks.append(f"""
 <section class="card">
     <h2>Resultados {time_label}</h2>
     <p class="pending">Imagen AP cargada; cuantificación HMR pendiente.</p>
 </section>""")
-                                continue
+                continue
 
-                        hmr = float(data["hmr"])
-                        heart_counts = float(data["heart_counts"])
-                        mediastinum_counts = float(data["mediastinum_counts"])
-                        classification = data.get("classification") or (
-                                "POSITIVO" if hmr >= 1.5 else ("EQUÍVOCO" if hmr >= 1.0 else "NEGATIVO")
-                        )
-                        color_class = "positive" if hmr >= 1.5 else ("equivocal" if hmr >= 1.0 else "negative")
-                        perugini_time = self._perugini_by_time.get(time_label, perugini)
-                        perugini_confirmed = bool(self._perugini_confirmed_by_time.get(time_label, False))
-                        perugini_state_text = "Final (confirmado manualmente)" if perugini_confirmed else "Sugerido por HMR"
-                        q_bone_val = data.get("q_bone")
-                        q_bone_text = f"{q_bone_val:.2f}" if q_bone_val is not None else "N/D"
-                        q_bone_mode = str(data.get("q_bone_mode", "auto"))
-                        q_bone_mode_text = "manual (ROI esternón/costilla)" if q_bone_mode == "manual" else "auto (estimado)"
-                        temporal_hmr[time_label] = hmr
+            hmr = float(data["hmr"])
+            heart_counts = float(data["heart_counts"])
+            mediastinum_counts = float(data["mediastinum_counts"])
+            classification = data.get("classification") or (
+                "POSITIVO" if hmr >= 1.5 else ("EQUÍVOCO" if hmr >= 1.0 else "NEGATIVO")
+            )
+            color_class = "positive" if hmr >= 1.5 else ("equivocal" if hmr >= 1.0 else "negative")
+            perugini_time = self._perugini_by_time.get(time_label, perugini)
+            perugini_confirmed = bool(self._perugini_confirmed_by_time.get(time_label, False))
+            perugini_state_text = "Final (confirmado manualmente)" if perugini_confirmed else "Sugerido por HMR"
+            q_bone_val = data.get("q_bone")
+            q_bone_text = f"{q_bone_val:.2f}" if q_bone_val is not None else "N/D"
+            q_bone_mode = str(data.get("q_bone_mode", "auto"))
+            q_bone_mode_text = "manual (ROI esternón/costilla)" if q_bone_mode == "manual" else "auto (estimado)"
+            temporal_hmr[time_label] = hmr
 
-                        roi_html = '<div class="roi-placeholder">Imagen ROI no disponible</div>'
-                        roi_image = self._processed_images.get(time_label, {}).get("roi")
-                        if roi_image is not None:
-                                roi_array = np.asarray(roi_image)
-                                if roi_array.dtype != np.uint8:
-                                        roi_array = np.clip(roi_array, 0, 255).astype(np.uint8)
-                                roi_buffer = io.BytesIO()
-                                PILImage.fromarray(roi_array).save(roi_buffer, format="PNG")
-                                roi_b64 = base64.b64encode(roi_buffer.getvalue()).decode("ascii")
-                                roi_html = (
-                                        f'<img class="report-image" src="data:image/png;base64,{roi_b64}" '
-                                        f'alt="AP cuantificada {time_label}">'
-                                )
+            roi_html = '<div class="roi-placeholder">Imagen ROI no disponible</div>'
+            roi_image = self._processed_images.get(time_label, {}).get("roi")
+            if roi_image is not None:
+                roi_array = np.asarray(roi_image)
+                if roi_array.dtype != np.uint8:
+                    roi_array = np.clip(roi_array, 0, 255).astype(np.uint8)
+                roi_buffer = io.BytesIO()
+                PILImage.fromarray(roi_array).save(roi_buffer, format="PNG")
+                roi_b64 = base64.b64encode(roi_buffer.getvalue()).decode("ascii")
+                roi_html = (
+                    f'<img class="report-image" src="data:image/png;base64,{roi_b64}" '
+                    f'alt="AP cuantificada {time_label}">'
+                )
 
-                        temporal_blocks.append(f"""
+            temporal_blocks.append(f"""
 <section class="card">
     <h2>Resultados {time_label}</h2>
     <div class="result-grid">
@@ -2673,28 +3621,17 @@ class AmyloidWindow(QDialog):
                 <tr><td>Perugini estado</td><td>{escape(perugini_state_text)}</td><td>Control clínico</td></tr>
                 <tr><td>Q_bone (calidad ósea)</td><td>{escape(q_bone_text)}</td><td>{escape(q_bone_mode_text)}</td></tr>
             </table>
-            <p style="font-size:0.85rem; color:#94a3b8; margin-top:8px;">
-                <strong>Índice Q_bone:</strong> razón entre cuentas promedio en ROI esternal y ROI costal,
-                calculada como <code>Q_bone = mean(sternum) / mean(rib)</code>.
-                Se usa como control interno de homogeneidad de captación ósea y posible contaminación de fondo.
-                Referencia práctica: valores cercanos a 1 sugieren distribución ósea homogénea;
-                desviaciones marcadas (&gt;1 o &lt;1) indican predominio esternal o costal.
-                <em>No es criterio diagnóstico de amiloidosis por sí solo.</em>
-            </p>
         </div>
     </div>
 </section>""")
 
-                if temporal_blocks:
-                        results_html = "".join(temporal_blocks)
-                        roi_html = ""
-                else:
-                        current_hmr = float(result.hmr)
-                        color_class = (
-                                "positive" if current_hmr >= 1.5
-                                else ("equivocal" if current_hmr >= 1.0 else "negative")
-                        )
-                        results_html = f"""
+        if temporal_blocks:
+            results_html = "".join(temporal_blocks)
+            roi_html = ""
+        elif show_planar_blocks and result is not None:
+            current_hmr = float(result.hmr)
+            color_class = "positive" if current_hmr >= 1.5 else ("equivocal" if current_hmr >= 1.0 else "negative")
+            results_html = f"""
 <section class="card">
     <h2>Resultados</h2>
     <div class="metric {color_class}">{current_hmr:.2f}</div>
@@ -2707,61 +3644,86 @@ class AmyloidWindow(QDialog):
         <tr><td>Perugini</td><td>{escape(str(perugini))}</td><td>0–3</td></tr>
     </table>
 </section>"""
-                        roi_html = f"""
+            roi_html = f"""
 <section class="card">
     <h2>Imagen planar con ROIs</h2>
     <img class="report-image" src="data:image/png;base64,{img_b64}" alt="Imagen planar con ROIs">
 </section>"""
+        else:
+            results_html = """
+<section class="card">
+    <h2>Resultados</h2>
+    <p class="pending">Sin cuantificación planar (HMR) en este estudio.</p>
+    <p>Se prioriza correlación tomográfica SPECT/SPECT-CT y contexto clínico.</p>
+</section>"""
+            roi_html = ""
 
-
-                layout_html = ""
-                if composite_path and os.path.isfile(composite_path):
-                        with open(composite_path, "rb") as f:
-                                composite_b64 = base64.b64encode(f.read()).decode("ascii")
-                        layout_html = f"""
+        layout_html = ""
+        if show_layout and composite_path and os.path.isfile(composite_path):
+            with open(composite_path, "rb") as f:
+                composite_b64 = base64.b64encode(f.read()).decode("ascii")
+            layout_html = f"""
 <section class="card">
     <h2>Layout completo</h2>
     <img class="report-image" src="data:image/png;base64,{composite_b64}" alt="Layout completo">
 </section>"""
 
-                histogram_html = ""
-                if hist_b64:
-                        histogram_html = f"""
+        histogram_html = ""
+        if show_advanced_graphs and hist_b64:
+            histogram_html = f"""
 <section class="card">
     <h2>Distribución de cuentas ROI cardíaco</h2>
     <img class="report-image" src="data:image/png;base64,{hist_b64}" alt="Histograma ROI cardíaco">
-    <p style="font-size:0.85rem; color:#94a3b8; margin-top:8px;">La distribución de intensidades dentro del ROI cardíaco permite evaluar la homogeneidad de la captación. Una cola derecha (asimetría positiva) sugiere posible pool sanguíneo residual. Una distribución simétrica indica captación miocárdica homogénea.</p>
 </section>"""
 
-                comparison_html = ""
-                if comparison_b64:
-                        comparison_html = f"""
+        comparison_html = ""
+        if show_advanced_graphs and comparison_b64:
+            comparison_html = f"""
 <section class="card">
     <h2>Cuentas corazón vs mediastino</h2>
     <img class="report-image" src="data:image/png;base64,{comparison_b64}" alt="Comparación cuentas">
-    <p style="font-size:0.85rem; color:#94a3b8; margin-top:8px;">Comparación directa de cuentas promedio entre el ROI cardíaco y el mediastinal. La diferencia justifica el valor de HMR calculado.</p>
 </section>"""
 
-                perugini_strip_html = ""
-                if perugini_strip_b64:
-                        perugini_strip_html = f"""
+        perugini_strip_html = ""
+        if perugini_strip_b64:
+            perugini_strip_html = f"""
 <section class="card">
     <h2>Escala Perugini visual</h2>
     <img class="report-image" src="data:image/png;base64,{perugini_strip_b64}" alt="Perugini visual">
 </section>"""
 
-                washout_html = ""
-                if washout_b64:
-                        washout_html = f"""
+        washout_html = ""
+        if show_advanced_graphs and washout_b64:
+            washout_html = f"""
 <section class="card">
     <h2>Curva de washout (1h vs 3h)</h2>
     <img class="report-image" src="data:image/png;base64,{washout_b64}" alt="Curva de washout">
 </section>"""
 
-                kinetic_html = ""
-                if self._kinetic_result is not None:
-                        km = self._kinetic_result
-                        kinetic_html = f"""
+        oai_optional_html = ""
+        if show_oai_and_kinetic and "1h" in self._oai_washout_data and "3h" in self._oai_washout_data:
+            h1 = float(self._oai_washout_data["1h"].get("heart_counts", 0.0))
+            h3 = float(self._oai_washout_data["3h"].get("heart_counts", 0.0))
+            if h1 > 0:
+                ret = h3 / h1
+                wo = (1.0 - ret) * 100.0
+                oai_optional_html = f"""
+<section class="card">
+    <h2>Washout OAI opcional (ROI corazón)</h2>
+    <table>
+        <tr><th>Métrica</th><th>Valor</th><th>Nota</th></tr>
+        <tr><td>Cuentas OAI 1h (norm.)</td><td>{h1:.4f}</td><td>cps corregidas por decaimiento</td></tr>
+        <tr><td>Cuentas OAI 3h (norm.)</td><td>{h3:.4f}</td><td>cps corregidas por decaimiento</td></tr>
+        <tr><td>Retención OAI 3h/1h</td><td>{ret:.3f}</td><td>Opcional</td></tr>
+        <tr><td>Washout OAI</td><td>{wo:+.1f}%</td><td>Opcional · no reemplaza HMR AP</td></tr>
+    </table>
+    <p style="font-size:.85rem;color:#94a3b8;">Métrica auxiliar. Interpretar junto con AP/HMR y SPECT para evitar sesgo por blood pool/proyección.</p>
+</section>"""
+
+        kinetic_html = ""
+        if show_oai_and_kinetic and self._kinetic_result is not None:
+            km = self._kinetic_result
+            kinetic_html = f"""
 <section class="card">
     <h2>Análisis temporal PYP — EXPERIMENTAL</h2>
     <p class="pending"><strong>No diagnóstico / no terapéutico.</strong> No subtipifica ATTR/AL.</p>
@@ -2773,21 +3735,47 @@ class AmyloidWindow(QDialog):
         <tr><td>HMR temporal 3h</td><td>{km.hmr_3h:.2f}</td></tr>
         <tr><td>ΔHMR</td><td>{km.hmr_change:+.2f}</td></tr>
     </table>
-    <p style="font-size:.85rem;color:#94a3b8;">Las imágenes se normalizan a cuentas por segundo y se corrigen por decaimiento físico de Tc-99m. El método describe retención y lavado; no identifica de forma validada amiloide, hueso o subtipo ATTR/AL.</p>
 </section>"""
 
-                if "1h" in temporal_hmr and "3h" in temporal_hmr:
-                        interpretation_summary = (
-                                f'HMR 1h = {temporal_hmr["1h"]:.2f} y '
-                                f'HMR 3h = {temporal_hmr["3h"]:.2f}.'
-                        )
-                else:
-                        interpretation_summary = (
-                                f'HMR = {float(result.hmr):.2f}. '
-                                f'<strong>{escape(str(result.classification))}</strong>'
-                        )
+        if show_planar_blocks and "1h" in temporal_hmr and "3h" in temporal_hmr:
+            interpretation_summary = f'HMR 1h = {temporal_hmr["1h"]:.2f} y HMR 3h = {temporal_hmr["3h"]:.2f}.'
+        elif show_planar_blocks and result is not None:
+            interpretation_summary = f'HMR = {float(result.hmr):.2f}. <strong>{escape(str(result.classification))}</strong>'
+        else:
+            interpretation_summary = (
+                'Sin HMR disponible. Confirmar miocardio vs blood pool en SPECT/SPECT-CT '
+                'y completar exclusión de AL antes de concluir ATTR-CM.'
+            )
 
-                html = f"""<!DOCTYPE html>
+        study_coverage_html = f"""
+<section class="card">
+    <h2>Cobertura de estudio</h2>
+    <table>
+        <tr><th>Ítem</th><th>Estado</th></tr>
+        <tr><td>Planar cargado</td><td>{'Sí' if report_ctx.get('has_planar_loaded') else 'No'}</td></tr>
+        <tr><td>Planar cuantificado (HMR)</td><td>{'Sí' if report_ctx.get('has_planar_metrics') else 'No'}</td></tr>
+        <tr><td>SPECT vinculado</td><td>{'Sí' if report_ctx.get('has_spect') else 'No'}</td></tr>
+        <tr><td>CT vinculado</td><td>{'Sí' if report_ctx.get('has_ct') else 'No'}</td></tr>
+        <tr><td>Workflow puente</td><td>{escape(str(bridge.get('workflow_tag') or 'N/D'))}</td></tr>
+        <tr><td>Serie/Protocolo puente</td><td>{escape(str(bridge_profile.get('series_description') or bridge_profile.get('protocol') or 'N/D'))}</td></tr>
+    </table>
+</section>"""
+        if not show_coverage:
+            study_coverage_html = ""
+
+        al_block_html = f"""
+<section class="card">
+    <h2>Exclusión de AL (obligatorio para confirmar ATTR-CM)</h2>
+    <table>
+        <tr><th>Ítem</th><th>Estado</th></tr>
+        <tr><td>Cadenas livianas libres</td><td>{escape(str(report_ctx.get('free_light_chain') or 'No informado'))}</td></tr>
+        <tr><td>Inmunofijación sérica/urinaria</td><td>{escape(str(report_ctx.get('immunofixation') or 'No informada'))}</td></tr>
+        <tr><td>Estado AL</td><td>{escape(str(report_ctx.get('al_status') or 'PENDIENTE / NO INFORMADO'))}</td></tr>
+    </table>
+    <p style="font-size:.85rem;color:#94a3b8;">La gammagrafía no debe usarse de forma aislada para confirmar ATTR-CM si AL no fue excluida.</p>
+</section>"""
+
+        html = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
@@ -2815,6 +3803,9 @@ table {{ width:100%; border-collapse:collapse; }}
 th {{ padding:9px; background:#1a3a5c; color:#f8fafc; text-align:left; }}
 td {{ padding:9px; border-bottom:1px solid #475569; }}
 .footer {{ padding:16px; color:#94a3b8; font-size:.8rem; text-align:center; border-top:1px solid #475569; }}
+.template-card {{ margin:16px 0; padding:14px; background:#0f172a; border:1px solid {profile_accent}; border-radius:10px; }}
+.template-card h3 {{ margin:0 0 8px; color:{profile_accent}; font-size:1rem; }}
+.template-card ul {{ margin:6px 0 0 18px; color:#cbd5e1; font-size:.9rem; }}
 @media (max-width:700px) {{
     .report {{ width:min(100% - 20px,980px); padding:10px 0; }}
     .header,.card {{ padding:16px; }}
@@ -2828,8 +3819,17 @@ td {{ padding:9px; border-bottom:1px solid #475569; }}
 <header class="header">
     <h1>SINCRO</h1>
     <div class="subtitle">Informe de Amiloidosis Cardíaca</div>
+    <div class="subtitle">Plantilla: {template_name}</div>
     <div class="patient-data">Paciente: {patient} · Fecha: {date} · Serie: {series}</div>
 </header>
+<section class="template-card">
+    <h3>Perfil de plantilla</h3>
+    <p>{profile_focus}</p>
+    {f"<p><b>Incluye</b></p><ul>{profile_includes}</ul>" if profile_includes else ""}
+    {f"<p style='margin-top:8px;'><b>Omite</b></p><ul>{profile_omits}</ul>" if profile_omits else ""}
+</section>
+{study_coverage_html}
+{al_block_html}
 {roi_html}
 {results_html}
 <section class="card">
@@ -2842,14 +3842,15 @@ td {{ padding:9px; border-bottom:1px solid #475569; }}
 {comparison_html}
 {perugini_strip_html}
 {washout_html}
+{oai_optional_html}
 {kinetic_html}
 {layout_html}
 <footer class="footer">Informe SINCRO — Amiloidosis. Resultados orientativos.</footer>
 </main>
 </body>
 </html>"""
-                with open(html_path, "wb") as f:
-                        f.write(html.encode("utf-8"))
+        with open(html_path, "wb") as f:
+            f.write(html.encode("utf-8"))
 
     # ── Paginación de layouts ───────────────────────────────────────
 

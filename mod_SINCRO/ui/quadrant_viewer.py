@@ -25,15 +25,18 @@ class QuadrantViewer(QWidget):
     """Visor de cuadrantes: grilla de imágenes con selección, colormaps y filtros."""
 
     quadrantSelected = pyqtSignal(int)  # índice del cuadrante seleccionado
+    quadrantLabelEditRequested = pyqtSignal(int)  # click en rótulo para editar
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(400, 300)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMouseTracking(True)
         self._layout: Layout | None = None
         self._selected: int = 0
         self._pixmaps: list[QPixmap | None] = []
         self._zoom: float = 1.0
+        self._hover_label_idx: int = -1
 
     def set_layout(self, layout: Layout):
         self._layout = layout
@@ -191,12 +194,20 @@ class QuadrantViewer(QWidget):
                     Qt.AlignmentFlag.AlignCenter,
                     label,
                 )
+                if idx == self._hover_label_idx:
+                    painter.setPen(QColor("#fbbf24"))
+                    painter.drawText(
+                        QRectF(x0 + cell_w - 18, y0 + cell_h - 20, 14, 14),
+                        Qt.AlignmentFlag.AlignCenter,
+                        "✎",
+                    )
 
         painter.end()
 
-    def mousePressEvent(self, event):
+    def _hit_test(self, x: float, y: float) -> tuple[int, bool]:
+        """Devuelve (idx, on_label). idx=-1 si fuera de grilla."""
         if self._layout is None:
-            return
+            return -1, False
         rows = self._layout.rows
         cols = self._layout.cols
         ww, wh = self.width(), self.height()
@@ -204,12 +215,39 @@ class QuadrantViewer(QWidget):
         gap = 2
         cell_w = (ww - margin * 2 - gap * (cols - 1)) / max(cols, 1)
         cell_h = (wh - margin * 2 - gap * (rows - 1)) / max(rows, 1)
-
-        x = event.position().x()
-        y = event.position().y()
         col = int((x - margin) / (cell_w + gap))
         row = int((y - margin) / (cell_h + gap))
         if 0 <= col < cols and 0 <= row < rows:
             idx = row * cols + col
             if idx < self._layout.total():
-                self.select_quadrant(idx)
+                y0 = margin + row * (cell_h + gap)
+                label_top = y0 + cell_h - 22
+                return idx, y >= label_top
+        return -1, False
+
+    def mouseMoveEvent(self, event):
+        idx, on_label = self._hit_test(event.position().x(), event.position().y())
+        new_hover = idx if on_label else -1
+        if new_hover != self._hover_label_idx:
+            self._hover_label_idx = new_hover
+            self.update()
+        if on_label:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def leaveEvent(self, event):
+        self._hover_label_idx = -1
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if self._layout is None:
+            return
+        idx, on_label = self._hit_test(event.position().x(), event.position().y())
+        if idx < 0:
+            return
+        self.select_quadrant(idx)
+        if on_label:
+            self.quadrantLabelEditRequested.emit(idx)
