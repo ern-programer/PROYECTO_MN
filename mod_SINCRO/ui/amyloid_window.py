@@ -34,6 +34,7 @@ from core.amyloid_layouts import (
 )
 from ui.quadrant_viewer import QuadrantViewer
 from ui.anatomical_3d_panel import Anatomical3DPanel
+from ui.amyloid_spect_panel import AmyloidSpectPanel
 
 
 class ROIDragWidget(QWidget):
@@ -210,8 +211,15 @@ class AmyloidWindow(QDialog):
     def __init__(self, parent=None, image=None, study=None):
         super().__init__(parent)
         self.setWindowTitle("SINCRO — Amiloidosis")
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowMinMaxButtonsHint)
-        self.resize(1100, 700)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMinMaxButtonsHint
+        )
+        self.resize(1040, 660)
+        self.setMinimumSize(900, 560)
+        self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
         self._image = image          # imagen renderizada (puede ser RGB)
         self._original_image = image  # imagen original 2D para análisis ROI
         self._study = study
@@ -287,6 +295,10 @@ class AmyloidWindow(QDialog):
         btn_anatomical_3d.setToolTip("Visualización anatómica 3D (experimental)")
         btn_anatomical_3d.clicked.connect(self._open_anatomical_3d)
         toolbar.addWidget(btn_anatomical_3d)
+        btn_spect_3d = QPushButton("SPECT 3D")
+        btn_spect_3d.setToolTip("Análisis SPECT amiloidosis 3D (fase 2, experimental)")
+        btn_spect_3d.clicked.connect(self._open_amyloid_spect_3d)
+        toolbar.addWidget(btn_spect_3d)
 
         toolbar.addStretch(1)
 
@@ -1162,6 +1174,11 @@ class AmyloidWindow(QDialog):
             image_ap=image_ap,
             title="Corazón 3D anatómico",
         )
+        dlg.exec()
+
+    def _open_amyloid_spect_3d(self):
+        """Abre panel AMYLO SPECT 3D (fase 2, experimental)."""
+        dlg = AmyloidSpectPanel(self)
         dlg.exec()
 
     def _load_time_images(self, time_label: str):

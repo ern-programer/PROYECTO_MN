@@ -1051,19 +1051,19 @@ class MainWindow(QMainWindow):
 		button_row.addWidget(self.gqc_window_btn, 5, 0, 1, 4)
 		button_row.addWidget(self.asynchrony_review_btn, 6, 0, 1, 4)
 		button_row.addWidget(self.lv_3d_btn, 7, 0, 1, 4)
-		self.amyloid_btn = QPushButton("Amyloidosis")
+		self.amyloid_btn = QPushButton("Amyloidosis Planar")
 		self.amyloid_btn.clicked.connect(self.open_amyloid_window)
 		self.amyloid_btn.setToolTip(
-			"Módulo de amiloidosis cardíaca con imágenes planar y SPECT (HMR/Perugini)."
+			"Módulo planar de amiloidosis cardíaca: ROIs, HMR, Perugini, washout y reporte."
 		)
 		button_row.addWidget(self.amyloid_btn, 8, 0, 1, 4)
-		self.open_planar_btn = QPushButton("Abrir Planar")
-		self.open_planar_btn.clicked.connect(self.open_planar_study)
-		self.open_planar_btn.setToolTip(
-			"Carga una imagen planar estática (no gated) directamente, sin procesamiento cardíaco.\n"
-			"Para amiloidosis (PYP/DPD) y otros estudios planares."
+		self.amyloid_spect_btn = QPushButton("Amyloidosis SPECT/CT")
+		self.amyloid_spect_btn.clicked.connect(self.open_amyloid_spect_window)
+		self.amyloid_spect_btn.setToolTip(
+			"Abre directamente el flujo AMYLO SPECT / SPECT-CT: reconstrucción, cortes, CT, registro, "
+			"sustracción ósea visual y exportación."
 		)
-		button_row.addWidget(self.open_planar_btn, 9, 0, 1, 4)
+		button_row.addWidget(self.amyloid_spect_btn, 9, 0, 1, 4)
 		# Ubicar Acciones justo debajo de la versión y la barra de progreso.
 		insert_at = self._sidebar_layout.indexOf(self._progress_bar) + 1
 		self._sidebar_layout.insertWidget(insert_at, button_box)
@@ -4083,6 +4083,16 @@ class MainWindow(QMainWindow):
 		dlg.raise_()
 		dlg.activateWindow()
 		self._amyloid_window = dlg
+		return dlg
+
+	def open_amyloid_spect_window(self):
+		"""Abre directamente el flujo AMYLO SPECT / SPECT-CT."""
+		from ui.amyloid_spect_panel import AmyloidSpectPanel
+		dlg = AmyloidSpectPanel(self)
+		dlg.show()
+		dlg.raise_()
+		dlg.activateWindow()
+		self._amyloid_spect_window = dlg
 		return dlg
 
 	def _amyloid_2d_image(self):

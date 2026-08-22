@@ -85,8 +85,16 @@ class CardiacReorientationDialog(QDialog):
     def __init__(self, ungated_volume, gated_volume=None, source_label="", geometry=None, parent=None, locked_voi=None, initial_orientation=None, phase_gated_volume=None, voxel_mm=None, motion_frozen_volume=None, motion_frozen_gated_volume=None):
         super().__init__(parent)
         self.setWindowTitle("Reorientar corazón · Rec/Ref")
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMinMaxButtonsHint
+        )
         self.setModal(True)
-        self.resize(1180, 820)
+        self.resize(1060, 720)
+        self.setMinimumSize(920, 600)
+        self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
 
         # Tamaño de vóxel isotrópico (mm) del volumen reconstruido, para expresar
         # las medidas de la VOI en mm además de vóxeles. None si no se conoce.
