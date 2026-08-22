@@ -170,6 +170,11 @@ class RawReconConfig:
     #   fantoma/estudio real). Se aplica a gated y ungated por igual.
     scatter_subtract: bool = False
     scatter_k: float = 1.0
+    # --- Corrección de atenuación (AC) en reconstrucción iterativa ---
+    # Requiere proveer μ-map en grilla de reconstrucción al pipeline.
+    # Aplica en OSEM/MLEM (forward/backprojection). FBP no usa AC.
+    attenuation_correction: bool = False
+    attenuation_mu_scale: float = 1.0
 
 
 @dataclass
@@ -186,6 +191,9 @@ class RawReconResult:
     config: RawReconConfig
     motion_result: dict
     notes: list[str] = field(default_factory=list)
+    # True si se aplicó espejo L/R (flip en eje x del volumen reconstruido)
+    # para converger orientación CW/CCW a una convención canónica.
+    flip_x_applied: bool = False
     # Motion-frozen: volumen 4D alineado y promediado (None si no se pidió).
     ungated_volume_mf: np.ndarray | None = None
     # Motion-frozen por gate: 4D de "cine nítido" (None si no se pidió).
@@ -368,6 +376,9 @@ def reconstruct_projection_volume(
     map_prior_size: int = 3,
     map_adaptive: bool = False,
     map_beta0: float = 0.4,
+    attenuation_mu_map: np.ndarray | None = None,
+    attenuation_mu_scale: float = 1.0,
+    attenuation_pixel_size_cm: float = 1.0,
 ) -> np.ndarray:
     """Reconstruye volumen desde proyecciones 3D con FBP/MLEM/OSEM.
 
@@ -404,6 +415,14 @@ def reconstruct_projection_volume(
     theta = np.linspace(0.0, 360.0, n_angles, endpoint=False) if angles_deg is None else np.asarray(angles_deg, dtype=np.float64)
     if theta.size != n_angles:
         raise ValueError(f"angles_deg debe tener {n_angles} valores; recibio {theta.size}")
+    mu_map_3d = None
+    if attenuation_mu_map is not None:
+        mu_map_3d = np.asarray(attenuation_mu_map, dtype=np.float64)
+        if mu_map_3d.shape != (height, width, width):
+            raise ValueError(
+                "attenuation_mu_map debe tener shape (H,W,W) de la grilla de reconstrucción; "
+                f"esperado {(height, width, width)}, recibido {mu_map_3d.shape}"
+            )
     effective_subsets = int(subsets) if method_key == "osem" else 1
     # La imagen de "sensibilidad" (retroproyección de un sinograma de unos) NO
     # depende de los datos medidos ni de la iteración actual: solo depende de
@@ -423,19 +442,23 @@ def reconstruct_projection_volume(
     n_band = z1 - z0 + 1
     for done, slice_idx in enumerate(range(z0, z1 + 1), start=1):
         sinogram = proj[:, slice_idx, :].T
+        mu_slice = None if mu_map_3d is None else mu_map_3d[slice_idx]
         out[slice_idx] = _iterative_reconstruct_slice(
             sinogram,
             theta,
             output_size=width,
             iterations=int(iterations),
             subsets=effective_subsets,
-            sensitivity_cache=sensitivity_cache,
+            sensitivity_cache=sensitivity_cache if mu_slice is None else None,
             psf=psf,
             map_beta=map_beta,
             map_prior=map_prior,
             map_prior_size=map_prior_size,
             map_adaptive=map_adaptive,
             map_beta0=map_beta0,
+            attenuation_mu_map_2d=mu_slice,
+            attenuation_mu_scale=float(attenuation_mu_scale),
+            attenuation_pixel_size_cm=float(attenuation_pixel_size_cm),
         )
         if progress is not None and n_band:
             progress(done / n_band)
@@ -489,7 +512,16 @@ def _ramp_filter_sinogram(sinogram: np.ndarray) -> np.ndarray:
     return np.real(np.fft.ifft(ft, axis=0))[:n_det]
 
 
-def _simple_backprojection(sinogram: np.ndarray, theta: np.ndarray, *, output_size: int, psf=None) -> np.ndarray:
+def _simple_backprojection(
+    sinogram: np.ndarray,
+    theta: np.ndarray,
+    *,
+    output_size: int,
+    psf=None,
+    attenuation_mu_map_2d: np.ndarray | None = None,
+    attenuation_mu_scale: float = 1.0,
+    attenuation_pixel_size_cm: float = 1.0,
+) -> np.ndarray:
     """Retroproyección paralela simple (adjunto). Sin filtro rampa.
 
     Usada por el path iterativo (MLEM/OSEM, donde el adjunto NO debe filtrarse)
@@ -508,9 +540,14 @@ def _simple_backprojection(sinogram: np.ndarray, theta: np.ndarray, *, output_si
     x_old = np.linspace(-1.0, 1.0, n_det)
     x_new = np.linspace(-1.0, 1.0, out_size)
     volume = np.zeros((out_size, out_size), dtype=np.float64)
+    mu2 = None if attenuation_mu_map_2d is None else np.asarray(attenuation_mu_map_2d, dtype=np.float64)
     for idx, angle in enumerate(theta):
         profile = np.interp(x_new, x_old, sino[:, idx], left=0.0, right=0.0)
         slab = np.tile(profile.reshape(1, out_size), (out_size, 1))
+        if mu2 is not None:
+            mu_rot = rotate(mu2, angle=-float(angle), reshape=False, order=1, mode="constant", cval=0.0)
+            tau = np.cumsum(np.clip(mu_rot, 0.0, None)[:, ::-1], axis=1)[:, ::-1] * max(1e-6, float(attenuation_pixel_size_cm))
+            slab = slab * np.exp(-max(0.0, float(attenuation_mu_scale)) * tau)
         if psf is not None:
             from core.resolution_recovery import variable_depth_gaussian
             slab = variable_depth_gaussian(slab, psf)
@@ -520,23 +557,56 @@ def _simple_backprojection(sinogram: np.ndarray, theta: np.ndarray, *, output_si
     return volume
 
 
-def _forward_project_slice(image: np.ndarray, theta: np.ndarray, *, detector_size: int, psf=None) -> np.ndarray:
+def _forward_project_slice(
+    image: np.ndarray,
+    theta: np.ndarray,
+    *,
+    detector_size: int,
+    psf=None,
+    attenuation_mu_map_2d: np.ndarray | None = None,
+    attenuation_mu_scale: float = 1.0,
+    attenuation_pixel_size_cm: float = 1.0,
+) -> np.ndarray:
     img = np.asarray(image, dtype=np.float64)
     sino = np.zeros((int(detector_size), int(theta.size)), dtype=np.float64)
     x_old = np.linspace(-1.0, 1.0, img.shape[1])
     x_new = np.linspace(-1.0, 1.0, int(detector_size))
+    mu2 = None if attenuation_mu_map_2d is None else np.asarray(attenuation_mu_map_2d, dtype=np.float64)
     for idx, angle in enumerate(theta):
         rot = rotate(img, angle=-float(angle), reshape=False, order=1, mode="constant", cval=0.0)
         if psf is not None:
             from core.resolution_recovery import variable_depth_gaussian
             rot = variable_depth_gaussian(rot, psf)
-        prof = rot.sum(axis=0)
+        if mu2 is not None:
+            mu_rot = rotate(mu2, angle=-float(angle), reshape=False, order=1, mode="constant", cval=0.0)
+            tau = np.cumsum(np.clip(mu_rot, 0.0, None)[:, ::-1], axis=1)[:, ::-1] * max(1e-6, float(attenuation_pixel_size_cm))
+            trans = np.exp(-max(0.0, float(attenuation_mu_scale)) * tau)
+            prof = (rot * trans).sum(axis=0)
+        else:
+            prof = rot.sum(axis=0)
         sino[:, idx] = np.interp(x_new, x_old, prof, left=0.0, right=0.0)
     return sino
 
 
-def _backproject_slice(sinogram: np.ndarray, theta: np.ndarray, *, output_size: int, psf=None) -> np.ndarray:
-    return _simple_backprojection(sinogram, theta, output_size=output_size, psf=psf)
+def _backproject_slice(
+    sinogram: np.ndarray,
+    theta: np.ndarray,
+    *,
+    output_size: int,
+    psf=None,
+    attenuation_mu_map_2d: np.ndarray | None = None,
+    attenuation_mu_scale: float = 1.0,
+    attenuation_pixel_size_cm: float = 1.0,
+) -> np.ndarray:
+    return _simple_backprojection(
+        sinogram,
+        theta,
+        output_size=output_size,
+        psf=psf,
+        attenuation_mu_map_2d=attenuation_mu_map_2d,
+        attenuation_mu_scale=attenuation_mu_scale,
+        attenuation_pixel_size_cm=attenuation_pixel_size_cm,
+    )
 
 
 def _iterative_reconstruct_slice(
@@ -553,6 +623,9 @@ def _iterative_reconstruct_slice(
     map_prior_size: int = 3,
     map_adaptive: bool = False,
     map_beta0: float = 0.4,
+    attenuation_mu_map_2d: np.ndarray | None = None,
+    attenuation_mu_scale: float = 1.0,
+    attenuation_pixel_size_cm: float = 1.0,
 ) -> np.ndarray:
     """MLEM/OSEM paralela simple por slice.
 
@@ -608,13 +681,37 @@ def _iterative_reconstruct_slice(
                 continue
             theta_sub = theta[idx]
             measured_sub = measured[:, idx]
-            estimated_sub = _forward_project_slice(image, theta_sub, detector_size=detector_size, psf=psf)
+            estimated_sub = _forward_project_slice(
+                image,
+                theta_sub,
+                detector_size=detector_size,
+                psf=psf,
+                attenuation_mu_map_2d=attenuation_mu_map_2d,
+                attenuation_mu_scale=attenuation_mu_scale,
+                attenuation_pixel_size_cm=attenuation_pixel_size_cm,
+            )
             ratio = measured_sub / np.maximum(estimated_sub, eps)
-            correction = _backproject_slice(ratio, theta_sub, output_size=out_size, psf=psf)
+            correction = _backproject_slice(
+                ratio,
+                theta_sub,
+                output_size=out_size,
+                psf=psf,
+                attenuation_mu_map_2d=attenuation_mu_map_2d,
+                attenuation_mu_scale=attenuation_mu_scale,
+                attenuation_pixel_size_cm=attenuation_pixel_size_cm,
+            )
             if sensitivity_cache is not None and subset_id in sensitivity_cache:
                 sensitivity = sensitivity_cache[subset_id]
             else:
-                sensitivity = _backproject_slice(np.ones_like(measured_sub), theta_sub, output_size=out_size, psf=psf)
+                sensitivity = _backproject_slice(
+                    np.ones_like(measured_sub),
+                    theta_sub,
+                    output_size=out_size,
+                    psf=psf,
+                    attenuation_mu_map_2d=attenuation_mu_map_2d,
+                    attenuation_mu_scale=attenuation_mu_scale,
+                    attenuation_pixel_size_cm=attenuation_pixel_size_cm,
+                )
             denom = np.maximum(sensitivity, eps)
             if map_adaptive:
                 # Pilar C: beta espacial (SNR local) x gradiente Huber (suavidad,
@@ -674,6 +771,9 @@ def reconstruct_gated_projection_volume(
     map_prior_size: int = 3,
     map_adaptive: bool = False,
     map_beta0: float = 0.4,
+    attenuation_mu_map: np.ndarray | None = None,
+    attenuation_mu_scale: float = 1.0,
+    attenuation_pixel_size_cm: float = 1.0,
 ) -> np.ndarray:
     """Reconstruye cada gate por separado con FBP/MLEM/OSEM.
 
@@ -719,6 +819,9 @@ def reconstruct_gated_projection_volume(
             map_prior_size=map_prior_size,
             map_adaptive=map_adaptive,
             map_beta0=map_beta0,
+            attenuation_mu_map=attenuation_mu_map,
+            attenuation_mu_scale=float(attenuation_mu_scale),
+            attenuation_pixel_size_cm=float(attenuation_pixel_size_cm),
         )
         for gate in range(proj.shape[0])
     ]
@@ -766,6 +869,8 @@ def reconstruct_raw_gated_pipeline(
     motion_kwargs: dict | None = None,
     progress_callback=None,
     scatter_projections: np.ndarray | None = None,
+    attenuation_mu_map: np.ndarray | None = None,
+    attenuation_pixel_size_cm: float | None = None,
 ) -> RawReconResult:
     """Ejecuta el pipeline raw gated central.
 
@@ -857,6 +962,36 @@ def reconstruct_raw_gated_pipeline(
     gated_subsets = int(cfg.osem_subsets) if gated_method == "osem" else 1
     gated_rr_psf = cfg.psf_model if (rr_gat and gated_method in {"osem", "mlem"}) else None
 
+    ac_requested = bool(getattr(cfg, "attenuation_correction", False))
+    ac_mu_map = None
+    ac_mu_scale = float(getattr(cfg, "attenuation_mu_scale", 1.0) or 1.0)
+    if ac_requested:
+        if attenuation_mu_map is None:
+            notes.append("[WARN] AC iterativa pedida pero no se proveyó ATT MAP en grilla de reconstrucción; se desactiva AC.")
+        else:
+            ac_mu_map = np.asarray(attenuation_mu_map, dtype=np.float64)
+            expected_shape = (int(raw.shape[2]), int(raw.shape[3]), int(raw.shape[3]))
+            if ac_mu_map.shape != expected_shape:
+                notes.append(
+                    "[WARN] AC iterativa pedida pero ATT MAP con shape incompatible "
+                    f"{ac_mu_map.shape} (esperado {expected_shape}); se desactiva AC."
+                )
+                ac_mu_map = None
+    # Fallback estable para reconstrucción iterativa cuando no se conoce spacing:
+    # 6.8 mm ~= 0.68 cm (matriz típica NM 64x64 con FOV cardíaco estándar).
+    ac_px_cm = max(1e-4, float(attenuation_pixel_size_cm) if attenuation_pixel_size_cm is not None else 0.68)
+
+    ac_ung_enabled = ac_mu_map is not None and method in {"osem", "mlem"}
+    ac_gat_enabled = ac_mu_map is not None and gated_method in {"osem", "mlem"}
+    if ac_requested and ac_mu_map is not None and not (ac_ung_enabled or ac_gat_enabled):
+        notes.append("AC iterativa disponible pero no aplicada: método(s) FBP no usan modelo de atenuación en el update.")
+    if ac_ung_enabled or ac_gat_enabled:
+        notes.append(
+            "AC iterativa habilitada en reconstrucción "
+            f"(μ-scale={ac_mu_scale:.3f}, px={ac_px_cm*10.0:.3f} mm, "
+            f"ungated={'ON' if ac_ung_enabled else 'OFF'}, gated={'ON' if ac_gat_enabled else 'OFF'})."
+        )
+
     # Reparto del presupuesto de progreso: UngGat ~25%, gates ~70%, post ~5%.
     n_gates = int(raw.shape[0])
     method_label = ("NÍTIDA/" + method.upper()) if rr_psf is not None else method.upper()
@@ -917,6 +1052,9 @@ def reconstruct_raw_gated_pipeline(
         psf=rr_psf,
         slice_range=cfg.recon_slice_range,
         progress=ung_progress,
+        attenuation_mu_map=ac_mu_map if ac_ung_enabled else None,
+        attenuation_mu_scale=ac_mu_scale,
+        attenuation_pixel_size_cm=ac_px_cm,
     )
     gated_volume = reconstruct_gated_projection_volume(
         gated_src,
@@ -929,6 +1067,9 @@ def reconstruct_raw_gated_pipeline(
         psf=gated_rr_psf,
         slice_range=cfg.recon_slice_range,
         progress=gated_progress,
+        attenuation_mu_map=ac_mu_map if ac_gat_enabled else None,
+        attenuation_mu_scale=ac_mu_scale,
+        attenuation_pixel_size_cm=ac_px_cm,
     )
     if rr_psf is not None or gated_rr_psf is not None:
         notes.append("NÍTIDA (OmniRes) activo: recuperación de resolución dependiente de profundidad.")
@@ -947,7 +1088,10 @@ def reconstruct_raw_gated_pipeline(
             denoise_projections_bilateral(ungated_corrected, sigma_color=blur_sc),
             angles_deg, method=method, projection_filter=cfg.ungated_filter,
             fbp_filter_name=cfg.fbp_filter_name, iterations=int(cfg.iterative_iterations),
-            subsets=subsets, psf=rr_psf, slice_range=cfg.recon_slice_range)
+            subsets=subsets, psf=rr_psf, slice_range=cfg.recon_slice_range,
+            attenuation_mu_map=ac_mu_map if ac_ung_enabled else None,
+            attenuation_mu_scale=ac_mu_scale,
+            attenuation_pixel_size_cm=ac_px_cm)
         ungated_volume = sharpen_by_subtraction(ungated_volume, ung_blur, k_u)
         notes.append(f"Denoise+ ungated: realce por resta (k={k_u:.2f}, difuso σc={blur_sc:.2f}).")
 
@@ -1061,7 +1205,10 @@ def reconstruct_raw_gated_pipeline(
                 denoise_projections_bilateral(corrected, sigma_color=blur_sc),
                 angles_deg, method=gated_method, projection_filter=cfg.gated_filter,
                 fbp_filter_name=cfg.fbp_filter_name, iterations=int(cfg.iterative_iterations),
-                subsets=gated_subsets, psf=gated_rr_psf, slice_range=cfg.recon_slice_range)
+                subsets=gated_subsets, psf=gated_rr_psf, slice_range=cfg.recon_slice_range,
+                attenuation_mu_map=ac_mu_map if ac_gat_enabled else None,
+                attenuation_mu_scale=ac_mu_scale,
+                attenuation_pixel_size_cm=ac_px_cm)
             gated_volume = sharpen_by_subtraction(gated_volume, gated_blur, k_g)
             notes.append(
                 f"Denoise+ GATED: realce por resta (k={k_g:.2f}, difuso σc={blur_sc:.2f}, "
@@ -1230,6 +1377,7 @@ def reconstruct_raw_gated_pipeline(
         shifts_x=shifts_x,
         config=cfg,
         motion_result=dict(motion_result),
+        flip_x_applied=bool(flip_x),
         notes=notes,
         ungated_volume_mf=ungated_volume_mf,
         gated_volume_mf_per_gate=gated_volume_mf_per_gate,

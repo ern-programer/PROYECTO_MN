@@ -746,6 +746,8 @@ def reconstruct_amyloid_with_perf_pipeline(
     *,
     recon_config: RawReconConfig | None = None,
     cuts_mode: str = "mixed",
+    attenuation_mu_map: np.ndarray | None = None,
+    attenuation_pixel_size_cm: float | None = None,
     progress_callback=None,
 ) -> AmyloidReconstructionBundle:
     """Reconstruye AMYLO reusando el pipeline de perfusión existente.
@@ -767,6 +769,8 @@ def reconstruct_amyloid_with_perf_pipeline(
             angles_deg=getattr(study, "angles_deg", None),
             config=cfg,
             scatter_projections=getattr(study, "scatter_projections", None),
+            attenuation_mu_map=attenuation_mu_map,
+            attenuation_pixel_size_cm=attenuation_pixel_size_cm,
             progress_callback=progress_callback,
         )
         ungated = np.asarray(raw_res.ungated_volume, dtype=np.float64)
@@ -1061,6 +1065,248 @@ def register_ct_to_spect_rigid(
         f"Δ(z,y,x)=({shift_zyx[0]:.2f},{shift_zyx[1]:.2f},{shift_zyx[2]:.2f})."
     )
     return ct_reg, shift_zyx, notes
+
+
+def align_ct_orientation_to_spect(
+    ct_volume: np.ndarray,
+    spect_volume: np.ndarray,
+    *,
+    try_flip_x: bool = True,
+    try_flip_y: bool = True,
+    try_flip_z: bool = False,
+    try_flip_xy: bool = True,
+    try_rot90_inplane: bool = True,
+    min_score_gain: float = 0.03,
+    min_abs_score: float = 0.05,
+) -> tuple[np.ndarray, dict[str, bool | int], list[str]]:
+    """Ajuste de orientación CT→SPECT por evaluación de flips globales.
+
+    Evalúa correlación normalizada entre máscara ósea CT (gradiente + altas HU)
+    y foco SPECT para elegir la orientación que más coincide.
+    """
+    ct = np.asarray(ct_volume, dtype=np.float64)
+    sp = np.asarray(spect_volume, dtype=np.float64)
+    if ct.ndim != 3 or sp.ndim != 3:
+        raise ValueError(f"CT y SPECT deben ser 3D. CT={ct.shape}, SPECT={sp.shape}")
+    if ct.shape != sp.shape:
+        raise ValueError(f"CT y SPECT deben tener misma grilla. CT={ct.shape}, SPECT={sp.shape}")
+
+    notes: list[str] = []
+
+    sp_feat = np.clip(sp - float(np.percentile(sp, 75.0)), 0.0, None)
+    sp_feat = _safe_norm(sp_feat)
+    roi = sp_feat > 0.05
+    if np.count_nonzero(roi) < 64:
+        roi = sp > float(np.percentile(sp, 70.0))
+    sp_mask = sp > float(np.percentile(sp, 85.0))
+
+    def _ct_feat(arr: np.ndarray) -> np.ndarray:
+        a = np.asarray(arr, dtype=np.float64)
+        # mezcla simple: estructuras densas + bordes
+        hu = np.clip(a - float(np.percentile(a, 70.0)), 0.0, None)
+        gz, gy, gx = np.gradient(a)
+        grad = np.sqrt(gz * gz + gy * gy + gx * gx)
+        f = 0.7 * _safe_norm(hu) + 0.3 * _safe_norm(grad)
+        return _safe_norm(f)
+
+    def _ncc(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> float:
+        m = np.asarray(mask, dtype=bool)
+        if np.count_nonzero(m) < 64:
+            return -1.0
+        av = np.asarray(a[m], dtype=np.float64)
+        bv = np.asarray(b[m], dtype=np.float64)
+        av = av - float(np.mean(av))
+        bv = bv - float(np.mean(bv))
+        den = float(np.linalg.norm(av) * np.linalg.norm(bv))
+        if den < 1e-12:
+            return -1.0
+        return float(np.dot(av, bv) / den)
+
+    candidates: list[tuple[str, np.ndarray, dict[str, bool | int]]] = []
+
+    rot_ks = [0, 1, 2, 3] if try_rot90_inplane else [0]
+    flip_opts_xy: list[tuple[bool, bool]] = [(False, False)]
+    if try_flip_x:
+        flip_opts_xy.append((False, True))
+    if try_flip_y:
+        flip_opts_xy.append((True, False))
+    if try_flip_xy and try_flip_x and try_flip_y:
+        flip_opts_xy.append((True, True))
+
+    for k in rot_ks:
+        ct_rot = np.rot90(ct, k=int(k), axes=(1, 2)) if int(k) != 0 else ct
+        for fy, fx in flip_opts_xy:
+            arr = ct_rot
+            if fy:
+                arr = np.flip(arr, axis=1)
+            if fx:
+                arr = np.flip(arr, axis=2)
+            name = f"rot{k*90}"
+            if fy:
+                name += "_flip_y"
+            if fx:
+                name += "_flip_x"
+            candidates.append(
+                (
+                    name,
+                    arr,
+                    {
+                        "flip_z": False,
+                        "flip_y": bool(fy),
+                        "flip_x": bool(fx),
+                        "rot_k": int(k),
+                    },
+                )
+            )
+
+    if try_flip_z:
+        z_augmented: list[tuple[str, np.ndarray, dict[str, bool | int]]] = []
+        for name, arr, flags in candidates:
+            z_augmented.append((name, arr, flags))
+            flags_z = dict(flags)
+            flags_z["flip_z"] = True
+            z_augmented.append((name + "_flip_z", np.flip(arr, axis=0), flags_z))
+        candidates = z_augmented
+
+    best_name = "rot0"
+    best_arr = ct
+    best_flags: dict[str, bool | int] = {"flip_z": False, "flip_y": False, "flip_x": False, "rot_k": 0}
+    best_score = -2.0
+    cand_best: dict[str, tuple[float, np.ndarray, dict[str, bool | int]]] = {}
+    scores: list[str] = []
+    for name, arr, flags in candidates:
+        # Reajuste traslacional por candidato para no sesgar la comparación.
+        ct_mask = arr > float(np.percentile(arr, 85.0))
+        if np.count_nonzero(ct_mask) >= 64 and np.count_nonzero(sp_mask) >= 64:
+            ct_center = np.mean(np.argwhere(ct_mask), axis=0)
+            sp_center = np.mean(np.argwhere(sp_mask), axis=0)
+            shift_zyx = tuple((sp_center - ct_center).tolist())
+            arr_aligned = ndi.shift(arr, shift=shift_zyx, order=1, mode="nearest")
+        else:
+            shift_zyx = (0.0, 0.0, 0.0)
+            arr_aligned = arr
+
+        sc = _ncc(_ct_feat(arr_aligned), sp_feat, roi)
+        scores.append(
+            f"{name}:{sc:.4f} Δ({float(shift_zyx[0]):.1f},{float(shift_zyx[1]):.1f},{float(shift_zyx[2]):.1f})"
+        )
+        cand_best[name] = (sc, np.asarray(arr_aligned, dtype=np.float64), flags)
+        if sc > best_score:
+            best_score = sc
+            best_name = name
+            best_arr = arr_aligned
+            best_flags = flags
+
+    notes.append("Auto-orient CT por NCC (candidatos): " + ", ".join(scores) + ".")
+    ranked = sorted([(k, v[0]) for k, v in cand_best.items()], key=lambda kv: kv[1], reverse=True)
+    second_score = float(ranked[1][1]) if len(ranked) > 1 else -2.0
+    gain = float(best_score - second_score)
+
+    if best_name != "none" and (best_score < float(min_abs_score) or gain < float(min_score_gain)):
+        none_key = "rot0"
+        none_sc, none_arr, none_flags = cand_best.get(none_key, (best_score, best_arr, best_flags))
+        notes.append(
+            "Auto-orient CT: decisión de flip con baja confianza "
+            f"(best={best_score:.4f}, gain={gain:.4f}); se fuerza 'rot0' (score={none_sc:.4f})."
+        )
+        best_name = "rot0"
+        best_score = float(none_sc)
+        best_arr = none_arr
+        best_flags = none_flags
+
+    if best_name != "rot0":
+        notes.append(
+            f"Auto-orient CT: aplicado {best_name} "
+            f"(score={best_score:.4f}, gain={gain:.4f})."
+        )
+    else:
+        notes.append(
+            f"Auto-orient CT: sin flip adicional "
+            f"(score={best_score:.4f}, gain={gain:.4f})."
+        )
+
+    return np.asarray(best_arr, dtype=np.float64), best_flags, notes
+
+
+def refine_ct_to_spect_translation(
+    ct_volume: np.ndarray,
+    spect_volume: np.ndarray,
+    *,
+    search_radius_zyx: tuple[int, int, int] = (3, 8, 8),
+    ct_bone_hu_threshold: float = 200.0,
+    spect_focus_percentile: float = 85.0,
+) -> tuple[np.ndarray, tuple[float, float, float], list[str]]:
+    """Refina traslación CT→SPECT por NCC local en grilla ya orientada.
+
+    Espera CT y SPECT en misma grilla/shape y devuelve un corrimiento incremental
+    (delta) respecto de la posición CT de entrada.
+    """
+    ct = np.asarray(ct_volume, dtype=np.float64)
+    sp = np.asarray(spect_volume, dtype=np.float64)
+    if ct.ndim != 3 or sp.ndim != 3:
+        raise ValueError(f"CT y SPECT deben ser 3D. CT={ct.shape}, SPECT={sp.shape}")
+    if ct.shape != sp.shape:
+        raise ValueError(f"CT y SPECT deben tener misma grilla. CT={ct.shape}, SPECT={sp.shape}")
+
+    notes: list[str] = []
+    rz, ry, rx = [max(0, int(v)) for v in search_radius_zyx]
+    if rz == 0 and ry == 0 and rx == 0:
+        return ct.copy(), (0.0, 0.0, 0.0), notes
+
+    sp_thr = float(np.percentile(sp, max(70.0, float(spect_focus_percentile) - 10.0)))
+    sp_feat = _safe_norm(np.clip(sp - sp_thr, 0.0, None))
+    roi_mask = sp_feat > 0.05
+    if not np.any(roi_mask):
+        roi_mask = sp > np.percentile(sp, 75.0)
+
+    ct_feat_base = _safe_norm(np.clip(ct - float(ct_bone_hu_threshold), 0.0, None))
+    if float(np.max(ct_feat_base)) <= 0.0:
+        ct_feat_base = _safe_norm(np.clip(ct - float(np.percentile(ct, 80.0)), 0.0, None))
+
+    def _ncc(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> float:
+        m = np.asarray(mask, dtype=bool)
+        if np.count_nonzero(m) < 64:
+            return -1.0
+        av = np.asarray(a[m], dtype=np.float64)
+        bv = np.asarray(b[m], dtype=np.float64)
+        av = av - float(np.mean(av))
+        bv = bv - float(np.mean(bv))
+        den = float(np.linalg.norm(av) * np.linalg.norm(bv))
+        if den < 1e-12:
+            return -1.0
+        return float(np.dot(av, bv) / den)
+
+    # Búsqueda en dos pasos: gruesa (step=2) + fina local (step=1).
+    best_score = -2.0
+    best_shift = (0.0, 0.0, 0.0)
+
+    for dz in range(-rz, rz + 1, 2 if rz >= 2 else 1):
+        for dy in range(-ry, ry + 1, 2 if ry >= 2 else 1):
+            for dx in range(-rx, rx + 1, 2 if rx >= 2 else 1):
+                cand = (float(dz), float(dy), float(dx))
+                ct_cand = ndi.shift(ct_feat_base, shift=cand, order=1, mode="nearest")
+                sc = _ncc(ct_cand, sp_feat, roi_mask)
+                if sc > best_score:
+                    best_score = sc
+                    best_shift = cand
+
+    bz, by, bx = [int(round(v)) for v in best_shift]
+    for dz in range(max(-rz, bz - 1), min(rz, bz + 1) + 1):
+        for dy in range(max(-ry, by - 1), min(ry, by + 1) + 1):
+            for dx in range(max(-rx, bx - 1), min(rx, bx + 1) + 1):
+                cand = (float(dz), float(dy), float(dx))
+                ct_cand = ndi.shift(ct_feat_base, shift=cand, order=1, mode="nearest")
+                sc = _ncc(ct_cand, sp_feat, roi_mask)
+                if sc > best_score:
+                    best_score = sc
+                    best_shift = cand
+
+    ct_refined = ndi.shift(ct, shift=best_shift, order=1, mode="nearest")
+    notes.append(
+        "Refinamiento fino CT↔SPECT por NCC aplicado "
+        f"(radio z/y/x={rz}/{ry}/{rx}, Δ=({best_shift[0]:.1f},{best_shift[1]:.1f},{best_shift[2]:.1f}), score={best_score:.4f})."
+    )
+    return ct_refined, best_shift, notes
 
 
 def central_slices_preview(volume: np.ndarray) -> dict[str, np.ndarray]:

@@ -9,6 +9,7 @@ import numpy as np
 from PyQt6.QtCore import QObject, Qt, QSettings, QThread, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
+    QApplication,
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -43,6 +44,8 @@ from core.amyloid_spect import (
     apply_attenuation_correction_chang,
     resample_volume_to_spect_grid,
     register_ct_to_spect_rigid,
+    align_ct_orientation_to_spect,
+    refine_ct_to_spect_translation,
 )
 
 
@@ -51,11 +54,20 @@ class _AmyloidReconWorker(QObject):
     finished = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, dicom_path: str, recon_config, cuts_mode: str):
+    def __init__(
+        self,
+        dicom_path: str,
+        recon_config,
+        cuts_mode: str,
+        attenuation_mu_map: np.ndarray | None = None,
+        attenuation_pixel_size_cm: float | None = None,
+    ):
         super().__init__()
         self._dicom_path = dicom_path
         self._recon_config = recon_config
         self._cuts_mode = cuts_mode
+        self._attenuation_mu_map = None if attenuation_mu_map is None else np.asarray(attenuation_mu_map, dtype=np.float64)
+        self._attenuation_pixel_size_cm = attenuation_pixel_size_cm
         self._cancel_requested = False
 
     def cancel(self):
@@ -73,6 +85,8 @@ class _AmyloidReconWorker(QObject):
                 self._dicom_path,
                 recon_config=self._recon_config,
                 cuts_mode=self._cuts_mode,
+                attenuation_mu_map=self._attenuation_mu_map,
+                attenuation_pixel_size_cm=self._attenuation_pixel_size_cm,
                 progress_callback=_progress,
             )
             self.finished.emit(bundle)
@@ -121,6 +135,7 @@ class AmyloidSpectPanel(QDialog):
         self._pending_recon_cfg = None
         self._pending_recon_preset_label = ""
         self._pending_recon_cuts_mode = ""
+        self._pending_recon_ac_iter = False
         self._study_is_gated = False
         self._slice_idx = {"axial": 0, "coronal": 0, "sagittal": 0}
         self._spect_view_offset = {"axial": 0, "coronal": 0, "sagittal": 0}
@@ -130,8 +145,12 @@ class AmyloidSpectPanel(QDialog):
         self._spect_pan_px = {"axial": [0, 0], "coronal": [0, 0], "sagittal": [0, 0]}
         self._ct_pan_px = {"axial": [0, 0], "coronal": [0, 0], "sagittal": [0, 0]}
         self._drag_state = None
+        # Sensibilidad del arrastre triangulado CT (Ctrl+drag).
+        # <1.0 = más suave/fino.
+        self._ct_drag_sensitivity = 0.35
         self._spect_win_low = 0
         self._spect_win_high = 100
+        self._fusion_pct = 55
         self._ct_window = "bone"
 
         root = QVBoxLayout(self)
@@ -333,7 +352,14 @@ class AmyloidSpectPanel(QDialog):
         self._denoise_plus_k_spin.setSingleStep(0.05)
         self._denoise_plus_k_spin.setDecimals(2)
         self._denoise_plus_k_spin.setValue(0.20)
-        for widget in (self._bg_check, self._scatter_check, self._scatter_k_spin, self._post_check, self._post_sigma_spin, self._denoise_plus_check, self._denoise_plus_k_spin, self._gated_method_combo):
+        self._ac_iter_check = QCheckBox("AC iterativa")
+        self._ac_iter_check.setToolTip("Activa corrección por atenuación dentro del update OSEM/MLEM (requiere ATT MAP cargado).")
+        self._ac_mu_scale_spin = QDoubleSpinBox()
+        self._ac_mu_scale_spin.setRange(0.10, 3.00)
+        self._ac_mu_scale_spin.setSingleStep(0.05)
+        self._ac_mu_scale_spin.setDecimals(2)
+        self._ac_mu_scale_spin.setValue(1.00)
+        for widget in (self._bg_check, self._scatter_check, self._scatter_k_spin, self._post_check, self._post_sigma_spin, self._denoise_plus_check, self._denoise_plus_k_spin, self._ac_iter_check, self._ac_mu_scale_spin, self._gated_method_combo):
             if hasattr(widget, "valueChanged"):
                 widget.valueChanged.connect(self._persist_ui_state)
             elif hasattr(widget, "toggled"):
@@ -349,6 +375,9 @@ class AmyloidSpectPanel(QDialog):
         recon_grid.addWidget(self._denoise_plus_check, 2, 6)
         recon_grid.addWidget(QLabel("k"), 2, 7)
         recon_grid.addWidget(self._denoise_plus_k_spin, 2, 8)
+        recon_grid.addWidget(self._ac_iter_check, 2, 9)
+        recon_grid.addWidget(QLabel("μ-scale"), 2, 10)
+        recon_grid.addWidget(self._ac_mu_scale_spin, 2, 11)
 
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
@@ -407,6 +436,17 @@ class AmyloidSpectPanel(QDialog):
         self._qc_split_lbl = QLabel("50%")
         self._qc_split_lbl.setStyleSheet("color:#94a3b8;")
         qc_row.addWidget(self._qc_split_lbl)
+        qc_row.addWidget(QLabel("Fusión %:"))
+        self._fusion_slider = QSlider(Qt.Orientation.Horizontal)
+        self._fusion_slider.setRange(0, 100)
+        self._fusion_slider.setValue(55)
+        self._fusion_slider.setToolTip("0% CT solamente · 100% SPECT coloreado. Ajusta la mezcla de la fusión.")
+        self._fusion_slider.valueChanged.connect(self._on_fusion_slider_changed)
+        self._fusion_slider.setEnabled(False)
+        qc_row.addWidget(self._fusion_slider, 1)
+        self._fusion_lbl = QLabel("55%")
+        self._fusion_lbl.setStyleSheet("color:#94a3b8;")
+        qc_row.addWidget(self._fusion_lbl)
         root.addLayout(qc_row)
 
         slice_row = QHBoxLayout()
@@ -578,6 +618,7 @@ class AmyloidSpectPanel(QDialog):
         preset = str(self._preset_combo.currentData() or "manual")
         split = int(self._qc_split_slider.value())
         overlay = int(self._blend_slider.value())
+        fusion = int(self._fusion_slider.value()) if hasattr(self, "_fusion_slider") else int(getattr(self, "_fusion_pct", 55))
         self._settings.setValue("global/preset", preset)
         self._settings.setValue("global/ung_method", str(self._ung_method_combo.currentData() or "fbp"))
         self._settings.setValue("global/gated_method", str(self._gated_method_combo.currentData() or "fbp"))
@@ -585,6 +626,7 @@ class AmyloidSpectPanel(QDialog):
         self._settings.setValue("global/qc_mode", qc_mode)
         self._settings.setValue("global/split_pct", split)
         self._settings.setValue("global/overlay_pct", overlay)
+        self._settings.setValue("global/fusion_pct", fusion)
         self._settings.setValue("global/ung_filter", str(self._ung_filter_combo.currentData() or "butterworth"))
         self._settings.setValue("global/ung_cutoff", float(self._ung_cutoff_spin.value()))
         self._settings.setValue("global/ung_order", int(self._ung_order_spin.value()))
@@ -600,6 +642,8 @@ class AmyloidSpectPanel(QDialog):
         self._settings.setValue("global/post_sigma", float(self._post_sigma_spin.value()))
         self._settings.setValue("global/denoise_plus", bool(self._denoise_plus_check.isChecked()))
         self._settings.setValue("global/denoise_plus_k", float(self._denoise_plus_k_spin.value()))
+        self._settings.setValue("global/ac_iter", bool(self._ac_iter_check.isChecked()))
+        self._settings.setValue("global/ac_mu_scale", float(self._ac_mu_scale_spin.value()))
         if self._current_spect_path:
             prefix = self._study_settings_prefix()
             self._settings.setValue(f"{prefix}/preset", preset)
@@ -607,6 +651,7 @@ class AmyloidSpectPanel(QDialog):
             self._settings.setValue(f"{prefix}/qc_mode", qc_mode)
             self._settings.setValue(f"{prefix}/split_pct", split)
             self._settings.setValue(f"{prefix}/overlay_pct", overlay)
+            self._settings.setValue(f"{prefix}/fusion_pct", fusion)
             if self._ct_path:
                 self._settings.setValue(f"{prefix}/ct_path", self._ct_path)
 
@@ -631,8 +676,13 @@ class AmyloidSpectPanel(QDialog):
         self._post_sigma_spin.setValue(float(self._settings.value("global/post_sigma", 0.5) or 0.5))
         self._denoise_plus_check.setChecked(str(self._settings.value("global/denoise_plus", "false")).lower() == "true")
         self._denoise_plus_k_spin.setValue(float(self._settings.value("global/denoise_plus_k", 0.20) or 0.20))
+        self._ac_iter_check.setChecked(str(self._settings.value("global/ac_iter", "false")).lower() == "true")
+        self._ac_mu_scale_spin.setValue(float(self._settings.value("global/ac_mu_scale", 1.0) or 1.0))
         self._qc_split_slider.setValue(int(self._settings.value("global/split_pct", 50) or 50))
         self._blend_slider.setValue(int(self._settings.value("global/overlay_pct", 35) or 35))
+        fusion = int(self._settings.value("global/fusion_pct", 55) or 55)
+        self._fusion_slider.setValue(fusion)
+        self._fusion_pct = fusion
         self._on_preset_changed()
 
     def _restore_study_ui_state(self):
@@ -653,6 +703,9 @@ class AmyloidSpectPanel(QDialog):
         )
         self._qc_split_slider.setValue(int(self._settings.value(f"{prefix}/split_pct", self._qc_split_slider.value()) or 50))
         self._blend_slider.setValue(int(self._settings.value(f"{prefix}/overlay_pct", self._blend_slider.value()) or 35))
+        fusion = int(self._settings.value(f"{prefix}/fusion_pct", self._fusion_slider.value()) or 55)
+        self._fusion_slider.setValue(fusion)
+        self._fusion_pct = fusion
         self._ct_path = str(self._settings.value(f"{prefix}/ct_path", "") or "")
         self._on_preset_changed()
 
@@ -677,6 +730,8 @@ class AmyloidSpectPanel(QDialog):
             self._post_check.setChecked(True)
             self._post_sigma_spin.setValue(0.45)
             self._denoise_plus_check.setChecked(False)
+            self._ac_iter_check.setChecked(False)
+            self._ac_mu_scale_spin.setValue(1.00)
         elif preset == "amylo360_hd":
             self._set_combo_by_data(self._recon_combo, "osem")
             self._set_combo_by_data(self._ung_method_combo, "osem")
@@ -695,6 +750,8 @@ class AmyloidSpectPanel(QDialog):
             self._post_sigma_spin.setValue(0.35)
             self._denoise_plus_check.setChecked(True)
             self._denoise_plus_k_spin.setValue(0.20)
+            self._ac_iter_check.setChecked(True)
+            self._ac_mu_scale_spin.setValue(1.00)
         for widget in (
             self._ung_method_combo,
             self._ung_filter_combo,
@@ -798,6 +855,8 @@ class AmyloidSpectPanel(QDialog):
             ungated_denoise_plus=bool(self._denoise_plus_check.isChecked()),
             ungated_denoise_plus_k=float(self._denoise_plus_k_spin.value()),
             gated_denoise_plus=False,
+            attenuation_correction=bool(self._ac_iter_check.isChecked()),
+            attenuation_mu_scale=float(self._ac_mu_scale_spin.value()),
         )
 
     def _current_preset_label(self) -> str:
@@ -845,6 +904,27 @@ class AmyloidSpectPanel(QDialog):
     def _on_visual_controls_changed(self):
         self._persist_ui_state()
         self._render_current_with_overlay()
+
+    def _on_fusion_slider_changed(self, value: int):
+        self._fusion_pct = int(value)
+        self._fusion_lbl.setText(f"{int(value)}%")
+        self._persist_ui_state()
+        self._render_current_with_overlay()
+
+    def _task_progress_start(self, message: str):
+        self._progress.setValue(3)
+        self._progress.setFormat(f"3% · {message}")
+        QApplication.processEvents()
+
+    def _task_progress_step(self, value: int, message: str):
+        self._progress.setValue(int(np.clip(value, 0, 100)))
+        self._progress.setFormat(f"{int(np.clip(value, 0, 100))}% · {message}")
+        QApplication.processEvents()
+
+    def _task_progress_done(self, message: str):
+        self._progress.setValue(100)
+        self._progress.setFormat(f"100% · {message}")
+        QApplication.processEvents()
 
     def _mk_image_label(self, title: str) -> QLabel:
         lbl = QLabel(title)
@@ -987,12 +1067,11 @@ class AmyloidSpectPanel(QDialog):
         mode = str(mode or "off").lower()
 
         if mode == "fusion":
-            hot = np.zeros((*sp.shape, 3), dtype=np.float64)
-            hot[..., 0] = sp
-            hot[..., 1] = np.clip((sp - 0.25) / 0.75, 0.0, 1.0) * 0.85
-            hot[..., 2] = np.clip((sp - 0.65) / 0.35, 0.0, 1.0) * 0.25
-            alpha = np.clip(sp * 1.25, 0.0, 0.75)[..., None]
-            out = (1.0 - alpha) * rgb_ct + alpha * hot
+            mix = float(np.clip(getattr(self, "_fusion_pct", 55), 0, 100)) / 100.0
+            # Alpha espacial: el porcentaje de fusión define cuánto pesa el SPECT,
+            # pero la señal baja queda translúcida para no tapar CT de fondo.
+            alpha = np.clip(sp * 1.35, 0.0, 1.0)[..., None] * mix
+            out = (1.0 - alpha) * rgb_ct + alpha * rgb_sp
             return np.clip(out * 255.0, 0, 255).astype(np.uint8)
 
         if mode == "edges":
@@ -1194,20 +1273,67 @@ class AmyloidSpectPanel(QDialog):
         if dx == 0 and dy == 0:
             return
         target = self._drag_state.get("target")
-        pan = self._ct_pan_px if target == "ct" else self._spect_pan_px
-        pan[axis][0] += dy
-        pan[axis][1] += dx
+        if target == "ct" and self._ct_auto_registered is not None:
+            dz, dyw, dxw = self._drag_delta_to_world_zyx(axis, dx, dy)
+            self._nudge_z.setValue(float(np.clip(self._nudge_z.value() + dz, -64.0, 64.0)))
+            self._nudge_y.setValue(float(np.clip(self._nudge_y.value() + dyw, -64.0, 64.0)))
+            self._nudge_x.setValue(float(np.clip(self._nudge_x.value() + dxw, -64.0, 64.0)))
+            self._status.setText(
+                "Ctrl+arrastre (triangulado): "
+                f"CT Δ(z,y,x)=({self._nudge_z.value():.1f},{self._nudge_y.value():.1f},{self._nudge_x.value():.1f}) px"
+            )
+        else:
+            pan = self._spect_pan_px
+            pan[axis][0] += dy
+            pan[axis][1] += dx
+            self._status.setText(
+                f"Shift+arrastre: SPECT pan {axis}=({pan[axis][0]},{pan[axis][1]}) px"
+            )
+            self._render_current_with_overlay()
         self._drag_state["pos"] = pos
-        self._status.setText(
-            f"{'Ctrl' if target == 'ct' else 'Shift'}+arrastre: {'CT' if target == 'ct' else 'SPECT'} "
-            f"pan {axis}=({pan[axis][0]},{pan[axis][1]}) px"
-        )
-        self._render_current_with_overlay()
         event.accept()
 
     def _on_image_mouse_release(self, event, axis: str):
         self._drag_state = None
         event.accept()
+
+    def _axis_label(self, axis: str) -> QLabel:
+        if axis == "axial":
+            return self._axial_lbl
+        if axis == "coronal":
+            return self._cor_lbl
+        return self._sag_lbl
+
+    def _drag_delta_to_world_zyx(self, axis: str, dx_px: int, dy_px: int) -> tuple[float, float, float]:
+        """Convierte delta de mouse en una vista 2D a delta global z/y/x (px volumen)."""
+        vol = self._base_spect_volume if self._base_spect_volume is not None else self._current_volume
+        if vol is None:
+            return (0.0, 0.0, 0.0)
+        shape = tuple(int(v) for v in np.asarray(vol).shape)
+        if len(shape) != 3:
+            return (0.0, 0.0, 0.0)
+
+        lbl = self._axis_label(axis)
+        pm = lbl.pixmap()
+        w = int(pm.width()) if pm is not None else max(1, int(lbl.width()))
+        h = int(pm.height()) if pm is not None else max(1, int(lbl.height()))
+        w = max(1, w)
+        h = max(1, h)
+
+        sens = max(0.05, float(getattr(self, "_ct_drag_sensitivity", 1.0)))
+
+        if axis == "axial":
+            sx = float(shape[2]) / float(w)
+            sy = float(shape[1]) / float(h)
+            return (0.0, float(dy_px) * sy * sens, float(dx_px) * sx * sens)
+        if axis == "coronal":
+            sx = float(shape[2]) / float(w)
+            sz = float(shape[0]) / float(h)
+            return (float(dy_px) * sz * sens, 0.0, float(dx_px) * sx * sens)
+        # sagittal: horizontal=y, vertical=z
+        sy = float(shape[1]) / float(w)
+        sz = float(shape[0]) / float(h)
+        return (float(dy_px) * sz * sens, float(dx_px) * sy * sens, 0.0)
 
     def _slices_preview_at(self, volume: np.ndarray) -> dict[str, np.ndarray]:
         vol = np.asarray(volume, dtype=np.float64)
@@ -1249,11 +1375,26 @@ class AmyloidSpectPanel(QDialog):
             return self._slices_preview_at(vol)
         z = int(np.clip(self._slice_idx.get("axial", vol.shape[0] // 2) + self._ct_view_offset.get("axial", 0), 0, vol.shape[0] - 1))
         y = int(np.clip(self._slice_idx.get("coronal", vol.shape[1] // 2) + self._ct_view_offset.get("coronal", 0), 0, vol.shape[1] - 1))
+        # El eje AP/PA del CT queda invertido respecto del SPECT en esta exportación:
+        # al pedir el corte y=N del SPECT, el CT equivalente está en y espejado.
+        y_ct = int(vol.shape[1] - 1 - y)
         x = int(np.clip(self._slice_idx.get("sagittal", vol.shape[2] // 2) + self._ct_view_offset.get("sagittal", 0), 0, vol.shape[2] - 1))
+        axial = self._window_ct(vol[z])
+        coronal = self._window_ct(vol[:, y_ct, :])
+        sagittal = self._window_ct(vol[:, :, x])
+
+        # Corrección visual por eje (consenso clínico actual):
+        # - CT y global AP/PA espejado frente al SPECT.
+        # - Axial: flip vertical.
+        # - Eje X (sagital): flip horizontal.
+        # - Coronal (eje Y): usa y_ct espejado, sin flip extra en pantalla.
+        axial = np.flipud(axial)
+        sagittal = np.fliplr(sagittal)
+
         return {
-            "axial": self._pan_2d_center(self._zoom_2d_center(self._window_ct(vol[z]), self._ct_zoom_pct), self._ct_pan_px["axial"]),
-            "coronal": self._pan_2d_center(self._zoom_2d_center(self._window_ct(vol[:, y, :]), self._ct_zoom_pct), self._ct_pan_px["coronal"]),
-            "sagittal": self._pan_2d_center(self._zoom_2d_center(self._window_ct(vol[:, :, x]), self._ct_zoom_pct), self._ct_pan_px["sagittal"]),
+            "axial": self._pan_2d_center(self._zoom_2d_center(axial, self._ct_zoom_pct), self._ct_pan_px["axial"]),
+            "coronal": self._pan_2d_center(self._zoom_2d_center(coronal, self._ct_zoom_pct), self._ct_pan_px["coronal"]),
+            "sagittal": self._pan_2d_center(self._zoom_2d_center(sagittal, self._ct_zoom_pct), self._ct_pan_px["sagittal"]),
         }
 
     def _render_triplet(self, left_title: str, left_arr: np.ndarray, mid_title: str, mid_arr: np.ndarray, right_title: str, right_arr: np.ndarray):
@@ -1346,6 +1487,9 @@ class AmyloidSpectPanel(QDialog):
         alpha = float(self._blend_slider.value()) / 100.0
         self._blend_lbl.setText(f"{self._blend_slider.value()}%")
         self._qc_split_lbl.setText(f"{self._qc_split_slider.value()}%")
+        self._fusion_pct = int(self._fusion_slider.value()) if hasattr(self, "_fusion_slider") else int(getattr(self, "_fusion_pct", 55))
+        if hasattr(self, "_fusion_lbl"):
+            self._fusion_lbl.setText(f"{self._fusion_pct}%")
 
         pv = self._slices_preview_at(self._current_volume)
         mode = str(self._qc_mode.currentData() or "off")
@@ -1402,8 +1546,12 @@ class AmyloidSpectPanel(QDialog):
             return
 
         try:
-            method = str(self._recon_combo.currentData() or "fbp")
+            self._task_progress_start("Cargando SPECT...")
+            # Carga inicial siempre rápida en FBP para feedback inmediato en UI.
+            method = "fbp"
+            selected_method = str(self._recon_combo.currentData() or "fbp")
             self._analysis = run_amyloid_spect_analysis(path, recon_method=method)
+            self._task_progress_step(55, "Preparando volumen base...")
             self._study_is_gated = int(getattr(self._analysis, "n_gates", 1) or 1) >= 2
             self._spect_spacing_zyx = getattr(self._analysis, "spacing_zyx", None)
             self._spect_affine_ijk_to_lps = getattr(self._analysis, "affine_ijk_to_lps", None)
@@ -1414,6 +1562,7 @@ class AmyloidSpectPanel(QDialog):
             self._bone_mask = None
             self._qc_mode.setEnabled(False)
             self._qc_split_slider.setEnabled(False)
+            self._fusion_slider.setEnabled(False)
             self._update_slice_controls()
             self._render_preview(self._current_volume)
             self._btn_bone.setEnabled(True)
@@ -1426,17 +1575,25 @@ class AmyloidSpectPanel(QDialog):
             self._btn_export_axes_dcm.setEnabled(False)
             self._blend_slider.setEnabled(False)
             self._refresh_gated_controls()
+            self._task_progress_step(88, "Renderizando vistas...")
             self._status.setText(
                 f"SPECT cargado: {'crudo' if self._analysis.was_raw else 'reconstruido'} · "
                 f"shape {self._current_volume.shape} · "
                 f"{'gatillado' if self._study_is_gated else 'no gatillado'}"
             )
             self._write_metrics(self._analysis.metrics, self._analysis.notes)
+            if selected_method != "fbp":
+                self._metrics.append(
+                    f"- Carga inicial forzada a FBP rápido (selección actual: {selected_method.upper()}). "
+                    "Para método final usar 'Recon + cortes'."
+                )
             if self._ct_path:
                 self._metrics.append(f"\nCT asociado guardado: {self._ct_path}")
                 self._metrics.append(self._matrix_recommendation(self._current_volume.shape))
             self._persist_ui_state()
+            self._task_progress_done("SPECT listo")
         except Exception as exc:
+            self._progress.setFormat("Error")
             self._status.setText(f"Error cargando SPECT: {exc}")
             self._metrics.setPlainText(f"Error:\n{exc}")
 
@@ -1459,9 +1616,43 @@ class AmyloidSpectPanel(QDialog):
             self._pending_recon_cfg = cfg
             self._pending_recon_preset_label = self._current_preset_label()
             self._pending_recon_cuts_mode = cuts_mode
+            ac_iter_enabled = bool(getattr(cfg, "attenuation_correction", False))
+            self._pending_recon_ac_iter = ac_iter_enabled
+
+            att_rs_for_iter = None
+            att_px_cm = None
+            if ac_iter_enabled:
+                if self._att_map_volume is None:
+                    self._status.setText("AC iterativa: cargar primero ATT MAP o desactivar el toggle.")
+                    return
+                att_rs_for_iter, notes_rs = resample_volume_to_spect_grid(
+                    self._att_map_volume,
+                    np.asarray(self._analysis.volume, dtype=np.float64),
+                    source_spacing_zyx=self._att_spacing_zyx,
+                    spect_spacing_zyx=self._spect_spacing_zyx,
+                    source_affine_ijk_to_lps=self._att_affine_ijk_to_lps,
+                    spect_affine_ijk_to_lps=self._spect_affine_ijk_to_lps,
+                    fill_value=0.0,
+                )
+                self._att_map_registered = np.asarray(att_rs_for_iter, dtype=np.float64)
+                px_mm = float(self._spect_spacing_zyx[2]) if self._spect_spacing_zyx is not None else 6.8
+                att_px_cm = max(1e-4, px_mm / 10.0)
+                self._metrics.append("\n--- AC iterativa (pre-recon) ---")
+                for n in notes_rs:
+                    self._metrics.append(f"- {n}")
+                self._metrics.append(
+                    f"- ATT MAP para iterativa listo: shape={self._att_map_registered.shape}, px={px_mm:.3f} mm, μ-scale={float(getattr(cfg, 'attenuation_mu_scale', 1.0)):.2f}"
+                )
+
             self._set_recon_busy(True)
             self._recon_thread = QThread(self)
-            self._recon_worker = _AmyloidReconWorker(self._analysis.source_path, cfg, cuts_mode)
+            self._recon_worker = _AmyloidReconWorker(
+                self._analysis.source_path,
+                cfg,
+                cuts_mode,
+                attenuation_mu_map=att_rs_for_iter,
+                attenuation_pixel_size_cm=att_px_cm,
+            )
             self._recon_worker.moveToThread(self._recon_thread)
             self._recon_thread.started.connect(self._recon_worker.run)
             self._recon_worker.progress.connect(self._on_recon_progress)
@@ -1519,6 +1710,9 @@ class AmyloidSpectPanel(QDialog):
                 f"- config: método={cfg.reconstruction_method.upper()}, "
                 f"gated={str(cfg.gated_method or cfg.reconstruction_method).upper()}, "
                 f"iter={int(cfg.iterative_iterations)}, subsets={int(cfg.osem_subsets)}"
+            )
+            self._metrics.append(
+                f"- AC iterativa: {'ON' if self._pending_recon_ac_iter else 'OFF'}"
             )
             self._metrics.append(f"- modo cortes: {self._pending_recon_cuts_mode}")
             self._metrics.append(f"- tomográficos: {tomo_keys}")
@@ -1635,7 +1829,9 @@ class AmyloidSpectPanel(QDialog):
 
     def _load_ct_path(self, path: str):
         try:
+            self._task_progress_start("Cargando CT...")
             ct = load_ct_volume_from_path(path)
+            self._task_progress_step(60, "Remapeando CT y actualizando estado...")
             self._ct_volume = np.asarray(ct.volume, dtype=np.float64)
             self._ct_spacing_zyx = getattr(ct, "spacing_zyx", None)
             self._ct_affine_ijk_to_lps = getattr(ct, "affine_ijk_to_lps", None)
@@ -1645,6 +1841,7 @@ class AmyloidSpectPanel(QDialog):
             self._reset_ct_nudge(update_view=False)
             self._qc_mode.setEnabled(False)
             self._qc_split_slider.setEnabled(False)
+            self._fusion_slider.setEnabled(False)
             self._btn_register.setEnabled(self._base_spect_volume is not None)
             self._status.setText(f"CT cargado · {ct.series_description} · shape {self._ct_volume.shape}")
             self._metrics.append("\n--- CT cargado ---")
@@ -1653,7 +1850,9 @@ class AmyloidSpectPanel(QDialog):
             self._append_grid_report()
             self._metrics.append("Ejecutar 'Registrar CT↔SPECT'.")
             self._persist_ui_state()
+            self._task_progress_done("CT listo")
         except Exception as exc:
+            self._progress.setFormat("Error")
             self._status.setText(f"Error cargando CT: {exc}")
 
     def _load_att_map(self):
@@ -1666,7 +1865,9 @@ class AmyloidSpectPanel(QDialog):
         if not path:
             return
         try:
+            self._task_progress_start("Cargando ATT MAP...")
             att = load_attenuation_map_from_path(path)
+            self._task_progress_step(70, "Actualizando ATT MAP en estado...")
             self._att_map_volume = np.asarray(att.volume, dtype=np.float64)
             self._att_map_registered = None
             self._att_spacing_zyx = getattr(att, "spacing_zyx", None)
@@ -1677,7 +1878,9 @@ class AmyloidSpectPanel(QDialog):
             self._metrics.append("\n--- ATT MAP cargado ---")
             for note in att.notes:
                 self._metrics.append(f"- {note}")
+            self._task_progress_done("ATT MAP listo")
         except Exception as exc:
+            self._progress.setFormat("Error")
             self._status.setText(f"Error cargando ATT MAP: {exc}")
 
     def _apply_ac_prototype(self):
@@ -1688,6 +1891,7 @@ class AmyloidSpectPanel(QDialog):
             self._status.setText("Cargar primero ATT MAP.")
             return
         try:
+            self._task_progress_start("Aplicando AC (prototipo/Chang)...")
             att_rs, notes_rs = resample_volume_to_spect_grid(
                 self._att_map_volume,
                 self._base_spect_volume,
@@ -1697,12 +1901,14 @@ class AmyloidSpectPanel(QDialog):
                 spect_affine_ijk_to_lps=self._spect_affine_ijk_to_lps,
                 fill_value=0.0,
             )
+            self._task_progress_step(45, "Calculando AC prototipo...")
             self._att_map_registered = np.asarray(att_rs, dtype=np.float64)
             corrected_proto, notes_proto = apply_attenuation_correction_prototype(
                 self._base_spect_volume,
                 self._att_map_registered,
                 mu_scale=0.12,
             )
+            self._task_progress_step(70, "Calculando AC Chang...")
             corrected, notes_ac = apply_attenuation_correction_chang(
                 self._base_spect_volume,
                 self._att_map_registered,
@@ -1710,6 +1916,7 @@ class AmyloidSpectPanel(QDialog):
                 mu_scale=1.0,
                 n_angles=36,
             )
+            self._task_progress_step(90, "Renderizando volumen corregido...")
             self._current_volume = np.asarray(corrected, dtype=np.float64)
             self._bone_mask = None
             self._update_slice_controls()
@@ -1722,7 +1929,9 @@ class AmyloidSpectPanel(QDialog):
                 self._metrics.append(f"- [AC prototipo] {n}")
             for n in notes_ac:
                 self._metrics.append(f"- [AC Chang] {n}")
+            self._task_progress_done("AC aplicada")
         except Exception as exc:
+            self._progress.setFormat("Error")
             self._status.setText(f"Error aplicando AC prototipo: {exc}")
 
     def _register_ct_to_spect(self):
@@ -1730,6 +1939,7 @@ class AmyloidSpectPanel(QDialog):
             self._status.setText("Cargar primero SPECT y CT.")
             return
         try:
+            self._task_progress_start("Registrando CT↔SPECT...")
             ct_reg, shift_zyx, notes = register_ct_to_spect_rigid(
                 self._ct_volume,
                 self._base_spect_volume,
@@ -1740,6 +1950,26 @@ class AmyloidSpectPanel(QDialog):
                 refine_ncc=True,
                 ncc_search_radius_zyx=(2, 4, 4),
             )
+            self._task_progress_step(45, "Ajustando orientación CT...")
+            ct_reg, orient_flags, orient_notes = align_ct_orientation_to_spect(
+                ct_reg,
+                self._base_spect_volume,
+                try_flip_x=True,
+                try_flip_y=True,
+                try_flip_z=False,
+                try_flip_xy=True,
+                min_score_gain=0.03,
+                min_abs_score=0.05,
+            )
+            self._task_progress_step(70, "Refinando traslación fina...")
+            ct_reg, fine_shift_zyx, fine_notes = refine_ct_to_spect_translation(
+                ct_reg,
+                self._base_spect_volume,
+                search_radius_zyx=(3, 8, 8),
+                ct_bone_hu_threshold=200.0,
+                spect_focus_percentile=85.0,
+            )
+            self._task_progress_step(90, "Renderizando registro...")
             self._ct_auto_registered = np.asarray(ct_reg, dtype=np.float64)
             self._ct_registered = np.asarray(ct_reg, dtype=np.float64)
             for spin in (self._nudge_z, self._nudge_y, self._nudge_x):
@@ -1750,6 +1980,7 @@ class AmyloidSpectPanel(QDialog):
             self._btn_reset_nudge.setEnabled(True)
             self._qc_mode.setEnabled(True)
             self._qc_split_slider.setEnabled(True)
+            self._fusion_slider.setEnabled(True)
             self._set_combo_by_data(self._qc_mode, "fusion")
             self._status.setText(
                 "Registro CT↔SPECT listo "
@@ -1758,9 +1989,26 @@ class AmyloidSpectPanel(QDialog):
             self._metrics.append("\n--- Registro CT↔SPECT ---")
             for n in notes:
                 self._metrics.append(n)
+            for n in orient_notes:
+                self._metrics.append(n)
+            for n in fine_notes:
+                self._metrics.append(n)
+            self._metrics.append(
+                "Auto-orientación CT aplicada: "
+                f"rot={int(orient_flags.get('rot_k', 0))*90}°, "
+                f"flip_z={bool(orient_flags.get('flip_z', False))}, "
+                f"flip_y={bool(orient_flags.get('flip_y', False))}, "
+                f"flip_x={bool(orient_flags.get('flip_x', False))}."
+            )
+            self._metrics.append(
+                "Refinamiento fino incremental Δ(z,y,x)="
+                f"({float(fine_shift_zyx[0]):.1f},{float(fine_shift_zyx[1]):.1f},{float(fine_shift_zyx[2]):.1f}) px."
+            )
             self._append_grid_report()
             self._render_current_with_overlay()
+            self._task_progress_done("Registro CT↔SPECT listo")
         except Exception as exc:
+            self._progress.setFormat("Error")
             self._status.setText(f"Error en registro CT↔SPECT: {exc}")
 
     def _apply_ct_nudge(self):
@@ -1787,6 +2035,7 @@ class AmyloidSpectPanel(QDialog):
         if self._current_volume is None:
             return
         try:
+            self._task_progress_start("Aplicando sustracción ósea...")
             ct_vol = None
             if self._ct_check.isChecked():
                 ct_vol = self._ct_registered if self._ct_registered is not None else self._ct_volume
@@ -1794,12 +2043,14 @@ class AmyloidSpectPanel(QDialog):
                 self._base_spect_volume if self._base_spect_volume is not None else self._current_volume,
                 ct_volume=ct_vol,
             )
+            self._task_progress_step(80, "Renderizando sustracción ósea...")
             self._current_volume = np.asarray(res.enhanced_volume, dtype=np.float64)
             self._bone_mask = np.asarray(res.bone_mask, dtype=np.uint8)
             self._blend_slider.setEnabled(True)
             self._render_current_with_overlay()
             self._status.setText(f"Sustracción ósea visual aplicada ({res.method}).")
             self._metrics.append("\n--- Sustracción ósea ---")
+            self._task_progress_done("Sustracción ósea lista")
             self._metrics.append("\n".join(res.notes))
         except Exception as exc:
             self._status.setText(f"Error en sustracción ósea: {exc}")
