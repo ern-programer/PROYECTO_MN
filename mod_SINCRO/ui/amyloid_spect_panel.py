@@ -2579,7 +2579,10 @@ class AmyloidSpectPanel(QDialog):
         self._localization_anchor_zyx = (int(pt[0]), int(pt[1]), int(pt[2]))
         
         # Crear VOI corazón temporal para visualización en vivo
-        heart_radius = float(self._heart_radius_spin.value())
+        # Usar valor del spin si existe, sino default 30mm
+        heart_radius = 30.0
+        if hasattr(self, "_heart_radius_spin"):
+            heart_radius = float(self._heart_radius_spin.value())
         self._temp_voi_heart = VOISphere(
             label="Corazón (temp)",
             cz=int(pt[0]), cy=int(pt[1]), cx=int(pt[2]),
@@ -3016,7 +3019,10 @@ class AmyloidSpectPanel(QDialog):
         # Crear VOI mediastino temporal si ya existe el ancla (corazón)
         anchor = getattr(self, "_localization_anchor_zyx", None)
         if anchor is not None:
-            mediastinum_radius = float(self._mediastinum_radius_spin.value())
+            # Usar valor del spin si existe, sino default 25mm
+            mediastinum_radius = 25.0
+            if hasattr(self, "_mediastinum_radius_spin"):
+                mediastinum_radius = float(self._mediastinum_radius_spin.value())
             self._temp_voi_mediastinum = VOISphere(
                 label="Mediastino (temp)",
                 cz=int(z), cy=int(y), cx=int(x),
