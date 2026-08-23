@@ -8,7 +8,7 @@ import json
 import numpy as np
 
 from PyQt6.QtCore import QObject, Qt, QSettings, QThread, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QPdfWriter, QPageSize
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPdfWriter, QPageSize, QPen, QColor
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -746,6 +746,9 @@ class AmyloidSpectPanel(QDialog):
         self._dicom_profile_info = {}
         self._pending_camera_profile_adjust = None
         self._pre_bone_volume = None
+        self._triangulation_cross_enabled = False
+        self._localization_cross_enabled = False
+        self._localization_point_zyx = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -1059,6 +1062,21 @@ class AmyloidSpectPanel(QDialog):
         self._fusion_lbl = QLabel("55%")
         self._fusion_lbl.setStyleSheet("color:#94a3b8;")
         qc_row.addWidget(self._fusion_lbl)
+        self._btn_triangulation_cross = QPushButton("Cruz triangulación")
+        self._btn_triangulation_cross.setCheckable(True)
+        self._btn_triangulation_cross.setChecked(False)
+        self._btn_triangulation_cross.setToolTip("Activa/desactiva líneas de referencia entre cortes axial, coronal y sagital.")
+        self._btn_triangulation_cross.toggled.connect(self._on_triangulation_cross_toggled)
+        qc_row.addWidget(self._btn_triangulation_cross)
+        self._btn_localization_cross = QPushButton("Localización")
+        self._btn_localization_cross.setCheckable(True)
+        self._btn_localization_cross.setChecked(False)
+        self._btn_localization_cross.setToolTip(
+            "Modo localización: Ctrl+clic/arrastre localiza en CT; Shift+clic/arrastre localiza en SPECT. "
+            "Reacomoda los otros cortes al mismo punto."
+        )
+        self._btn_localization_cross.toggled.connect(self._on_localization_cross_toggled)
+        qc_row.addWidget(self._btn_localization_cross)
         root.addLayout(qc_row)
 
         slice_row = QHBoxLayout()
@@ -1505,6 +1523,8 @@ class AmyloidSpectPanel(QDialog):
         self._settings.setValue("global/split_pct", split)
         self._settings.setValue("global/overlay_pct", overlay)
         self._settings.setValue("global/fusion_pct", fusion)
+        self._settings.setValue("global/triangulation_cross", bool(getattr(self, "_triangulation_cross_enabled", False)))
+        self._settings.setValue("global/localization_cross", bool(getattr(self, "_localization_cross_enabled", False)))
         self._settings.setValue("global/ung_filter", str(self._ung_filter_combo.currentData() or "butterworth"))
         self._settings.setValue("global/ung_cutoff", float(self._ung_cutoff_spin.value()))
         self._settings.setValue("global/ung_order", int(self._ung_order_spin.value()))
@@ -1562,6 +1582,18 @@ class AmyloidSpectPanel(QDialog):
         fusion = int(self._settings.value("global/fusion_pct", 55) or 55)
         self._fusion_slider.setValue(fusion)
         self._fusion_pct = fusion
+        triang = str(self._settings.value("global/triangulation_cross", "false")).lower() == "true"
+        self._triangulation_cross_enabled = bool(triang)
+        if hasattr(self, "_btn_triangulation_cross"):
+            self._btn_triangulation_cross.blockSignals(True)
+            self._btn_triangulation_cross.setChecked(bool(triang))
+            self._btn_triangulation_cross.blockSignals(False)
+        localize = str(self._settings.value("global/localization_cross", "false")).lower() == "true"
+        self._localization_cross_enabled = bool(localize)
+        if hasattr(self, "_btn_localization_cross"):
+            self._btn_localization_cross.blockSignals(True)
+            self._btn_localization_cross.setChecked(bool(localize))
+            self._btn_localization_cross.blockSignals(False)
         self._on_preset_changed()
 
     def _restore_study_ui_state(self):
@@ -2062,6 +2094,106 @@ class AmyloidSpectPanel(QDialog):
         qimg = QImage(arr.data, w, h, arr.strides[0], QImage.Format.Format_RGB888)
         return QPixmap.fromImage(qimg.copy())
 
+    def _draw_triangulation_cross(self, pix: QPixmap, axis: str) -> QPixmap:
+        """Dibuja referencias de corte cruzadas sobre una vista MPR ya escalada."""
+        show_triang = bool(getattr(self, "_triangulation_cross_enabled", False))
+        show_loc = bool(getattr(self, "_localization_cross_enabled", False)) and getattr(self, "_localization_point_zyx", None) is not None
+        if not (show_triang or show_loc) or pix.isNull():
+            return pix
+        vol = self._base_spect_volume if self._base_spect_volume is not None else self._current_volume
+        if vol is None:
+            return pix
+        shape = tuple(int(v) for v in np.asarray(vol).shape[:3])
+        if len(shape) != 3 or min(shape) <= 1:
+            return pix
+
+        cur_z = int(np.clip(self._slice_idx.get("axial", shape[0] // 2), 0, shape[0] - 1))
+        cur_y = int(np.clip(self._slice_idx.get("coronal", shape[1] // 2), 0, shape[1] - 1))
+        cur_x = int(np.clip(self._slice_idx.get("sagittal", shape[2] // 2), 0, shape[2] - 1))
+
+        def _coords_from_zyx(zyx: tuple[int, int, int]) -> tuple[int, int, str, str]:
+            zz = int(np.clip(zyx[0], 0, shape[0] - 1))
+            yy = int(np.clip(zyx[1], 0, shape[1] - 1))
+            xx = int(np.clip(zyx[2], 0, shape[2] - 1))
+            if axis == "axial":
+                return (
+                    int(round(xx / max(1, shape[2] - 1) * (w - 1))),
+                    int(round(yy / max(1, shape[1] - 1) * (h - 1))),
+                    f"X {xx + 1}",
+                    f"Y {yy + 1}",
+                )
+            if axis == "coronal":
+                return (
+                    int(round(xx / max(1, shape[2] - 1) * (w - 1))),
+                    int(round(zz / max(1, shape[0] - 1) * (h - 1))),
+                    f"X {xx + 1}",
+                    f"Z {zz + 1}",
+                )
+            return (
+                int(round(yy / max(1, shape[1] - 1) * (w - 1))),
+                int(round(zz / max(1, shape[0] - 1) * (h - 1))),
+                f"Y {yy + 1}",
+                f"Z {zz + 1}",
+            )
+        w = max(1, int(pix.width()))
+        h = max(1, int(pix.height()))
+
+        out = QPixmap(pix)
+        painter = QPainter(out)
+        try:
+            if show_triang:
+                vx, hy, v_label, h_label = _coords_from_zyx((cur_z, cur_y, cur_x))
+                shadow = QPen(QColor(0, 0, 0, 220), 3)
+                pen_v = QPen(QColor(56, 189, 248, 235), 1)
+                pen_h = QPen(QColor(251, 191, 36, 235), 1)
+                for off in (-1, 1):
+                    painter.setPen(shadow)
+                    painter.drawLine(max(0, min(w - 1, vx + off)), 0, max(0, min(w - 1, vx + off)), h - 1)
+                    painter.drawLine(0, max(0, min(h - 1, hy + off)), w - 1, max(0, min(h - 1, hy + off)))
+                painter.setPen(pen_v)
+                painter.drawLine(vx, 0, vx, h - 1)
+                painter.setPen(pen_h)
+                painter.drawLine(0, hy, w - 1, hy)
+                painter.setPen(QColor(255, 255, 255, 230))
+                painter.drawText(6, 16, h_label)
+                painter.drawText(max(6, min(w - 48, vx + 5)), max(30, min(h - 8, hy - 6)), v_label)
+            if show_loc:
+                loc_z, loc_y, loc_x = (int(v) for v in getattr(self, "_localization_point_zyx"))
+                vx, hy, _v_label, _h_label = _coords_from_zyx((loc_z, loc_y, loc_x))
+                mark_pen = QPen(QColor(255, 255, 255, 245), 2)
+                painter.setPen(mark_pen)
+                painter.drawEllipse(max(0, vx - 5), max(0, hy - 5), 10, 10)
+                painter.drawLine(max(0, vx - 10), hy, max(0, vx - 3), hy)
+                painter.drawLine(min(w - 1, vx + 3), hy, min(w - 1, vx + 10), hy)
+                painter.drawLine(vx, max(0, hy - 10), vx, max(0, hy - 3))
+                painter.drawLine(vx, min(h - 1, hy + 3), vx, min(h - 1, hy + 10))
+                painter.drawText(6, max(32, h - 10), f"LOC Z/Y/X {loc_z + 1}/{loc_y + 1}/{loc_x + 1}")
+        finally:
+            painter.end()
+        return out
+
+    def _set_axis_pixmap_with_cross(self, lbl: QLabel, pix: QPixmap, axis: str) -> None:
+        lbl.setPixmap(self._draw_triangulation_cross(pix, axis))
+
+    def _on_triangulation_cross_toggled(self, checked: bool) -> None:
+        self._triangulation_cross_enabled = bool(checked)
+        if hasattr(self, "_settings"):
+            self._settings.setValue("global/triangulation_cross", bool(checked))
+        self._status.setText("Cruz de triangulación activada." if checked else "Cruz de triangulación desactivada.")
+        self._render_selected_view()
+
+    def _on_localization_cross_toggled(self, checked: bool) -> None:
+        self._localization_cross_enabled = bool(checked)
+        if not checked:
+            self._localization_point_zyx = None
+        if hasattr(self, "_settings"):
+            self._settings.setValue("global/localization_cross", bool(checked))
+        self._status.setText(
+            "Localización activada: Ctrl+clic/arrastre = CT, Shift+clic/arrastre = SPECT."
+            if checked else "Localización desactivada."
+        )
+        self._render_selected_view()
+
     @staticmethod
     def _blend_mask_over_rgb(rgb: np.ndarray, mask2d: np.ndarray | None, alpha: float) -> np.ndarray:
         arr = np.asarray(rgb, dtype=np.float64)
@@ -2094,9 +2226,9 @@ class AmyloidSpectPanel(QDialog):
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        self._axial_lbl.setPixmap(ax)
-        self._cor_lbl.setPixmap(co)
-        self._sag_lbl.setPixmap(sa)
+        self._set_axis_pixmap_with_cross(self._axial_lbl, ax, "axial")
+        self._set_axis_pixmap_with_cross(self._cor_lbl, co, "coronal")
+        self._set_axis_pixmap_with_cross(self._sag_lbl, sa, "sagittal")
 
     def _update_slice_controls(self):
         if self._current_volume is None:
@@ -2121,6 +2253,7 @@ class AmyloidSpectPanel(QDialog):
         self._slice_idx["axial"] = int(self._slice_z.value())
         self._slice_idx["coronal"] = int(self._slice_y.value())
         self._slice_idx["sagittal"] = int(self._slice_x.value())
+        self._move_localization_point_to_current_slices(None)
         if self._current_volume is not None:
             shape = tuple(int(v) for v in np.asarray(self._current_volume).shape[:3])
             self._slice_z_lbl.setText(f"z {self._slice_idx['axial'] + 1}/{shape[0]}")
@@ -2207,13 +2340,33 @@ class AmyloidSpectPanel(QDialog):
         slider = {"axial": self._slice_z, "coronal": self._slice_y, "sagittal": self._slice_x}.get(axis)
         if slider is not None and slider.isEnabled():
             slider.setValue(int(np.clip(slider.value() + step, slider.minimum(), slider.maximum())))
+            self._move_localization_point_to_current_slices(axis)
         event.accept()
+
+    def _move_localization_point_to_current_slices(self, changed_axis: str | None = None) -> None:
+        """Hace que la cruz depositada navegue junto con los cortes activos."""
+        if not bool(getattr(self, "_localization_cross_enabled", False)):
+            return
+        if getattr(self, "_localization_point_zyx", None) is None:
+            return
+        z, y, x = (int(v) for v in self._localization_point_zyx)
+        if changed_axis in (None, "axial"):
+            z = int(self._slice_idx.get("axial", z))
+        if changed_axis in (None, "coronal"):
+            y = int(self._slice_idx.get("coronal", y))
+        if changed_axis in (None, "sagittal"):
+            x = int(self._slice_idx.get("sagittal", x))
+        self._localization_point_zyx = (z, y, x)
 
     def _on_image_mouse_press(self, event, axis: str):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if bool(getattr(self, "_localization_cross_enabled", False)) and (ctrl or shift):
+            if self._localize_from_view_click(event, axis, target="ct" if ctrl else "spect"):
+                event.accept()
+                return
         if not (ctrl or shift):
             return
         self._drag_state = {
@@ -2224,6 +2377,12 @@ class AmyloidSpectPanel(QDialog):
         event.accept()
 
     def _on_image_mouse_move(self, event, axis: str):
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if bool(getattr(self, "_localization_cross_enabled", False)) and (ctrl or shift):
+            if self._localize_from_view_click(event, axis, target="ct" if ctrl else "spect"):
+                event.accept()
+                return
         if not self._drag_state or self._drag_state.get("axis") != axis:
             return
         pos = event.position().toPoint()
@@ -2252,6 +2411,62 @@ class AmyloidSpectPanel(QDialog):
             self._render_current_with_overlay()
         self._drag_state["pos"] = pos
         event.accept()
+
+    def _mouse_pos_to_volume_zyx(self, event, axis: str, target: str) -> tuple[int, int, int] | None:
+        vol = self._ct_registered if target == "ct" and self._ct_registered is not None else self._current_volume
+        if vol is None:
+            return None
+        shape = tuple(int(v) for v in np.asarray(vol).shape[:3])
+        if len(shape) != 3 or min(shape) <= 1:
+            return None
+        lbl = self._axis_label(axis)
+        pm = lbl.pixmap()
+        if pm is None or pm.isNull():
+            return None
+        pos = event.position().toPoint()
+        lbl_w, lbl_h = max(1, int(lbl.width())), max(1, int(lbl.height()))
+        pm_w, pm_h = max(1, int(pm.width())), max(1, int(pm.height()))
+        x0 = max(0, (lbl_w - pm_w) // 2)
+        y0 = max(0, (lbl_h - pm_h) // 2)
+        px = int(np.clip(pos.x() - x0, 0, pm_w - 1))
+        py = int(np.clip(pos.y() - y0, 0, pm_h - 1))
+
+        z = int(np.clip(self._slice_idx.get("axial", shape[0] // 2), 0, shape[0] - 1))
+        y = int(np.clip(self._slice_idx.get("coronal", shape[1] // 2), 0, shape[1] - 1))
+        x = int(np.clip(self._slice_idx.get("sagittal", shape[2] // 2), 0, shape[2] - 1))
+
+        if axis == "axial":
+            x = int(round(px / max(1, pm_w - 1) * (shape[2] - 1)))
+            y = int(round(py / max(1, pm_h - 1) * (shape[1] - 1)))
+        elif axis == "coronal":
+            x = int(round(px / max(1, pm_w - 1) * (shape[2] - 1)))
+            z = int(round(py / max(1, pm_h - 1) * (shape[0] - 1)))
+        else:
+            y = int(round(px / max(1, pm_w - 1) * (shape[1] - 1)))
+            z = int(round(py / max(1, pm_h - 1) * (shape[0] - 1)))
+        return (int(np.clip(z, 0, shape[0] - 1)), int(np.clip(y, 0, shape[1] - 1)), int(np.clip(x, 0, shape[2] - 1)))
+
+    def _localize_from_view_click(self, event, axis: str, target: str) -> bool:
+        zyx = self._mouse_pos_to_volume_zyx(event, axis, target)
+        if zyx is None:
+            return False
+        z, y, x = zyx
+        self._localization_point_zyx = (int(z), int(y), int(x))
+        for slider, value in ((self._slice_z, z), (self._slice_y, y), (self._slice_x, x)):
+            slider.blockSignals(True)
+            slider.setValue(int(np.clip(value, slider.minimum(), slider.maximum())))
+            slider.blockSignals(False)
+        self._slice_idx["axial"] = int(z)
+        self._slice_idx["coronal"] = int(y)
+        self._slice_idx["sagittal"] = int(x)
+        shape = tuple(int(v) for v in np.asarray(self._current_volume).shape[:3]) if self._current_volume is not None else (0, 0, 0)
+        if len(shape) == 3 and min(shape) > 0:
+            self._slice_z_lbl.setText(f"z {z + 1}/{shape[0]}")
+            self._slice_y_lbl.setText(f"y {y + 1}/{shape[1]}")
+            self._slice_x_lbl.setText(f"x {x + 1}/{shape[2]}")
+        self._status.setText(f"Cruz depositada ({target.upper()}) desde {axis}: Z/Y/X = {z + 1}/{y + 1}/{x + 1}")
+        self._render_current_with_overlay()
+        return True
 
     def _on_image_mouse_release(self, event, axis: str):
         self._drag_state = None
@@ -2357,7 +2572,8 @@ class AmyloidSpectPanel(QDialog):
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            lbl.setPixmap(pix)
+            axis = "axial" if lbl is self._axial_lbl else ("coronal" if lbl is self._cor_lbl else "sagittal")
+            self._set_axis_pixmap_with_cross(lbl, pix, axis)
             lbl.setToolTip(title)
 
     @staticmethod
@@ -2480,9 +2696,9 @@ class AmyloidSpectPanel(QDialog):
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        self._axial_lbl.setPixmap(ax)
-        self._cor_lbl.setPixmap(co)
-        self._sag_lbl.setPixmap(sa)
+        self._set_axis_pixmap_with_cross(self._axial_lbl, ax, "axial")
+        self._set_axis_pixmap_with_cross(self._cor_lbl, co, "coronal")
+        self._set_axis_pixmap_with_cross(self._sag_lbl, sa, "sagittal")
 
     def _show_fusion_report_layout(self):
         try:
