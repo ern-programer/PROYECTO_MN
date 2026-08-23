@@ -46,8 +46,21 @@ mod_SINCRO/
 3. **Ctrl+clic** en SPECT para posicionar cruz en centro del corazón
 4. Click **"Fijar ancla A"** (guarda punto corazón)
 5. **Ctrl+clic** en SPECT para posicionar cruz en mediastino superior
-6. Click **"Calcular HMR-SPECT"** en sección HMR-SPECT
-7. Exportar a PDF si se desea
+6. Ajustar radios de VOIs (corazón 30mm, mediastino 20mm por defecto)
+7. Click **"Calcular HMR-SPECT"** en sección HMR-SPECT
+8. Ver VOIs proyectados como círculos punteados en los 3 planos
+9. Ver resultados: HMR(raw) y HMR(filtrado) - el raw es el valor clínico
+10. Exportar a PDF si se desea
+
+### Visualización de VOIs (2026-08-23)
+- Los VOIs se muestran como círculos punteados en las 3 vistas MPR
+- Corazón: círculo rojo punteado con etiqueta "Corazón XXmm"
+- Mediastino: círculo azul punteado con etiqueta "Mediastino XXmm"
+- Los radios se pueden ajustar antes de calcular
+
+### Resultados duales (2026-08-23)
+- **HMR (raw)**: Calculado sobre volumen sin filtrar - **valor clínico relevante**
+- **HMR (filtrado)**: Calculado sobre volumen filtrado - referencia visual
 
 ### Dependencias
 - PyQt6

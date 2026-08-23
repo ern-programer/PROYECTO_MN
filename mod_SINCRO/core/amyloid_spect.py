@@ -1378,29 +1378,52 @@ class VOISphere:
         """Calcula volumen de la esfera en mL."""
         vol_mm3 = (4.0 / 3.0) * np.pi * (self.radius_mm ** 3)
         return vol_mm3 / 1000.0
+    
+    def get_circle_params_axial(self, spacing_yx: tuple[float, float]) -> tuple[float, float, float]:
+        """Retorna (cy, cx, radius_px) para dibujar círculo en vista axial."""
+        sy, sx = spacing_yx
+        radius_px = self.radius_mm / sx  # Asumiendo pixels isotrópicos en YX
+        return (self.cy, self.cx, radius_px)
+    
+    def get_circle_params_coronal(self, spacing_zx: tuple[float, float]) -> tuple[float, float, float]:
+        """Retorna (cz, cx, radius_px) para dibujar círculo en vista coronal."""
+        sz, sx = spacing_zx
+        radius_px = self.radius_mm / max(sz, sx)
+        return (self.cz, self.cx, radius_px)
+    
+    def get_circle_params_sagittal(self, spacing_zy: tuple[float, float]) -> tuple[float, float, float]:
+        """Retorna (cz, cy, radius_px) para dibujar círculo en vista sagittal."""
+        sz, sy = spacing_zy
+        radius_px = self.radius_mm / max(sz, sy)
+        return (self.cz, self.cy, radius_px)
 
 
 @dataclass
 class HmrSpectResult:
     """Resultado del cálculo HMR en SPECT 3D."""
     
-    hmr: float
-    heart_counts: float
-    mediastinum_counts: float
-    heart_volume_ml: float
-    mediastinum_volume_ml: float
-    voi_heart: VOISphere
-    voi_mediastinum: VOISphere
-    method: str  # "VOI completa" o "ROI slice central"
+    hmr: float  # HMR sobre volumen filtrado (el que se visualiza)
+    hmr_raw: float | None = None  # HMR sobre volumen sin filtrar (el que vale clínicamente)
+    heart_counts: float = 0.0
+    mediastinum_counts: float = 0.0
+    heart_counts_raw: float = 0.0
+    mediastinum_counts_raw: float = 0.0
+    heart_volume_ml: float = 0.0
+    mediastinum_volume_ml: float = 0.0
+    voi_heart: VOISphere | None = None
+    voi_mediastinum: VOISphere | None = None
+    method: str = ""  # "VOI completa" o "ROI slice central"
     slice_idx: int | None = None
     
     @property
     def classification(self) -> str:
-        if self.hmr >= 1.5:
-            return "POSITIVO (sugiere ATTR)"
-        if self.hmr >= 1.0:
-            return "EQUIVOCO (complementar con SPECT o repeat a 3h)"
-        return "NEGATIVO"
+        # Clasificación basada en HMR raw (el clínicamente relevante)
+        hmr = self.hmr_raw if self.hmr_raw is not None else self.hmr
+        if hmr >= 1.6:
+            return "NEGATIVO"
+        if hmr >= 1.5:
+            return "EQUIVOCO"
+        return "POSITIVO"
     
     @property
     def hmr_text(self) -> str:
@@ -1420,11 +1443,12 @@ def compute_hmr_spect(
     voi_mediastinum: VOISphere,
     method: HmrSpectMethod = HmrSpectMethod.VOI_COMPLETE,
     slice_idx: int | None = None,
+    volume_raw: np.ndarray | None = None,
 ) -> HmrSpectResult:
     """Calcula HMR-SPECT = Cuentas VOI corazón / Cuentas VOI mediastino.
     
     Args:
-        volume: Volumen SPECT 3D (nz, ny, nx)
+        volume: Volumen SPECT 3D filtrado (nz, ny, nx) - el que se visualiza
         spacing_zyx: Espaciado en mm (sz, sy, sx)
         voi_heart: VOI esférica del corazón
         voi_mediastinum: VOI esférica del mediastino
@@ -1432,13 +1456,20 @@ def compute_hmr_spect(
             - VOI_COMPLETE: Integra cuentas de toda la esfera 3D
             - SLICE_CENTRAL: Usa solo el slice axial especificado
         slice_idx: Slice axial para método SLICE_CENTRAL (default: centro del corazón)
+        volume_raw: Volumen SPECT sin filtrar (opcional, para HMR raw)
         
     Returns:
-        HmrSpectResult con HMR y métricas
+        HmrSpectResult con HMR filtrado y HMR raw (si se proporciona volume_raw)
     """
     vol = np.asarray(volume, dtype=np.float64)
     if vol.ndim != 3:
         raise ValueError(f"Se esperaba volumen 3D, recibido {vol.shape}")
+    
+    vol_raw = None
+    if volume_raw is not None:
+        vol_raw = np.asarray(volume_raw, dtype=np.float64)
+        if vol_raw.shape != vol.shape:
+            vol_raw = None  # Ignorar si no coincide
     
     if method == HmrSpectMethod.VOI_COMPLETE:
         mask_h = voi_heart.mask_3d(vol.shape, spacing_zyx)
@@ -1446,6 +1477,10 @@ def compute_hmr_spect(
         
         heart_counts = float(vol[mask_h].sum())
         mediastinum_counts = float(vol[mask_m].sum())
+        
+        heart_counts_raw = float(vol_raw[mask_h].sum()) if vol_raw is not None else 0.0
+        mediastinum_counts_raw = float(vol_raw[mask_m].sum()) if vol_raw is not None else 0.0
+        
         used_slice = None
     else:
         if slice_idx is None:
@@ -1460,14 +1495,29 @@ def compute_hmr_spect(
         
         heart_counts = float(slice_2d[mask_h].sum())
         mediastinum_counts = float(slice_2d[mask_m].sum())
+        
+        if vol_raw is not None:
+            slice_2d_raw = vol_raw[slice_idx]
+            heart_counts_raw = float(slice_2d_raw[mask_h].sum())
+            mediastinum_counts_raw = float(slice_2d_raw[mask_m].sum())
+        else:
+            heart_counts_raw = 0.0
+            mediastinum_counts_raw = 0.0
+        
         used_slice = slice_idx
     
     hmr = heart_counts / max(mediastinum_counts, 1e-8)
+    hmr_raw = None
+    if vol_raw is not None and mediastinum_counts_raw > 0:
+        hmr_raw = heart_counts_raw / mediastinum_counts_raw
     
     return HmrSpectResult(
         hmr=hmr,
+        hmr_raw=hmr_raw,
         heart_counts=heart_counts,
         mediastinum_counts=mediastinum_counts,
+        heart_counts_raw=heart_counts_raw,
+        mediastinum_counts_raw=mediastinum_counts_raw,
         heart_volume_ml=voi_heart.volume_ml(),
         mediastinum_volume_ml=voi_mediastinum.volume_ml(),
         voi_heart=voi_heart,

@@ -7,7 +7,7 @@ import base64
 import json
 import numpy as np
 
-from PyQt6.QtCore import QObject, Qt, QSettings, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QSettings, QThread, pyqtSignal, QPointF
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QPdfWriter, QPageSize, QPen, QColor, QFont
 from PyQt6.QtWidgets import (
     QApplication,
@@ -2282,10 +2282,11 @@ class AmyloidSpectPanel(QDialog):
         return QPixmap.fromImage(qimg.copy())
 
     def _draw_triangulation_cross(self, pix: QPixmap, axis: str) -> QPixmap:
-        """Dibuja referencias de corte cruzadas sobre una vista MPR ya escalada."""
+        """Dibuja referencias de corte cruzadas y VOIs sobre una vista MPR ya escalada."""
         show_triang = bool(getattr(self, "_triangulation_cross_enabled", False))
         show_loc = bool(getattr(self, "_localization_cross_enabled", False)) and getattr(self, "_localization_point_zyx", None) is not None
-        if not (show_triang or show_loc) or pix.isNull():
+        show_vois = bool(getattr(self, "_hmr_result", None)) is not None
+        if not (show_triang or show_loc or show_vois) or pix.isNull():
             return pix
         vol = self._base_spect_volume if self._base_spect_volume is not None else self._current_volume
         if vol is None:
@@ -2328,6 +2329,65 @@ class AmyloidSpectPanel(QDialog):
         out = QPixmap(pix)
         painter = QPainter(out)
         try:
+            # Dibujar VOIs si existen
+            if show_vois and hasattr(self, "_hmr_result") and self._hmr_result is not None:
+                hmr_res = self._hmr_result
+                spacing = self._spect_spacing_or_default()
+                
+                # VOI corazón (rojo punteado)
+                if hmr_res.voi_heart is not None:
+                    voi_h = hmr_res.voi_heart
+                    # Centro en índices de volumen
+                    cz_h, cy_h, cx_h = voi_h.cz, voi_h.cy, voi_h.cx
+                    # Radio en píxeles de volumen
+                    r_vol = voi_h.radius_mm / max(spacing)
+                    
+                    if axis == "axial":
+                        # Vista axial: X horizontal, Y vertical
+                        cx_px = int(round(cx_h / max(1, shape[2] - 1) * (w - 1)))
+                        cy_px = int(round(cy_h / max(1, shape[1] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
+                    elif axis == "coronal":
+                        # Vista coronal: X horizontal, Z vertical
+                        cx_px = int(round(cx_h / max(1, shape[2] - 1) * (w - 1)))
+                        cy_px = int(round(cz_h / max(1, shape[0] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
+                    else:  # sagittal
+                        # Vista sagittal: Y horizontal, Z vertical
+                        cx_px = int(round(cy_h / max(1, shape[1] - 1) * (w - 1)))
+                        cy_px = int(round(cz_h / max(1, shape[0] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[1] - 1) * w))
+                    
+                    pen_h = QPen(QColor(239, 68, 68, 220), 2, Qt.PenStyle.DashLine)
+                    painter.setPen(pen_h)
+                    painter.drawEllipse(QPointF(cx_px, cy_px), r_px, r_px)
+                    painter.drawText(cx_px + r_px + 4, cy_px - 4, f"Corazón {voi_h.radius_mm:.0f}mm")
+                
+                # VOI mediastino (azul punteado)
+                if hmr_res.voi_mediastinum is not None:
+                    voi_m = hmr_res.voi_mediastinum
+                    cz_m, cy_m, cx_m = voi_m.cz, voi_m.cy, voi_m.cx
+                    r_vol = voi_m.radius_mm / max(spacing)
+                    
+                    if axis == "axial":
+                        cx_px = int(round(cx_m / max(1, shape[2] - 1) * (w - 1)))
+                        cy_px = int(round(cy_m / max(1, shape[1] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
+                    elif axis == "coronal":
+                        cx_px = int(round(cx_m / max(1, shape[2] - 1) * (w - 1)))
+                        cy_px = int(round(cz_m / max(1, shape[0] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
+                    else:  # sagittal
+                        cx_px = int(round(cy_m / max(1, shape[1] - 1) * (w - 1)))
+                        cy_px = int(round(cz_m / max(1, shape[0] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[1] - 1) * w))
+                    
+                    pen_m = QPen(QColor(59, 130, 246, 220), 2, Qt.PenStyle.DashLine)
+                    painter.setPen(pen_m)
+                    painter.drawEllipse(QPointF(cx_px, cy_px), r_px, r_px)
+                    painter.drawText(cx_px + r_px + 4, cy_px - 4, f"Mediastino {voi_m.radius_mm:.0f}mm")
+            
+            # Dibujar cruz de triangulación
             if show_triang:
                 vx, hy, v_label, h_label = _coords_from_zyx((cur_z, cur_y, cur_x))
                 shadow = QPen(QColor(0, 0, 0, 220), 3)
@@ -2523,47 +2583,74 @@ class AmyloidSpectPanel(QDialog):
                 mediastinum_radius_mm=mediastinum_radius
             )
             
+            # Buscar volumen raw (sin filtrar) si está disponible
+            volume_raw = getattr(self, "_raw_spect_volume", None)
+            if volume_raw is None:
+                # Intentar obtener del bundle de reconstrucción
+                if hasattr(self, "_recon_bundle") and self._recon_bundle is not None:
+                    volume_raw = getattr(self._recon_bundle, "raw_volume", None)
+            
             # Calcular HMR-SPECT
             result = compute_hmr_spect(
                 volume=self._current_volume,
                 spacing_zyx=spacing,
                 voi_heart=voi_heart,
                 voi_mediastinum=voi_mediastinum,
-                method=method
+                method=method,
+                volume_raw=volume_raw
             )
             
             self._hmr_result = result
             
-            # Actualizar UI con resultado
-            self._lbl_hmr_result.setText(f"HMR-SPECT = {result.hmr:.2f}")
-            
-            # Color según clasificación
-            if result.classification == "NEGATIVO":
-                color = "#22c55e"  # Verde
-            elif result.classification == "EQUIVOCO":
-                color = "#f59e0b"  # Naranja
+            # Actualizar UI con resultado (mostrar ambos HMR si están disponibles)
+            if result.hmr_raw is not None:
+                hmr_text = f"HMR (filtrado) = {result.hmr:.2f}\nHMR (raw) = {result.hmr_raw:.2f}"
             else:
-                color = "#ef4444"  # Rojo
+                hmr_text = f"HMR-SPECT = {result.hmr:.2f}"
+            
+            self._lbl_hmr_result.setText(hmr_text)
+            
+            # Color según clasificación del HMR raw (si existe) o filtrado
+            hmr_clinical = result.hmr_raw if result.hmr_raw is not None else result.hmr
+            if hmr_clinical >= 1.6:
+                color = "#22c55e"  # Verde - NEGATIVO
+                classification = "NEGATIVO"
+            elif hmr_clinical >= 1.5:
+                color = "#f59e0b"  # Naranja - EQUIVOCO
+                classification = "EQUIVOCO"
+            else:
+                color = "#ef4444"  # Rojo - POSITIVO
+                classification = "POSITIVO"
             
             self._lbl_hmr_result.setStyleSheet(
-                f"font-size:16px; font-weight:700; color:{color}; "
+                f"font-size:14px; font-weight:700; color:{color}; "
                 f"background:#000000; padding:6px 12px;"
             )
             
             # Mostrar detalles
-            details = (
-                f"HMR-SPECT = {result.hmr:.2f}\n"
-                f"Clasificación: {result.classification}\n\n"
-                f"Método: {result.method}\n"
-                f"Cuentas corazón: {result.heart_counts:.0f}\n"
-                f"Cuentas mediastino: {result.mediastinum_counts:.0f}\n"
-                f"Volumen corazón: {result.heart_volume_ml:.1f} mL\n"
-                f"Volumen mediastino: {result.mediastinum_volume_ml:.1f} mL"
-            )
+            details = f"HMR-SPECT\n{'='*30}\n"
+            if result.hmr_raw is not None:
+                details += f"HMR (raw): {result.hmr_raw:.2f} ← valor clínico\n"
+                details += f"HMR (filtrado): {result.hmr:.2f}\n"
+            else:
+                details += f"HMR: {result.hmr:.2f}\n"
+            details += f"Clasificación: {classification}\n\n"
+            details += f"Método: {result.method}\n"
+            details += f"Cuentas corazón: {result.heart_counts:.0f}"
+            if result.heart_counts_raw > 0:
+                details += f" (raw: {result.heart_counts_raw:.0f})"
+            details += f"\nCuentas mediastino: {result.mediastinum_counts:.0f}"
+            if result.mediastinum_counts_raw > 0:
+                details += f" (raw: {result.mediastinum_counts_raw:.0f})"
+            details += f"\nVolumen corazón: {result.heart_volume_ml:.1f} mL"
+            details += f"\nVolumen mediastino: {result.mediastinum_volume_ml:.1f} mL"
             if result.slice_idx is not None:
                 details += f"\nSlice axial: {result.slice_idx}"
             
             QMessageBox.information(self, "SINCRO — HMR-SPECT", details)
+            
+            # Re-renderizar para mostrar los VOIs
+            self._render_selected_view()
             
         except Exception as exc:
             QMessageBox.critical(self, "SINCRO", f"Error calculando HMR-SPECT:\n{exc}")
