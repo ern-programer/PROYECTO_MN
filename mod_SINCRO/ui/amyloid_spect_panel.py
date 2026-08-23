@@ -1283,6 +1283,18 @@ class AmyloidSpectPanel(QDialog):
         calc_row.addStretch(1)
         hmr_layout.addLayout(calc_row)
         
+        # Fila 4: Referencia de escala clínica
+        scale_row = QHBoxLayout()
+        scale_lbl = QLabel(
+            "<span style='color:#22c55e; font-weight:600;'>≥1.6 NEGATIVO</span> · "
+            "<span style='color:#f59e0b; font-weight:600;'>1.5-1.6 EQUIVOCO</span> · "
+            "<span style='color:#ef4444; font-weight:600;'>&lt;1.5 POSITIVO</span>"
+        )
+        scale_lbl.setStyleSheet("font-size:11px; background:transparent;")
+        scale_row.addWidget(scale_lbl)
+        scale_row.addStretch(1)
+        hmr_layout.addLayout(scale_row)
+        
         root.addWidget(hmr_group)
         # ────────────────────────────────────────────────────────────────────────────
 
@@ -2584,11 +2596,14 @@ class AmyloidSpectPanel(QDialog):
             )
             
             # Buscar volumen raw (sin filtrar) si está disponible
-            volume_raw = getattr(self, "_raw_spect_volume", None)
+            # Usar _base_spect_volume como raw (volumen base sin procesamiento)
+            volume_raw = getattr(self, "_base_spect_volume", None)
             if volume_raw is None:
-                # Intentar obtener del bundle de reconstrucción
-                if hasattr(self, "_recon_bundle") and self._recon_bundle is not None:
-                    volume_raw = getattr(self._recon_bundle, "raw_volume", None)
+                # Si no hay base, usar el mismo volumen (no habrá HMR raw)
+                volume_raw = None
+            elif np.array_equal(volume_raw, self._current_volume):
+                # Si son iguales, no hay volumen raw separado
+                volume_raw = None
             
             # Calcular HMR-SPECT
             result = compute_hmr_spect(

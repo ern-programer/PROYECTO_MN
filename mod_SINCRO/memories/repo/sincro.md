@@ -59,8 +59,15 @@ mod_SINCRO/
 - Los radios se pueden ajustar antes de calcular
 
 ### Resultados duales (2026-08-23)
-- **HMR (raw)**: Calculado sobre volumen sin filtrar - **valor clínico relevante**
+- **HMR (raw)**: Calculado sobre volumen base sin filtrar - **valor clínico relevante**
 - **HMR (filtrado)**: Calculado sobre volumen filtrado - referencia visual
+- Si no hay volumen raw disponible, solo se muestra HMR filtrado
+
+### Referencia de escala en UI (2026-08-23)
+- Se muestra escala de clasificación clínica junto al resultado:
+  - **≥1.6 NEGATIVO** (verde)
+  - **1.5-1.6 EQUIVOCO** (naranja)
+  - **<1.5 POSITIVO** (rojo)
 
 ### Dependencias
 - PyQt6
