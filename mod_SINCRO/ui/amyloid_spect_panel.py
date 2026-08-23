@@ -2546,6 +2546,10 @@ class AmyloidSpectPanel(QDialog):
             out.append({"label": "Distancia A→B", "value_mm": round(dist, 1)})
         return out
 
+    def get_hmr_spect_result(self) -> HmrSpectResult | None:
+        """Retorna el resultado HMR-SPECT calculado (para informes)."""
+        return self._hmr_result
+
     def _calculate_hmr_spect(self) -> None:
         """Calcula HMR-SPECT usando VOIs esféricas desde puntos de localización."""
         try:
@@ -2662,6 +2666,18 @@ class AmyloidSpectPanel(QDialog):
             details += f"\nVolumen mediastino: {result.mediastinum_volume_ml:.1f} mL"
             if result.slice_idx is not None:
                 details += f"\nSlice axial: {result.slice_idx}"
+            
+            # Información de diagnóstico
+            details += f"\n\n{'='*30}\nDIAGNÓSTICO VOIs:\n"
+            details += f"Píxeles corazón: {result.heart_pixels}\n"
+            details += f"Píxeles mediastino: {result.mediastinum_pixels}\n"
+            details += f"Media corazón: {result.heart_mean:.2f} cts/píxel\n"
+            details += f"Media mediastino: {result.mediastinum_mean:.2f} cts/píxel\n"
+            details += f"Ratio medias: {result.heart_mean/max(result.mediastinum_mean, 0.01):.2f}"
+            
+            # Advertencia si el mediastino tiene muy pocas cuentas
+            if result.mediastinum_mean < 1.0:
+                details += "\n\n⚠️ ADVERTENCIA: El mediastino tiene\nmuy bajas cuentas (<1 cts/píxel).\n¿Está el VOI en una zona vacía?"
             
             QMessageBox.information(self, "SINCRO — HMR-SPECT", details)
             

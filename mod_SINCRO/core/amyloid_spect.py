@@ -1408,6 +1408,10 @@ class HmrSpectResult:
     mediastinum_counts: float = 0.0
     heart_counts_raw: float = 0.0
     mediastinum_counts_raw: float = 0.0
+    heart_pixels: int = 0  # Número de píxeles en VOI corazón
+    mediastinum_pixels: int = 0  # Número de píxeles en VOI mediastino
+    heart_mean: float = 0.0  # Cuentas promedio por píxel
+    mediastinum_mean: float = 0.0  # Cuentas promedio por píxel
     heart_volume_ml: float = 0.0
     mediastinum_volume_ml: float = 0.0
     voi_heart: VOISphere | None = None
@@ -1512,6 +1516,12 @@ def compute_hmr_spect(
     if vol_raw is not None and mediastinum_counts_raw > 0:
         hmr_raw = heart_counts_raw / mediastinum_counts_raw
     
+    # Calcular estadísticas de diagnóstico
+    heart_pixels = int(mask_h.sum())
+    mediastinum_pixels = int(mask_m.sum())
+    heart_mean = heart_counts / max(heart_pixels, 1) if heart_pixels > 0 else 0.0
+    mediastinum_mean = mediastinum_counts / max(mediastinum_pixels, 1) if mediastinum_pixels > 0 else 0.0
+    
     return HmrSpectResult(
         hmr=hmr,
         hmr_raw=hmr_raw,
@@ -1519,6 +1529,10 @@ def compute_hmr_spect(
         mediastinum_counts=mediastinum_counts,
         heart_counts_raw=heart_counts_raw,
         mediastinum_counts_raw=mediastinum_counts_raw,
+        heart_pixels=heart_pixels,
+        mediastinum_pixels=mediastinum_pixels,
+        heart_mean=heart_mean,
+        mediastinum_mean=mediastinum_mean,
         heart_volume_ml=voi_heart.volume_ml(),
         mediastinum_volume_ml=voi_mediastinum.volume_ml(),
         voi_heart=voi_heart,

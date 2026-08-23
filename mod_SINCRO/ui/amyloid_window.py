@@ -3222,6 +3222,14 @@ class AmyloidWindow(QDialog):
         workflow = str(bridge.get("workflow_tag") or "").strip().lower()
         has_spect = bool(bridge) and workflow in ("perf_spect_ct", "amylo")
         has_ct = bool(str(bridge.get("ct_path") or "").strip())
+        
+        # Intentar obtener HMR-SPECT del bridge (si se calculó en AmyloidSpectPanel)
+        hmr_spect = None
+        hmr_spect_raw = None
+        if has_spect:
+            hmr_spect_data = bridge.get("hmr_spect") or {}
+            hmr_spect = hmr_spect_data.get("hmr")
+            hmr_spect_raw = hmr_spect_data.get("hmr_raw")
 
         auto_template = ""
         if has_planar_loaded and has_spect:
@@ -3251,6 +3259,8 @@ class AmyloidWindow(QDialog):
             "has_spect": has_spect,
             "has_ct": has_ct,
             "bridge": bridge,
+            "hmr_spect": hmr_spect,
+            "hmr_spect_raw": hmr_spect_raw,
             "al_status": self._al_status_text_from_code(al_status_code),
             "free_light_chain": self._flc_text_from_code(flc_code),
             "immunofixation": self._immunofix_text_from_code(ifx_code),
@@ -3628,6 +3638,70 @@ class AmyloidWindow(QDialog):
             ]))
             story.append(hmr_table)
             story.append(Spacer(1, 3*mm))
+            sec_num += 1
+
+        # --- Comparación HMR Planar vs SPECT (si ambos disponibles) ---
+        hmr_planar = None
+        hmr_planar_raw = None
+        if self._washout_data:
+            # Tomar el último tiempo disponible como referencia planar
+            for t in ("3h", "1h"):
+                if t in self._washout_data:
+                    hmr_planar = self._washout_data[t].get("hmr")
+                    hmr_planar_raw = self._washout_data[t].get("hmr_raw")
+                    break
+        elif result is not None:
+            hmr_planar = result.hmr
+            hmr_planar_raw = getattr(result, "hmr_raw", None)
+
+        hmr_spect = report_ctx.get("hmr_spect")
+        hmr_spect_raw = report_ctx.get("hmr_spect_raw")
+
+        if hmr_planar is not None and hmr_spect is not None:
+            story.append(Paragraph(f"{sec_num}. Comparación HMR Planar vs SPECT", section_style))
+            
+            # Determinar clasificación para cada método
+            def classify_hmr(hmr_val):
+                if hmr_val >= 1.6:
+                    return "POSITIVO", "#ef4444"
+                elif hmr_val >= 1.5:
+                    return "EQUIVOCO", "#f59e0b"
+                else:
+                    return "NEGATIVO", "#22c55e"
+            
+            planar_cls, planar_color = classify_hmr(hmr_planar)
+            spect_cls, spect_color = classify_hmr(hmr_spect)
+            
+            comparison_data = [
+                ["Método", "HMR", "HMR raw", "Clasificación"],
+                ["Planar", f"{hmr_planar:.2f}", f"{hmr_planar_raw:.2f}" if hmr_planar_raw else "N/D", planar_cls],
+                ["SPECT", f"{hmr_spect:.2f}", f"{hmr_spect_raw:.2f}" if hmr_spect_raw else "N/D", spect_cls],
+            ]
+            
+            comparison_table = Table(comparison_data, colWidths=[40*mm, 35*mm, 35*mm, 56*mm])
+            comparison_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), DARK_BLUE),
+                ("TEXTCOLOR", (0, 0), (-1, 0), white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cccccc")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 3*mm),
+                ("TEXTCOLOR", (3, 1), (3, 1), HexColor(planar_color)),
+                ("TEXTCOLOR", (3, 2), (3, 2), HexColor(spect_color)),
+                ("FONTNAME", (3, 1), (3, -1), "Helvetica-Bold"),
+            ]))
+            story.append(comparison_table)
+            
+            # Nota explicativa
+            diff = abs(hmr_spect - hmr_planar)
+            story.append(Paragraph(
+                f"Diferencia: {diff:.2f}. "
+                f"El HMR-SPECT suele ser ligeramente mayor que el planar debido a mejor contraste "
+                f"(eliminación de superposición de estructuras). "
+                f"Ambos métodos son complementarios para confirmar ATTR-CM.",
+                small_style,
+            ))
+            story.append(Spacer(1, 4*mm))
             sec_num += 1
 
         # Perugini visual strip
