@@ -23,7 +23,7 @@ from PyQt6.QtGui import QMouseEvent, QPainter, QPen, QColor, QBrush, QPixmap, QI
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
     QComboBox, QWidget, QSizePolicy, QMessageBox, QStackedWidget,
-    QSlider, QFrame, QFileDialog, QTextEdit, QInputDialog, QCheckBox,
+    QSlider, QFrame, QFileDialog, QTextEdit, QInputDialog, QCheckBox, QDoubleSpinBox,
 )
 import os
 
@@ -56,10 +56,15 @@ class ROIDragWidget(QWidget):
             {"cy": 0.6 * image.shape[0], "cx": 0.6 * image.shape[1], "radius": 12.0, "color": "#38bdf8", "name": "Mediastino"},
         ]
         self._show_aux_rois = False
+        self._show_mirror_roi = False
         self._drag_roi = -1
 
     def set_aux_rois_visible(self, visible: bool):
         self._show_aux_rois = bool(visible)
+        self.update()
+
+    def set_mirror_roi_visible(self, visible: bool):
+        self._show_mirror_roi = bool(visible)
         self.update()
 
     def _is_roi_visible(self, idx: int) -> bool:
@@ -126,11 +131,35 @@ class ROIDragWidget(QWidget):
             legend_y = 8
             painter.setPen(QPen(QColor("#cbd5e1"), 1.0))
             painter.setBrush(QBrush(QColor(15, 23, 42, 220)))
-            painter.drawRoundedRect(legend_x, legend_y, 230, 40, 6, 6)
+            painter.drawRoundedRect(legend_x, legend_y, 260, 72, 6, 6)
             painter.setPen(QPen(QColor("#fbbf24"), 1.5))
             painter.drawText(legend_x + 10, legend_y + 17, "Esternón: amarillo")
             painter.setPen(QPen(QColor("#a78bfa"), 1.5))
             painter.drawText(legend_x + 10, legend_y + 33, "Costilla: violeta")
+            painter.setPen(QPen(QColor("#34d399"), 1.5))
+            painter.drawText(legend_x + 10, legend_y + 49, "Fondo est. 1: verde")
+            painter.setPen(QPen(QColor("#22d3ee"), 1.5))
+            painter.drawText(legend_x + 10, legend_y + 65, "Fondo est. 2: cian")
+
+        # Vista previa ROI espejo de costilla (izquierda), usada por EXCLUDE_BONE.
+        if self._show_mirror_roi and len(self._rois) >= 4:
+            rib = self._rois[3]
+            m_cx = (w - 1) - float(rib["cx"])
+            m_cy = float(rib["cy"])
+            m_r = float(rib["radius"])
+            m_rcx = ox + m_cx * scale
+            m_rcy = oy + m_cy * scale
+            m_rr = m_r * scale
+            mirror_color = QColor("#c084fc")
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(QPen(mirror_color, 2.0, Qt.PenStyle.DashLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QPointF(m_rcx, m_rcy), m_rr, m_rr)
+            painter.setPen(QPen(mirror_color, 1.2, Qt.PenStyle.DashLine))
+            painter.drawLine(int(m_rcx - 4), int(m_rcy), int(m_rcx + 4), int(m_rcy))
+            painter.drawLine(int(m_rcx), int(m_rcy - 4), int(m_rcx), int(m_rcy + 4))
+            painter.setPen(QPen(mirror_color, 1.5))
+            painter.drawText(int(m_rcx + m_rr + 5), int(m_rcy), "Costilla espejo")
 
     def mousePressEvent(self, event: QMouseEvent):
         for i, roi in enumerate(self._rois):
@@ -256,6 +285,14 @@ class AmyloidWindow(QDialog):
         self._quadrant_state: dict[int, dict] = {}
         self._linked_spect_ct = None
         self._layout_12q3x4_lat_hidden = False
+        self._exclude_bone_enabled = False
+        self._exclude_bone_method = "mean_subtract"
+        self._exclude_bone_asym_thresh = 0.35
+        self._exclude_sternum_enabled = False
+        self._exclude_sternum_asym_thresh = 0.35
+        self._use_scatter_planar = False
+        self._scatter_planar_k = 1.0
+        self._result_view_mode = "original"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
@@ -507,6 +544,7 @@ class AmyloidWindow(QDialog):
 
         # ── Página 1: Análisis ROI (modo clásico) ──────────────────
         page_analysis = QWidget()
+        page_analysis.setStyleSheet("QLabel { color:#000000; } QCheckBox { color:#000000; }")
         analysis_layout = QVBoxLayout(page_analysis)
         analysis_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -515,11 +553,15 @@ class AmyloidWindow(QDialog):
         analysis_layout.addWidget(self._roi_widget, 1)
 
         self._lbl_hmr = QLabel("HMR = N/D")
-        self._lbl_hmr.setStyleSheet("font-size: 16px; font-weight: bold; color: #e2e8f0;")
+        self._lbl_hmr.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._lbl_hmr.setMinimumHeight(24)
+        self._lbl_hmr.setStyleSheet("font-size:16px; font-weight:bold; color:#ffffff; background:#000000; padding:4px 8px;")
         analysis_layout.addWidget(self._lbl_hmr)
 
         self._lbl_class = QLabel("")
-        self._lbl_class.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        self._lbl_class.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._lbl_class.setMinimumHeight(22)
+        self._lbl_class.setStyleSheet("font-size:12px; font-weight:600; color:#ffffff; background:#000000; padding:3px 8px;")
         analysis_layout.addWidget(self._lbl_class)
 
         # Perugini.
@@ -538,28 +580,28 @@ class AmyloidWindow(QDialog):
         analysis_layout.addWidget(self._perugini_combo)
 
         self._perugini_confirm_chk = QCheckBox("Perugini confirmado manualmente")
-        self._perugini_confirm_chk.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        self._perugini_confirm_chk.setStyleSheet("color: #000000; font-size: 11px;")
         self._perugini_confirm_chk.setChecked(False)
         analysis_layout.addWidget(self._perugini_confirm_chk)
 
         # Selector de tiempo para washout.
         time_row = QHBoxLayout()
         lbl_time = QLabel("Tiempo:")
-        lbl_time.setStyleSheet(self._lbl_css)
+        lbl_time.setStyleSheet("color:#000000;")
         time_row.addWidget(lbl_time)
         self._time_combo = QComboBox()
         self._time_combo.addItems(["1h", "3h"])
         self._time_combo.setEnabled(False)
-        self._time_combo.setStyleSheet("QComboBox { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; padding: 4px; border-radius: 4px; } QComboBox QAbstractItemView { background: #1e293b; color: #e2e8f0; selection-background-color: #2563eb; }")
+        self._time_combo.setStyleSheet("QComboBox { background:#ffffff; color:#000000; border:1px solid #7a7a7a; padding:4px; border-radius:4px; } QComboBox QAbstractItemView { background:#ffffff; color:#000000; selection-background-color:#dbeafe; }")
         time_row.addWidget(self._time_combo)
 
         lbl_view_role = QLabel("Vista:")
-        lbl_view_role.setStyleSheet(self._lbl_css)
+        lbl_view_role.setStyleSheet("color:#000000;")
         time_row.addWidget(lbl_view_role)
         self._view_role_combo = QComboBox()
         self._view_role_combo.addItem("AP (HMR)", "ap")
         self._view_role_combo.addItem("OAI (washout opcional)", "oai")
-        self._view_role_combo.setStyleSheet("QComboBox { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; padding: 4px; border-radius: 4px; } QComboBox QAbstractItemView { background: #1e293b; color: #e2e8f0; selection-background-color: #2563eb; }")
+        self._view_role_combo.setStyleSheet("QComboBox { background:#ffffff; color:#000000; border:1px solid #7a7a7a; padding:4px; border-radius:4px; } QComboBox QAbstractItemView { background:#ffffff; color:#000000; selection-background-color:#dbeafe; }")
         self._view_role_combo.currentIndexChanged.connect(self._on_view_role_changed)
         time_row.addWidget(self._view_role_combo)
         analysis_layout.addLayout(time_row)
@@ -568,34 +610,119 @@ class AmyloidWindow(QDialog):
         from core.amyloid_planar import VISUAL_FILTERS
         filter_row = QHBoxLayout()
         lbl_filt = QLabel("Filtro visual:")
-        lbl_filt.setStyleSheet(self._lbl_css)
+        lbl_filt.setStyleSheet("color:#000000;")
         filter_row.addWidget(lbl_filt)
         self._filter_combo = QComboBox()
         for key, (name, _) in VISUAL_FILTERS.items():
             self._filter_combo.addItem(name, key)
         self._filter_combo.addItem("Dinámico temprano (localización)", "early_dynamic")
-        self._filter_combo.setStyleSheet("QComboBox { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; padding: 4px; border-radius: 4px; } QComboBox QAbstractItemView { background: #1e293b; color: #e2e8f0; selection-background-color: #2563eb; }")
+        self._filter_combo.setStyleSheet("QComboBox { background:#ffffff; color:#000000; border:1px solid #7a7a7a; padding:4px; border-radius:4px; } QComboBox QAbstractItemView { background:#ffffff; color:#000000; selection-background-color:#dbeafe; }")
         self._filter_combo.currentIndexChanged.connect(self._on_visual_filter_changed)
         filter_row.addWidget(self._filter_combo)
         analysis_layout.addLayout(filter_row)
 
+        # Selector de imagen base para visualización ROI.
+        result_row = QHBoxLayout()
+        lbl_result = QLabel("Ver imagen:")
+        lbl_result.setStyleSheet("color:#000000;")
+        result_row.addWidget(lbl_result)
+        self._result_view_combo = QComboBox()
+        self._result_view_combo.addItem("Original", "original")
+        self._result_view_combo.addItem("Corregida (filtros)", "corrected")
+        self._result_view_combo.addItem("Diferencia (Original - Corregida)", "difference")
+        self._result_view_combo.setStyleSheet("QComboBox { background:#ffffff; color:#000000; border:1px solid #7a7a7a; padding:4px; border-radius:4px; } QComboBox QAbstractItemView { background:#ffffff; color:#000000; selection-background-color:#dbeafe; }")
+        self._result_view_combo.currentIndexChanged.connect(self._on_result_view_mode_changed)
+        result_row.addWidget(self._result_view_combo)
+        analysis_layout.addLayout(result_row)
+
         # Q_bone: modo automático/manual.
         qbone_row = QHBoxLayout()
         lbl_qbone_mode = QLabel("Q_bone:")
-        lbl_qbone_mode.setStyleSheet(self._lbl_css)
+        lbl_qbone_mode.setStyleSheet("color:#000000;")
         qbone_row.addWidget(lbl_qbone_mode)
         self._qbone_mode_combo = QComboBox()
         self._qbone_mode_combo.addItem("Automático", "auto")
         self._qbone_mode_combo.addItem("Manual (ROIs esternón/costilla)", "manual")
-        self._qbone_mode_combo.setStyleSheet("QComboBox { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; padding: 4px; border-radius: 4px; } QComboBox QAbstractItemView { background: #1e293b; color: #e2e8f0; selection-background-color: #2563eb; }")
+        self._qbone_mode_combo.setStyleSheet("QComboBox { background:#ffffff; color:#000000; border:1px solid #7a7a7a; padding:4px; border-radius:4px; } QComboBox QAbstractItemView { background:#ffffff; color:#000000; selection-background-color:#dbeafe; }")
         self._qbone_mode_combo.currentIndexChanged.connect(self._on_qbone_mode_changed)
         qbone_row.addWidget(self._qbone_mode_combo)
         analysis_layout.addLayout(qbone_row)
 
         self._qbone_hint_lbl = QLabel("Q_bone automático: esternón/costilla se estiman desde ROI cardíaco.")
-        self._qbone_hint_lbl.setStyleSheet("font-size:10px; color:#94a3b8; padding:2px;")
+        self._qbone_hint_lbl.setStyleSheet("font-size:10px; color:#000000; padding:2px;")
         self._qbone_hint_lbl.setWordWrap(True)
         analysis_layout.addWidget(self._qbone_hint_lbl)
+
+        # EXCLUDE_BONE experimental (corrección costal + scatter planar opcional)
+        self._exclude_bone_chk = QCheckBox("Filtro costal (EXCLUDE_BONE)")
+        self._exclude_bone_chk.setStyleSheet("color:#000000; font-size:11px; font-weight:600;")
+        self._exclude_bone_chk.setToolTip("Resta fondo óseo costal con ROI costilla derecha y ROI espejo izquierda")
+        self._exclude_bone_chk.toggled.connect(self._on_exclude_bone_changed)
+        analysis_layout.addWidget(self._exclude_bone_chk)
+
+        eb_row = QHBoxLayout()
+        lbl_eb_method = QLabel("Método costal:")
+        lbl_eb_method.setStyleSheet("color:#000000; font-size:11px;")
+        eb_row.addWidget(lbl_eb_method)
+        self._exclude_bone_method_combo = QComboBox()
+        self._exclude_bone_method_combo.addItem("Resta media costal", "mean_subtract")
+        self._exclude_bone_method_combo.addItem("Escala por hotspot", "scaled_hotspot")
+        self._exclude_bone_method_combo.currentIndexChanged.connect(self._on_exclude_bone_changed)
+        eb_row.addWidget(self._exclude_bone_method_combo, 1)
+        analysis_layout.addLayout(eb_row)
+
+        self._exclude_sternum_chk = QCheckBox("Filtro esternón (2 fondos)")
+        self._exclude_sternum_chk.setStyleSheet("color:#000000; font-size:11px; font-weight:600;")
+        self._exclude_sternum_chk.setToolTip("Corrige actividad esternal usando ROI esternón menos promedio de Fondo est. 1/2")
+        self._exclude_sternum_chk.toggled.connect(self._on_exclude_bone_changed)
+        analysis_layout.addWidget(self._exclude_sternum_chk)
+
+        eb_row2 = QHBoxLayout()
+        lbl_asym_rib = QLabel("Asimetría máx costal:")
+        lbl_asym_rib.setStyleSheet("color:#000000; font-size:11px;")
+        eb_row2.addWidget(lbl_asym_rib)
+        self._exclude_bone_asym_spin = QDoubleSpinBox()
+        self._exclude_bone_asym_spin.setRange(0.05, 1.50)
+        self._exclude_bone_asym_spin.setSingleStep(0.05)
+        self._exclude_bone_asym_spin.setDecimals(2)
+        self._exclude_bone_asym_spin.setValue(0.35)
+        self._exclude_bone_asym_spin.valueChanged.connect(self._on_exclude_bone_changed)
+        eb_row2.addWidget(self._exclude_bone_asym_spin)
+        lbl_sc_k = QLabel("Scatter k:")
+        lbl_sc_k.setStyleSheet("color:#000000; font-size:11px;")
+        eb_row2.addWidget(lbl_sc_k)
+        self._scatter_k_spin = QDoubleSpinBox()
+        self._scatter_k_spin.setRange(0.0, 2.0)
+        self._scatter_k_spin.setSingleStep(0.05)
+        self._scatter_k_spin.setDecimals(2)
+        self._scatter_k_spin.setValue(1.00)
+        self._scatter_k_spin.valueChanged.connect(self._on_exclude_bone_changed)
+        eb_row2.addWidget(self._scatter_k_spin)
+        analysis_layout.addLayout(eb_row2)
+
+        eb_row3 = QHBoxLayout()
+        lbl_asym_st = QLabel("Asimetría máx esternón:")
+        lbl_asym_st.setStyleSheet("color:#000000; font-size:11px;")
+        eb_row3.addWidget(lbl_asym_st)
+        self._exclude_sternum_asym_spin = QDoubleSpinBox()
+        self._exclude_sternum_asym_spin.setRange(0.05, 1.50)
+        self._exclude_sternum_asym_spin.setSingleStep(0.05)
+        self._exclude_sternum_asym_spin.setDecimals(2)
+        self._exclude_sternum_asym_spin.setValue(0.35)
+        self._exclude_sternum_asym_spin.valueChanged.connect(self._on_exclude_bone_changed)
+        eb_row3.addWidget(self._exclude_sternum_asym_spin)
+        analysis_layout.addLayout(eb_row3)
+
+        self._scatter_planar_chk = QCheckBox("Usar SCATTER planar (si existe archivo SC)")
+        self._scatter_planar_chk.setStyleSheet("color:#000000; font-size:11px;")
+        self._scatter_planar_chk.toggled.connect(self._on_exclude_bone_changed)
+        analysis_layout.addWidget(self._scatter_planar_chk)
+
+        self._show_mirror_roi_chk = QCheckBox("Mostrar ROI espejo costilla (preview filtro costal)")
+        self._show_mirror_roi_chk.setStyleSheet("color:#000000; font-size:11px;")
+        self._show_mirror_roi_chk.setChecked(True)
+        self._show_mirror_roi_chk.toggled.connect(self._on_exclude_bone_changed)
+        analysis_layout.addWidget(self._show_mirror_roi_chk)
 
         # Botón Aplicar: renderiza ROIs + HMR y asigna al cuadrante AP+ROIs.
         btn_apply = QPushButton("Aplicar ROIs al cuadrante")
@@ -604,8 +731,13 @@ class AmyloidWindow(QDialog):
         analysis_layout.addWidget(btn_apply)
 
         # Label de estado de washout.
+        self._lbl_filter_summary = QLabel("")
+        self._lbl_filter_summary.setStyleSheet("font-size:10px; color:#000000; background:#f3f4f6; padding:6px 10px; border:1px solid #d1d5db; border-radius:999px;")
+        self._lbl_filter_summary.setWordWrap(True)
+        analysis_layout.addWidget(self._lbl_filter_summary)
+
         self._lbl_washout_status = QLabel("")
-        self._lbl_washout_status.setStyleSheet("font-size: 10px; color: #94a3b8; padding: 4px;")
+        self._lbl_washout_status.setStyleSheet("font-size:10px; color:#000000; background:#eef2ff; padding:6px 10px; border:1px solid #c7d2fe; border-radius:999px;")
         self._lbl_washout_status.setWordWrap(True)
         analysis_layout.addWidget(self._lbl_washout_status)
 
@@ -711,19 +843,29 @@ class AmyloidWindow(QDialog):
             self._perugini_combo.setCurrentIndex(idx)
 
     def _ensure_aux_rois(self):
-        if len(self._roi_widget._rois) >= 4:
+        if len(self._roi_widget._rois) >= 6:
             return
         if self._original_image is None:
             h, w = 64, 64
         else:
             h, w = self._original_image.shape
         base_r = self._roi_widget._rois[0]["radius"] if self._roi_widget._rois else 12.0
-        self._roi_widget._rois.append(
-            {"cy": 0.25 * h, "cx": 0.50 * w, "radius": base_r * 0.6, "color": "#fbbf24", "name": "Esternón"}
-        )
-        self._roi_widget._rois.append(
-            {"cy": 0.60 * h, "cx": 0.20 * w, "radius": base_r * 0.5, "color": "#a78bfa", "name": "Costilla"}
-        )
+        if len(self._roi_widget._rois) < 3:
+            self._roi_widget._rois.append(
+                {"cy": 0.25 * h, "cx": 0.50 * w, "radius": base_r * 0.6, "color": "#fbbf24", "name": "Esternón"}
+            )
+        if len(self._roi_widget._rois) < 4:
+            self._roi_widget._rois.append(
+                {"cy": 0.60 * h, "cx": 0.20 * w, "radius": base_r * 0.5, "color": "#a78bfa", "name": "Costilla"}
+            )
+        if len(self._roi_widget._rois) < 5:
+            self._roi_widget._rois.append(
+                {"cy": 0.25 * h, "cx": 0.42 * w, "radius": base_r * 0.45, "color": "#34d399", "name": "Fondo est. 1"}
+            )
+        if len(self._roi_widget._rois) < 6:
+            self._roi_widget._rois.append(
+                {"cy": 0.25 * h, "cx": 0.58 * w, "radius": base_r * 0.45, "color": "#22d3ee", "name": "Fondo est. 2"}
+            )
 
     def _serialize_rois(self, rois: list[dict] | None) -> list[dict] | None:
         if not rois:
@@ -811,6 +953,15 @@ class AmyloidWindow(QDialog):
                 "active_view_role": str(self._active_view_role or "ap"),
                 "report_output_mode": str(self._report_output_combo.currentData() or "both"),
                 "report_output_dir": str(getattr(self, "_report_output_dir", "") or ""),
+                "exclude_bone_enabled": bool(self._exclude_bone_chk.isChecked()),
+                "exclude_bone_method": str(self._exclude_bone_method_combo.currentData() or "mean_subtract"),
+                "exclude_bone_asym_thresh": float(self._exclude_bone_asym_spin.value()),
+                "exclude_sternum_enabled": bool(self._exclude_sternum_chk.isChecked()),
+                "exclude_sternum_asym_thresh": float(self._exclude_sternum_asym_spin.value()),
+                "use_scatter_planar": bool(self._scatter_planar_chk.isChecked()),
+                "scatter_planar_k": float(self._scatter_k_spin.value()),
+                "show_mirror_roi_preview": bool(getattr(self, "_show_mirror_roi_chk", None) and self._show_mirror_roi_chk.isChecked()),
+                "result_view_mode": str(self._result_view_combo.currentData() or "original"),
             }
             settings.setValue("state_json", json.dumps(payload, ensure_ascii=False))
             settings.endGroup()
@@ -908,6 +1059,24 @@ class AmyloidWindow(QDialog):
                 self._report_output_combo.blockSignals(False)
             self._report_output_dir = str(payload.get("report_output_dir", "") or "")
 
+            self._exclude_bone_chk.setChecked(bool(payload.get("exclude_bone_enabled", False)))
+            idx_eb = self._exclude_bone_method_combo.findData(str(payload.get("exclude_bone_method", "mean_subtract")))
+            if idx_eb >= 0:
+                self._exclude_bone_method_combo.setCurrentIndex(idx_eb)
+            self._exclude_bone_asym_spin.setValue(float(payload.get("exclude_bone_asym_thresh", 0.35) or 0.35))
+            self._exclude_sternum_chk.setChecked(bool(payload.get("exclude_sternum_enabled", False)))
+            self._exclude_sternum_asym_spin.setValue(float(payload.get("exclude_sternum_asym_thresh", 0.35) or 0.35))
+            self._scatter_planar_chk.setChecked(bool(payload.get("use_scatter_planar", False)))
+            self._scatter_k_spin.setValue(float(payload.get("scatter_planar_k", 1.0) or 1.0))
+            self._show_mirror_roi_chk.setChecked(bool(payload.get("show_mirror_roi_preview", True)))
+            saved_view_mode = str(payload.get("result_view_mode", "original") or "original")
+            idx_view_mode = self._result_view_combo.findData(saved_view_mode)
+            if idx_view_mode >= 0:
+                self._result_view_combo.blockSignals(True)
+                self._result_view_combo.setCurrentIndex(idx_view_mode)
+                self._result_view_combo.blockSignals(False)
+                self._result_view_mode = saved_view_mode
+
             self._sync_qbone_mode_ui()
         except Exception:
             pass
@@ -951,8 +1120,15 @@ class AmyloidWindow(QDialog):
             ap_entry = source["ap"]
             ap = ap_entry["image"] if ap_entry else None
             processed = self._processed_images[time_label]
+            corr = processed.get("corr", processed.get("clean", ap))
+            corr_meta = processed.get("corr_meta", {}) if isinstance(processed.get("corr_meta"), dict) else {}
+            corr_used = bool(
+                corr_meta.get("rib_filter_used")
+                or corr_meta.get("sternum_filter_used")
+                or corr_meta.get("scatter_used")
+            )
             images = [
-                processed.get("roi", ap), processed.get("clean", ap),
+                processed.get("roi", ap), corr,
                 source["oai"]["image"] if source["oai"] else None,
                 source["lat"]["image"] if source["lat"] else None,
             ]
@@ -961,7 +1137,7 @@ class AmyloidWindow(QDialog):
             lat_lbl = self._build_label_for_role(source.get("lat"), "lat", time_label)
             labels = [
                 (ap_lbl + " + ROIs") if "roi" in processed else (ap_lbl + " cuantificación"),
-                ap_lbl + " limpio",
+                (ap_lbl + " corregido (filtros)") if corr_used else (ap_lbl + " limpio"),
                 oai_lbl,
                 lat_lbl,
             ]
@@ -1302,6 +1478,22 @@ class AmyloidWindow(QDialog):
             str(getattr(ds, "ViewPosition", "") or ""),
         ])).upper()
         dt = self._dicom_acquisition_datetime(ds)
+        scatter_image = None
+        scatter_path = ""
+        try:
+            from core.raw_projections import find_scatter_sibling
+            sc_path = find_scatter_sibling(path)
+            if sc_path and os.path.isfile(sc_path):
+                ds_sc = pydicom.dcmread(sc_path, force=True)
+                sc = np.asarray(ds_sc.pixel_array, dtype=np.float64)
+                while sc.ndim > 2:
+                    sc = sc[sc.shape[0] // 2]
+                if sc.shape == img.shape:
+                    scatter_image = sc
+                    scatter_path = sc_path
+        except Exception:
+            scatter_image = None
+            scatter_path = ""
         return {
             "image": img,
             "label": description or os.path.basename(path),
@@ -1310,7 +1502,253 @@ class AmyloidWindow(QDialog):
             "ds": ds,
             "duration_s": self._dicom_static_duration_s(ds),
             "acq_dt": dt,
+            "scatter_image": scatter_image,
+            "scatter_path": scatter_path,
         }
+
+    def _on_exclude_bone_changed(self, _=None):
+        self._exclude_bone_enabled = bool(self._exclude_bone_chk.isChecked())
+        self._exclude_bone_method = str(self._exclude_bone_method_combo.currentData() or "mean_subtract")
+        self._exclude_bone_asym_thresh = float(self._exclude_bone_asym_spin.value())
+        self._exclude_sternum_enabled = bool(self._exclude_sternum_chk.isChecked())
+        self._exclude_sternum_asym_thresh = float(self._exclude_sternum_asym_spin.value())
+        self._use_scatter_planar = bool(self._scatter_planar_chk.isChecked())
+        self._scatter_planar_k = float(self._scatter_k_spin.value())
+        show_preview = bool(getattr(self, "_show_mirror_roi_chk", None) and self._show_mirror_roi_chk.isChecked())
+        mode_manual = str(self._qbone_mode_combo.currentData() or "auto") == "manual"
+        self._roi_widget.set_mirror_roi_visible(show_preview and mode_manual and self._exclude_bone_enabled)
+        self._update_roi_display_image()
+        self._update_filter_summary()
+        self._persist_user_state()
+        self._update_hmr(0, 0, 0, 0)
+
+    def _on_result_view_mode_changed(self, _idx: int):
+        self._result_view_mode = str(self._result_view_combo.currentData() or "original")
+        self._update_roi_display_image()
+        self._persist_user_state()
+
+    def _update_filter_summary(self):
+        if not hasattr(self, "_lbl_filter_summary"):
+            return
+        costal_on = bool(getattr(self, "_exclude_bone_enabled", False))
+        sternum_on = bool(getattr(self, "_exclude_sternum_enabled", False))
+        scatter_on = bool(getattr(self, "_use_scatter_planar", False))
+        order_txt = "Orden: SCATTER → Esternón → Costal"
+
+        if self._original_image is None:
+            self._lbl_filter_summary.setText(
+                f"Filtro costal: {'ON' if costal_on else 'OFF'} · "
+                f"Filtro esternón: {'ON' if sternum_on else 'OFF'} · "
+                f"SCATTER: {'ON' if scatter_on else 'OFF'}\n{order_txt}"
+            )
+            return
+
+        try:
+            roi_h = ROICircle(
+                cy=self._roi_widget._rois[0]["cy"],
+                cx=self._roi_widget._rois[0]["cx"],
+                radius=self._roi_widget._rois[0]["radius"],
+            )
+            roi_m = ROICircle(
+                cy=self._roi_widget._rois[1]["cy"],
+                cx=self._roi_widget._rois[1]["cx"],
+                radius=self._roi_widget._rois[1]["radius"],
+            )
+
+            img_raw = np.asarray(self._original_image, dtype=np.float64)
+            hmr_raw = compute_hmr(img_raw, roi_h, roi_m).hmr
+
+            prev_c, prev_s = self._exclude_bone_enabled, self._exclude_sternum_enabled
+            try:
+                # Solo esternón
+                self._exclude_bone_enabled, self._exclude_sternum_enabled = False, True
+                img_st, _ = self._build_ap_quant_image(self._active_time if self._active_time in ("1h", "3h") else "1h", roi_h)
+                hmr_st = compute_hmr(np.asarray(img_st, dtype=np.float64), roi_h, roi_m).hmr
+
+                # Solo costal
+                self._exclude_bone_enabled, self._exclude_sternum_enabled = True, False
+                img_co, _ = self._build_ap_quant_image(self._active_time if self._active_time in ("1h", "3h") else "1h", roi_h)
+                hmr_co = compute_hmr(np.asarray(img_co, dtype=np.float64), roi_h, roi_m).hmr
+
+                # Ambos según estado actual
+                self._exclude_bone_enabled, self._exclude_sternum_enabled = prev_c, prev_s
+                img_both, _ = self._build_ap_quant_image(self._active_time if self._active_time in ("1h", "3h") else "1h", roi_h)
+                hmr_both = compute_hmr(np.asarray(img_both, dtype=np.float64), roi_h, roi_m).hmr
+            finally:
+                self._exclude_bone_enabled, self._exclude_sternum_enabled = prev_c, prev_s
+
+            self._lbl_filter_summary.setText(
+                f"Filtro costal: {'ON' if costal_on else 'OFF'} · Filtro esternón: {'ON' if sternum_on else 'OFF'} · SCATTER: {'ON' if scatter_on else 'OFF'}\n"
+                f"{order_txt}\n"
+                f"ΔHMR esternón = {hmr_st - hmr_raw:+.2f} · ΔHMR costal = {hmr_co - hmr_raw:+.2f} · ΔHMR ambos = {hmr_both - hmr_raw:+.2f}"
+            )
+        except Exception:
+            self._lbl_filter_summary.setText(
+                f"Filtro costal: {'ON' if costal_on else 'OFF'} · "
+                f"Filtro esternón: {'ON' if sternum_on else 'OFF'} · "
+                f"SCATTER: {'ON' if scatter_on else 'OFF'}\n{order_txt}"
+            )
+
+    def _build_current_display_image(self) -> np.ndarray | None:
+        if self._original_image is None:
+            return None
+        base = np.asarray(self._original_image, dtype=np.float64)
+        mode = str(getattr(self, "_result_view_mode", "original") or "original")
+        if mode == "original":
+            return base
+        if self._active_time not in ("1h", "3h"):
+            return base
+        try:
+            roi_h = ROICircle(
+                cy=self._roi_widget._rois[0]["cy"],
+                cx=self._roi_widget._rois[0]["cx"],
+                radius=self._roi_widget._rois[0]["radius"],
+            )
+            corr, _meta = self._build_ap_quant_image(self._active_time, roi_h)
+            corr = np.asarray(corr, dtype=np.float64)
+            if mode == "corrected":
+                return corr
+            if mode == "difference":
+                diff = np.clip(base - corr, 0.0, None)
+                return diff
+        except Exception:
+            return base
+        return base
+
+    def _update_roi_display_image(self):
+        img = self._build_current_display_image()
+        if img is None:
+            return
+        filter_key = self._filter_combo.currentData() if hasattr(self, "_filter_combo") else None
+        if filter_key is None or filter_key == "none":
+            self._roi_widget._image = np.asarray(img, dtype=np.float64)
+            self._roi_widget.update()
+            return
+        self._on_visual_filter_changed(self._filter_combo.currentIndex())
+
+    def _build_ap_quant_image(self, time_label: str, roi_h: ROICircle) -> tuple[np.ndarray, dict]:
+        """Construye imagen para cuantificación AP con correcciones experimentales opcionales."""
+        img = np.asarray(self._original_image, dtype=np.float64)
+        source_ap = self._time_images.get(time_label, {}).get("ap") or {}
+        meta = {
+            "scatter_used": False,
+            "scatter_k": 0.0,
+            "rib_filter_used": False,
+            "rib_filter_method": self._exclude_bone_method,
+            "rib_filter_level": 0.0,
+            "rib_filter_asym": None,
+            "rib_filter_note": "",
+            "sternum_filter_used": False,
+            "sternum_filter_level": 0.0,
+            "sternum_filter_asym": None,
+            "sternum_filter_note": "",
+        }
+
+        # 1) Scatter planar (si está disponible y habilitado)
+        if self._use_scatter_planar:
+            sc = source_ap.get("scatter_image")
+            if isinstance(sc, np.ndarray) and sc.shape == img.shape:
+                k = float(self._scatter_planar_k)
+                img = np.clip(img - k * np.asarray(sc, dtype=np.float64), 0.0, None)
+                meta["scatter_used"] = True
+                meta["scatter_k"] = k
+            else:
+                meta["rib_filter_note"] = "SC no disponible o geometría distinta"
+
+        # 2) Filtro esternal (independiente del costal)
+        if self._exclude_sternum_enabled:
+            if len(self._roi_widget._rois) < 6:
+                meta["sternum_filter_note"] = "Faltan ROIs Fondo est. 1/2 para filtro esternal"
+            else:
+                sternum_roi = ROICircle(
+                    cy=self._roi_widget._rois[2]["cy"],
+                    cx=self._roi_widget._rois[2]["cx"],
+                    radius=self._roi_widget._rois[2]["radius"],
+                )
+                bg1_roi = ROICircle(
+                    cy=self._roi_widget._rois[4]["cy"],
+                    cx=self._roi_widget._rois[4]["cx"],
+                    radius=self._roi_widget._rois[4]["radius"],
+                )
+                bg2_roi = ROICircle(
+                    cy=self._roi_widget._rois[5]["cy"],
+                    cx=self._roi_widget._rois[5]["cx"],
+                    radius=self._roi_widget._rois[5]["radius"],
+                )
+                m_st = sternum_roi.mask(img.shape)
+                m_bg1 = bg1_roi.mask(img.shape)
+                m_bg2 = bg2_roi.mask(img.shape)
+                if not np.any(m_st) or not np.any(m_bg1) or not np.any(m_bg2):
+                    meta["sternum_filter_note"] = "ROI esternón/fondos inválidas"
+                else:
+                    st_mean = float(np.mean(img[m_st]))
+                    bg1_mean = float(np.mean(img[m_bg1]))
+                    bg2_mean = float(np.mean(img[m_bg2]))
+                    bg_mean = 0.5 * (bg1_mean + bg2_mean)
+                    asym_bg = abs(bg1_mean - bg2_mean) / max(bg_mean, 1e-8)
+                    meta["sternum_filter_asym"] = asym_bg
+                    if asym_bg > float(self._exclude_sternum_asym_thresh):
+                        meta["sternum_filter_note"] = (
+                            f"Asimetría fondos esternales alta ({asym_bg:.2f}) > umbral {self._exclude_sternum_asym_thresh:.2f}; corrección descartada"
+                        )
+                    else:
+                        level_st = max(0.0, min(st_mean - bg_mean, float(np.percentile(img, 95))))
+                        img = np.clip(img - (m_st.astype(np.float64) * level_st), 0.0, None)
+                        meta["sternum_filter_used"] = True
+                        meta["sternum_filter_level"] = level_st
+                        meta["sternum_filter_note"] = (
+                            f"Filtro esternón aplicado (nivel={level_st:.2f}, bg={bg_mean:.2f}, asim={asym_bg:.2f})"
+                        )
+
+        # 3) Filtro costal (independiente del esternal)
+        if not self._exclude_bone_enabled or len(self._roi_widget._rois) < 4:
+            return img, meta
+
+        rib_r = ROICircle(
+            cy=self._roi_widget._rois[3]["cy"],
+            cx=self._roi_widget._rois[3]["cx"],
+            radius=self._roi_widget._rois[3]["radius"],
+        )
+        rib_l = ROICircle(
+            cy=rib_r.cy,
+            cx=(img.shape[1] - 1) - rib_r.cx,
+            radius=rib_r.radius,
+        )
+        m_r = rib_r.mask(img.shape)
+        m_l = rib_l.mask(img.shape)
+        if not np.any(m_r) or not np.any(m_l):
+            meta["rib_filter_note"] = "ROI costal inválida"
+            return img, meta
+
+        right_mean = float(np.mean(img[m_r]))
+        left_mean = float(np.mean(img[m_l]))
+        asym = abs(left_mean - right_mean) / max(right_mean, 1e-8)
+        meta["rib_filter_asym"] = asym
+        if asym > float(self._exclude_bone_asym_thresh):
+            meta["rib_filter_note"] = (
+                f"Asimetría costal alta ({asym:.2f}) > umbral {self._exclude_bone_asym_thresh:.2f}; corrección descartada"
+            )
+            return img, meta
+
+        if self._exclude_bone_method == "scaled_hotspot":
+            heart_mask = roi_h.mask(img.shape)
+            h_vals = img[heart_mask]
+            if h_vals.size == 0:
+                return img, meta
+            hot_ref = float(np.percentile(h_vals, 95))
+            ratio = right_mean / max(hot_ref, 1e-8)
+            level = float(left_mean * ratio)
+        else:
+            level = right_mean
+
+        level = max(0.0, min(level, float(np.percentile(img, 95))))
+        img_corr = np.clip(img - level, 0.0, None)
+        meta["rib_filter_used"] = True
+        meta["rib_filter_level"] = level
+        meta["rib_filter_note"] = (
+            f"Filtro costal aplicado (nivel={level:.2f}, asimetría={asym:.2f}, método={self._exclude_bone_method})"
+        )
+        return img_corr, meta
 
     @staticmethod
     def _relative_hours(first: datetime, current: datetime) -> float:
@@ -1413,7 +1851,9 @@ class AmyloidWindow(QDialog):
                 f"Dinámico temprano cargado: {frames.shape[0]} frames, {total_min:.1f} min. "
                 "Método experimental; falta cuantificar 1h y 3h para análisis temporal."
             )
-            self._lbl_washout_status.setStyleSheet("font-size:10px; color:#38bdf8; padding:4px;")
+            self._lbl_washout_status.setStyleSheet(
+                "font-size:10px; color:#000000; background:#bfdbfe; padding:6px 10px; border:1px solid #93c5fd; border-radius:999px;"
+            )
             self._update_kinetic_analysis()
         except Exception as exc:
             QMessageBox.critical(self, "SINCRO — Cinética experimental", f"No se pudo cargar el dinámico:\n{exc}")
@@ -1957,6 +2397,8 @@ class AmyloidWindow(QDialog):
         self._perugini_combo.setEnabled(view_role == "ap")
         self._perugini_confirm_chk.setEnabled(view_role == "ap")
         self._sync_qbone_mode_ui()
+        self._update_roi_display_image()
+        self._update_filter_summary()
         self._toggle_mode()
         self._update_hmr(0, 0, 0, 0)
 
@@ -1983,6 +2425,8 @@ class AmyloidWindow(QDialog):
             self._qbone_mode_combo.setCurrentIndex(idx)
         self._qbone_mode_combo.blockSignals(False)
         self._roi_widget.set_aux_rois_visible(mode == "manual")
+        show_preview = bool(getattr(self, "_show_mirror_roi_chk", None) and self._show_mirror_roi_chk.isChecked())
+        self._roi_widget.set_mirror_roi_visible(show_preview and mode == "manual" and self._exclude_bone_enabled)
         self._qbone_hint_lbl.setText(
             "Q_bone manual: ajustar ROI Esternón y ROI Costilla." if mode == "manual"
             else "Q_bone automático: esternón/costilla se estiman desde ROI cardíaco."
@@ -1995,6 +2439,8 @@ class AmyloidWindow(QDialog):
         if self._active_time in self._roi_state:
             self._roi_state[self._active_time] = [dict(roi) for roi in self._roi_widget._rois]
         self._roi_widget.set_aux_rois_visible(mode == "manual")
+        show_preview = bool(getattr(self, "_show_mirror_roi_chk", None) and self._show_mirror_roi_chk.isChecked())
+        self._roi_widget.set_mirror_roi_visible(show_preview and mode == "manual" and self._exclude_bone_enabled)
         self._qbone_hint_lbl.setText(
             "Q_bone manual: ajustar ROI Esternón y ROI Costilla." if mode == "manual"
             else "Q_bone automático: esternón/costilla se estiman desde ROI cardíaco."
@@ -2035,6 +2481,8 @@ class AmyloidWindow(QDialog):
             lay.replaceWidget(old, self._roi_widget)
             old.deleteLater()
             self._sync_qbone_mode_ui()
+            self._update_roi_display_image()
+            self._update_filter_summary()
             self._update_hmr(0, 0, 0, 0)
             # En OAI ocultar mediastino/HMR como métrica principal, queda opcional.
             if role == "oai":
@@ -2116,7 +2564,9 @@ class AmyloidWindow(QDialog):
                 cx=self._roi_widget._rois[1]["cx"],
                 radius=self._roi_widget._rois[1]["radius"],
             )
-            result = compute_hmr(self._original_image, roi_h, roi_m)
+            raw_result = compute_hmr(self._original_image, roi_h, roi_m)
+            quant_img, corr_meta = self._build_ap_quant_image(time_label, roi_h)
+            result = compute_hmr(quant_img, roi_h, roi_m)
         except Exception as exc:
             QMessageBox.warning(self, "SINCRO", f"Error calculando HMR:\n{exc}")
             return
@@ -2156,11 +2606,13 @@ class AmyloidWindow(QDialog):
 
         self._washout_data[time_label] = {
             "hmr": result.hmr,
+            "hmr_raw": raw_result.hmr,
             "heart_counts": result.heart_counts,
             "mediastinum_counts": result.mediastinum_counts,
             "classification": result.classification,
             "q_bone": q_bone_val,
             "q_bone_mode": self._qbone_mode_by_time.get(time_label, "auto"),
+            "exclude_bone": dict(corr_meta),
         }
         self._perugini_by_time[time_label] = int(self._perugini_combo.currentData())
         self._perugini_confirmed_by_time[time_label] = bool(self._perugini_confirm_chk.isChecked())
@@ -2210,6 +2662,8 @@ class AmyloidWindow(QDialog):
         img_rgb = np.array(pil, dtype=np.float64)
         self._processed_images[time_label]["roi"] = img_rgb
         self._processed_images[time_label]["clean"] = self._original_image.copy()
+        self._processed_images[time_label]["corr"] = np.asarray(quant_img, dtype=np.float64).copy()
+        self._processed_images[time_label]["corr_meta"] = dict(corr_meta)
         self._rebuild_layout(force_layout=self._current_layout_n)
         layout = self._quadrant_viewer._layout
         roi_idx = self._roi_slot_index(time_label)
@@ -2220,6 +2674,23 @@ class AmyloidWindow(QDialog):
             self._quadrant_viewer._rebuild_pixmaps()
             self._quadrant_viewer.update()
         self._update_washout_preview()
+        corr_used = bool(
+            corr_meta.get("rib_filter_used")
+            or corr_meta.get("sternum_filter_used")
+            or corr_meta.get("scatter_used")
+        )
+        notes = []
+        if corr_meta.get("rib_filter_note"):
+            notes.append(str(corr_meta.get("rib_filter_note")))
+        if corr_meta.get("sternum_filter_note"):
+            notes.append(str(corr_meta.get("sternum_filter_note")))
+        if corr_used:
+            QMessageBox.information(
+                self,
+                "SINCRO — Corrección experimental AP",
+                f"HMR raw={raw_result.hmr:.2f} · HMR corregido={result.hmr:.2f}\n"
+                f"{' | '.join(notes)}",
+            )
 
         # Volver al modo visor.
         if self._current_mode == "analisis":
@@ -2267,14 +2738,62 @@ class AmyloidWindow(QDialog):
                 cx=self._roi_widget._rois[1]["cx"],
                 radius=self._roi_widget._rois[1]["radius"],
             )
-            result = compute_hmr(self._original_image, roi_h, roi_m)
-            self._lbl_hmr.setText(f"HMR = {result.hmr:.2f}")
-            self._lbl_class.setText(result.classification)
-            color = "#f87171" if result.hmr >= 1.5 else ("#fbbf24" if result.hmr >= 1.0 else "#4ade80")
-            self._lbl_hmr.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {color};")
+            raw_result = compute_hmr(self._original_image, roi_h, roi_m)
+            if self._active_time in ("1h", "3h"):
+                qimg, corr_meta = self._build_ap_quant_image(self._active_time, roi_h)
+                result = compute_hmr(qimg, roi_h, roi_m)
+            else:
+                corr_meta = {
+                    "rib_filter_used": False,
+                    "sternum_filter_used": False,
+                    "scatter_used": False,
+                    "rib_filter_note": "",
+                    "sternum_filter_note": "",
+                }
+                result = raw_result
+            corr_used = bool(
+                corr_meta.get("rib_filter_used")
+                or corr_meta.get("sternum_filter_used")
+                or corr_meta.get("scatter_used")
+            )
+            notes = []
+            if corr_meta.get("rib_filter_note"):
+                notes.append(str(corr_meta.get("rib_filter_note")))
+            if corr_meta.get("sternum_filter_note"):
+                notes.append(str(corr_meta.get("sternum_filter_note")))
+            if corr_used:
+                self._lbl_hmr.setText(f"HMR = {result.hmr:.2f} (raw {raw_result.hmr:.2f})")
+                self._lbl_class.setText(result.classification + (f" · {' | '.join(notes)}" if notes else ""))
+            else:
+                self._lbl_hmr.setText(f"HMR = {result.hmr:.2f}")
+                self._lbl_class.setText(result.classification)
+            cls_txt = str(result.classification or "").upper()
+            if "POSITIVO" in cls_txt:
+                hmr_color = "#fca5a5"
+                cls_color = "#fca5a5"
+            elif "EQU" in cls_txt:
+                hmr_color = "#fde68a"
+                cls_color = "#fde68a"
+            else:
+                hmr_color = "#86efac"
+                cls_color = "#86efac"
+            self._lbl_hmr.setStyleSheet(
+                f"font-size:16px; font-weight:700; color:{hmr_color}; background:#000000; padding:4px 8px;"
+            )
+            self._lbl_class.setStyleSheet(
+                f"font-size:12px; font-weight:600; color:{cls_color}; background:#000000; padding:3px 8px;"
+            )
+            self._update_filter_summary()
         except Exception as exc:
             self._lbl_hmr.setText("HMR = N/D")
             self._lbl_class.setText(f"Error: {exc}")
+            self._lbl_hmr.setStyleSheet(
+                "font-size:16px; font-weight:700; color:#ffffff; background:#000000; padding:4px 8px;"
+            )
+            self._lbl_class.setStyleSheet(
+                "font-size:12px; font-weight:600; color:#fca5a5; background:#000000; padding:3px 8px;"
+            )
+            self._update_filter_summary()
 
     def _reset_rois(self):
         if self._original_image is None:
@@ -2293,6 +2812,12 @@ class AmyloidWindow(QDialog):
         self._roi_widget._rois[3]["cy"] = 0.60 * h
         self._roi_widget._rois[3]["cx"] = 0.20 * w
         self._roi_widget._rois[3]["radius"] = 6.0
+        self._roi_widget._rois[4]["cy"] = 0.25 * h
+        self._roi_widget._rois[4]["cx"] = 0.42 * w
+        self._roi_widget._rois[4]["radius"] = 5.4
+        self._roi_widget._rois[5]["cy"] = 0.25 * h
+        self._roi_widget._rois[5]["cx"] = 0.58 * w
+        self._roi_widget._rois[5]["radius"] = 5.4
         self._roi_widget.update()
         if self._active_time in self._roi_state:
             self._roi_state[self._active_time] = [dict(roi) for roi in self._roi_widget._rois]
@@ -2303,6 +2828,7 @@ class AmyloidWindow(QDialog):
         """Aplica/quita filtro visual al widget de ROIs (solo display, no raw)."""
         from core.amyloid_planar import apply_visual_filter, VISUAL_FILTERS
         filter_key = self._filter_combo.currentData()
+        display_base = self._build_current_display_image()
         if filter_key == "early_dynamic":
             if self._early_dynamic is None:
                 QMessageBox.information(
@@ -2326,15 +2852,15 @@ class AmyloidWindow(QDialog):
             return
         if filter_key is None or filter_key == "none":
             # Restaurar imagen raw.
-            if self._original_image is not None:
-                self._roi_widget._image = np.asarray(self._original_image, dtype=np.float64)
+            if display_base is not None:
+                self._roi_widget._image = np.asarray(display_base, dtype=np.float64)
                 self._roi_widget.update()
             return
-        if self._original_image is None:
+        if display_base is None:
             return
         _, kwargs = VISUAL_FILTERS.get(filter_key, ("", {}))
         try:
-            filtered = apply_visual_filter(self._original_image, filter_key, **kwargs)
+            filtered = apply_visual_filter(np.asarray(display_base, dtype=np.float64), filter_key, **kwargs)
             self._roi_widget._image = np.asarray(filtered, dtype=np.float64)
             self._roi_widget.update()
         except Exception:
@@ -2452,7 +2978,9 @@ class AmyloidWindow(QDialog):
             missing_text = " y ".join(missing)
             status = f"Cuantificado: {done_text}. Falta cuantificar {missing_text}."
             self._lbl_washout_status.setText(status)
-            self._lbl_washout_status.setStyleSheet("font-size:10px; color:#fbbf24; padding:4px;")
+            self._lbl_washout_status.setStyleSheet(
+                "font-size:10px; color:#000000; background:#e5e7eb; padding:6px 10px; border:1px solid #d1d5db; border-radius:999px;"
+            )
             self._washout_preview.clear()
             self._washout_preview.setText(status)
             self._washout_preview.setVisible(True)
@@ -2463,6 +2991,15 @@ class AmyloidWindow(QDialog):
             self._washout_preview.setPixmap(pixmap.scaledToWidth(145, Qt.TransformationMode.SmoothTransformation))
             self._washout_preview.setVisible(True)
         oai_txt = ""
+        corr_txt = ""
+        for t in ("1h", "3h"):
+            data = self._washout_data.get(t) or {}
+            eb = dict(data.get("exclude_bone") or {})
+            if eb.get("rib_filter_used") or eb.get("sternum_filter_used") or eb.get("scatter_used"):
+                raw = data.get("hmr_raw")
+                cur = data.get("hmr")
+                if raw is not None and cur is not None:
+                    corr_txt += f" · {t}: raw {raw:.2f}→corr {cur:.2f}"
         if "1h" in self._oai_washout_data and "3h" in self._oai_washout_data:
             h1 = float(self._oai_washout_data["1h"].get("heart_counts", 0.0))
             h3 = float(self._oai_washout_data["3h"].get("heart_counts", 0.0))
@@ -2470,8 +3007,10 @@ class AmyloidWindow(QDialog):
                 ret = h3 / h1
                 wo = (1.0 - ret) * 100.0
                 oai_txt = f" · OAI opcional 3h/1h={ret:.3f} (washout {wo:+.1f}%)"
-        self._lbl_washout_status.setText("Washout 1h/3h cuantificado: curva lista para el informe." + oai_txt)
-        self._lbl_washout_status.setStyleSheet("font-size:10px; color:#4ade80; padding:4px;")
+        self._lbl_washout_status.setText("Washout 1h/3h cuantificado: curva lista para el informe." + oai_txt + corr_txt)
+        self._lbl_washout_status.setStyleSheet(
+            "font-size:10px; color:#000000; background:#bfdbfe; padding:6px 10px; border:1px solid #93c5fd; border-radius:999px;"
+        )
 
     def _open_report_template_preview(self):
         """Abre vista previa visual de plantillas de informe y permite selección."""
@@ -2584,94 +3123,94 @@ class AmyloidWindow(QDialog):
         btn_apply.clicked.connect(_apply_and_close)
         dlg.exec()
 
-        def _open_report_template_matrix(self):
-                """Muestra matriz comparativa de escenarios vs plantilla automática y contenido."""
-                dlg = QDialog(self)
-                dlg.setWindowTitle("SINCRO — Matriz de escenarios AMILO")
-                dlg.resize(980, 620)
-                lay = QVBoxLayout(dlg)
+    def _open_report_template_matrix(self):
+        """Muestra matriz comparativa de escenarios vs plantilla automática y contenido."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("SINCRO — Matriz de escenarios AMILO")
+        dlg.resize(980, 620)
+        lay = QVBoxLayout(dlg)
 
-                info = QLabel(
-                        "Matriz de referencia para entender qué plantilla usa AUTO y qué secciones se incluyen/omiten "
-                        "según cobertura del estudio."
-                )
-                info.setWordWrap(True)
-                info.setStyleSheet("color:#cbd5e1; font-size:12px;")
-                lay.addWidget(info)
+        info = QLabel(
+            "Matriz de referencia para entender qué plantilla usa AUTO y qué secciones se incluyen/omiten "
+            "según cobertura del estudio."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#cbd5e1; font-size:12px;")
+        lay.addWidget(info)
 
-                scenarios = [
-                        ("Solo planar", True, False, False),
-                        ("Planar + SPECT", True, True, False),
-                        ("Planar + SPECT/CT", True, True, True),
-                        ("Solo SPECT", False, True, False),
-                        ("Solo SPECT/CT", False, True, True),
-                ]
+        scenarios = [
+            ("Solo planar", True, False, False),
+            ("Planar + SPECT", True, True, False),
+            ("Planar + SPECT/CT", True, True, True),
+            ("Solo SPECT", False, True, False),
+            ("Solo SPECT/CT", False, True, True),
+        ]
 
-                rows_html = []
-                for name, has_planar, has_spect, has_ct in scenarios:
-                        if has_planar and has_spect:
-                                tpl = "AMILO Clínico Completo"
-                        elif has_planar:
-                                tpl = "AMILO Planar"
-                        elif has_spect:
-                                tpl = "AMILO SPECT"
-                        else:
-                                tpl = "AMILO Básico"
-                        profile = self._template_profile(tpl, has_planar, has_spect, has_ct)
-                        includes = "<br>• " + "<br>• ".join(str(x) for x in profile.get("includes", [])) if profile.get("includes") else "—"
-                        omits = "<br>• " + "<br>• ".join(str(x) for x in profile.get("omits", [])) if profile.get("omits") else "—"
-                        rows_html.append(
-                                f"""
-                                <tr>
-                                    <td><b>{name}</b></td>
-                                    <td>{'Sí' if has_planar else 'No'}</td>
-                                    <td>{'Sí' if has_spect else 'No'}</td>
-                                    <td>{'Sí' if has_ct else 'No'}</td>
-                                    <td><b>{tpl}</b><br><span style='color:#94a3b8'>{profile.get('focus','')}</span></td>
-                                    <td>{includes}</td>
-                                    <td>{omits}</td>
-                                </tr>
-                                """
-                        )
-
-                html = f"""
-                <html><body style='background:#0f172a; color:#e2e8f0; font-family:Segoe UI, Arial;'>
-                <table style='width:100%; border-collapse:collapse; font-size:12px;'>
-                    <thead>
-                        <tr style='background:#1e293b;'>
-                            <th style='border:1px solid #334155; padding:8px;'>Escenario</th>
-                            <th style='border:1px solid #334155; padding:8px;'>Planar</th>
-                            <th style='border:1px solid #334155; padding:8px;'>SPECT</th>
-                            <th style='border:1px solid #334155; padding:8px;'>CT</th>
-                            <th style='border:1px solid #334155; padding:8px;'>AUTO</th>
-                            <th style='border:1px solid #334155; padding:8px;'>Incluye</th>
-                            <th style='border:1px solid #334155; padding:8px;'>Omite</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {''.join(rows_html)}
-                    </tbody>
-                </table>
-                <p style='margin-top:10px; color:#94a3b8;'>
-                    Nota: si el usuario selecciona una plantilla manual (no AUTO), esa selección fuerza el perfil.
-                </p>
-                </body></html>
+        rows_html = []
+        for name, has_planar, has_spect, has_ct in scenarios:
+            if has_planar and has_spect:
+                tpl = "AMILO Clínico Completo"
+            elif has_planar:
+                tpl = "AMILO Planar"
+            elif has_spect:
+                tpl = "AMILO SPECT"
+            else:
+                tpl = "AMILO Básico"
+            profile = self._template_profile(tpl, has_planar, has_spect, has_ct)
+            includes = "<br>• " + "<br>• ".join(str(x) for x in profile.get("includes", [])) if profile.get("includes") else "—"
+            omits = "<br>• " + "<br>• ".join(str(x) for x in profile.get("omits", [])) if profile.get("omits") else "—"
+            rows_html.append(
+                f"""
+                <tr>
+                  <td><b>{name}</b></td>
+                  <td>{'Sí' if has_planar else 'No'}</td>
+                  <td>{'Sí' if has_spect else 'No'}</td>
+                  <td>{'Sí' if has_ct else 'No'}</td>
+                  <td><b>{tpl}</b><br><span style='color:#94a3b8'>{profile.get('focus','')}</span></td>
+                  <td>{includes}</td>
+                  <td>{omits}</td>
+                </tr>
                 """
+            )
 
-                text = QTextEdit()
-                text.setReadOnly(True)
-                text.setHtml(html)
-                text.setStyleSheet("background:#0b1220; border:1px solid #334155; color:#e2e8f0;")
-                lay.addWidget(text, 1)
+        html = f"""
+        <html><body style='background:#0f172a; color:#e2e8f0; font-family:Segoe UI, Arial;'>
+        <table style='width:100%; border-collapse:collapse; font-size:12px;'>
+          <thead>
+            <tr style='background:#1e293b;'>
+              <th style='border:1px solid #334155; padding:8px;'>Escenario</th>
+              <th style='border:1px solid #334155; padding:8px;'>Planar</th>
+              <th style='border:1px solid #334155; padding:8px;'>SPECT</th>
+              <th style='border:1px solid #334155; padding:8px;'>CT</th>
+              <th style='border:1px solid #334155; padding:8px;'>AUTO</th>
+              <th style='border:1px solid #334155; padding:8px;'>Incluye</th>
+              <th style='border:1px solid #334155; padding:8px;'>Omite</th>
+            </tr>
+          </thead>
+          <tbody>
+            {''.join(rows_html)}
+          </tbody>
+        </table>
+        <p style='margin-top:10px; color:#94a3b8;'>
+          Nota: si el usuario selecciona una plantilla manual (no AUTO), esa selección fuerza el perfil.
+        </p>
+        </body></html>
+        """
 
-                row_btn = QHBoxLayout()
-                row_btn.addStretch(1)
-                btn_close = QPushButton("Cerrar")
-                btn_close.clicked.connect(dlg.accept)
-                row_btn.addWidget(btn_close)
-                lay.addLayout(row_btn)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setHtml(html)
+        text.setStyleSheet("background:#0b1220; border:1px solid #334155; color:#e2e8f0;")
+        lay.addWidget(text, 1)
 
-                dlg.exec()
+        row_btn = QHBoxLayout()
+        row_btn.addStretch(1)
+        btn_close = QPushButton("Cerrar")
+        btn_close.clicked.connect(dlg.accept)
+        row_btn.addWidget(btn_close)
+        lay.addLayout(row_btn)
+
+        dlg.exec()
 
     def _build_report_context(self) -> dict:
         """Resume la cobertura de datos para elegir plantilla de informe."""
@@ -3025,15 +3564,31 @@ class AmyloidWindow(QDialog):
             q_bone_text = f"{q_bone_val:.2f}" if q_bone_val is not None else "N/D"
             q_bone_mode = str(data.get("q_bone_mode", "auto"))
             q_bone_ref = "manual (ROI esternón/costilla)" if q_bone_mode == "manual" else "auto (estimado)"
+            hmr_raw = data.get("hmr_raw")
+            eb = dict(data.get("exclude_bone") or {})
+            rib_used = bool(eb.get("rib_filter_used", False))
+            sternum_used = bool(eb.get("sternum_filter_used", False))
+            sc_used = bool(eb.get("scatter_used", False))
+            rib_method = str(eb.get("rib_filter_method", "N/D"))
+            rib_asym = eb.get("rib_filter_asym", None)
+            sternum_asym = eb.get("sternum_filter_asym", None)
+            rib_note = str(eb.get("rib_filter_note", "") or "")
+            sternum_note = str(eb.get("sternum_filter_note", "") or "")
             hmr_data = [
                 ["Métrica", "Valor", "Referencia"],
                 [f"HMR ({time_label})", f"{hmr:.2f}", "≥1.5 sugiere ATTR"],
+                [f"HMR raw ({time_label})", f"{float(hmr_raw):.2f}" if hmr_raw is not None else "N/D", "Sin correcciones experimentales"],
                 ["Cuentas cardíacas", f"{heart:,.0f}", ""],
                 ["Cuentas mediastinales", f"{medi:,.0f}", ""],
                 ["Clasificación", cls, ""],
                 ["Perugini", str(perugini_time), "0–3"],
                 ["Perugini estado", "Final" if perugini_confirmed else "Sugerido", "Confirmación manual"],
                 ["Q_bone (calidad ósea)", q_bone_text, f"≈1 homogéneo · {q_bone_ref}"],
+                ["Filtro costal", "Sí" if rib_used else "No", rib_method if rib_used else "No aplicado"],
+                ["Filtro esternón", "Sí" if sternum_used else "No", "2 fondos" if sternum_used else "No aplicado"],
+                ["SCATTER planar", "Sí" if sc_used else "No", f"k={float(eb.get('scatter_k', 0.0)):.2f}" if sc_used else "No aplicado"],
+                ["Asimetría costal", f"{float(rib_asym):.2f}" if rib_asym is not None else "N/D", "Se descarta corrección si supera umbral"],
+                ["Asimetría fondos esternón", f"{float(sternum_asym):.2f}" if sternum_asym is not None else "N/D", "Se descarta corrección si supera umbral"],
             ]
             hmr_table = Table(hmr_data, colWidths=[50*mm, 40*mm, 76*mm])
             hmr_table.setStyle(TableStyle([
@@ -3045,6 +3600,9 @@ class AmyloidWindow(QDialog):
                 ("LEFTPADDING", (0, 0), (-1, -1), 3*mm),
             ]))
             story.append(hmr_table)
+            notes_txt = " | ".join([x for x in [rib_note, sternum_note] if x])
+            if notes_txt:
+                story.append(Paragraph(f"Nota corrección experimental: {notes_txt}", small_style))
             story.append(Spacer(1, 4*mm))
             sec_num += 1
 
@@ -3588,6 +4146,16 @@ class AmyloidWindow(QDialog):
             q_bone_text = f"{q_bone_val:.2f}" if q_bone_val is not None else "N/D"
             q_bone_mode = str(data.get("q_bone_mode", "auto"))
             q_bone_mode_text = "manual (ROI esternón/costilla)" if q_bone_mode == "manual" else "auto (estimado)"
+            hmr_raw = data.get("hmr_raw")
+            eb = dict(data.get("exclude_bone") or {})
+            rib_used = bool(eb.get("rib_filter_used", False))
+            sternum_used = bool(eb.get("sternum_filter_used", False))
+            sc_used = bool(eb.get("scatter_used", False))
+            rib_method = str(eb.get("rib_filter_method", "N/D"))
+            rib_asym = eb.get("rib_filter_asym", None)
+            sternum_asym = eb.get("sternum_filter_asym", None)
+            rib_note = str(eb.get("rib_filter_note", "") or "")
+            sternum_note = str(eb.get("sternum_filter_note", "") or "")
             temporal_hmr[time_label] = hmr
 
             roi_html = '<div class="roi-placeholder">Imagen ROI no disponible</div>'
@@ -3617,10 +4185,17 @@ class AmyloidWindow(QDialog):
                 <tr><td>Cuentas cardíacas</td><td>{heart_counts:,.0f}</td><td></td></tr>
                 <tr><td>Cuentas mediastinales</td><td>{mediastinum_counts:,.0f}</td><td></td></tr>
                 <tr><td>Clasificación</td><td>{escape(str(classification))}</td><td></td></tr>
+                <tr><td>HMR raw</td><td>{float(hmr_raw):.2f}</td><td>Sin correcciones experimentales</td></tr>
                 <tr><td>Perugini</td><td>{escape(str(perugini_time))}</td><td>0–3</td></tr>
                 <tr><td>Perugini estado</td><td>{escape(perugini_state_text)}</td><td>Control clínico</td></tr>
                 <tr><td>Q_bone (calidad ósea)</td><td>{escape(q_bone_text)}</td><td>{escape(q_bone_mode_text)}</td></tr>
+                <tr><td>Filtro costal</td><td>{'Sí' if rib_used else 'No'}</td><td>{escape(rib_method if rib_used else 'No aplicado')}</td></tr>
+                <tr><td>Filtro esternón</td><td>{'Sí' if sternum_used else 'No'}</td><td>{'2 fondos' if sternum_used else 'No aplicado'}</td></tr>
+                <tr><td>SCATTER planar</td><td>{'Sí' if sc_used else 'No'}</td><td>{escape(f"k={float(eb.get('scatter_k', 0.0)):.2f}" if sc_used else 'No aplicado')}</td></tr>
+                <tr><td>Asimetría costal</td><td>{escape(f"{float(rib_asym):.2f}" if rib_asym is not None else 'N/D')}</td><td>Se descarta corrección si supera umbral</td></tr>
+                <tr><td>Asimetría fondos esternón</td><td>{escape(f"{float(sternum_asym):.2f}" if sternum_asym is not None else 'N/D')}</td><td>Se descarta corrección si supera umbral</td></tr>
             </table>
+            {f"<p style='font-size:.82rem;color:#94a3b8;'>Nota corrección experimental: {escape(' | '.join([x for x in [rib_note, sternum_note] if x]))}</p>" if (rib_note or sternum_note) else ""}
         </div>
     </div>
 </section>""")
