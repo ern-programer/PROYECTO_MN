@@ -8,7 +8,7 @@ import json
 import numpy as np
 
 from PyQt6.QtCore import QObject, Qt, QSettings, QThread, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QPdfWriter, QPageSize, QPen, QColor
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPdfWriter, QPageSize, QPen, QColor, QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -28,6 +28,11 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QSpinBox,
     QScrollArea,
+    QMessageBox,
+    QInputDialog,
+)
+
+from pydicom.dataset import Dataset
     QMessageBox,
     QInputDialog,
 )
@@ -118,6 +123,7 @@ class FusionReportLayoutDialog(QDialog):
         ct_window_fn,
         cmap_fn,
         slice_idx: dict,
+        localization_points: list[dict] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("SINCRO — Vista informe fusión")
@@ -145,6 +151,7 @@ class FusionReportLayoutDialog(QDialog):
             "coronal": int(slice_idx.get("coronal", self._spect_vol.shape[1] // 2)),
             "sagittal": int(slice_idx.get("sagittal", self._spect_vol.shape[2] // 2)),
         }
+        self._localization_points = list(localization_points or [])
         self._settings = QSettings("GAMMASYS", "SINCRO_AMYLO_SPECT")
         self._custom_layouts = self._load_custom_layouts()
         self._line_px = 1
@@ -254,6 +261,10 @@ class FusionReportLayoutDialog(QDialog):
         btn_export_pdf = QPushButton("Exportar PDF")
         btn_export_pdf.clicked.connect(self._export_pdf)
         btns.addWidget(btn_export_pdf)
+        btn_export_sr = QPushButton("Exportar DICOM-SR")
+        btn_export_sr.clicked.connect(self._export_dicom_sr)
+        btn_export_sr.setToolTip("Exporta puntos de localización como Structured Report (TID 1411)")
+        btns.addWidget(btn_export_sr)
         btns.addStretch(1)
         btn_close = QPushButton("Cerrar")
         btn_close.clicked.connect(self.accept)
@@ -671,11 +682,70 @@ class FusionReportLayoutDialog(QDialog):
             dx = int((page_w - dw) / 2)
             dy = int((page_h - dh) / 2)
             painter.drawPixmap(dx, dy, dw, dh, pix)
+            # Agregar puntos de localización si existen
+            if self._localization_points:
+                painter.save()
+                font = QFont("Arial", 10)
+                painter.setFont(font)
+                painter.setPen(QColor(30, 30, 30))
+                text_y = dy + dh + 40
+                line_h = 18
+                painter.drawText(dx, text_y, "Puntos de localización:")
+                text_y += line_h + 4
+                for pt in self._localization_points:
+                    label = pt.get("label", "?")
+                    if "zyx" in pt:
+                        zyx = pt["zyx"]
+                        line = f"  {label}: Z={zyx[0]}, Y={zyx[1]}, X={zyx[2]}"
+                    elif "value_mm" in pt:
+                        line = f"  {label}: {pt['value_mm']} mm"
+                    else:
+                        line = f"  {label}"
+                    painter.drawText(dx, text_y, line)
+                    text_y += line_h
+                painter.restore()
             painter.end()
             self._remember_path(path)
             QMessageBox.information(self, "SINCRO", f"PDF exportado:\n{path}")
         except Exception as exc:
             QMessageBox.critical(self, "SINCRO", f"Error exportando PDF:\n{exc}")
+
+    def _export_dicom_sr(self):
+        """Exporta puntos de localización como DICOM Structured Report."""
+        if not self._localization_points:
+            QMessageBox.warning(self, "SINCRO", "No hay puntos de localización para exportar.")
+            return
+        try:
+            from report.dicom_sr import create_localization_sr
+
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Exportar DICOM-SR",
+                self._last_dir(),
+                "DICOM (*.dcm)",
+            )
+            if not path:
+                return
+            if not path.lower().endswith(".dcm"):
+                path += ".dcm"
+
+            # Crear dataset mínimo del SPECT para referencia
+            spect_ds = Dataset()
+            spect_ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.20"
+            spect_ds.SOPInstanceUID = "1.2.3.4.5.6.7.8.9"
+            spect_ds.PatientID = "SR_EXPORT"
+            spect_ds.PatientName = "Exported^From^SINCRO"
+            spect_ds.StudyInstanceUID = "1.2.3.4.5.6.7.8.9.10"
+
+            sr = create_localization_sr(
+                localization_points=self._localization_points,
+                spect_ds=spect_ds,
+                output_path=path,
+            )
+            self._remember_path(path)
+            QMessageBox.information(self, "SINCRO", f"DICOM-SR exportado:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "SINCRO", f"Error exportando DICOM-SR:\n{exc}")
 
 
 class AmyloidSpectPanel(QDialog):
@@ -749,6 +819,7 @@ class AmyloidSpectPanel(QDialog):
         self._triangulation_cross_enabled = False
         self._localization_cross_enabled = False
         self._localization_point_zyx = None
+        self._localization_anchor_zyx = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -1077,6 +1148,14 @@ class AmyloidSpectPanel(QDialog):
         )
         self._btn_localization_cross.toggled.connect(self._on_localization_cross_toggled)
         qc_row.addWidget(self._btn_localization_cross)
+        self._btn_loc_anchor = QPushButton("Fijar ancla A")
+        self._btn_loc_anchor.setToolTip("Fija la cruz actual como punto A. Luego depositá otra cruz para medir la distancia A→B en mm.")
+        self._btn_loc_anchor.clicked.connect(self._on_set_localization_anchor)
+        qc_row.addWidget(self._btn_loc_anchor)
+        self._btn_loc_clear = QPushButton("Limpiar ancla")
+        self._btn_loc_clear.setToolTip("Borra el punto A de medición de distancia.")
+        self._btn_loc_clear.clicked.connect(self._on_clear_localization_anchor)
+        qc_row.addWidget(self._btn_loc_clear)
         root.addLayout(qc_row)
 
         slice_row = QHBoxLayout()
@@ -2168,6 +2247,27 @@ class AmyloidSpectPanel(QDialog):
                 painter.drawLine(vx, max(0, hy - 10), vx, max(0, hy - 3))
                 painter.drawLine(vx, min(h - 1, hy + 3), vx, min(h - 1, hy + 10))
                 painter.drawText(6, max(32, h - 10), f"LOC Z/Y/X {loc_z + 1}/{loc_y + 1}/{loc_x + 1}")
+            anchor = getattr(self, "_localization_anchor_zyx", None)
+            if anchor is not None:
+                a_z, a_y, a_x = (int(v) for v in anchor)
+                avx, ahy, _av, _ah = _coords_from_zyx((a_z, a_y, a_x))
+                anchor_pen = QPen(QColor(74, 222, 128, 245), 2)
+                painter.setPen(anchor_pen)
+                painter.drawEllipse(max(0, avx - 6), max(0, ahy - 6), 12, 12)
+                painter.drawLine(max(0, avx - 12), ahy, max(0, avx - 4), ahy)
+                painter.drawLine(min(w - 1, avx + 4), ahy, min(w - 1, avx + 12), ahy)
+                painter.drawLine(avx, max(0, ahy - 12), avx, max(0, ahy - 4))
+                painter.drawLine(avx, min(h - 1, ahy + 4), avx, min(h - 1, ahy + 12))
+                painter.drawText(6, max(48, h - 26), f"ANCLA A Z/Y/X {a_z + 1}/{a_y + 1}/{a_x + 1}")
+                if show_loc:
+                    dist = self._localization_distance_mm()
+                    if dist is not None:
+                        painter.setPen(QPen(QColor(74, 222, 128, 220), 1))
+                        painter.drawLine(avx, ahy, vx, hy)
+                        mid_x = (avx + vx) // 2
+                        mid_y = (ahy + hy) // 2
+                        painter.setPen(QColor(255, 255, 255, 240))
+                        painter.drawText(max(6, min(w - 70, mid_x + 4)), max(14, min(h - 8, mid_y - 4)), f"{dist:.1f} mm")
         finally:
             painter.end()
         return out
@@ -2186,6 +2286,7 @@ class AmyloidSpectPanel(QDialog):
         self._localization_cross_enabled = bool(checked)
         if not checked:
             self._localization_point_zyx = None
+            self._localization_anchor_zyx = None
         if hasattr(self, "_settings"):
             self._settings.setValue("global/localization_cross", bool(checked))
         self._status.setText(
@@ -2193,6 +2294,77 @@ class AmyloidSpectPanel(QDialog):
             if checked else "Localización desactivada."
         )
         self._render_selected_view()
+
+    def _spect_spacing_or_default(self) -> tuple[float, float, float]:
+        sp = getattr(self, "_spect_spacing_zyx", None)
+        if sp and len(sp) == 3 and all(float(v) > 0 for v in sp):
+            return (float(sp[0]), float(sp[1]), float(sp[2]))
+        return (6.8, 6.8, 6.8)
+
+    def _localization_distance_mm(self) -> float | None:
+        """Distancia euclídea 3D en mm entre el ancla y el punto actual."""
+        a = getattr(self, "_localization_anchor_zyx", None)
+        b = getattr(self, "_localization_point_zyx", None)
+        if a is None or b is None:
+            return None
+        sz, sy, sx = self._spect_spacing_or_default()
+        dz = (float(b[0]) - float(a[0])) * sz
+        dy = (float(b[1]) - float(a[1])) * sy
+        dx = (float(b[2]) - float(a[2])) * sx
+        return float(np.sqrt(dz * dz + dy * dy + dx * dx))
+
+    def _update_localization_distance(self) -> None:
+        dist = self._localization_distance_mm()
+        if dist is None:
+            return
+        a = self._localization_anchor_zyx
+        b = self._localization_point_zyx
+        self._status.setText(
+            f"Distancia LOC: {dist:.1f} mm · "
+            f"A(Z/Y/X)={a[0] + 1}/{a[1] + 1}/{a[2] + 1} → "
+            f"B(Z/Y/X)={b[0] + 1}/{b[1] + 1}/{b[2] + 1}"
+        )
+        self._metrics.append(
+            f"\n--- Medida localización ---\n"
+            f"- A (ancla) Z/Y/X: {a[0] + 1}/{a[1] + 1}/{a[2] + 1}\n"
+            f"- B (punto) Z/Y/X: {b[0] + 1}/{b[1] + 1}/{b[2] + 1}\n"
+            f"- distancia: {dist:.1f} mm (spacing "
+            f"{self._spect_spacing_or_default()[0]:.2f}/"
+            f"{self._spect_spacing_or_default()[1]:.2f}/"
+            f"{self._spect_spacing_or_default()[2]:.2f} mm)"
+        )
+
+    def _on_set_localization_anchor(self) -> None:
+        """Fija el punto actual como ancla para medir distancia."""
+        pt = getattr(self, "_localization_point_zyx", None)
+        if pt is None:
+            self._status.setText("Primero depositá una cruz de localización (Ctrl/Shift+clic).")
+            return
+        self._localization_anchor_zyx = (int(pt[0]), int(pt[1]), int(pt[2]))
+        self._status.setText(
+            f"Ancla fijada en Z/Y/X = {pt[0] + 1}/{pt[1] + 1}/{pt[2] + 1}. "
+            "Depositá un segundo punto para medir la distancia."
+        )
+        self._render_selected_view()
+
+    def _on_clear_localization_anchor(self) -> None:
+        self._localization_anchor_zyx = None
+        self._status.setText("Ancla de medición limpiada.")
+        self._render_selected_view()
+
+    def get_localization_points(self) -> list[dict]:
+        """Exporta ancla y punto de localización para informes."""
+        out: list[dict] = []
+        a = getattr(self, "_localization_anchor_zyx", None)
+        b = getattr(self, "_localization_point_zyx", None)
+        if a is not None:
+            out.append({"label": "A (ancla)", "zyx": [int(v) + 1 for v in a]})
+        if b is not None:
+            out.append({"label": "B (punto)", "zyx": [int(v) + 1 for v in b]})
+        dist = self._localization_distance_mm()
+        if dist is not None:
+            out.append({"label": "Distancia A→B", "value_mm": round(dist, 1)})
+        return out
 
     @staticmethod
     def _blend_mask_over_rgb(rgb: np.ndarray, mask2d: np.ndarray | None, alpha: float) -> np.ndarray:
@@ -2452,6 +2624,7 @@ class AmyloidSpectPanel(QDialog):
             return False
         z, y, x = zyx
         self._localization_point_zyx = (int(z), int(y), int(x))
+        self._update_localization_distance()
         for slider, value in ((self._slice_z, z), (self._slice_y, y), (self._slice_x, x)):
             slider.blockSignals(True)
             slider.setValue(int(np.clip(value, slider.minimum(), slider.maximum())))
@@ -2720,6 +2893,7 @@ class AmyloidSpectPanel(QDialog):
                 tmp = self._ct_transform_3d(np.asarray(self._ct_volume, dtype=np.float64))
                 ct_vol = tmp if tmp.ndim == 3 else None
 
+            loc_points = self.get_localization_points()
             dlg = FusionReportLayoutDialog(
                 self,
                 spect_vol=spect_vol,
@@ -2729,6 +2903,7 @@ class AmyloidSpectPanel(QDialog):
                 ct_window_fn=self._window_ct,
                 cmap_fn=self._apply_cmap,
                 slice_idx=dict(self._slice_idx),
+                localization_points=loc_points,
             )
             dlg.exec()
         except Exception as exc:
