@@ -33,9 +33,6 @@ from PyQt6.QtWidgets import (
 )
 
 from pydicom.dataset import Dataset
-    QMessageBox,
-    QInputDialog,
-)
 
 from scipy import ndimage as ndi
 
