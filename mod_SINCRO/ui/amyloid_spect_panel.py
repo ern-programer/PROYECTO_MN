@@ -1286,9 +1286,9 @@ class AmyloidSpectPanel(QDialog):
         # Fila 4: Referencia de escala clínica
         scale_row = QHBoxLayout()
         scale_lbl = QLabel(
-            "<span style='color:#22c55e; font-weight:600;'>≥1.6 NEGATIVO</span> · "
+            "<span style='color:#ef4444; font-weight:600;'>≥1.6 POSITIVO</span> · "
             "<span style='color:#f59e0b; font-weight:600;'>1.5-1.6 EQUIVOCO</span> · "
-            "<span style='color:#ef4444; font-weight:600;'>&lt;1.5 POSITIVO</span>"
+            "<span style='color:#22c55e; font-weight:600;'>&lt;1.5 NEGATIVO</span>"
         )
         scale_lbl.setStyleSheet("font-size:11px; background:transparent;")
         scale_row.addWidget(scale_lbl)
@@ -2626,16 +2626,17 @@ class AmyloidSpectPanel(QDialog):
             self._lbl_hmr_result.setText(hmr_text)
             
             # Color según clasificación del HMR raw (si existe) o filtrado
+            # HMR ALTO = mucha captación cardíaca = POSITIVO para amiloidosis
             hmr_clinical = result.hmr_raw if result.hmr_raw is not None else result.hmr
             if hmr_clinical >= 1.6:
-                color = "#22c55e"  # Verde - NEGATIVO
-                classification = "NEGATIVO"
+                color = "#ef4444"  # Rojo - POSITIVO
+                classification = "POSITIVO"
             elif hmr_clinical >= 1.5:
                 color = "#f59e0b"  # Naranja - EQUIVOCO
                 classification = "EQUIVOCO"
             else:
-                color = "#ef4444"  # Rojo - POSITIVO
-                classification = "POSITIVO"
+                color = "#22c55e"  # Verde - NEGATIVO
+                classification = "NEGATIVO"
             
             self._lbl_hmr_result.setStyleSheet(
                 f"font-size:14px; font-weight:700; color:{color}; "

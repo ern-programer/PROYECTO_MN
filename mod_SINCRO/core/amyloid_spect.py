@@ -1418,12 +1418,13 @@ class HmrSpectResult:
     @property
     def classification(self) -> str:
         # Clasificación basada en HMR raw (el clínicamente relevante)
+        # HMR ALTO = mucha captación cardíaca = POSITIVO para amiloidosis
         hmr = self.hmr_raw if self.hmr_raw is not None else self.hmr
         if hmr >= 1.6:
-            return "NEGATIVO"
+            return "POSITIVO"
         if hmr >= 1.5:
             return "EQUIVOCO"
-        return "POSITIVO"
+        return "NEGATIVO"
     
     @property
     def hmr_text(self) -> str:

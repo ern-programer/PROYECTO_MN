@@ -35,10 +35,12 @@ mod_SINCRO/
 - **UI**: Sección en panel principal con selección de método, radios ajustables
 - **PDF**: Exportación de resultados HMR al informe
 
-### Clasificación clínica
-- HMR ≥ 1.6: NEGATIVO (sin amiloidosis)
-- HMR 1.5-1.6: EQUIVOCO
-- HMR < 1.5: POSITIVO (amiloidosis)
+### Clasificación clínica (CORREGIDO 2026-08-23)
+- HMR ≥ 1.6: **POSITIVO** (alta captación cardíaca = amiloidosis)
+- HMR 1.5-1.6: **EQUIVOCO**
+- HMR < 1.5: **NEGATIVO** (baja captación cardíaca = sin amiloidosis)
+
+**NOTA IMPORTANTE**: La lógica original estaba invertida. HMR ALTO significa mucha captación en corazón relativo al mediastino, lo cual indica amiloidosis.
 
 ### Flujo de uso (actualizado 2026-08-23)
 1. Cargar SPECT (botón "1. Cargar SPECT")
