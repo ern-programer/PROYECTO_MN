@@ -32,7 +32,7 @@ mod_SINCRO/
   - `VOI_COMPLETE`: Usa toda la esfera 3D
   - `SLICE_CENTRAL`: Usa solo el slice axial central
 - **compute_hmr_spect()**: Calcula ratio corazón/mediastino
-- **UI**: Panel con selección de método, radios ajustables, botón de cálculo
+- **UI**: Sección en panel principal con selección de método, radios ajustables
 - **PDF**: Exportación de resultados HMR al informe
 
 ### Clasificación clínica
@@ -40,15 +40,16 @@ mod_SINCRO/
 - HMR 1.5-1.6: EQUIVOCO
 - HMR < 1.5: POSITIVO (amiloidosis)
 
-### Uso
-1. Cargar estudio SPECT
-2. Colocar punto Anchor A en centro del corazón
-3. Colocar punto B en mediastino superior
-4. Seleccionar método y radios
-5. Click "Calcular HMR-SPECT"
-6. Exportar a PDF
+### Flujo de uso (actualizado 2026-08-23)
+1. Cargar SPECT (botón "1. Cargar SPECT")
+2. Activar **"Localización"** (botón checkable)
+3. **Ctrl+clic** en SPECT para posicionar cruz en centro del corazón
+4. Click **"Fijar ancla A"** (guarda punto corazón)
+5. **Ctrl+clic** en SPECT para posicionar cruz en mediastino superior
+6. Click **"Calcular HMR-SPECT"** en sección HMR-SPECT
+7. Exportar a PDF si se desea
 
-## Dependencias
+### Dependencias
 - PyQt6
 - numpy
 - scipy
