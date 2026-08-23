@@ -858,6 +858,9 @@ class AmyloidSpectPanel(QDialog):
         self._localization_point_zyx = None
         self._localization_anchor_zyx = None
         self._hmr_result = None
+        # VOIs temporales para visualización en vivo
+        self._temp_voi_heart = None
+        self._temp_voi_mediastinum = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -2298,7 +2301,8 @@ class AmyloidSpectPanel(QDialog):
         show_triang = bool(getattr(self, "_triangulation_cross_enabled", False))
         show_loc = bool(getattr(self, "_localization_cross_enabled", False)) and getattr(self, "_localization_point_zyx", None) is not None
         show_vois = bool(getattr(self, "_hmr_result", None)) is not None
-        if not (show_triang or show_loc or show_vois) or pix.isNull():
+        show_temp_vois = bool(getattr(self, "_temp_voi_heart", None)) or bool(getattr(self, "_temp_voi_mediastinum", None))
+        if not (show_triang or show_loc or show_vois or show_temp_vois) or pix.isNull():
             return pix
         vol = self._base_spect_volume if self._base_spect_volume is not None else self._current_volume
         if vol is None:
@@ -2398,6 +2402,58 @@ class AmyloidSpectPanel(QDialog):
                     painter.setPen(pen_m)
                     painter.drawEllipse(QPointF(cx_px, cy_px), r_px, r_px)
                     painter.drawText(cx_px + r_px + 4, cy_px - 4, f"Mediastino {voi_m.radius_mm:.0f}mm")
+            
+            # Dibujar VOIs temporales (en vivo durante posicionamiento)
+            if show_temp_vois and not show_vois:  # Solo si no hay resultado final
+                spacing = self._spect_spacing_or_default()
+                
+                # VOI corazón temporal (rojo punteado)
+                temp_heart = getattr(self, "_temp_voi_heart", None)
+                if temp_heart is not None:
+                    cz_h, cy_h, cx_h = temp_heart.cz, temp_heart.cy, temp_heart.cx
+                    r_vol = temp_heart.radius_mm / max(spacing)
+                    
+                    if axis == "axial":
+                        cx_px = int(round(cx_h / max(1, shape[2] - 1) * (w - 1)))
+                        cy_px = int(round(cy_h / max(1, shape[1] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
+                    elif axis == "coronal":
+                        cx_px = int(round(cx_h / max(1, shape[2] - 1) * (w - 1)))
+                        cy_px = int(round(cz_h / max(1, shape[0] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
+                    else:  # sagittal
+                        cx_px = int(round(cy_h / max(1, shape[1] - 1) * (w - 1)))
+                        cy_px = int(round(cz_h / max(1, shape[0] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[1] - 1) * w))
+                    
+                    pen_h = QPen(QColor(239, 68, 68, 180), 2, Qt.PenStyle.DotLine)
+                    painter.setPen(pen_h)
+                    painter.drawEllipse(QPointF(cx_px, cy_px), r_px, r_px)
+                    painter.drawText(cx_px + r_px + 4, cy_px - 4, f"♥ {temp_heart.radius_mm:.0f}mm")
+                
+                # VOI mediastino temporal (azul punteado)
+                temp_med = getattr(self, "_temp_voi_mediastinum", None)
+                if temp_med is not None:
+                    cz_m, cy_m, cx_m = temp_med.cz, temp_med.cy, temp_med.cx
+                    r_vol = temp_med.radius_mm / max(spacing)
+                    
+                    if axis == "axial":
+                        cx_px = int(round(cx_m / max(1, shape[2] - 1) * (w - 1)))
+                        cy_px = int(round(cy_m / max(1, shape[1] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
+                    elif axis == "coronal":
+                        cx_px = int(round(cx_m / max(1, shape[2] - 1) * (w - 1)))
+                        cy_px = int(round(cz_m / max(1, shape[0] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
+                    else:  # sagittal
+                        cx_px = int(round(cy_m / max(1, shape[1] - 1) * (w - 1)))
+                        cy_px = int(round(cz_m / max(1, shape[0] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[1] - 1) * w))
+                    
+                    pen_m = QPen(QColor(59, 130, 246, 180), 2, Qt.PenStyle.DotLine)
+                    painter.setPen(pen_m)
+                    painter.drawEllipse(QPointF(cx_px, cy_px), r_px, r_px)
+                    painter.drawText(cx_px + r_px + 4, cy_px - 4, f"M {temp_med.radius_mm:.0f}mm")
             
             # Dibujar cruz de triangulación
             if show_triang:
@@ -2515,20 +2571,31 @@ class AmyloidSpectPanel(QDialog):
         )
 
     def _on_set_localization_anchor(self) -> None:
-        """Fija el punto actual como ancla para medir distancia."""
+        """Fija el punto actual como ancla para medir distancia y crea VOI corazón temporal."""
         pt = getattr(self, "_localization_point_zyx", None)
         if pt is None:
             self._status.setText("Primero depositá una cruz de localización (Ctrl/Shift+clic).")
             return
         self._localization_anchor_zyx = (int(pt[0]), int(pt[1]), int(pt[2]))
+        
+        # Crear VOI corazón temporal para visualización en vivo
+        heart_radius = float(self._heart_radius_spin.value())
+        self._temp_voi_heart = VOISphere(
+            label="Corazón (temp)",
+            cz=int(pt[0]), cy=int(pt[1]), cx=int(pt[2]),
+            radius_mm=heart_radius
+        )
+        
         self._status.setText(
             f"Ancla fijada en Z/Y/X = {pt[0] + 1}/{pt[1] + 1}/{pt[2] + 1}. "
             "Depositá un segundo punto para medir la distancia."
         )
-        self._render_selected_view()
+        self._render_selected_view()  # Redibujar para mostrar VOI
 
     def _on_clear_localization_anchor(self) -> None:
         self._localization_anchor_zyx = None
+        self._temp_voi_heart = None
+        self._temp_voi_mediastinum = None
         self._status.setText("Ancla de medición limpiada.")
         self._render_selected_view()
 
@@ -2945,6 +3012,17 @@ class AmyloidSpectPanel(QDialog):
             return False
         z, y, x = zyx
         self._localization_point_zyx = (int(z), int(y), int(x))
+        
+        # Crear VOI mediastino temporal si ya existe el ancla (corazón)
+        anchor = getattr(self, "_localization_anchor_zyx", None)
+        if anchor is not None:
+            mediastinum_radius = float(self._mediastinum_radius_spin.value())
+            self._temp_voi_mediastinum = VOISphere(
+                label="Mediastino (temp)",
+                cz=int(z), cy=int(y), cx=int(x),
+                radius_mm=mediastinum_radius
+            )
+        
         self._update_localization_distance()
         for slider, value in ((self._slice_z, z), (self._slice_y, y), (self._slice_x, x)):
             slider.blockSignals(True)
