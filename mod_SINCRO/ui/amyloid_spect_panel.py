@@ -52,6 +52,12 @@ from core.amyloid_spect import (
     resample_volume_to_spect_grid,
     register_ct_to_spect_rigid,
     refine_ct_to_spect_translation,
+    # HMR-SPECT
+    VOISphere,
+    HmrSpectResult,
+    HmrSpectMethod,
+    compute_hmr_spect,
+    create_voi_from_localization,
 )
 
 
@@ -149,6 +155,7 @@ class FusionReportLayoutDialog(QDialog):
             "sagittal": int(slice_idx.get("sagittal", self._spect_vol.shape[2] // 2)),
         }
         self._localization_points = list(localization_points or [])
+        self._hmr_result: HmrSpectResult | None = None
         self._settings = QSettings("GAMMASYS", "SINCRO_AMYLO_SPECT")
         self._custom_layouts = self._load_custom_layouts()
         self._line_px = 1
@@ -250,6 +257,70 @@ class FusionReportLayoutDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._body)
         root.addWidget(scroll, 1)
+
+        # ── Sección HMR-SPECT ─────────────────────────────────────────────────────
+        hmr_group = QGroupBox("HMR-SPECT (Ratio Corazón/Mediastino 3D)")
+        hmr_layout = QVBoxLayout(hmr_group)
+        
+        # Fila 1: Método
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel("Método:"))
+        self._hmr_method_combo = QComboBox()
+        self._hmr_method_combo.addItem(
+            "VOI esférica completa (integra cuentas 3D)",
+            HmrSpectMethod.VOI_COMPLETE.value
+        )
+        self._hmr_method_combo.addItem(
+            "ROI slice central (slice único comparable a planar)",
+            HmrSpectMethod.SLICE_CENTRAL.value
+        )
+        self._hmr_method_combo.setToolTip(
+            "VOI completa: Mayor precisión, integra todo el volumen\n"
+            "Slice central: Más simple, comparable con HMR planar"
+        )
+        method_row.addWidget(self._hmr_method_combo)
+        method_row.addStretch(1)
+        hmr_layout.addLayout(method_row)
+        
+        # Fila 2: Radios
+        radius_row = QHBoxLayout()
+        radius_row.addWidget(QLabel("Radio corazón (mm):"))
+        self._heart_radius_spin = QDoubleSpinBox()
+        self._heart_radius_spin.setRange(10.0, 60.0)
+        self._heart_radius_spin.setValue(30.0)
+        self._heart_radius_spin.setSingleStep(5.0)
+        radius_row.addWidget(self._heart_radius_spin)
+        
+        radius_row.addWidget(QLabel("Radio mediastino (mm):"))
+        self._mediastinum_radius_spin = QDoubleSpinBox()
+        self._mediastinum_radius_spin.setRange(5.0, 40.0)
+        self._mediastinum_radius_spin.setValue(20.0)
+        self._mediastinum_radius_spin.setSingleStep(5.0)
+        radius_row.addWidget(self._mediastinum_radius_spin)
+        radius_row.addStretch(1)
+        hmr_layout.addLayout(radius_row)
+        
+        # Fila 3: Botón calcular y resultado
+        calc_row = QHBoxLayout()
+        self._btn_calc_hmr = QPushButton("Calcular HMR-SPECT")
+        self._btn_calc_hmr.clicked.connect(self._calculate_hmr_spect)
+        self._btn_calc_hmr.setToolTip(
+            "Usa los puntos de localización:\n"
+            "- Anchor A = centro VOI corazón\n"
+            "- Point B = centro VOI mediastino"
+        )
+        calc_row.addWidget(self._btn_calc_hmr)
+        
+        self._lbl_hmr_result = QLabel("HMR-SPECT = N/D")
+        self._lbl_hmr_result.setStyleSheet(
+            "font-size:16px; font-weight:700; color:#ffffff; background:#000000; padding:6px 12px;"
+        )
+        calc_row.addWidget(self._lbl_hmr_result)
+        calc_row.addStretch(1)
+        hmr_layout.addLayout(calc_row)
+        
+        root.addWidget(hmr_group)
+        # ────────────────────────────────────────────────────────────────────────────
 
         btns = QHBoxLayout()
         btn_export_png = QPushButton("Exportar PNG")
@@ -701,6 +772,38 @@ class FusionReportLayoutDialog(QDialog):
                     painter.drawText(dx, text_y, line)
                     text_y += line_h
                 painter.restore()
+            # Agregar HMR-SPECT si fue calculado
+            if self._hmr_result:
+                painter.save()
+                font = QFont("Arial", 10)
+                painter.setFont(font)
+                painter.setPen(QColor(30, 30, 30))
+                text_y = dy + dh + 40
+                if self._localization_points:
+                    # Si ya hay puntos, el text_y ya avanzó
+                    pass
+                else:
+                    # Si no hay puntos, empezar desde abajo
+                    text_y = dy + dh + 40
+                line_h = 18
+                painter.drawText(dx, text_y, "HMR-SPECT:")
+                text_y += line_h + 4
+                hmr = self._hmr_result
+                painter.drawText(dx, text_y, f"  HMR = {hmr.hmr:.2f} ({hmr.classification})")
+                text_y += line_h
+                painter.drawText(dx, text_y, f"  Método: {hmr.method}")
+                text_y += line_h
+                painter.drawText(dx, text_y, f"  Cuentas corazón: {hmr.heart_counts:.0f}")
+                text_y += line_h
+                painter.drawText(dx, text_y, f"  Cuentas mediastino: {hmr.mediastinum_counts:.0f}")
+                text_y += line_h
+                painter.drawText(dx, text_y, f"  Volumen corazón: {hmr.heart_volume_ml:.1f} mL")
+                text_y += line_h
+                painter.drawText(dx, text_y, f"  Volumen mediastino: {hmr.mediastinum_volume_ml:.1f} mL")
+                if hmr.slice_idx is not None:
+                    text_y += line_h
+                    painter.drawText(dx, text_y, f"  Slice axial: {hmr.slice_idx}")
+                painter.restore()
             painter.end()
             self._remember_path(path)
             QMessageBox.information(self, "SINCRO", f"PDF exportado:\n{path}")
@@ -743,6 +846,106 @@ class FusionReportLayoutDialog(QDialog):
             QMessageBox.information(self, "SINCRO", f"DICOM-SR exportado:\n{path}")
         except Exception as exc:
             QMessageBox.critical(self, "SINCRO", f"Error exportando DICOM-SR:\n{exc}")
+
+    def _calculate_hmr_spect(self):
+        """Calcula HMR-SPECT usando VOIs esféricas desde puntos de localización."""
+        # Verificar que hay volumen SPECT cargado
+        if self._spect_volume is None:
+            QMessageBox.warning(self, "SINCRO", "No hay volumen SPECT cargado.")
+            return
+        
+        # Verificar puntos de localización
+        anchor = None
+        point_b = None
+        for pt in self._localization_points:
+            label = pt.get("label", "").lower()
+            if "anchor" in label or "a" in label:
+                anchor = pt.get("zyx")
+            elif "point" in label or "b" in label:
+                point_b = pt.get("zyx")
+        
+        if anchor is None:
+            QMessageBox.warning(
+                self, "SINCRO",
+                "Falta el punto Anchor A (centro corazón).\n"
+                "Use el sistema de localización para marcar el centro del corazón."
+            )
+            return
+        
+        if point_b is None:
+            QMessageBox.warning(
+                self, "SINCRO",
+                "Falta el punto B (centro mediastino).\n"
+                "Use el sistema de localización para marcar el centro del mediastino."
+            )
+            return
+        
+        # Verificar spacing
+        if self._spect_spacing_zyx is None:
+            QMessageBox.warning(self, "SINCRO", "No hay información de spacing del volumen SPECT.")
+            return
+        
+        try:
+            # Crear VOIs desde puntos de localización
+            heart_radius = self._heart_radius_spin.value()
+            mediastinum_radius = self._mediastinum_radius_spin.value()
+            
+            voi_heart, voi_mediastinum = create_voi_from_localization(
+                anchor_zyx=anchor,
+                point_zyx=point_b,
+                heart_radius_mm=heart_radius,
+                mediastinum_radius_mm=mediastinum_radius,
+            )
+            
+            # Obtener método seleccionado
+            method_text = self._hmr_method_combo.currentText()
+            if "VOI" in method_text:
+                method = HmrSpectMethod.VOI_COMPLETE
+            else:
+                method = HmrSpectMethod.SLICE_CENTRAL
+            
+            # Calcular HMR-SPECT
+            result = compute_hmr_spect(
+                volume=self._spect_volume,
+                spacing_zyx=self._spect_spacing_zyx,
+                voi_heart=voi_heart,
+                voi_mediastinum=voi_mediastinum,
+                method=method,
+            )
+            
+            # Actualizar UI
+            self._hmr_result = result
+            
+            # Color según clasificación
+            if result.hmr >= 1.5:
+                color = "#fca5a5"  # rojo claro
+            elif result.hmr >= 1.0:
+                color = "#fde68a"  # ámbar
+            else:
+                color = "#86efac"  # verde claro
+            
+            self._lbl_hmr_result.setText(f"HMR-SPECT = {result.hmr:.2f}")
+            self._lbl_hmr_result.setStyleSheet(
+                f"font-size:16px; font-weight:700; color:{color}; background:#000000; padding:6px 12px;"
+            )
+            
+            # Mostrar detalles
+            details = (
+                f"HMR-SPECT = {result.hmr:.2f}\n"
+                f"Clasificación: {result.classification}\n\n"
+                f"Cuentas corazón: {result.heart_counts:.0f}\n"
+                f"Cuentas mediastino: {result.mediastinum_counts:.0f}\n"
+                f"Volumen corazón: {result.heart_volume_ml:.1f} mL\n"
+                f"Volumen mediastino: {result.mediastinum_volume_ml:.1f} mL\n"
+                f"Método: {result.method}"
+            )
+            if result.slice_idx is not None:
+                details += f"\nSlice axial: {result.slice_idx}"
+            
+            QMessageBox.information(self, "SINCRO — HMR-SPECT", details)
+            
+        except Exception as exc:
+            QMessageBox.critical(self, "SINCRO", f"Error calculando HMR-SPECT:\n{exc}")
 
 
 class AmyloidSpectPanel(QDialog):

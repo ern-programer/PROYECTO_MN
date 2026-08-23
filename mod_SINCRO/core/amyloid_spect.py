@@ -14,6 +14,7 @@ NOTA: módulo experimental y de apoyo visual. No diagnóstico automático.
 """
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass
 from typing import Any
 
@@ -1328,3 +1329,191 @@ def central_slices_preview(volume: np.ndarray) -> dict[str, np.ndarray]:
         "coronal": coronal,
         "sagittal": sagittal,
     }
+
+
+# =============================================================================
+# HMR-SPECT: Heart-to-Mediastinum Ratio en SPECT 3D
+# =============================================================================
+
+@dataclass
+class VOISphere:
+    """VOI (Volume of Interest) esférica 3D en coordenadas ZYX (índices)."""
+    
+    cz: float      # centro Z (axial)
+    cy: float      # centro Y (coronal)
+    cx: float      # centro X (sagittal)
+    radius_mm: float
+    
+    def mask_3d(self, shape: tuple[int, int, int], spacing_zyx: tuple[float, float, float]) -> np.ndarray:
+        """Genera máscara 3D con radio en mm."""
+        nz, ny, nx = shape
+        sz, sy, sx = spacing_zyx
+        
+        zz, yy, xx = np.meshgrid(
+            np.arange(nz) * sz,
+            np.arange(ny) * sy,
+            np.arange(nx) * sx,
+            indexing='ij'
+        )
+        
+        dist = np.sqrt(
+            (zz - self.cz * sz) ** 2 +
+            (yy - self.cy * sy) ** 2 +
+            (xx - self.cx * sx) ** 2
+        )
+        
+        return dist <= self.radius_mm
+    
+    def mask_slice(self, z_idx: int, shape_2d: tuple[int, int], spacing_yx: tuple[float, float]) -> np.ndarray:
+        """Genera máscara 2D para un slice axial específico."""
+        ny, nx = shape_2d
+        sy, sx = spacing_yx
+        
+        yy, xx = np.meshgrid(np.arange(ny) * sy, np.arange(nx) * sx, indexing='ij')
+        dist = np.sqrt((yy - self.cy * sy) ** 2 + (xx - self.cx * sx) ** 2)
+        
+        return dist <= self.radius_mm
+    
+    def volume_ml(self) -> float:
+        """Calcula volumen de la esfera en mL."""
+        vol_mm3 = (4.0 / 3.0) * np.pi * (self.radius_mm ** 3)
+        return vol_mm3 / 1000.0
+
+
+@dataclass
+class HmrSpectResult:
+    """Resultado del cálculo HMR en SPECT 3D."""
+    
+    hmr: float
+    heart_counts: float
+    mediastinum_counts: float
+    heart_volume_ml: float
+    mediastinum_volume_ml: float
+    voi_heart: VOISphere
+    voi_mediastinum: VOISphere
+    method: str  # "VOI completa" o "ROI slice central"
+    slice_idx: int | None = None
+    
+    @property
+    def classification(self) -> str:
+        if self.hmr >= 1.5:
+            return "POSITIVO (sugiere ATTR)"
+        if self.hmr >= 1.0:
+            return "EQUIVOCO (complementar con SPECT o repeat a 3h)"
+        return "NEGATIVO"
+    
+    @property
+    def hmr_text(self) -> str:
+        return f"HMR-SPECT = {self.hmr:.2f} ({self.classification})"
+
+
+class HmrSpectMethod(enum.Enum):
+    """Métodos de cálculo HMR-SPECT."""
+    VOI_COMPLETE = "VOI completa"
+    SLICE_CENTRAL = "ROI slice central"
+
+
+def compute_hmr_spect(
+    volume: np.ndarray,
+    spacing_zyx: tuple[float, float, float],
+    voi_heart: VOISphere,
+    voi_mediastinum: VOISphere,
+    method: HmrSpectMethod = HmrSpectMethod.VOI_COMPLETE,
+    slice_idx: int | None = None,
+) -> HmrSpectResult:
+    """Calcula HMR-SPECT = Cuentas VOI corazón / Cuentas VOI mediastino.
+    
+    Args:
+        volume: Volumen SPECT 3D (nz, ny, nx)
+        spacing_zyx: Espaciado en mm (sz, sy, sx)
+        voi_heart: VOI esférica del corazón
+        voi_mediastinum: VOI esférica del mediastino
+        method: Método de cálculo
+            - VOI_COMPLETE: Integra cuentas de toda la esfera 3D
+            - SLICE_CENTRAL: Usa solo el slice axial especificado
+        slice_idx: Slice axial para método SLICE_CENTRAL (default: centro del corazón)
+        
+    Returns:
+        HmrSpectResult con HMR y métricas
+    """
+    vol = np.asarray(volume, dtype=np.float64)
+    if vol.ndim != 3:
+        raise ValueError(f"Se esperaba volumen 3D, recibido {vol.shape}")
+    
+    if method == HmrSpectMethod.VOI_COMPLETE:
+        mask_h = voi_heart.mask_3d(vol.shape, spacing_zyx)
+        mask_m = voi_mediastinum.mask_3d(vol.shape, spacing_zyx)
+        
+        heart_counts = float(vol[mask_h].sum())
+        mediastinum_counts = float(vol[mask_m].sum())
+        used_slice = None
+    else:
+        if slice_idx is None:
+            slice_idx = int(round(voi_heart.cz))
+        slice_idx = int(np.clip(slice_idx, 0, vol.shape[0] - 1))
+        
+        slice_2d = vol[slice_idx]
+        spacing_yx = (spacing_zyx[1], spacing_zyx[2])
+        
+        mask_h = voi_heart.mask_slice(slice_idx, slice_2d.shape, spacing_yx)
+        mask_m = voi_mediastinum.mask_slice(slice_idx, slice_2d.shape, spacing_yx)
+        
+        heart_counts = float(slice_2d[mask_h].sum())
+        mediastinum_counts = float(slice_2d[mask_m].sum())
+        used_slice = slice_idx
+    
+    hmr = heart_counts / max(mediastinum_counts, 1e-8)
+    
+    return HmrSpectResult(
+        hmr=hmr,
+        heart_counts=heart_counts,
+        mediastinum_counts=mediastinum_counts,
+        heart_volume_ml=voi_heart.volume_ml(),
+        mediastinum_volume_ml=voi_mediastinum.volume_ml(),
+        voi_heart=voi_heart,
+        voi_mediastinum=voi_mediastinum,
+        method=method.value,
+        slice_idx=used_slice,
+    )
+
+
+def create_voi_from_localization(
+    anchor_zyx: tuple[float, float, float],
+    point_zyx: tuple[float, float, float] | None = None,
+    heart_radius_mm: float = 30.0,
+    mediastinum_radius_mm: float = 20.0,
+) -> tuple[VOISphere, VOISphere]:
+    """Crea VOIs corazón y mediastino a partir de puntos de localización.
+    
+    Args:
+        anchor_zyx: Coordenadas del anchor (centro corazón) en índices
+        point_zyx: Coordenadas del point B (opcional, para mediastino manual)
+        heart_radius_mm: Radio de la VOI corazón en mm
+        mediastinum_radius_mm: Radio de la VOI mediastino en mm
+        
+    Returns:
+        (voi_heart, voi_mediastinum)
+    """
+    voi_heart = VOISphere(
+        cz=anchor_zyx[0],
+        cy=anchor_zyx[1],
+        cx=anchor_zyx[2],
+        radius_mm=heart_radius_mm,
+    )
+    
+    if point_zyx is not None:
+        voi_mediastinum = VOISphere(
+            cz=point_zyx[0],
+            cy=point_zyx[1],
+            cx=point_zyx[2],
+            radius_mm=mediastinum_radius_mm,
+        )
+    else:
+        voi_mediastinum = VOISphere(
+            cz=anchor_zyx[0],
+            cy=anchor_zyx[1],
+            cx=anchor_zyx[2],
+            radius_mm=mediastinum_radius_mm,
+        )
+    
+    return voi_heart, voi_mediastinum
