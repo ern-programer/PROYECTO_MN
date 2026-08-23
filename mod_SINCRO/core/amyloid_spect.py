@@ -684,6 +684,33 @@ def _compute_lv_like_metrics(volume: np.ndarray) -> dict[str, float]:
     }
 
 
+def load_spect_volume_from_dicom(
+    dicom_path: str,
+    *,
+    recon_method: str = "fbp",
+) -> tuple[np.ndarray, tuple[float, float, float]]:
+    """Carga un volumen SPECT desde DICOM y retorna el volumen 3D + spacing.
+    
+    Helper simplificado para el módulo de washout dual-SPECT.
+    
+    Args:
+        dicom_path: Ruta al archivo DICOM o directorio.
+        recon_method: Método de reconstrucción ('fbp' o 'osem').
+    
+    Returns:
+        Tuple (volume, spacing) donde:
+        - volume: np.ndarray 3D con el volumen SPECT
+        - spacing: Tuple (dz, dy, dx) en mm
+    """
+    result = run_amyloid_spect_analysis(dicom_path, recon_method=recon_method)
+    volume = np.asarray(result.volume, dtype=np.float64)
+    if result.spacing_zyx is not None:
+        spacing = result.spacing_zyx
+    else:
+        spacing = (4.0, 4.0, 4.0)  # Default 4mm isotropic
+    return volume, spacing
+
+
 def run_amyloid_spect_analysis(
     dicom_path: str,
     *,

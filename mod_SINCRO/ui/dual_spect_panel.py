@@ -40,7 +40,6 @@ from core.amyloid_spect import (
     HmrSpectMethod,
     compute_hmr_spect,
     load_spect_volume_from_dicom,
-    reconstruct_amyloid_with_perf_pipeline,
 )
 from core.washout_spect import (
     DualSpectSession,
@@ -157,6 +156,12 @@ class DualSpectPanel(QDialog):
         self._btn_calculate.setStyleSheet("font-weight: bold;")
         control.addWidget(self._btn_calculate)
         
+        # Botón de exportar PDF
+        self._btn_export_pdf = QPushButton("📄 Exportar PDF")
+        self._btn_export_pdf.setEnabled(False)
+        self._btn_export_pdf.setToolTip("Genera informe PDF con resultados del washout")
+        control.addWidget(self._btn_export_pdf)
+        
         root.addWidget(control_box)
         
         # === ÁREA DE VISUALIZACIÓN DUAL ===
@@ -257,6 +262,7 @@ class DualSpectPanel(QDialog):
         self._btn_load_t1.clicked.connect(self._load_t1)
         self._btn_load_t2.clicked.connect(self._load_t2)
         self._btn_calculate.clicked.connect(self._calculate_washout)
+        self._btn_export_pdf.clicked.connect(self._export_pdf)
         self._time_t1_spin.valueChanged.connect(self._update_times)
         self._time_t2_spin.valueChanged.connect(self._update_times)
     
@@ -292,6 +298,7 @@ class DualSpectPanel(QDialog):
             self._slice_idx_t1 = volume.shape[0] // 2
             self._update_display_t1()
             self._update_titles()
+            self._validate_spacing()
             self._check_ready()
             
             self._status_label.setText(f"T1 cargado: {Path(path).name}")
@@ -315,12 +322,57 @@ class DualSpectPanel(QDialog):
             self._slice_idx_t2 = volume.shape[0] // 2
             self._update_display_t2()
             self._update_titles()
+            self._validate_spacing()
             self._check_ready()
             
             self._status_label.setText(f"T2 cargado: {Path(path).name}")
             
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Error al cargar T2:\n{exc}")
+    
+    def _validate_spacing(self) -> bool:
+        """Valida que ambos estudios tengan spacing compatible.
+        
+        Returns:
+            True si el spacing es compatible, False si hay discrepancia significativa.
+        """
+        if not self._session.is_loaded_t1 or not self._session.is_loaded_t2:
+            return True
+        
+        s1 = self._session.spacing_t1
+        s2 = self._session.spacing_t2
+        
+        if s1 is None or s2 is None:
+            return True
+        
+        # Tolerancia del 10% para discrepancias de spacing
+        tolerance = 0.10
+        discrepancies = []
+        
+        for i, (v1, v2) in enumerate(zip(s1, s2)):
+            if v1 > 0 and v2 > 0:
+                diff_pct = abs(v1 - v2) / max(v1, v2)
+                if diff_pct > tolerance:
+                    axis_name = ["Z (axial)", "Y (coronal)", "X (sagital)"][i]
+                    discrepancies.append(f"{axis_name}: {v1:.2f}mm vs {v2:.2f}mm ({diff_pct*100:.1f}% diff)")
+        
+        if discrepancies:
+            msg = (
+                "⚠️ Discrepancia de spacing detectada:\n\n" +
+                "\n".join(discrepancies) +
+                "\n\nEsto puede afectar la precisión del washout.\n"
+                "¿Desea continuar de todas formas?"
+            )
+            result = QMessageBox.warning(
+                self,
+                "Validación de spacing",
+                msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            return result == QMessageBox.StandardButton.Yes
+        
+        return True
     
     def _select_dicom_folder(self, title: str) -> str | None:
         """Selecciona carpeta DICOM."""
@@ -333,18 +385,14 @@ class DualSpectPanel(QDialog):
         return folder if folder else None
     
     def _load_spect_volume(self, path: str) -> tuple[np.ndarray, tuple[float, float, float]]:
-        """Carga volumen SPECT desde DICOM.
+        """Carga volumen SPECT desde DICOM usando la infraestructura existente.
         
-        TODO: Integrar con load_spect_volume_from_dicom de amyloid_spect.py
-        Por ahora usa implementación placeholder.
+        Usa `load_spect_volume_from_dicom` de amyloid_spect.py que maneja:
+        - DICOM crudo (proyecciones) → reconstruye FBP rápido
+        - DICOM reconstruido gated → promedia gates
+        - Extrae spacing real del DICOM
         """
-        # Placeholder - en producción usar:
-        # volume, spacing = load_spect_volume_from_dicom(path)
-        
-        # Por ahora, simular volumen de prueba
-        volume = np.random.rand(64, 64, 64).astype(np.float32)
-        spacing = (4.0, 4.0, 4.0)  # mm
-        
+        volume, spacing = load_spect_volume_from_dicom(path, recon_method="fbp")
         return volume, spacing
     
     def _update_display_t1(self):
@@ -439,6 +487,9 @@ class DualSpectPanel(QDialog):
         
         self._status_label.setText("Washout calculado exitosamente")
         
+        # Habilitar exportación
+        self._btn_export_pdf.setEnabled(True)
+        
         # Emitir señal
         self.washout_calculated.emit(washout)
     
@@ -453,3 +504,132 @@ class DualSpectPanel(QDialog):
         
         self._session.washout.radiotracer = self._tracer_combo.currentText()
         return format_washout_report(self._session.washout)
+    
+    def _export_pdf(self):
+        """Exporta el resultado del washout a PDF."""
+        if not self._session.is_complete:
+            QMessageBox.warning(self, "Error", "Calcule el washout primero.")
+            return
+        
+        # Seleccionar ubicación
+        default_name = f"washout_amyloid_{self._session.label_t1}_{self._session.label_t2}.pdf"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Guardar informe PDF",
+            str(Path.home() / default_name),
+            "PDF (*.pdf)"
+        )
+        
+        if not path:
+            return
+        
+        try:
+            self._generate_washout_pdf(path)
+            QMessageBox.information(self, "Éxito", f"Informe guardado en:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Error al generar PDF:\n{exc}")
+    
+    def _generate_washout_pdf(self, path: str):
+        """Genera el PDF con el informe de washout."""
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import cm
+        from reportlab.pdfgen import canvas
+        from reportlab.lib import colors
+        
+        c = canvas.Canvas(path, pagesize=A4)
+        width, height = A4
+        
+        # Título
+        c.setFont("Helvetica-Bold", 18)
+        c.drawCentredString(width/2, height - 2*cm, "INFORME DE WASHOUT SPECT")
+        
+        # Subtítulo
+        c.setFont("Helvetica", 12)
+        c.drawCentredString(width/2, height - 3*cm, 
+            f"Amiloidosis Cardíaca - {self._tracer_combo.currentText()}")
+        
+        # Línea separadora
+        c.setStrokeColor(colors.grey)
+        c.line(2*cm, height - 3.5*cm, width - 2*cm, height - 3.5*cm)
+        
+        y = height - 5*cm
+        
+        # Datos del estudio
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(2*cm, y, "DATOS DEL ESTUDIO")
+        y -= 0.8*cm
+        
+        c.setFont("Helvetica", 10)
+        c.drawString(2.5*cm, y, f"Radiotrazador: {self._tracer_combo.currentText()}")
+        y -= 0.5*cm
+        c.drawString(2.5*cm, y, f"Tiempo T1: {self._session.time_t1_h:.1f} horas")
+        y -= 0.5*cm
+        c.drawString(2.5*cm, y, f"Tiempo T2: {self._session.time_t2_h:.1f} horas")
+        y -= 1*cm
+        
+        # Resultados HMR
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(2*cm, y, "RESULTADOS HMR-SPECT")
+        y -= 0.8*cm
+        
+        c.setFont("Helvetica", 10)
+        if self._session.hmr_t1:
+            hmr1 = self._session.hmr_t1.hmr_raw or self._session.hmr_t1.hmr
+            c.drawString(2.5*cm, y, f"HMR T1 ({self._session.label_t1}): {hmr1:.2f} ({self._session.hmr_t1.classification})")
+        y -= 0.5*cm
+        
+        if self._session.hmr_t2:
+            hmr2 = self._session.hmr_t2.hmr_raw or self._session.hmr_t2.hmr
+            c.drawString(2.5*cm, y, f"HMR T2 ({self._session.label_t2}): {hmr2:.2f} ({self._session.hmr_t2.classification})")
+        y -= 1*cm
+        
+        # Resultado Washout (destacado)
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(2*cm, y, "WASHOUT")
+        y -= 0.8*cm
+        
+        washout = self._session.washout
+        c.setFont("Helvetica-Bold", 14)
+        
+        # Color según interpretación
+        if washout.is_attr_pattern:
+            c.setFillColor(colors.HexColor("#2196F3"))  # Azul para ATTR
+        elif washout.is_al_pattern:
+            c.setFillColor(colors.HexColor("#FF5722"))  # Naranja para AL
+        else:
+            c.setFillColor(colors.black)
+        
+        c.drawString(2.5*cm, y, washout.washout_text)
+        c.setFillColor(colors.black)
+        y -= 0.8*cm
+        
+        c.setFont("Helvetica", 10)
+        c.drawString(2.5*cm, y, f"Interpretación: {washout.interpretation}")
+        y -= 1.5*cm
+        
+        # Nota clínica
+        c.setFont("Helvetica-Oblique", 9)
+        c.setFillColor(colors.grey)
+        note_text = (
+            "Nota: El washout negativo (captación creciente) sugiere ATTR-CM. "
+            "El washout elevado (>20%) sugiere AL o captación inespecífica. "
+            "El diagnóstico final debe integrar contexto clínico completo."
+        )
+        # Wrap text
+        from reportlab.lib.utils import simpleSplit
+        lines = simpleSplit(note_text, "Helvetica-Oblique", 9, width - 4*cm)
+        for line in lines:
+            c.drawString(2*cm, y, line)
+            y -= 0.4*cm
+        
+        c.setFillColor(colors.black)
+        y -= 1*cm
+        
+        # Footer
+        c.setFont("Helvetica", 8)
+        c.drawString(2*cm, 1.5*cm, f"Generado por SINCRO - GammaSync")
+        c.drawRightString(width - 2*cm, 1.5*cm, 
+            f"{self._session.washout.patient_id or 'Paciente'} - {self._session.washout.study_date or 'Fecha N/D'}")
+        
+        c.save()
+
