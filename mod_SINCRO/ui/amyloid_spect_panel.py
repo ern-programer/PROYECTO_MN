@@ -2584,7 +2584,6 @@ class AmyloidSpectPanel(QDialog):
         if hasattr(self, "_heart_radius_spin"):
             heart_radius = float(self._heart_radius_spin.value())
         self._temp_voi_heart = VOISphere(
-            label="Corazón (temp)",
             cz=int(pt[0]), cy=int(pt[1]), cx=int(pt[2]),
             radius_mm=heart_radius
         )
@@ -3024,7 +3023,6 @@ class AmyloidSpectPanel(QDialog):
             if hasattr(self, "_mediastinum_radius_spin"):
                 mediastinum_radius = float(self._mediastinum_radius_spin.value())
             self._temp_voi_mediastinum = VOISphere(
-                label="Mediastino (temp)",
                 cz=int(z), cy=int(y), cx=int(x),
                 radius_mm=mediastinum_radius
             )
