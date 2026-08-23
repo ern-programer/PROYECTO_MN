@@ -2761,12 +2761,17 @@ class AmyloidWindow(QDialog):
                 notes.append(str(corr_meta.get("rib_filter_note")))
             if corr_meta.get("sternum_filter_note"):
                 notes.append(str(corr_meta.get("sternum_filter_note")))
-            if corr_used:
-                self._lbl_hmr.setText(f"HMR = {result.hmr:.2f} (raw {raw_result.hmr:.2f})")
-                self._lbl_class.setText(result.classification + (f" · {' | '.join(notes)}" if notes else ""))
+            # HMR raw es el valor clínico principal
+            hmr_display = raw_result.hmr if raw_result else result.hmr
+            hmr_secondary = result.hmr if (raw_result and abs(result.hmr - raw_result.hmr) > 0.01) else None
+            
+            if hmr_secondary is not None:
+                self._lbl_hmr.setText(f"HMR = {hmr_display:.2f} (filtrado {hmr_secondary:.2f})")
             else:
-                self._lbl_hmr.setText(f"HMR = {result.hmr:.2f}")
-                self._lbl_class.setText(result.classification)
+                self._lbl_hmr.setText(f"HMR = {hmr_display:.2f}")
+            self._lbl_class.setText(result.classification + (f" · {' | '.join(notes)}" if notes else ""))
+            
+            # Clasificación basada en HMR raw (valor clínico)
             cls_txt = str(result.classification or "").upper()
             if "POSITIVO" in cls_txt:
                 hmr_color = "#fca5a5"
@@ -3584,10 +3589,19 @@ class AmyloidWindow(QDialog):
             sternum_asym = eb.get("sternum_filter_asym", None)
             rib_note = str(eb.get("rib_filter_note", "") or "")
             sternum_note = str(eb.get("sternum_filter_note", "") or "")
+            
+            # HMR raw es el valor clínico principal
+            hmr_clinical = hmr_raw if hmr_raw is not None else hmr
+            hmr_filtered = hmr if (hmr_raw is not None and abs(hmr - hmr_raw) > 0.01) else None
+            
             hmr_data = [
                 ["Métrica", "Valor", "Referencia"],
-                [f"HMR ({time_label})", f"{hmr:.2f}", "≥1.5 sugiere ATTR"],
-                [f"HMR raw ({time_label})", f"{float(hmr_raw):.2f}" if hmr_raw is not None else "N/D", "Sin correcciones experimentales"],
+                [f"HMR raw ({time_label})", f"{float(hmr_clinical):.2f}", "Valor clínico · ≥1.5 sugiere ATTR"],
+            ]
+            if hmr_filtered is not None:
+                hmr_data.append([f"HMR filtrado ({time_label})", f"{hmr_filtered:.2f}", "Con correcciones experimentales"])
+            
+            hmr_data.extend([
                 ["Cuentas cardíacas", f"{heart:,.0f}", ""],
                 ["Cuentas mediastinales", f"{medi:,.0f}", ""],
                 ["Clasificación", cls, ""],
@@ -3599,7 +3613,7 @@ class AmyloidWindow(QDialog):
                 ["SCATTER planar", "Sí" if sc_used else "No", f"k={float(eb.get('scatter_k', 0.0)):.2f}" if sc_used else "No aplicado"],
                 ["Asimetría costal", f"{float(rib_asym):.2f}" if rib_asym is not None else "N/D", "Se descarta corrección si supera umbral"],
                 ["Asimetría fondos esternón", f"{float(sternum_asym):.2f}" if sternum_asym is not None else "N/D", "Se descarta corrección si supera umbral"],
-            ]
+            ])
             hmr_table = Table(hmr_data, colWidths=[50*mm, 40*mm, 76*mm])
             hmr_table.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, 0), DARK_BLUE),
@@ -3657,7 +3671,11 @@ class AmyloidWindow(QDialog):
         hmr_spect = report_ctx.get("hmr_spect")
         hmr_spect_raw = report_ctx.get("hmr_spect_raw")
 
-        if hmr_planar is not None and hmr_spect is not None:
+        # Usar HMR raw como valor clínico principal
+        hmr_planar_clinical = hmr_planar_raw if hmr_planar_raw is not None else hmr_planar
+        hmr_spect_clinical = hmr_spect_raw if hmr_spect_raw is not None else hmr_spect
+
+        if hmr_planar_clinical is not None and hmr_spect_clinical is not None:
             story.append(Paragraph(f"{sec_num}. Comparación HMR Planar vs SPECT", section_style))
             
             # Determinar clasificación para cada método
@@ -3669,13 +3687,13 @@ class AmyloidWindow(QDialog):
                 else:
                     return "NEGATIVO", "#22c55e"
             
-            planar_cls, planar_color = classify_hmr(hmr_planar)
-            spect_cls, spect_color = classify_hmr(hmr_spect)
+            planar_cls, planar_color = classify_hmr(hmr_planar_clinical)
+            spect_cls, spect_color = classify_hmr(hmr_spect_clinical)
             
             comparison_data = [
-                ["Método", "HMR", "HMR raw", "Clasificación"],
-                ["Planar", f"{hmr_planar:.2f}", f"{hmr_planar_raw:.2f}" if hmr_planar_raw else "N/D", planar_cls],
-                ["SPECT", f"{hmr_spect:.2f}", f"{hmr_spect_raw:.2f}" if hmr_spect_raw else "N/D", spect_cls],
+                ["Método", "HMR raw", "HMR filtrado", "Clasificación"],
+                ["Planar", f"{hmr_planar_clinical:.2f}", f"{hmr_planar:.2f}" if hmr_planar and abs(hmr_planar - hmr_planar_clinical) > 0.01 else "—", planar_cls],
+                ["SPECT", f"{hmr_spect_clinical:.2f}", f"{hmr_spect:.2f}" if hmr_spect and abs(hmr_spect - hmr_spect_clinical) > 0.01 else "—", spect_cls],
             ]
             
             comparison_table = Table(comparison_data, colWidths=[40*mm, 35*mm, 35*mm, 56*mm])
@@ -3693,12 +3711,12 @@ class AmyloidWindow(QDialog):
             story.append(comparison_table)
             
             # Nota explicativa
-            diff = abs(hmr_spect - hmr_planar)
+            diff = abs(hmr_spect_clinical - hmr_planar_clinical)
             story.append(Paragraph(
                 f"Diferencia: {diff:.2f}. "
                 f"El HMR-SPECT suele ser ligeramente mayor que el planar debido a mejor contraste "
                 f"(eliminación de superposición de estructuras). "
-                f"Ambos métodos son complementarios para confirmar ATTR-CM.",
+                f"Se reporta HMR raw como valor clínico principal.",
                 small_style,
             ))
             story.append(Spacer(1, 4*mm))
