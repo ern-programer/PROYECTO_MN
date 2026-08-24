@@ -451,17 +451,22 @@ class DualSpectPanel(QDialog):
         self._t2_image.setPixmap(pixmap)
     
     def _array_to_pixmap(self, arr: np.ndarray) -> QPixmap:
-        """Convierte array 2D a QPixmap."""
+        """Convierte array 2D a QPixmap (compatible PyQt6)."""
         # Normalizar a 0-255
         arr_norm = (arr - arr.min()) / (arr.max() - arr.min() + 1e-9) * 255
         arr_uint8 = arr_norm.astype(np.uint8)
         
-        # Crear imagen grayscale
-        h, w = arr_uint8.shape
-        img = QImage(w, h, QImage.Format.Format_Grayscale8)
-        img.bits()[:] = arr_uint8.tobytes()
+        # Asegurar array contiguo (requerido por PyQt6)
+        arr_cont = np.ascontiguousarray(arr_uint8)
         
-        return QPixmap.fromImage(img)
+        h, w = arr_cont.shape
+        
+        # Crear QImage desde bytes crudos (forma compatible con PyQt6)
+        # Format_Grayscale8: 1 byte por píxel
+        img = QImage(arr_cont.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
+        
+        # Copiar los datos antes de que el buffer temporal se libere
+        return QPixmap.fromImage(img.copy())
     
     def _check_ready(self):
         """Verifica si está listo para calcular washout."""
