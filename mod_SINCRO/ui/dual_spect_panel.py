@@ -284,7 +284,7 @@ class DualSpectPanel(QDialog):
     
     def _load_t1(self):
         """Carga estudio SPECT T1."""
-        path = self._select_dicom_folder("Seleccionar estudio SPECT T1 (temprano)")
+        path = self._select_dicom_source("Seleccionar estudio SPECT T1 (temprano)")
         if not path:
             return
         
@@ -308,7 +308,7 @@ class DualSpectPanel(QDialog):
     
     def _load_t2(self):
         """Carga estudio SPECT T2."""
-        path = self._select_dicom_folder("Seleccionar estudio SPECT T2 (tardío)")
+        path = self._select_dicom_source("Seleccionar estudio SPECT T2 (tardío)")
         if not path:
             return
         
@@ -374,15 +374,52 @@ class DualSpectPanel(QDialog):
         
         return True
     
-    def _select_dicom_folder(self, title: str) -> str | None:
-        """Selecciona carpeta DICOM."""
+    def _select_dicom_source(self, title: str) -> str | None:
+        """Selecciona fuente DICOM (archivo o carpeta).
+        
+        Permite al usuario elegir:
+        - Un archivo .dcm individual
+        - Una carpeta (se buscará el primer .dcm dentro)
+        
+        Returns:
+            Ruta al archivo DICOM encontrado, o None si canceló.
+        """
+        # Usar diálogo que permite archivos Y carpetas
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            title + "\n(Seleccione archivo .dcm o use 'Cancelar' para elegir carpeta)",
+            str(Path.home()),
+            "DICOM (*.dcm *.DCM);;Todos los archivos (*)",
+        )
+        
+        if path:
+            # Usuario seleccionó un archivo directamente
+            return path
+        
+        # Si canceló, ofrecer seleccionar carpeta como alternativa
         folder = QFileDialog.getExistingDirectory(
             self,
-            title,
+            title + " - Seleccionar carpeta con DICOMs",
             str(Path.home()),
             QFileDialog.Option.ShowDirsOnly
         )
-        return folder if folder else None
+        
+        if not folder:
+            return None
+        
+        # Buscar archivos DICOM en la carpeta
+        dicom_files = list(Path(folder).glob("*.dcm")) + list(Path(folder).glob("*.DCM"))
+        
+        if not dicom_files:
+            QMessageBox.warning(
+                self,
+                "Sin archivos DICOM",
+                f"No se encontraron archivos .dcm en:\n{folder}"
+            )
+            return None
+        
+        # Retornar el primer archivo DICOM encontrado
+        return str(dicom_files[0])
     
     def _load_spect_volume(self, path: str) -> tuple[np.ndarray, tuple[float, float, float]]:
         """Carga volumen SPECT desde DICOM usando la infraestructura existente.
