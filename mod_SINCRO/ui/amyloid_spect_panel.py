@@ -1117,6 +1117,15 @@ class AmyloidSpectPanel(QDialog):
         self._status.setStyleSheet("color:#93c5fd; font-size:11px;")
         root.addWidget(self._status)
 
+        # ═══════════════════════════════════════════════════════════════════
+        # LAYOUT PRINCIPAL: Imágenes (izq) + Controles laterales (der)
+        # ═══════════════════════════════════════════════════════════════════
+        main_splitter = QHBoxLayout()
+        
+        # --- COLUMNA IZQUIERDA: Imágenes y controles principales ---
+        left_col = QVBoxLayout()
+        
+        # Grid de 3 imágenes (Axial, Coronal, Sagittal)
         grid = QGridLayout()
         self._axial_lbl = self._mk_image_label("Axial")
         self._cor_lbl = self._mk_image_label("Coronal")
@@ -1125,8 +1134,9 @@ class AmyloidSpectPanel(QDialog):
         grid.addWidget(self._axial_lbl, 0, 0)
         grid.addWidget(self._cor_lbl, 0, 1)
         grid.addWidget(self._sag_lbl, 0, 2)
-        root.addLayout(grid, 1)
+        left_col.addLayout(grid)
 
+        # Overlay óseo
         blend_row = QHBoxLayout()
         blend_row.addWidget(QLabel("Overlay óseo:"))
         self._blend_slider = QSlider(Qt.Orientation.Horizontal)
@@ -1139,8 +1149,9 @@ class AmyloidSpectPanel(QDialog):
         self._blend_lbl = QLabel("35%")
         self._blend_lbl.setStyleSheet("color:#94a3b8;")
         blend_row.addWidget(self._blend_lbl)
-        root.addLayout(blend_row)
+        left_col.addLayout(blend_row)
 
+        # QC registro / Fusión / Triangulación
         qc_row = QHBoxLayout()
         qc_row.addWidget(QLabel("QC registro:"))
         self._qc_mode = QComboBox()
@@ -1203,10 +1214,70 @@ class AmyloidSpectPanel(QDialog):
         self._btn_loc_clear.setToolTip("Borra el punto A.")
         self._btn_loc_clear.clicked.connect(self._on_clear_localization_anchor)
         qc_row.addWidget(self._btn_loc_clear)
-        root.addLayout(qc_row)
+        left_col.addLayout(qc_row)
 
+        # Sliders de corte z/y/x
         slice_row = QHBoxLayout()
         slice_row.addWidget(QLabel("Cortes z/y/x:"))
+        self._slice_z = QSlider(Qt.Orientation.Horizontal)
+        self._slice_y = QSlider(Qt.Orientation.Horizontal)
+        self._slice_x = QSlider(Qt.Orientation.Horizontal)
+        self._slice_z_lbl = QLabel("z -")
+        self._slice_y_lbl = QLabel("y -")
+        self._slice_x_lbl = QLabel("x -")
+        for slider in (self._slice_z, self._slice_y, self._slice_x):
+            slider.setRange(0, 0)
+            slider.setEnabled(False)
+            slider.valueChanged.connect(self._on_slice_slider_changed)
+        slice_row.addWidget(self._slice_z_lbl)
+        slice_row.addWidget(self._slice_z, 1)
+        slice_row.addWidget(self._slice_y_lbl)
+        slice_row.addWidget(self._slice_y, 1)
+        slice_row.addWidget(self._slice_x_lbl)
+        slice_row.addWidget(self._slice_x, 1)
+        left_col.addLayout(slice_row)
+
+        # ── Sección HMR-SPECT ─────────────────────────────────────────────────────
+        hmr_group = QGroupBox("HMR-SPECT (Ratio Corazón/Mediastino 3D)")
+        hmr_layout = QVBoxLayout(hmr_group)
+        
+        # Fila 1: Método
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel("Método:"))
+        self._hmr_method_combo = QComboBox()
+        self._hmr_method_combo.addItem(
+            "VOI esférica completa (integra cuentas 3D)",
+            HmrSpectMethod.VOI_COMPLETE.value
+        )
+        self._hmr_method_combo.addItem(
+            "ROI slice central (slice único comparable a planar)",
+            HmrSpectMethod.SLICE_CENTRAL.value
+        )
+        self._hmr_method_combo.setToolTip(
+            "VOI completa: Mayor precisión, integra todo el volumen\n"
+            "Slice central: Más simple, comparable con HMR planar"
+        )
+        method_row.addWidget(self._hmr_method_combo)
+        method_row.addStretch(1)
+        hmr_layout.addLayout(method_row)
+        
+        # Fila 2: Radios
+        radius_row = QHBoxLayout()
+        radius_row.addWidget(QLabel("Radio corazón (mm):"))
+        self._heart_radius_spin = QDoubleSpinBox()
+        self._heart_radius_spin.setRange(10.0, 60.0)
+        self._heart_radius_spin.setValue(30.0)
+        self._heart_radius_spin.setSingleStep(5.0)
+        radius_row.addWidget(self._heart_radius_spin)
+        
+        radius_row.addWidget(QLabel("Radio mediastino (mm):"))
+        self._mediastinum_radius_spin = QDoubleSpinBox()
+        self._mediastinum_radius_spin.setRange(5.0, 40.0)
+        self._mediastinum_radius_spin.setValue(20.0)
+        self._mediastinum_radius_spin.setSingleStep(5.0)
+        radius_row.addWidget(self._mediastinum_radius_spin)
+        radius_row.addStretch(1)
+        hmr_layout.addLayout(radius_row)
         self._slice_z = QSlider(Qt.Orientation.Horizontal)
         self._slice_y = QSlider(Qt.Orientation.Horizontal)
         self._slice_x = QSlider(Qt.Orientation.Horizontal)
@@ -1297,10 +1368,10 @@ class AmyloidSpectPanel(QDialog):
         scale_row.addWidget(scale_lbl)
         scale_row.addStretch(1)
         hmr_layout.addLayout(scale_row)
-        
-        root.addWidget(hmr_group)
+        left_col.addWidget(hmr_group)
         # ────────────────────────────────────────────────────────────────────────────
 
+        # Zoom visual
         zoom_row = QHBoxLayout()
         zoom_row.addWidget(QLabel("Zoom visual SPECT/CT:"))
         self._spect_zoom_slider = QSlider(Qt.Orientation.Horizontal)
@@ -1317,69 +1388,111 @@ class AmyloidSpectPanel(QDialog):
         zoom_row.addWidget(self._spect_zoom_slider, 1)
         zoom_row.addWidget(self._ct_zoom_lbl)
         zoom_row.addWidget(self._ct_zoom_slider, 1)
-        root.addLayout(zoom_row)
+        left_col.addLayout(zoom_row)
 
-        visual_row = QHBoxLayout()
-        visual_row.addWidget(QLabel("Color SPECT:"))
+        main_splitter.addLayout(left_col, 3)  # 3 partes para imágenes
+
+        # --- COLUMNA DERECHA: Controles de ventana/Color (vertical) ---
+        right_col = QVBoxLayout()
+        right_col.setSpacing(8)
+
+        # Grupo: Rango y Color SPECT
+        window_group = QGroupBox("Ventana / Color")
+        window_vbox = QVBoxLayout(window_group)
+        
+        # Botón Top (arriba)
+        self._btn_range_top = QPushButton("▲ Top 100")
+        self._btn_range_top.clicked.connect(lambda: self._set_spect_range(self._spect_win_low, 100))
+        self._btn_range_top.setToolTip("Fija el límite superior al 100%")
+        self._btn_range_top.setMinimumHeight(35)
+        window_vbox.addWidget(self._btn_range_top)
+
+        # RangeSlider (centro, vertical)
+        self._spect_range_slider = RangeSlider()
+        self._spect_range_slider.setMinimumHeight(180)
+        self._spect_range_slider.valuesChanged.connect(self._on_spect_range_changed)
+        window_vbox.addWidget(self._spect_range_slider)
+
+        self._spect_range_lbl = QLabel("Base 0% · Top 100%")
+        self._spect_range_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._spect_range_lbl.setStyleSheet("color:#94a3b8; font-size:11px;")
+        window_vbox.addWidget(self._spect_range_lbl)
+
+        # Botón Base (abajo)
+        self._btn_range_base = QPushButton("▼ Base 0")
+        self._btn_range_base.clicked.connect(lambda: self._set_spect_range(0, self._spect_win_high))
+        self._btn_range_base.setToolTip("Fija el límite inferior al 0%")
+        self._btn_range_base.setMinimumHeight(35)
+        window_vbox.addWidget(self._btn_range_base)
+
+        # Selector de color
+        color_row = QHBoxLayout()
+        color_row.addWidget(QLabel("Color:"))
         register_all_colormaps()
         self._spect_cmap_combo = QComboBox()
         self._spect_cmap_combo.addItems(available_colormaps())
         if self._spect_cmap_combo.findText("hot") >= 0:
             self._spect_cmap_combo.setCurrentText("hot")
         self._spect_cmap_combo.currentIndexChanged.connect(self._render_current_with_overlay)
-        visual_row.addWidget(self._spect_cmap_combo)
-        self._spect_flipx_check = QCheckBox("SPECT flip X (prueba)")
-        self._spect_flipx_check.setToolTip("Prueba de orientación: espeja SPECT en eje X para comparar contra CT (display + registro).")
-        self._spect_flipx_check.toggled.connect(self._on_spect_orientation_test_toggled)
-        visual_row.addWidget(self._spect_flipx_check)
-        self._spect_flipy_check = QCheckBox("SPECT flip Y (prueba)")
-        self._spect_flipy_check.setToolTip("Prueba de orientación: espeja SPECT en eje Y para comparar contra CT (display + registro).")
-        self._spect_flipy_check.toggled.connect(self._on_spect_orientation_test_toggled)
-        visual_row.addWidget(self._spect_flipy_check)
-        self._spect_flipz_check = QCheckBox("SPECT flip Z (prueba)")
-        self._spect_flipz_check.setToolTip("Prueba de orientación: espeja SPECT en eje Z (flip vertical del volumen) para comparar contra CT.")
-        self._spect_flipz_check.toggled.connect(self._on_spect_orientation_test_toggled)
-        visual_row.addWidget(self._spect_flipz_check)
-        self._ct_flipx_check = QCheckBox("CT flip X (prueba)")
-        self._ct_flipx_check.setToolTip("Prueba de orientación: espeja TC en eje X para comparar contra SPECT (display + registro).")
-        self._ct_flipx_check.toggled.connect(self._on_ct_orientation_test_toggled)
-        visual_row.addWidget(self._ct_flipx_check)
-        self._ct_flipy_check = QCheckBox("CT flip Y (prueba)")
-        self._ct_flipy_check.setToolTip("Prueba de orientación: espeja TC en eje Y para comparar contra SPECT (display + registro).")
-        self._ct_flipy_check.toggled.connect(self._on_ct_orientation_test_toggled)
-        visual_row.addWidget(self._ct_flipy_check)
-        self._ct_flipz_check = QCheckBox("CT flip Z (prueba)")
-        self._ct_flipz_check.setToolTip("Prueba de orientación: espeja TC en eje Z (flip vertical del volumen) para comparar contra SPECT.")
-        self._ct_flipz_check.toggled.connect(self._on_ct_orientation_test_toggled)
-        visual_row.addWidget(self._ct_flipz_check)
-        self._btn_range_base = QPushButton("Base 0")
-        self._btn_range_base.clicked.connect(lambda: self._set_spect_range(0, self._spect_win_high))
-        self._btn_range_top = QPushButton("Top 100")
-        self._btn_range_top.clicked.connect(lambda: self._set_spect_range(self._spect_win_low, 100))
-        visual_row.addWidget(self._btn_range_base)
-        visual_row.addWidget(self._btn_range_top)
-        visual_row.addWidget(QLabel("Ventana CT:"))
+        color_row.addWidget(self._spect_cmap_combo)
+        window_vbox.addLayout(color_row)
+
+        # Ventana CT
+        ct_win_row = QHBoxLayout()
+        ct_win_row.addWidget(QLabel("Ventana CT:"))
         self._ct_window_combo = QComboBox()
         self._ct_window_combo.addItem("Ósea", "bone")
         self._ct_window_combo.addItem("Partes blandas", "soft")
         self._ct_window_combo.addItem("Pulmón", "lung")
         self._ct_window_combo.addItem("Completa", "full")
         self._ct_window_combo.currentIndexChanged.connect(self._on_ct_window_changed)
-        visual_row.addWidget(self._ct_window_combo)
-        visual_row.addStretch(1)
-        root.addLayout(visual_row)
+        ct_win_row.addWidget(self._ct_window_combo)
+        window_vbox.addLayout(ct_win_row)
 
-        range_row = QHBoxLayout()
-        range_row.addWidget(QLabel("Rango SPECT 0–200%:"))
-        self._spect_range_slider = RangeSlider()
-        self._spect_range_slider.setMinimumHeight(90)
-        self._spect_range_slider.valuesChanged.connect(self._on_spect_range_changed)
-        range_row.addWidget(self._spect_range_slider)
-        self._spect_range_lbl = QLabel("Base 0% · Top 100%")
-        range_row.addWidget(self._spect_range_lbl)
-        range_row.addStretch(1)
-        root.addLayout(range_row)
+        right_col.addWidget(window_group)
 
+        # Grupo: Flip controls (compacto vertical)
+        flip_group = QGroupBox("Orientación prueba")
+        flip_grid = QGridLayout(flip_group)
+        flip_grid.setSpacing(4)
+        
+        self._spect_flipx_check = QCheckBox("SPECT flip X")
+        self._spect_flipx_check.setToolTip("Espeja SPECT en eje X")
+        self._spect_flipx_check.toggled.connect(self._on_spect_orientation_test_toggled)
+        flip_grid.addWidget(self._spect_flipx_check, 0, 0)
+        
+        self._spect_flipy_check = QCheckBox("SPECT flip Y")
+        self._spect_flipy_check.setToolTip("Espeja SPECT en eje Y")
+        self._spect_flipy_check.toggled.connect(self._on_spect_orientation_test_toggled)
+        flip_grid.addWidget(self._spect_flipy_check, 0, 1)
+        
+        self._spect_flipz_check = QCheckBox("SPECT flip Z")
+        self._spect_flipz_check.setToolTip("Espeja SPECT en eje Z")
+        self._spect_flipz_check.toggled.connect(self._on_spect_orientation_test_toggled)
+        flip_grid.addWidget(self._spect_flipz_check, 1, 0)
+        
+        self._ct_flipx_check = QCheckBox("CT flip X")
+        self._ct_flipx_check.setToolTip("Espeja TC en eje X")
+        self._ct_flipx_check.toggled.connect(self._on_ct_orientation_test_toggled)
+        flip_grid.addWidget(self._ct_flipx_check, 1, 1)
+        
+        self._ct_flipy_check = QCheckBox("CT flip Y")
+        self._ct_flipy_check.setToolTip("Espeja TC en eje Y")
+        self._ct_flipy_check.toggled.connect(self._on_ct_orientation_test_toggled)
+        flip_grid.addWidget(self._ct_flipy_check, 2, 0)
+        
+        self._ct_flipz_check = QCheckBox("CT flip Z")
+        self._ct_flipz_check.setToolTip("Espeja TC en eje Z")
+        self._ct_flipz_check.toggled.connect(self._on_ct_orientation_test_toggled)
+        flip_grid.addWidget(self._ct_flipz_check, 2, 1)
+        
+        right_col.addWidget(flip_group)
+        right_col.addStretch(1)  # Empuja todo hacia arriba
+
+        main_splitter.addLayout(right_col, 1)  # 1 parte para controles
+        root.addLayout(main_splitter)
+
+        # Ajustes CT (nudge/rot) - siguen abajo de las imágenes
         nudge_row = QHBoxLayout()
         nudge_row.addWidget(QLabel("Ajuste CT Δ z/y/x:"))
         self._nudge_z = self._mk_nudge_spin()
