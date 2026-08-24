@@ -1443,8 +1443,9 @@ class AmyloidSpectPanel(QDialog):
         base_btn_row.addStretch(1)
         window_vbox.addLayout(base_btn_row)
 
-        # Selector de color
+        # Selector de color (compacto)
         color_row = QHBoxLayout()
+        color_row.addStretch(1)
         color_row.addWidget(QLabel("Color:"))
         register_all_colormaps()
         self._spect_cmap_combo = QComboBox()
@@ -1452,19 +1453,26 @@ class AmyloidSpectPanel(QDialog):
         if self._spect_cmap_combo.findText("hot") >= 0:
             self._spect_cmap_combo.setCurrentText("hot")
         self._spect_cmap_combo.currentIndexChanged.connect(self._render_current_with_overlay)
+        self._spect_cmap_combo.setFixedWidth(90)
+        self._spect_cmap_combo.setStyleSheet("font-size:10px; padding:1px 4px;")
         color_row.addWidget(self._spect_cmap_combo)
+        color_row.addStretch(1)
         window_vbox.addLayout(color_row)
 
-        # Ventana CT
+        # Ventana CT (compacto)
         ct_win_row = QHBoxLayout()
-        ct_win_row.addWidget(QLabel("Ventana CT:"))
+        ct_win_row.addStretch(1)
+        ct_win_row.addWidget(QLabel("CT:"))
         self._ct_window_combo = QComboBox()
         self._ct_window_combo.addItem("Ósea", "bone")
         self._ct_window_combo.addItem("Partes blandas", "soft")
         self._ct_window_combo.addItem("Pulmón", "lung")
         self._ct_window_combo.addItem("Completa", "full")
         self._ct_window_combo.currentIndexChanged.connect(self._on_ct_window_changed)
+        self._ct_window_combo.setFixedWidth(90)
+        self._ct_window_combo.setStyleSheet("font-size:10px; padding:1px 4px;")
         ct_win_row.addWidget(self._ct_window_combo)
+        ct_win_row.addStretch(1)
         window_vbox.addLayout(ct_win_row)
 
         right_col.addWidget(window_group)
