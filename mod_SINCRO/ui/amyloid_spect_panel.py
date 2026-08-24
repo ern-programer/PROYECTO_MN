@@ -8,7 +8,7 @@ import json
 import numpy as np
 
 from PyQt6.QtCore import QObject, Qt, QSettings, QThread, pyqtSignal, QPointF
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QPdfWriter, QPageSize, QPen, QColor, QFont
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPdfWriter, QPageSize, QPen, QColor, QFont, QTransform
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QMessageBox,
     QInputDialog,
+    QSizePolicy,
 )
 
 from pydicom.dataset import Dataset
@@ -38,6 +39,7 @@ from scipy import ndimage as ndi
 
 from core.col_registry import available_colormaps, register_all_colormaps
 from ui.cine_widget import RangeSlider
+from ui.mip_rotator_widget import MipRotatorWidget
 
 from core.amyloid_spect import (
     run_amyloid_spect_analysis,
@@ -975,7 +977,16 @@ class AmyloidSpectPanel(QDialog):
         self._btn_fusion_layout.setToolTip("Muestra tiras SPECT y panel 3x3 (SPECT/CT/Fusión) con referencias de corte.")
         flow.addWidget(self._btn_fusion_layout, 2, 8)
         flow.setColumnStretch(9, 1)
-        root.addWidget(flow_box)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # FILA HORIZONTAL: Flujo clínico + Reconstrucción (lado a lado)
+        # ═══════════════════════════════════════════════════════════════════
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+        
+        # Flujo clínico: ancho compacto (no se expande)
+        flow_box.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        top_row.addWidget(flow_box)
 
         recon_box = QGroupBox("Reconstrucción y filtros")
         recon_grid = QGridLayout(recon_box)
@@ -1111,7 +1122,15 @@ class AmyloidSpectPanel(QDialog):
         self._progress.setValue(0)
         self._progress.setFormat("Listo")
         recon_grid.addWidget(self._progress, 3, 0, 1, 11)
-        root.addWidget(recon_box)
+        
+        # Reconstrucción: ancho compacto (no se expande)
+        recon_box.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        top_row.addWidget(recon_box)
+        
+        # Espacio flexible a la derecha para que no se estiren los boxes
+        top_row.addStretch(1)
+        
+        root.addLayout(top_row)
 
         self._status = QLabel("Cargar un DICOM SPECT para iniciar.")
         self._status.setStyleSheet("color:#93c5fd; font-size:11px;")
@@ -1126,7 +1145,7 @@ class AmyloidSpectPanel(QDialog):
         left_col = QVBoxLayout()
         
         # ═══════════════════════════════════════════════════════════════════
-        # GRUPO: Vistas 3D (imágenes + overlays + cortes)
+        # GRUPO: Vistas 3D (solo imágenes + botones de localización)
         # ═══════════════════════════════════════════════════════════════════
         vistas_group = QGroupBox("Vistas 3D")
         vistas_layout = QVBoxLayout(vistas_group)
@@ -1142,6 +1161,64 @@ class AmyloidSpectPanel(QDialog):
         grid.addWidget(self._sag_lbl, 0, 2)
         vistas_layout.addLayout(grid)
 
+        # Botones de localización (pie derecho dentro del box de imágenes)
+        loc_btns_row = QHBoxLayout()
+        loc_btns_row.addStretch(1)
+        self._btn_triangulation_cross = QPushButton("Cruz triangulación")
+        self._btn_triangulation_cross.setCheckable(True)
+        self._btn_triangulation_cross.setChecked(False)
+        self._btn_triangulation_cross.setToolTip("Activa/desactiva líneas de referencia entre cortes axial, coronal y sagital.")
+        self._btn_triangulation_cross.toggled.connect(self._on_triangulation_cross_toggled)
+        loc_btns_row.addWidget(self._btn_triangulation_cross)
+        self._btn_localization_cross = QPushButton("Localización")
+        self._btn_localization_cross.setCheckable(True)
+        self._btn_localization_cross.setChecked(False)
+        self._btn_localization_cross.setToolTip(
+            "MODO LOCALIZACIÓN:\n"
+            "• Ctrl+clic en CT → posiciona cruz\n"
+            "• Shift+clic en SPECT → posiciona cruz\n\n"
+            "Para HMR-SPECT:\n"
+            "1. Posicione cruz en centro del corazón\n"
+            "2. Click 'Fijar ancla A'\n"
+            "3. Posicione cruz en mediastino\n"
+            "4. Click 'Calcular HMR-SPECT'"
+        )
+        self._btn_localization_cross.toggled.connect(self._on_localization_cross_toggled)
+        loc_btns_row.addWidget(self._btn_localization_cross)
+        self._btn_loc_anchor = QPushButton("Fijar ancla A")
+        self._btn_loc_anchor.setToolTip("Guarda la posición actual como punto A (corazón) para HMR-SPECT.")
+        self._btn_loc_anchor.clicked.connect(self._on_set_localization_anchor)
+        loc_btns_row.addWidget(self._btn_loc_anchor)
+        self._btn_loc_clear = QPushButton("Limpiar ancla")
+        self._btn_loc_clear.setToolTip("Borra el punto A.")
+        self._btn_loc_clear.clicked.connect(self._on_clear_localization_anchor)
+        loc_btns_row.addWidget(self._btn_loc_clear)
+        vistas_layout.addLayout(loc_btns_row)
+
+        left_col.addWidget(vistas_group)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # PANEL MIP (rotación 360° con mouse)
+        # ═══════════════════════════════════════════════════════════════════
+        mip_group = QGroupBox("MIP 360° (arrastrar para rotar)")
+        mip_layout = QHBoxLayout(mip_group)
+        mip_layout.setContentsMargins(4, 2, 4, 2)
+        mip_layout.setSpacing(4)
+
+        # Widget MIP interactivo con rotación por mouse
+        self._mip_widget = MipRotatorWidget()
+        mip_layout.addWidget(self._mip_widget)
+
+        # NOTA: mip_group se agrega en right_col (debajo de Ventana/Color), no aquí
+        # left_col.addWidget(mip_group)  ← MOVIDO A COLUMNA DERECHA
+
+        # ═══════════════════════════════════════════════════════════════════
+        # GRUPO: Overlay / QC / Cortes (aparte, entre imágenes y controles)
+        # ═══════════════════════════════════════════════════════════════════
+        overlay_qc_group = QGroupBox("Overlay / QC / Cortes")
+        overlay_qc_layout = QVBoxLayout(overlay_qc_group)
+        overlay_qc_layout.setSpacing(4)
+        
         # Overlay óseo
         blend_row = QHBoxLayout()
         blend_row.addWidget(QLabel("Overlay óseo:"))
@@ -1155,9 +1232,9 @@ class AmyloidSpectPanel(QDialog):
         self._blend_lbl = QLabel("35%")
         self._blend_lbl.setStyleSheet("color:#94a3b8;")
         blend_row.addWidget(self._blend_lbl)
-        vistas_layout.addLayout(blend_row)
+        overlay_qc_layout.addLayout(blend_row)
 
-        # QC registro / Fusión / Triangulación
+        # QC registro / Split / Fusión
         qc_row = QHBoxLayout()
         qc_row.addWidget(QLabel("QC registro:"))
         self._qc_mode = QComboBox()
@@ -1191,36 +1268,7 @@ class AmyloidSpectPanel(QDialog):
         self._fusion_lbl = QLabel("55%")
         self._fusion_lbl.setStyleSheet("color:#94a3b8;")
         qc_row.addWidget(self._fusion_lbl)
-        self._btn_triangulation_cross = QPushButton("Cruz triangulación")
-        self._btn_triangulation_cross.setCheckable(True)
-        self._btn_triangulation_cross.setChecked(False)
-        self._btn_triangulation_cross.setToolTip("Activa/desactiva líneas de referencia entre cortes axial, coronal y sagital.")
-        self._btn_triangulation_cross.toggled.connect(self._on_triangulation_cross_toggled)
-        qc_row.addWidget(self._btn_triangulation_cross)
-        self._btn_localization_cross = QPushButton("Localización")
-        self._btn_localization_cross.setCheckable(True)
-        self._btn_localization_cross.setChecked(False)
-        self._btn_localization_cross.setToolTip(
-            "MODO LOCALIZACIÓN:\n"
-            "• Ctrl+clic en CT → posiciona cruz\n"
-            "• Shift+clic en SPECT → posiciona cruz\n\n"
-            "Para HMR-SPECT:\n"
-            "1. Posicione cruz en centro del corazón\n"
-            "2. Click 'Fijar ancla A'\n"
-            "3. Posicione cruz en mediastino\n"
-            "4. Click 'Calcular HMR-SPECT'"
-        )
-        self._btn_localization_cross.toggled.connect(self._on_localization_cross_toggled)
-        qc_row.addWidget(self._btn_localization_cross)
-        self._btn_loc_anchor = QPushButton("Fijar ancla A")
-        self._btn_loc_anchor.setToolTip("Guarda la posición actual como punto A (corazón) para HMR-SPECT.")
-        self._btn_loc_anchor.clicked.connect(self._on_set_localization_anchor)
-        qc_row.addWidget(self._btn_loc_anchor)
-        self._btn_loc_clear = QPushButton("Limpiar ancla")
-        self._btn_loc_clear.setToolTip("Borra el punto A.")
-        self._btn_loc_clear.clicked.connect(self._on_clear_localization_anchor)
-        qc_row.addWidget(self._btn_loc_clear)
-        vistas_layout.addLayout(qc_row)
+        overlay_qc_layout.addLayout(qc_row)
 
         # Sliders de corte z/y/x
         slice_row = QHBoxLayout()
@@ -1241,15 +1289,21 @@ class AmyloidSpectPanel(QDialog):
         slice_row.addWidget(self._slice_y, 1)
         slice_row.addWidget(self._slice_x_lbl)
         slice_row.addWidget(self._slice_x, 1)
-        vistas_layout.addLayout(slice_row)
-        
-        left_col.addWidget(vistas_group)
+        overlay_qc_layout.addLayout(slice_row)
+
+        # NOTA: overlay_qc_group se agrega en hmr_orient_row (entre Orientación y Zoom), no aquí
+        # left_col.addWidget(overlay_qc_group)  ← MOVIDO A LA FILA DE BOXES
         # ────────────────────────────────────────────────────────────────────────────
 
         # ═══════════════════════════════════════════════════════════════════
-        # FILA HORIZONTAL: HMR-SPECT (izq) + Orientación (der)
+        # FILA HORIZONTAL: HMR-SPECT + Orientación + Overlay/QC + Zoom + Ajuste
         # ═══════════════════════════════════════════════════════════════════
-        hmr_orient_row = QHBoxLayout()
+        # Contenedor con altura controlada (compacto)
+        controls_container = QWidget()
+        controls_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        hmr_orient_row = QHBoxLayout(controls_container)
+        hmr_orient_row.setContentsMargins(0, 0, 0, 0)
+        hmr_orient_row.setSpacing(4)
         
         # --- HMR-SPECT (angosto, ~60%) ---
         hmr_group = QGroupBox("HMR-SPECT")
@@ -1290,22 +1344,6 @@ class AmyloidSpectPanel(QDialog):
         self._mediastinum_radius_spin.setValue(20.0)
         self._mediastinum_radius_spin.setSingleStep(5.0)
         radius_row.addWidget(self._mediastinum_radius_spin)
-        radius_row.addStretch(1)
-        hmr_layout.addLayout(radius_row)
-        
-        # Fila 3: Botón calcular y resultado
-        self._heart_radius_spin.setRange(10.0, 60.0)
-        self._heart_radius_spin.setValue(30.0)
-        self._heart_radius_spin.setSingleStep(5.0)
-        radius_row.addWidget(self._heart_radius_spin)
-        
-        radius_row.addWidget(QLabel("Radio mediastino (mm):"))
-        self._mediastinum_radius_spin = QDoubleSpinBox()
-        self._mediastinum_radius_spin.setRange(5.0, 40.0)
-        self._mediastinum_radius_spin.setValue(20.0)
-        self._mediastinum_radius_spin.setSingleStep(5.0)
-        radius_row.addWidget(self._mediastinum_radius_spin)
-        radius_row.addStretch(1)
         hmr_layout.addLayout(radius_row)
         
         # Fila 3: Botón calcular y resultado
@@ -1338,97 +1376,184 @@ class AmyloidSpectPanel(QDialog):
         scale_row.addWidget(scale_lbl)
         scale_row.addStretch(1)
         hmr_layout.addLayout(scale_row)
-        hmr_orient_row.addWidget(hmr_group, 6)  # 60% del ancho
 
-        # --- Orientación prueba (al lado del HMR, ~40%) ---
+        # --- Orientación prueba (centro, COMPACTO) ---
         flip_group = QGroupBox("Orientación")
         flip_grid = QGridLayout(flip_group)
-        flip_grid.setSpacing(4)
+        flip_grid.setSpacing(2)
+        flip_grid.setContentsMargins(4, 4, 4, 4)
         
         self._spect_flipx_check = QCheckBox("SPECT flip X")
         self._spect_flipx_check.setToolTip("Espeja SPECT en eje X")
         self._spect_flipx_check.toggled.connect(self._on_spect_orientation_test_toggled)
+        self._spect_flipx_check.setStyleSheet("font-size:10px;")
         flip_grid.addWidget(self._spect_flipx_check, 0, 0)
         
         self._spect_flipy_check = QCheckBox("SPECT flip Y")
         self._spect_flipy_check.setToolTip("Espeja SPECT en eje Y")
         self._spect_flipy_check.toggled.connect(self._on_spect_orientation_test_toggled)
+        self._spect_flipy_check.setStyleSheet("font-size:10px;")
         flip_grid.addWidget(self._spect_flipy_check, 0, 1)
         
         self._spect_flipz_check = QCheckBox("SPECT flip Z")
         self._spect_flipz_check.setToolTip("Espeja SPECT en eje Z")
         self._spect_flipz_check.toggled.connect(self._on_spect_orientation_test_toggled)
+        self._spect_flipz_check.setStyleSheet("font-size:10px;")
         flip_grid.addWidget(self._spect_flipz_check, 1, 0)
         
         self._ct_flipx_check = QCheckBox("CT flip X")
         self._ct_flipx_check.setToolTip("Espeja TC en eje X")
         self._ct_flipx_check.toggled.connect(self._on_ct_orientation_test_toggled)
+        self._ct_flipx_check.setStyleSheet("font-size:10px;")
         flip_grid.addWidget(self._ct_flipx_check, 1, 1)
         
         self._ct_flipy_check = QCheckBox("CT flip Y")
         self._ct_flipy_check.setToolTip("Espeja TC en eje Y")
         self._ct_flipy_check.toggled.connect(self._on_ct_orientation_test_toggled)
+        self._ct_flipy_check.setStyleSheet("font-size:10px;")
         flip_grid.addWidget(self._ct_flipy_check, 2, 0)
         
         self._ct_flipz_check = QCheckBox("CT flip Z")
         self._ct_flipz_check.setToolTip("Espeja TC en eje Z")
         self._ct_flipz_check.toggled.connect(self._on_ct_orientation_test_toggled)
+        self._ct_flipz_check.setStyleSheet("font-size:10px;")
         flip_grid.addWidget(self._ct_flipz_check, 2, 1)
         
-        hmr_orient_row.addWidget(flip_group, 4)  # 40% del ancho
-        left_col.addLayout(hmr_orient_row)
+        hmr_orient_row.addWidget(hmr_group, 4)   # HMR-SPECT: 4/14
+        hmr_orient_row.addWidget(flip_group, 3)  # Orientación: 3/14 (compacto)
+
+        # --- Overlay / QC / Cortes (en hueco central de la fila) ---
+        hmr_orient_row.addWidget(overlay_qc_group, 4)  # Overlay/QC/Cortes: 4/14
+
+        # --- Zoom visual ---
+        zoom_group = QGroupBox("Zoom")
+        zoom_layout = QVBoxLayout(zoom_group)
+        zoom_layout.setSpacing(2)
+        zoom_layout.setContentsMargins(4, 4, 4, 4)
+
+        spect_zoom_row = QHBoxLayout()
+        spect_zoom_row.setSpacing(4)
+        self._spect_zoom_lbl = QLabel("SPECT:")
+        self._spect_zoom_lbl.setStyleSheet("font-size:10px;")
+        spect_zoom_row.addWidget(self._spect_zoom_lbl)
+        self._spect_zoom_spin = QSpinBox()
+        self._spect_zoom_spin.setRange(50, 200)
+        self._spect_zoom_spin.setValue(100)
+        self._spect_zoom_spin.setSuffix("%")
+        self._spect_zoom_spin.valueChanged.connect(self._on_zoom_changed)
+        self._spect_zoom_spin.setStyleSheet("font-size:10px;")
+        spect_zoom_row.addWidget(self._spect_zoom_spin, 1)
+        zoom_layout.addLayout(spect_zoom_row)
+
+        ct_zoom_row = QHBoxLayout()
+        ct_zoom_row.setSpacing(4)
+        self._ct_zoom_lbl = QLabel("CT:")
+        self._ct_zoom_lbl.setStyleSheet("font-size:10px;")
+        ct_zoom_row.addWidget(self._ct_zoom_lbl)
+        self._ct_zoom_spin = QSpinBox()
+        self._ct_zoom_spin.setRange(50, 200)
+        self._ct_zoom_spin.setValue(100)
+        self._ct_zoom_spin.setSuffix("%")
+        self._ct_zoom_spin.valueChanged.connect(self._on_zoom_changed)
+        self._ct_zoom_spin.setStyleSheet("font-size:10px;")
+        ct_zoom_row.addWidget(self._ct_zoom_spin, 1)
+        zoom_layout.addLayout(ct_zoom_row)
+
+        hmr_orient_row.addWidget(zoom_group, 3)  # Zoom: 3/14
+
+        # --- Ajuste CT (nudge/rot/resets) ---
+        ajuste_group = QGroupBox("Ajuste")
+        ajuste_layout = QVBoxLayout(ajuste_group)
+        ajuste_layout.setSpacing(2)
+        ajuste_layout.setContentsMargins(4, 4, 4, 4)
+
+        # Nudge Δ z/y/x
+        nudge_row = QHBoxLayout()
+        nudge_row.setSpacing(2)
+        nudge_row.addWidget(QLabel("Δ CT:"))
+        self._nudge_z = self._mk_nudge_spin()
+        self._nudge_y = self._mk_nudge_spin()
+        self._nudge_x = self._mk_nudge_spin()
+        for spin in (self._nudge_z, self._nudge_y, self._nudge_x):
+            spin.valueChanged.connect(self._apply_ct_nudge)
+            spin.setEnabled(False)
+            spin.setStyleSheet("font-size:9px;")
+        nudge_row.addWidget(self._nudge_z)
+        nudge_row.addWidget(self._nudge_y)
+        nudge_row.addWidget(self._nudge_x)
+        ajuste_layout.addLayout(nudge_row)
+
+        # Rotación z/y/x
+        rot_row = QHBoxLayout()
+        rot_row.setSpacing(2)
+        rot_row.addWidget(QLabel("Rot:"))
+        self._rot_z = self._mk_rotate_spin()
+        self._rot_y = self._mk_rotate_spin()
+        self._rot_x = self._mk_rotate_spin()
+        for spin in (self._rot_z, self._rot_y, self._rot_x):
+            spin.valueChanged.connect(self._apply_ct_nudge)
+            spin.setEnabled(False)
+            spin.setStyleSheet("font-size:9px;")
+        rot_row.addWidget(self._rot_z)
+        rot_row.addWidget(self._rot_y)
+        rot_row.addWidget(self._rot_x)
+        ajuste_layout.addLayout(rot_row)
+
+        # Botones de reset
+        reset_row = QHBoxLayout()
+        reset_row.setSpacing(2)
+        self._btn_reset_nudge = QPushButton("Reset Δ")
+        self._btn_reset_nudge.clicked.connect(self._reset_ct_nudge)
+        self._btn_reset_nudge.setEnabled(False)
+        self._btn_reset_nudge.setStyleSheet("font-size:9px; padding:1px 4px;")
+        reset_row.addWidget(self._btn_reset_nudge)
+        self._btn_reset_rot = QPushButton("Reset Rot")
+        self._btn_reset_rot.clicked.connect(self._reset_ct_rotation)
+        self._btn_reset_rot.setEnabled(False)
+        self._btn_reset_rot.setStyleSheet("font-size:9px; padding:1px 4px;")
+        reset_row.addWidget(self._btn_reset_rot)
+        self._btn_reset_offsets = QPushButton("Reset vista")
+        self._btn_reset_offsets.clicked.connect(self._reset_view_offsets)
+        self._btn_reset_offsets.setToolTip("Resetea offsets relativos y zoom visual SPECT/CT.")
+        self._btn_reset_offsets.setStyleSheet("font-size:9px; padding:1px 4px;")
+        reset_row.addWidget(self._btn_reset_offsets)
+        ajuste_layout.addLayout(reset_row)
+
+        hmr_orient_row.addWidget(ajuste_group, 4)  # Ajuste: 4/14
+        left_col.addWidget(controls_container)  # Fila de boxes compacta (altura controlada)
         # ────────────────────────────────────────────────────────────────────────────
 
-        # Zoom visual
-        zoom_row = QHBoxLayout()
-        zoom_row.addWidget(QLabel("Zoom visual SPECT/CT:"))
-        self._spect_zoom_slider = QSlider(Qt.Orientation.Horizontal)
-        self._spect_zoom_slider.setRange(50, 200)
-        self._spect_zoom_slider.setValue(100)
-        self._spect_zoom_slider.valueChanged.connect(self._on_zoom_changed)
-        self._spect_zoom_lbl = QLabel("SPECT 100%")
-        self._ct_zoom_slider = QSlider(Qt.Orientation.Horizontal)
-        self._ct_zoom_slider.setRange(50, 200)
-        self._ct_zoom_slider.setValue(100)
-        self._ct_zoom_slider.valueChanged.connect(self._on_zoom_changed)
-        self._ct_zoom_lbl = QLabel("CT 100%")
-        zoom_row.addWidget(self._spect_zoom_lbl)
-        zoom_row.addWidget(self._spect_zoom_slider, 1)
-        zoom_row.addWidget(self._ct_zoom_lbl)
-        zoom_row.addWidget(self._ct_zoom_slider, 1)
-        left_col.addLayout(zoom_row)
-
-        main_splitter.addLayout(left_col, 3)  # 3 partes para imágenes
+        main_splitter.addLayout(left_col, 6)  # 6 partes para imágenes (más espacio)
 
         # --- COLUMNA DERECHA: Controles de ventana/Color (vertical) ---
         right_col = QVBoxLayout()
         right_col.setSpacing(8)
 
-        # Grupo: Rango y Color SPECT
+        # Grupo: Rango y Color SPECT (compacto, alineado derecha)
         window_group = QGroupBox("Ventana / Color")
+        window_group.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        window_group.setStyleSheet("QGroupBox { font-weight:600; }")
         window_vbox = QVBoxLayout(window_group)
+        window_vbox.setAlignment(Qt.AlignmentFlag.AlignRight)
+        window_vbox.setSpacing(4)
         
         # Botón Top (arriba) - angosto
         top_btn_row = QHBoxLayout()
-        top_btn_row.addStretch(1)
         self._btn_range_top = QPushButton("▲ T100")
         self._btn_range_top.clicked.connect(lambda: self._set_spect_range(self._spect_win_low, 100))
         self._btn_range_top.setToolTip("Fija el límite superior al 100%")
         self._btn_range_top.setFixedSize(70, 28)
         self._btn_range_top.setStyleSheet("font-size:10px; padding:2px 6px;")
         top_btn_row.addWidget(self._btn_range_top)
-        top_btn_row.addStretch(1)
         window_vbox.addLayout(top_btn_row)
 
         # RangeSlider (centro, vertical) - centrado
         slider_row = QHBoxLayout()
-        slider_row.addStretch(1)
         self._spect_range_slider = RangeSlider()
-        self._spect_range_slider.setMinimumHeight(180)
+        self._spect_range_slider.setMinimumHeight(280)
         self._spect_range_slider.setFixedWidth(50)
         self._spect_range_slider.valuesChanged.connect(self._on_spect_range_changed)
         slider_row.addWidget(self._spect_range_slider)
-        slider_row.addStretch(1)
         window_vbox.addLayout(slider_row)
 
         self._spect_range_lbl = QLabel("Base 0% · Top 100%")
@@ -1438,19 +1563,16 @@ class AmyloidSpectPanel(QDialog):
 
         # Botón Base (abajo) - angosto
         base_btn_row = QHBoxLayout()
-        base_btn_row.addStretch(1)
         self._btn_range_base = QPushButton("▼ B0")
         self._btn_range_base.clicked.connect(lambda: self._set_spect_range(0, self._spect_win_high))
         self._btn_range_base.setToolTip("Fija el límite inferior al 0%")
         self._btn_range_base.setFixedSize(70, 28)
         self._btn_range_base.setStyleSheet("font-size:10px; padding:2px 6px;")
         base_btn_row.addWidget(self._btn_range_base)
-        base_btn_row.addStretch(1)
         window_vbox.addLayout(base_btn_row)
 
         # Selector de color (compacto)
         color_row = QHBoxLayout()
-        color_row.addStretch(1)
         color_row.addWidget(QLabel("Color:"))
         register_all_colormaps()
         self._spect_cmap_combo = QComboBox()
@@ -1461,12 +1583,10 @@ class AmyloidSpectPanel(QDialog):
         self._spect_cmap_combo.setFixedWidth(90)
         self._spect_cmap_combo.setStyleSheet("font-size:10px; padding:1px 4px;")
         color_row.addWidget(self._spect_cmap_combo)
-        color_row.addStretch(1)
         window_vbox.addLayout(color_row)
 
         # Ventana CT (compacto)
         ct_win_row = QHBoxLayout()
-        ct_win_row.addStretch(1)
         ct_win_row.addWidget(QLabel("Ventana CT:"))
         self._ct_window_combo = QComboBox()
         self._ct_window_combo.addItem("Ósea", "bone")
@@ -1477,55 +1597,35 @@ class AmyloidSpectPanel(QDialog):
         self._ct_window_combo.setFixedWidth(90)
         self._ct_window_combo.setStyleSheet("font-size:10px; padding:1px 4px;")
         ct_win_row.addWidget(self._ct_window_combo)
-        ct_win_row.addStretch(1)
         window_vbox.addLayout(ct_win_row)
 
         right_col.addWidget(window_group)
-        right_col.addStretch(1)  # Empuja todo hacia arriba
+        
+        # MIP + VOIs (expande para llenar espacio restante en columna derecha)
+        right_col.addWidget(mip_group)
+        
+        # Sin addStretch: el MIP se expande para ocupar todo el espacio disponible
 
         main_splitter.addLayout(right_col, 1)  # 1 parte para controles
         root.addLayout(main_splitter)
 
-        # Ajustes CT (nudge/rot) - siguen abajo de las imágenes
-        nudge_row = QHBoxLayout()
-        nudge_row.addWidget(QLabel("Ajuste CT Δ z/y/x:"))
-        self._nudge_z = self._mk_nudge_spin()
-        self._nudge_y = self._mk_nudge_spin()
-        self._nudge_x = self._mk_nudge_spin()
-        for spin in (self._nudge_z, self._nudge_y, self._nudge_x):
-            spin.valueChanged.connect(self._apply_ct_nudge)
-            spin.setEnabled(False)
-        nudge_row.addWidget(self._nudge_z)
-        nudge_row.addWidget(self._nudge_y)
-        nudge_row.addWidget(self._nudge_x)
-        nudge_row.addWidget(QLabel("Rot CT z/y/x:"))
-        self._rot_z = self._mk_rotate_spin()
-        self._rot_y = self._mk_rotate_spin()
-        self._rot_x = self._mk_rotate_spin()
-        for spin in (self._rot_z, self._rot_y, self._rot_x):
-            spin.valueChanged.connect(self._apply_ct_nudge)
-            spin.setEnabled(False)
-        nudge_row.addWidget(self._rot_z)
-        nudge_row.addWidget(self._rot_y)
-        nudge_row.addWidget(self._rot_x)
-        self._btn_reset_nudge = QPushButton("Reset ajuste")
-        self._btn_reset_nudge.clicked.connect(self._reset_ct_nudge)
-        self._btn_reset_nudge.setEnabled(False)
-        nudge_row.addWidget(self._btn_reset_nudge)
-        self._btn_reset_rot = QPushButton("Reset rot")
-        self._btn_reset_rot.clicked.connect(self._reset_ct_rotation)
-        self._btn_reset_rot.setEnabled(False)
-        nudge_row.addWidget(self._btn_reset_rot)
-        self._btn_reset_offsets = QPushButton("Reset offsets vista")
-        self._btn_reset_offsets.clicked.connect(self._reset_view_offsets)
-        self._btn_reset_offsets.setToolTip("Resetea offsets relativos y zoom visual SPECT/CT.")
-        nudge_row.addWidget(self._btn_reset_offsets)
-        nudge_row.addStretch(1)
-        root.addLayout(nudge_row)
-
         self._metrics = QTextEdit()
         self._metrics.setReadOnly(True)
         self._metrics.setStyleSheet("background:#0f172a; color:#e2e8f0; border:1px solid #334155;")
+        self._metrics.setMaximumHeight(120)  # Altura máxima cuando visible
+
+        # Botón toggle para ocultar/mostrar consola
+        self._btn_toggle_console = QPushButton("▶ Consola")
+        self._btn_toggle_console.setCheckable(True)
+        self._btn_toggle_console.setChecked(False)  # OCULTA por defecto
+        self._btn_toggle_console.setToolTip("Ocultar / Mostrar consola de métricas")
+        self._btn_toggle_console.setStyleSheet(
+            "font-size:10px; padding:2px 8px; background:#1e293b; color:#94a3b8; "
+            "border:1px solid #334155; border-radius:3px;"
+        )
+        self._btn_toggle_console.toggled.connect(self._toggle_console)
+
+        root.addWidget(self._btn_toggle_console)
         root.addWidget(self._metrics, 1)
 
         footer = QLabel(
@@ -1862,6 +1962,16 @@ class AmyloidSpectPanel(QDialog):
             if self._ct_path:
                 self._settings.setValue(f"{prefix}/ct_path", self._ct_path)
         self._persist_report_bridge_state()
+
+    def _toggle_console(self, visible: bool):
+        """Oculta o muestra la consola de métricas para dar más espacio a las imágenes."""
+        self._metrics.setVisible(visible)
+        if visible:
+            self._btn_toggle_console.setText("▼ Consola")
+            self._metrics.setMaximumHeight(120)
+        else:
+            self._btn_toggle_console.setText("▶ Consola")
+            self._metrics.setMaximumHeight(0)
 
     def _restore_global_ui_state(self):
         self._set_combo_by_data(self._preset_combo, str(self._settings.value("global/preset", "amylo360_std128") or "amylo360_std128"))
@@ -2931,10 +3041,8 @@ class AmyloidSpectPanel(QDialog):
         self._render_current_with_overlay()
 
     def _on_zoom_changed(self):
-        self._spect_zoom_pct = int(self._spect_zoom_slider.value())
-        self._ct_zoom_pct = int(self._ct_zoom_slider.value())
-        self._spect_zoom_lbl.setText(f"SPECT {self._spect_zoom_pct}%")
-        self._ct_zoom_lbl.setText(f"CT {self._ct_zoom_pct}%")
+        self._spect_zoom_pct = int(self._spect_zoom_spin.value())
+        self._ct_zoom_pct = int(self._ct_zoom_spin.value())
         self._render_current_with_overlay()
 
     def _on_spect_range_changed(self, low: int, high: int):
@@ -2957,23 +3065,23 @@ class AmyloidSpectPanel(QDialog):
         shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
 
         if ctrl and key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
-            self._ct_zoom_slider.setValue(int(np.clip(self._ct_zoom_slider.value() + 5, 50, 200)))
-            self._status.setText(f"Ctrl +: zoom CT {self._ct_zoom_slider.value()}%")
+            self._ct_zoom_spin.setValue(int(np.clip(self._ct_zoom_spin.value() + 5, 50, 200)))
+            self._status.setText(f"Ctrl +: zoom CT {self._ct_zoom_spin.value()}%")
             event.accept()
             return
         if ctrl and key in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
-            self._ct_zoom_slider.setValue(int(np.clip(self._ct_zoom_slider.value() - 5, 50, 200)))
-            self._status.setText(f"Ctrl -: zoom CT {self._ct_zoom_slider.value()}%")
+            self._ct_zoom_spin.setValue(int(np.clip(self._ct_zoom_spin.value() - 5, 50, 200)))
+            self._status.setText(f"Ctrl -: zoom CT {self._ct_zoom_spin.value()}%")
             event.accept()
             return
         if shift and key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
-            self._spect_zoom_slider.setValue(int(np.clip(self._spect_zoom_slider.value() + 5, 50, 200)))
-            self._status.setText(f"Shift +: zoom SPECT {self._spect_zoom_slider.value()}%")
+            self._spect_zoom_spin.setValue(int(np.clip(self._spect_zoom_spin.value() + 5, 50, 200)))
+            self._status.setText(f"Shift +: zoom SPECT {self._spect_zoom_spin.value()}%")
             event.accept()
             return
         if shift and key in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
-            self._spect_zoom_slider.setValue(int(np.clip(self._spect_zoom_slider.value() - 5, 50, 200)))
-            self._status.setText(f"Shift -: zoom SPECT {self._spect_zoom_slider.value()}%")
+            self._spect_zoom_spin.setValue(int(np.clip(self._spect_zoom_spin.value() - 5, 50, 200)))
+            self._status.setText(f"Shift -: zoom SPECT {self._spect_zoom_spin.value()}%")
             event.accept()
             return
 
@@ -3211,19 +3319,16 @@ class AmyloidSpectPanel(QDialog):
         self._ct_view_offset = {"axial": 0, "coronal": 0, "sagittal": 0}
         self._spect_pan_px = {"axial": [0, 0], "coronal": [0, 0], "sagittal": [0, 0]}
         self._ct_pan_px = {"axial": [0, 0], "coronal": [0, 0], "sagittal": [0, 0]}
-        self._spect_zoom_slider.blockSignals(True)
-        self._ct_zoom_slider.blockSignals(True)
-        self._spect_zoom_slider.setValue(100)
-        self._ct_zoom_slider.setValue(100)
-        self._spect_zoom_slider.blockSignals(False)
-        self._ct_zoom_slider.blockSignals(False)
+        self._spect_zoom_spin.blockSignals(True)
+        self._ct_zoom_spin.blockSignals(True)
+        self._spect_zoom_spin.setValue(100)
+        self._ct_zoom_spin.setValue(100)
+        self._spect_zoom_spin.blockSignals(False)
+        self._ct_zoom_spin.blockSignals(False)
         self._spect_range_slider.set_values(0, 100)
         self._spect_zoom_pct = 100
         self._ct_zoom_pct = 100
         self._spect_win_low = 0
-        self._spect_win_high = 100
-        self._spect_zoom_lbl.setText("SPECT 100%")
-        self._ct_zoom_lbl.setText("CT 100%")
         self._status.setText("Offsets, pan, zoom y rango visual SPECT/CT reseteados.")
         self._render_current_with_overlay()
 
@@ -3362,26 +3467,54 @@ class AmyloidSpectPanel(QDialog):
             sa_rgb = self._make_overlay_rgb(pv["sagittal"], bm.get("sagittal"), alpha)
         else:
             self._render_preview(self._current_volume)
-            return
+            # NOTA: No hacer return aquí — seguir para renderizar MIP
 
-        ax = self._rgb_to_pixmap(ax_rgb).scaled(
-            self._axial_lbl.width(), self._axial_lbl.height(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        co = self._rgb_to_pixmap(co_rgb).scaled(
-            self._cor_lbl.width(), self._cor_lbl.height(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        sa = self._rgb_to_pixmap(sa_rgb).scaled(
-            self._sag_lbl.width(), self._sag_lbl.height(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._set_axis_pixmap_with_cross(self._axial_lbl, ax, "axial")
-        self._set_axis_pixmap_with_cross(self._cor_lbl, co, "coronal")
-        self._set_axis_pixmap_with_cross(self._sag_lbl, sa, "sagittal")
+        # Actualizar cortes con overlay solo si se generaron RGBs arriba
+        if 'ax_rgb' in dir() and 'co_rgb' in dir():
+            ax = self._rgb_to_pixmap(ax_rgb).scaled(
+                self._axial_lbl.width(), self._axial_lbl.height(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            co = self._rgb_to_pixmap(co_rgb).scaled(
+                self._cor_lbl.width(), self._cor_lbl.height(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            sa = self._rgb_to_pixmap(sa_rgb).scaled(
+                self._sag_lbl.width(), self._sag_lbl.height(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._set_axis_pixmap_with_cross(self._axial_lbl, ax, "axial")
+            self._set_axis_pixmap_with_cross(self._cor_lbl, co, "coronal")
+            self._set_axis_pixmap_with_cross(self._sag_lbl, sa, "sagittal")
+
+        # Generar MIP con VOIs (SIEMPRE, incluso sin CT)
+        self._render_mip_with_vois()
+
+    def _render_mip_with_vois(self):
+        """Configura el widget MIP rotatorio con el volumen y VOIs actuales."""
+        if not hasattr(self, "_mip_widget"):
+            return
+            
+        # Pasar volumen al widget
+        if self._current_volume is not None:
+            spacing = getattr(self, "_voxel_spacing_mm", (4.0, 4.0, 4.0))
+            self._mip_widget.set_volume(self._current_volume, spacing)
+        else:
+            self._mip_widget.set_volume(None)
+            
+        # Pasar colormap
+        self._mip_widget.set_colormap(self._apply_cmap)
+        
+        # Pasar VOIs si existen
+        voi_heart = None
+        voi_med = None
+        if self._hmr_result is not None:
+            voi_heart = getattr(self._hmr_result, "voi_heart", None)
+            voi_med = getattr(self._hmr_result, "voi_mediastinum", None)
+        self._mip_widget.set_vois(voi_heart, voi_med)
 
     def _show_fusion_report_layout(self):
         try:
