@@ -1420,11 +1420,16 @@ class AmyloidSpectPanel(QDialog):
         top_btn_row.addStretch(1)
         window_vbox.addLayout(top_btn_row)
 
-        # RangeSlider (centro, vertical)
+        # RangeSlider (centro, vertical) - centrado
+        slider_row = QHBoxLayout()
+        slider_row.addStretch(1)
         self._spect_range_slider = RangeSlider()
         self._spect_range_slider.setMinimumHeight(180)
+        self._spect_range_slider.setFixedWidth(50)
         self._spect_range_slider.valuesChanged.connect(self._on_spect_range_changed)
-        window_vbox.addWidget(self._spect_range_slider)
+        slider_row.addWidget(self._spect_range_slider)
+        slider_row.addStretch(1)
+        window_vbox.addLayout(slider_row)
 
         self._spect_range_lbl = QLabel("Base 0% · Top 100%")
         self._spect_range_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1462,7 +1467,7 @@ class AmyloidSpectPanel(QDialog):
         # Ventana CT (compacto)
         ct_win_row = QHBoxLayout()
         ct_win_row.addStretch(1)
-        ct_win_row.addWidget(QLabel("CT:"))
+        ct_win_row.addWidget(QLabel("Ventana CT:"))
         self._ct_window_combo = QComboBox()
         self._ct_window_combo.addItem("Ósea", "bone")
         self._ct_window_combo.addItem("Partes blandas", "soft")
