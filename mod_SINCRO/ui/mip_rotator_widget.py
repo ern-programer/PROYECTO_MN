@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer, QPointF, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QScrollArea, QScrollBar
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont, QTransform
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QScrollArea, QScrollBar, QCheckBox
 
 
 class MipRotatorWidget(QWidget):
@@ -20,13 +20,13 @@ class MipRotatorWidget(QWidget):
     
     angle_changed = pyqtSignal(float, float)  # azimuth, elevation
     
-    # Posiciones predefinidas (azimut, elevación)
+    # Posiciones predefinidas (azimut, elevación) — calibradas vs vista real
     POSITIONS = {
-        "AP": (180.0, 0.0),     # Anterior-Posterior (vista frontal)
-        "PA": (0.0, 0.0),       # Posterior-Anterior (vista dorsal)
-        "LI": (270.0, 0.0),     # Lateral Izquierdo
-        "LD": (90.0, 0.0),      # Lateral Derecho
-        "OAI": (315.0, 0.0),    # Oblicuo Anterior Izquierdo
+        "PA": (0.0, 0.0),         # Posterior-Anterior (vista dorsal) — referencia 0°
+        "AP": (180.0, 0.0),       # Anterior-Posterior (vista frontal)
+        "LD": (90.0, 0.0),        # Lateral Derecho
+        "LI": (270.0, 0.0),       # Lateral Izquierdo
+        "OAI": (235.0, 0.0),      # Oblicuo Anterior Izquierdo
     }
     
     def __init__(self, parent=None):
@@ -40,7 +40,7 @@ class MipRotatorWidget(QWidget):
         self._setup_ui()
         
         # Estado de rotación
-        self._azimuth_deg = 0.0    # Rotación horizontal (0 = AP)
+        self._azimuth_deg = 0.0    # Rotación horizontal (0 = PA)
         self._elevation_deg = 0.0  # Rotación vertical
         
         # Zoom
@@ -48,6 +48,8 @@ class MipRotatorWidget(QWidget):
         
         # Datos
         self._volume = None
+        # Volumen sin post-filtro gaussiano (para toggle)
+        self._volume_unfiltered = None
         self._spacing_mm = (4.0, 4.0, 4.0)
         self._cmap_fn = None
         self._voi_heart = None
@@ -127,6 +129,26 @@ class MipRotatorWidget(QWidget):
         self._lbl.setStyleSheet("background:#0a0f1e;")
         self._lbl.setText("Cargar SPECT y calcular HMR para ver MIP")
         self._scroll.setWidget(self._lbl)
+        
+        # Label de ángulo en vivo
+        self._angle_lbl = QLabel("Az: 0.0°  El: 0.0°")
+        self._angle_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._angle_lbl.setStyleSheet("color:#94a3b8; font-size:11px; font-family:Consolas,monospace;")
+        layout.addWidget(self._angle_lbl)
+        
+        # Toggle filtro (con/sin post-filtro gaussiano)
+        self._filter_toggle = QCheckBox("Filtro ON")
+        self._filter_toggle.setChecked(True)
+        self._filter_toggle.setToolTip("Alternar entre volumen con/sin post-filtro gaussiano de reconstrucción")
+        self._filter_toggle.setStyleSheet(
+            "QCheckBox { color:#94a3b8; font-size:10px; spacing:4px; }"
+            "QCheckBox::indicator { width:14px; height:14px; border-radius:3px; "
+            "border:1px solid #475569; background:#1e293b; }"
+            "QCheckBox::indicator:checked { background:#3b82f6; border-color:#3b82f6; }"
+            "QCheckBox::indicator:hover { border-color:#64748b; }"
+        )
+        self._filter_toggle.stateChanged.connect(self._on_filter_toggled)
+        layout.addWidget(self._filter_toggle)
         
         # Fila de botones de posición
         btn_row = QHBoxLayout()
@@ -231,6 +253,7 @@ class MipRotatorWidget(QWidget):
             az, el = self.POSITIONS[name]
             self._azimuth_deg = az
             self._elevation_deg = el
+            self._update_angle_label()
             self._schedule_render()
             self.angle_changed.emit(az, el)
             
@@ -259,6 +282,7 @@ class MipRotatorWidget(QWidget):
     def _cine_step(self):
         """Avanzar un frame de cine."""
         self._azimuth_deg = (self._azimuth_deg - self._cine_speed) % 360.0
+        self._update_angle_label()
         self._render_mip()
         self.angle_changed.emit(self._azimuth_deg, self._elevation_deg)
         
@@ -266,6 +290,25 @@ class MipRotatorWidget(QWidget):
         """Establecer volumen SPECT para MIP."""
         self._volume = np.asarray(volume, dtype=np.float64) if volume is not None else None
         self._spacing_mm = spacing_mm
+        self._schedule_render()
+        
+    def set_volume_unfiltered(self, volume: np.ndarray | None):
+        """Establecer volumen sin post-filtro gaussiano para toggle."""
+        self._volume_unfiltered = np.asarray(volume, dtype=np.float64) if volume is not None else None
+        # Si no hay unfiltered, deshabilitar toggle y forzar ON
+        if self._volume_unfiltered is None:
+            self._filter_toggle.setChecked(True)
+            self._filter_toggle.setEnabled(False)
+        else:
+            self._filter_toggle.setEnabled(True)
+            
+    def _on_filter_toggled(self, state):
+        """Alternar entre volumen filtrado y sin filtro."""
+        if state != Qt.CheckState.Checked.value:
+            # Filtro OFF: verificar que exista el volumen sin filtro
+            if self._volume_unfiltered is None:
+                self._filter_toggle.setChecked(True)
+                return
         self._schedule_render()
         
     def set_colormap(self, cmap_fn):
@@ -280,15 +323,22 @@ class MipRotatorWidget(QWidget):
         self._schedule_render()
         
     def reset_view(self):
-        """Reset a vista AP sin zoom."""
-        self._azimuth_deg = 0.0
+        """Reset a vista PA sin zoom."""
+        self._azimuth_deg = 0.0     # PA
         self._elevation_deg = 0.0
         self._zoom_factor = 1.0
+        self._update_angle_label()
         self._schedule_render()
         
     def _schedule_render(self):
         """Programar renderizado con debounce."""
         self._render_timer.start(50)  # 50ms debounce
+
+    def _update_angle_label(self):
+        """Actualizar label de ángulo en vivo."""
+        self._angle_lbl.setText(
+            f"Az: {self._azimuth_deg:6.1f}°  El: {self._elevation_deg:+5.1f}°"
+        )
         
     def _render_mip(self):
         """Renderizar MIP con rotación 3D real.
@@ -306,7 +356,11 @@ class MipRotatorWidget(QWidget):
             return
             
         try:
-            vol = self._volume
+            # Elegir volumen según toggle de filtro
+            if self._filter_toggle.isChecked() or self._volume_unfiltered is None:
+                vol = self._volume
+            else:
+                vol = self._volume_unfiltered
             from scipy import ndimage
             
             # Paso 1: Rotación azimutal alrededor de eje Z (superior-inferior)
@@ -494,6 +548,7 @@ class MipRotatorWidget(QWidget):
             self._elevation_deg = np.clip(self._elevation_deg, -45.0, 45.0)
             
             self._last_pos = event.pos()
+            self._update_angle_label()
             self._render_mip()
             self.angle_changed.emit(self._azimuth_deg, self._elevation_deg)
             

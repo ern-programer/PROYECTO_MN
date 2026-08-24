@@ -97,6 +97,8 @@ class AmyloidReconstructionBundle:
     notes: list[str]
     spacing_zyx: tuple[float, float, float] | None = None
     affine_ijk_to_lps: np.ndarray | None = None
+    # Volumen sin post-filtro gaussiano (para toggle con/sin filtro en UI)
+    ungated_volume_unfiltered: np.ndarray | None = None
 
 
 def _safe_norm(img: np.ndarray) -> np.ndarray:
@@ -865,6 +867,8 @@ def reconstruct_amyloid_with_perf_pipeline(
         progress_callback(1.0, "Reconstrucción y cortes listos")
 
     spacing = _study_spacing_zyx(study)
+    # Volumen sin post-filtro: si viene de raw_recon, usar la copia guardada; sino es igual al filtrado
+    _unfiltered = getattr(raw_res, "ungated_volume_unfiltered", None) if was_raw else None
     return AmyloidReconstructionBundle(
         study=study,
         source_path=dicom_path,
@@ -876,6 +880,7 @@ def reconstruct_amyloid_with_perf_pipeline(
         notes=notes,
         spacing_zyx=spacing,
         affine_ijk_to_lps=_affine_from_dicom_file(dicom_path, spacing),
+        ungated_volume_unfiltered=_unfiltered,
     )
 
 

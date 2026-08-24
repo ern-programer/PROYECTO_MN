@@ -198,6 +198,8 @@ class RawReconResult:
     ungated_volume_mf: np.ndarray | None = None
     # Motion-frozen por gate: 4D de "cine nítido" (None si no se pidió).
     gated_volume_mf_per_gate: np.ndarray | None = None
+    # Volumen ungated ANTES del post-filtro gaussiano (para toggle con/sin filtro).
+    ungated_volume_unfiltered: np.ndarray | None = None
 
 
 def _normalize_filter_kind(kind: str) -> str:
@@ -1247,6 +1249,10 @@ def reconstruct_raw_gated_pipeline(
     _post_global = float(getattr(cfg, "post_filter_sigma_px", 0.0) or 0.0)
     post_ung = _post_global if getattr(cfg, "post_filter_sigma_ungated_px", None) is None else float(cfg.post_filter_sigma_ungated_px)
     post_gat = _post_global if getattr(cfg, "post_filter_sigma_gated_px", None) is None else float(cfg.post_filter_sigma_gated_px)
+
+    # Guardar copia SIN filtro para toggle en UI (se asigna al result al final)
+    _ungated_unfiltered = np.ascontiguousarray(ungated_volume.copy())
+
     if post_ung > 0.05 or post_gat > 0.05:
         if progress_callback is not None:
             progress_callback(0.96, "Aplicando post-filtro (suavizado)...")
@@ -1381,4 +1387,5 @@ def reconstruct_raw_gated_pipeline(
         notes=notes,
         ungated_volume_mf=ungated_volume_mf,
         gated_volume_mf_per_gate=gated_volume_mf_per_gate,
+        ungated_volume_unfiltered=_ungated_unfiltered,
     )

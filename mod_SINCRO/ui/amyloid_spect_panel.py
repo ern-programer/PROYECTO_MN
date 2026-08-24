@@ -572,7 +572,8 @@ class FusionReportLayoutDialog(QDialog):
 
         for c, axis in enumerate(axes):
             sp2d = self._spect_window_fn(self._view2d(self._spect_vol, axis))
-            sp_rgb = self._draw_refs((self._cmap_fn(sp2d) * 255.0).astype(np.uint8), axis, self._slice_idx, self._line_px)
+            # Usar _apply_cmap para respetar el colormap seleccionado en el combo
+            sp_rgb = self._draw_refs((self._apply_cmap(sp2d) * 255.0).astype(np.uint8), axis, self._slice_idx, self._line_px)
             sp_lbl = QLabel()
             sp_lbl.setStyleSheet("background:#0b1220; border:1px solid #334155;")
             sp_lbl.setPixmap(self._to_pix(sp_rgb).scaled(grid_w, grid_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
@@ -807,6 +808,8 @@ class AmyloidSpectPanel(QDialog):
         self._recon_bundle = None
         self._current_volume = None
         self._base_spect_volume = None
+        # Volumen sin post-filtro gaussiano (para toggle en MIP)
+        self._unfiltered_volume = None
         self._ct_volume = None
         self._ct_registered = None
         self._ct_auto_registered = None
@@ -2990,17 +2993,27 @@ class AmyloidSpectPanel(QDialog):
 
     def _render_preview(self, volume: np.ndarray):
         pv = self._slices_preview_at(volume)
-        ax = self._arr_to_pixmap(pv["axial"]).scaled(
+        # Aplicar colormap seleccionado al combo antes de convertir a pixmap
+        ax_data = pv["axial"]
+        co_data = pv["coronal"]
+        sa_data = pv["sagittal"]
+        
+        # Aplicar colormap si los datos están normalizados (0-1)
+        ax_rgb = (self._apply_cmap(ax_data) * 255.0).astype(np.uint8)
+        co_rgb = (self._apply_cmap(co_data) * 255.0).astype(np.uint8)
+        sa_rgb = (self._apply_cmap(sa_data) * 255.0).astype(np.uint8)
+        
+        ax = self._rgb_to_pixmap(ax_rgb).scaled(
             self._axial_lbl.width(), self._axial_lbl.height(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        co = self._arr_to_pixmap(pv["coronal"]).scaled(
+        co = self._rgb_to_pixmap(co_rgb).scaled(
             self._cor_lbl.width(), self._cor_lbl.height(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        sa = self._arr_to_pixmap(pv["sagittal"]).scaled(
+        sa = self._rgb_to_pixmap(sa_rgb).scaled(
             self._sag_lbl.width(), self._sag_lbl.height(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
@@ -3501,9 +3514,17 @@ class AmyloidSpectPanel(QDialog):
         # Pasar volumen al widget
         if self._current_volume is not None:
             spacing = getattr(self, "_voxel_spacing_mm", (4.0, 4.0, 4.0))
-            self._mip_widget.set_volume(self._current_volume, spacing)
+            # Usar el MISMO transform (flips X/Y/Z) que los cortes, para que
+            # los VOIs (definidos en coords de la vista) coincidan con el MIP.
+            vol_tx = self._spect_transform_3d(np.asarray(self._current_volume, dtype=np.float64))
+            self._mip_widget.set_volume(vol_tx, spacing)
         else:
             self._mip_widget.set_volume(None)
+        # Pasar volumen sin filtro para toggle (con mismo transform)
+        _uf = getattr(self, "_unfiltered_volume", None)
+        if _uf is not None:
+            _uf = self._spect_transform_3d(np.asarray(_uf, dtype=np.float64))
+        self._mip_widget.set_volume_unfiltered(_uf)
             
         # Pasar colormap
         self._mip_widget.set_colormap(self._apply_cmap)
@@ -3514,6 +3535,11 @@ class AmyloidSpectPanel(QDialog):
         if self._hmr_result is not None:
             voi_heart = getattr(self._hmr_result, "voi_heart", None)
             voi_med = getattr(self._hmr_result, "voi_mediastinum", None)
+        # Fallback: VOIs temporales (mientras se colocan, antes de calcular H/M)
+        if voi_heart is None:
+            voi_heart = getattr(self, "_temp_voi_heart", None)
+        if voi_med is None:
+            voi_med = getattr(self, "_temp_voi_mediastinum", None)
         self._mip_widget.set_vois(voi_heart, voi_med)
 
     def _show_fusion_report_layout(self):
@@ -3739,6 +3765,12 @@ class AmyloidSpectPanel(QDialog):
             self._recon_bundle = bundle
             self._base_spect_volume = np.asarray(self._recon_bundle.ungated_volume, dtype=np.float64)
             self._current_volume = np.asarray(self._recon_bundle.ungated_volume, dtype=np.float64)
+            # Guardar volumen sin post-filtro para toggle en MIP
+            _uf = getattr(self._recon_bundle, "ungated_volume_unfiltered", None)
+            if _uf is not None:
+                self._unfiltered_volume = np.asarray(_uf, dtype=np.float64)
+            else:
+                self._unfiltered_volume = None
             self._spect_spacing_zyx = getattr(self._recon_bundle, "spacing_zyx", self._spect_spacing_zyx)
             self._spect_affine_ijk_to_lps = getattr(self._recon_bundle, "affine_ijk_to_lps", self._spect_affine_ijk_to_lps)
             self._bone_mask = None

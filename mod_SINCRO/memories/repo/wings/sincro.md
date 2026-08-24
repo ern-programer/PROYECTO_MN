@@ -15,10 +15,11 @@ mod_SINCRO/
 │   ├── main_window.py      # Ventana principal
 │   ├── amyloid_window.py   # Panel planar amiloidosis
 │   ├── amyloid_spect_panel.py  # Panel SPECT/CT amiloidosis
-│   └── dual_spect_panel.py     # Panel dual-SPECT washout (NUEVO)
+│   ├── mip_rotator_widget.py   # Widget MIP 360° interactivo (NUEVO)
+│   └── dual_spect_panel.py     # Panel dual-SPECT washout
 ├── core/
 │   ├── amyloid_spect.py    # Lógica HMR-SPECT, VOISphere
-│   └── washout_spect.py    # Lógica washout dual-SPECT (NUEVO)
+│   └── washout_spect.py    # Lógica washout dual-SPECT
 ├── report/
 │   └── report_generator.py
 └── viz/
@@ -41,13 +42,19 @@ mod_SINCRO/
   - HMR < 1.5: NEGATIVO
 - **VOIs en vivo:** Visualización temporal durante posicionamiento de localizadores
 
-### 2. Washout SPECT (Dual-timepoint) - NUEVO
-- **Archivo:** `core/washout_spect.py`
-- **Clases:**
-  - `WashoutSpectResult`: Resultado con HMRs, washout %, interpretación
-  - `DualSpectSession`: Sesión con dos estudios (T1, T2)
-- **Fórmula:**
-  ```
+### 2. MIP Rotatorio 360° (NUEVO)
+- **Archivo:** `ui/mip_rotator_widget.py`
+- **Clase:** `MipRotatorWidget(QLabel)`
+- **Interacción:**
+  - Arrastrar horizontal: rotar azimut (0-360°)
+  - Arrastrar vertical: rotar elevación (-60° a +60°)
+  - Doble click: reset a vista AP
+  - Rueda mouse: zoom
+- **Features:**
+  - Rotación 3D con `scipy.ndimage.rotate()`
+  - Proyección MIP dinámica
+  - VOIs proyectados como círculos con etiquetas
+  - Sin overlay de HMR ni selector de dirección
   Washout % = (1 - HMR_t2 / HMR_t1) × 100
   ```
 - **Interpretación:**
