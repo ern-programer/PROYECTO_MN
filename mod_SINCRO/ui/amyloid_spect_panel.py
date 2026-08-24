@@ -1408,12 +1408,17 @@ class AmyloidSpectPanel(QDialog):
         window_group = QGroupBox("Ventana / Color")
         window_vbox = QVBoxLayout(window_group)
         
-        # Botón Top (arriba)
-        self._btn_range_top = QPushButton("▲ Top 100")
+        # Botón Top (arriba) - angosto
+        top_btn_row = QHBoxLayout()
+        top_btn_row.addStretch(1)
+        self._btn_range_top = QPushButton("▲ T100")
         self._btn_range_top.clicked.connect(lambda: self._set_spect_range(self._spect_win_low, 100))
         self._btn_range_top.setToolTip("Fija el límite superior al 100%")
-        self._btn_range_top.setMinimumHeight(35)
-        window_vbox.addWidget(self._btn_range_top)
+        self._btn_range_top.setFixedSize(70, 28)
+        self._btn_range_top.setStyleSheet("font-size:10px; padding:2px 6px;")
+        top_btn_row.addWidget(self._btn_range_top)
+        top_btn_row.addStretch(1)
+        window_vbox.addLayout(top_btn_row)
 
         # RangeSlider (centro, vertical)
         self._spect_range_slider = RangeSlider()
@@ -1426,12 +1431,17 @@ class AmyloidSpectPanel(QDialog):
         self._spect_range_lbl.setStyleSheet("color:#94a3b8; font-size:11px;")
         window_vbox.addWidget(self._spect_range_lbl)
 
-        # Botón Base (abajo)
-        self._btn_range_base = QPushButton("▼ Base 0")
+        # Botón Base (abajo) - angosto
+        base_btn_row = QHBoxLayout()
+        base_btn_row.addStretch(1)
+        self._btn_range_base = QPushButton("▼ B0")
         self._btn_range_base.clicked.connect(lambda: self._set_spect_range(0, self._spect_win_high))
         self._btn_range_base.setToolTip("Fija el límite inferior al 0%")
-        self._btn_range_base.setMinimumHeight(35)
-        window_vbox.addWidget(self._btn_range_base)
+        self._btn_range_base.setFixedSize(70, 28)
+        self._btn_range_base.setStyleSheet("font-size:10px; padding:2px 6px;")
+        base_btn_row.addWidget(self._btn_range_base)
+        base_btn_row.addStretch(1)
+        window_vbox.addLayout(base_btn_row)
 
         # Selector de color
         color_row = QHBoxLayout()
