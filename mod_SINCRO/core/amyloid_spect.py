@@ -238,7 +238,7 @@ def _resample_ct_to_spect_affine(
         matrix=matrix,
         offset=offset,
         output_shape=tuple(int(v) for v in spect_shape),
-        order=1,
+        order=0,
         mode="constant",
         cval=float(fill_value),
     )
@@ -285,7 +285,7 @@ def resample_volume_to_spect_grid(
             max(1e-6, float(source_spacing_zyx[i])) / max(1e-6, float(spect_spacing_zyx[i]))
             for i in range(3)
         )
-        phys = ndi.zoom(src, zoom_factors, order=1)
+        phys = ndi.zoom(src, zoom_factors, order=0)
         rs = _center_crop_or_pad_3d(phys, sp.shape, fill_value=fv)
         notes.append(
             "Remuestreo a grilla SPECT por espaciado físico "
@@ -299,7 +299,7 @@ def resample_volume_to_spect_grid(
         sp.shape[1] / max(src.shape[1], 1),
         sp.shape[2] / max(src.shape[2], 1),
     )
-    rs = ndi.zoom(src, zoom_factors, order=1)
+    rs = ndi.zoom(src, zoom_factors, order=0)
     notes.append(
         "Remuestreo a grilla SPECT por shape "
         f"{src.shape} -> {rs.shape} (zoom={zoom_factors}); sin spacing físico disponible."

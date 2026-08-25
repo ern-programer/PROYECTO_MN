@@ -129,6 +129,7 @@ class FusionReportLayoutDialog(QDialog):
         cmap_fn,
         slice_idx: dict,
         localization_points: list[dict] | None = None,
+        display_spacing_zyx: tuple[float, float, float] | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("SINCRO — Vista informe fusión")
@@ -147,6 +148,7 @@ class FusionReportLayoutDialog(QDialog):
         self._ct_vol = None if ct_vol is None else np.asarray(ct_vol, dtype=np.float64)
         if self._ct_vol is not None and self._ct_vol.ndim != 3:
             self._ct_vol = None
+        self._display_spacing_zyx = display_spacing_zyx
         self._fusion_pct = int(np.clip(fusion_pct, 0, 100))
         self._spect_window_fn = spect_window_fn
         self._ct_window_fn = ct_window_fn
@@ -486,12 +488,74 @@ class FusionReportLayoutDialog(QDialog):
         return np.clip(out, 0.0, 1.0)
 
     @staticmethod
-    def _draw_refs(rgb: np.ndarray, axis: str, idx: dict, line_px: int = 1) -> np.ndarray:
+    def _fit_2d_to_shape(img: np.ndarray, target_shape: tuple[int, int], order: int = 1) -> np.ndarray:
+        arr = np.asarray(img, dtype=np.float64)
+        if arr.ndim != 2:
+            return arr
+        th, tw = int(target_shape[0]), int(target_shape[1])
+        if th <= 0 or tw <= 0:
+            return arr
+        if arr.shape == (th, tw):
+            return arr
+        z = (th / max(1, arr.shape[0]), tw / max(1, arr.shape[1]))
+        scaled = ndi.zoom(arr, z, order=order)
+        out = np.zeros((th, tw), dtype=np.float64)
+        sh, sw = int(scaled.shape[0]), int(scaled.shape[1])
+
+        if sh <= th:
+            src_y0, src_y1 = 0, sh
+            dst_y0 = (th - sh) // 2
+            dst_y1 = dst_y0 + sh
+        else:
+            src_y0 = (sh - th) // 2
+            src_y1 = src_y0 + th
+            dst_y0, dst_y1 = 0, th
+
+        if sw <= tw:
+            src_x0, src_x1 = 0, sw
+            dst_x0 = (tw - sw) // 2
+            dst_x1 = dst_x0 + sw
+        else:
+            src_x0 = (sw - tw) // 2
+            src_x1 = src_x0 + tw
+            dst_x0, dst_x1 = 0, tw
+
+        out[dst_y0:dst_y1, dst_x0:dst_x1] = scaled[src_y0:src_y1, src_x0:src_x1]
+        return out
+
+    def _apply_aspect_2d_for_axis(self, img: np.ndarray, axis: str) -> np.ndarray:
+        arr = np.asarray(img, dtype=np.float64)
+        sp = self._display_spacing_zyx
+        if arr.ndim != 2 or sp is None or len(sp) != 3:
+            return arr
+        z_mm = max(1e-6, float(sp[0]))
+        y_mm = max(1e-6, float(sp[1]))
+        x_mm = max(1e-6, float(sp[2]))
+        if axis == "coronal":
+            ratio = z_mm / x_mm
+            if abs(ratio - 1.0) > 1e-3:
+                return ndi.zoom(arr, (ratio, 1.0), order=1)
+            return arr
+        if axis == "sagittal":
+            ratio = z_mm / y_mm
+            if abs(ratio - 1.0) > 1e-3:
+                return ndi.zoom(arr, (ratio, 1.0), order=1)
+            return arr
+        return arr
+
+    @staticmethod
+    def _draw_refs(
+        rgb: np.ndarray,
+        axis: str,
+        idx: dict,
+        vol_shape: tuple[int, int, int],
+        line_px: int = 1,
+    ) -> np.ndarray:
         arr = np.ascontiguousarray(np.asarray(rgb, dtype=np.uint8).copy())
         h, w = arr.shape[:2]
-        z = int(idx.get("axial", 0))
-        y = int(idx.get("coronal", 0))
-        x = int(idx.get("sagittal", 0))
+        z = int(np.clip(idx.get("axial", 0), 0, max(0, vol_shape[0] - 1)))
+        y = int(np.clip(idx.get("coronal", 0), 0, max(0, vol_shape[1] - 1)))
+        x = int(np.clip(idx.get("sagittal", 0), 0, max(0, vol_shape[2] - 1)))
 
         width = max(1, int(line_px))
 
@@ -512,14 +576,20 @@ class FusionReportLayoutDialog(QDialog):
             arr[:, max(0, px - a):min(w, px + b), 2] = 64
 
         if axis == "axial":
-            hline(int(round((y / max(1, h - 1)) * (h - 1))))
-            vline(int(round((x / max(1, w - 1)) * (w - 1))))
+            py = int(round((y / max(1, vol_shape[1] - 1)) * max(0, h - 1)))
+            px = int(round((x / max(1, vol_shape[2] - 1)) * max(0, w - 1)))
+            hline(py)
+            vline(px)
         elif axis == "coronal":
-            hline(int(round((z / max(1, h - 1)) * (h - 1))))
-            vline(int(round((x / max(1, w - 1)) * (w - 1))))
+            py = int(round((z / max(1, vol_shape[0] - 1)) * max(0, h - 1)))
+            px = int(round((x / max(1, vol_shape[2] - 1)) * max(0, w - 1)))
+            hline(py)
+            vline(px)
         else:
-            hline(int(round((z / max(1, h - 1)) * (h - 1))))
-            vline(int(round((y / max(1, w - 1)) * (w - 1))))
+            py = int(round((z / max(1, vol_shape[0] - 1)) * max(0, h - 1)))
+            px = int(round((y / max(1, vol_shape[1] - 1)) * max(0, w - 1)))
+            hline(py)
+            vline(px)
         return arr
 
     def _view2d(self, vol: np.ndarray, axis: str) -> np.ndarray:
@@ -572,8 +642,15 @@ class FusionReportLayoutDialog(QDialog):
 
         for c, axis in enumerate(axes):
             sp2d = self._spect_window_fn(self._view2d(self._spect_vol, axis))
-            # Usar _apply_cmap para respetar el colormap seleccionado en el combo
-            sp_rgb = self._draw_refs((self._apply_cmap(sp2d) * 255.0).astype(np.uint8), axis, self._slice_idx, self._line_px)
+            sp2d = self._apply_aspect_2d_for_axis(sp2d, axis)
+            # Respetar colormap de la ventana principal (inyectado como callback).
+            sp_rgb = self._draw_refs(
+                (self._cmap_fn(sp2d) * 255.0).astype(np.uint8),
+                axis,
+                self._slice_idx,
+                tuple(int(v) for v in self._spect_vol.shape[:3]),
+                self._line_px,
+            )
             sp_lbl = QLabel()
             sp_lbl.setStyleSheet("background:#0b1220; border:1px solid #334155;")
             sp_lbl.setPixmap(self._to_pix(sp_rgb).scaled(grid_w, grid_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
@@ -581,15 +658,36 @@ class FusionReportLayoutDialog(QDialog):
 
             if self._ct_vol is not None:
                 ct2d = self._ct_window_fn(self._view2d(self._ct_vol, axis))
-                ct_rgb = self._draw_refs((np.stack([ct2d, ct2d, ct2d], axis=-1) * 255.0).astype(np.uint8), axis, self._slice_idx, self._line_px)
-                fx_rgb = self._draw_refs((self._make_fusion_rgb(sp2d, ct2d) * 255.0).astype(np.uint8), axis, self._slice_idx, self._line_px)
+                ct2d = self._apply_aspect_2d_for_axis(ct2d, axis)
+                if sp2d.shape != ct2d.shape:
+                    sp2d = self._fit_2d_to_shape(sp2d, ct2d.shape, order=1)
+                ct_rgb = self._draw_refs(
+                    (np.stack([ct2d, ct2d, ct2d], axis=-1) * 255.0).astype(np.uint8),
+                    axis,
+                    self._slice_idx,
+                    tuple(int(v) for v in self._ct_vol.shape[:3]),
+                    self._line_px,
+                )
+                fx_rgb = self._draw_refs(
+                    (self._make_fusion_rgb(sp2d, ct2d) * 255.0).astype(np.uint8),
+                    axis,
+                    self._slice_idx,
+                    tuple(int(v) for v in self._ct_vol.shape[:3]),
+                    self._line_px,
+                )
             else:
-                ct_rgb = self._draw_refs((np.stack([sp2d, sp2d, sp2d], axis=-1) * 255.0).astype(np.uint8), axis, self._slice_idx, self._line_px)
+                ct_rgb = self._draw_refs(
+                    (np.stack([sp2d, sp2d, sp2d], axis=-1) * 255.0).astype(np.uint8),
+                    axis,
+                    self._slice_idx,
+                    tuple(int(v) for v in self._spect_vol.shape[:3]),
+                    self._line_px,
+                )
                 fx_rgb = sp_rgb
 
             ct_lbl = QLabel()
             ct_lbl.setStyleSheet("background:#0b1220; border:1px solid #334155;")
-            ct_lbl.setPixmap(self._to_pix(ct_rgb).scaled(grid_w, grid_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            ct_lbl.setPixmap(self._to_pix(ct_rgb).scaled(grid_w, grid_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation))
             self._grid.addWidget(ct_lbl, 2, c + 1)
 
             fx_lbl = QLabel()
@@ -854,6 +952,12 @@ class AmyloidSpectPanel(QDialog):
         self._ct_flip_y_test = False
         self._ct_flip_z_test = False
         self._ct_window = "bone"
+        self._ct_visual_trial_mode = False
+        self._ct_grid_trial_mode = False
+        self._trial_cache_signature = None
+        self._trial_spect_on_ct = None
+        self._trial_ct_native = None
+        self._trial_ref_shape = None
         self._workflow_tag = "perf_spect_ct"
         self._dicom_profile_info = {}
         self._pending_camera_profile_adjust = None
@@ -915,11 +1019,17 @@ class AmyloidSpectPanel(QDialog):
         self._btn_recon_pipeline.clicked.connect(self._reconstruct_with_perf_pipeline)
         self._btn_recon_pipeline.setEnabled(False)
         self._btn_recon_pipeline.setToolTip("Reconstruye el SPECT y genera cortes tomográficos; si hay gating, también SA/HLA/VLA.")
+        self._btn_recon_pipeline.setStyleSheet(
+            "background-color: #16a34a; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px;"
+        )
         flow.addWidget(self._btn_recon_pipeline, 0, 7)
 
         self._btn_cancel_recon = QPushButton("Cancelar")
         self._btn_cancel_recon.clicked.connect(self._cancel_reconstruction)
         self._btn_cancel_recon.setEnabled(False)
+        self._btn_cancel_recon.setStyleSheet(
+            "background-color: #dc2626; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px;"
+        )
         flow.addWidget(self._btn_cancel_recon, 0, 8)
 
         self._ct_check = QCheckBox("Usar CT para sustracción ósea (si hay)")
@@ -1250,27 +1360,38 @@ class AmyloidSpectPanel(QDialog):
         self._qc_mode.currentIndexChanged.connect(self._on_visual_controls_changed)
         self._qc_mode.setEnabled(False)
         qc_row.addWidget(self._qc_mode)
-        qc_row.addWidget(QLabel("Split %:"))
-        self._qc_split_slider = QSlider(Qt.Orientation.Horizontal)
+        # Split % (vertical para más recorrido)
+        split_col = QVBoxLayout()
+        split_col.addWidget(QLabel("Split %:"))
+        self._qc_split_slider = QSlider(Qt.Orientation.Vertical)
         self._qc_split_slider.setRange(10, 90)
         self._qc_split_slider.setValue(50)
         self._qc_split_slider.valueChanged.connect(self._on_visual_controls_changed)
         self._qc_split_slider.setEnabled(False)
-        qc_row.addWidget(self._qc_split_slider, 1)
+        self._qc_split_slider.setMinimumHeight(120)
+        split_col.addWidget(self._qc_split_slider, 1)
         self._qc_split_lbl = QLabel("50%")
-        self._qc_split_lbl.setStyleSheet("color:#94a3b8;")
-        qc_row.addWidget(self._qc_split_lbl)
-        qc_row.addWidget(QLabel("Fusión %:"))
-        self._fusion_slider = QSlider(Qt.Orientation.Horizontal)
+        self._qc_split_lbl.setStyleSheet("color:#94a3b8; font-size:10px;")
+        self._qc_split_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        split_col.addWidget(self._qc_split_lbl)
+        qc_row.addLayout(split_col, 1)
+
+        # Fusión % (vertical para más recorrido)
+        fusion_col = QVBoxLayout()
+        fusion_col.addWidget(QLabel("Fusión %:"))
+        self._fusion_slider = QSlider(Qt.Orientation.Vertical)
         self._fusion_slider.setRange(0, 100)
         self._fusion_slider.setValue(55)
         self._fusion_slider.setToolTip("0% CT solamente · 100% SPECT coloreado. Ajusta la mezcla de la fusión.")
         self._fusion_slider.valueChanged.connect(self._on_fusion_slider_changed)
         self._fusion_slider.setEnabled(False)
-        qc_row.addWidget(self._fusion_slider, 1)
+        self._fusion_slider.setMinimumHeight(120)
+        fusion_col.addWidget(self._fusion_slider, 1)
         self._fusion_lbl = QLabel("55%")
-        self._fusion_lbl.setStyleSheet("color:#94a3b8;")
-        qc_row.addWidget(self._fusion_lbl)
+        self._fusion_lbl.setStyleSheet("color:#94a3b8; font-size:10px;")
+        self._fusion_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fusion_col.addWidget(self._fusion_lbl)
+        qc_row.addLayout(fusion_col, 1)
         overlay_qc_layout.addLayout(qc_row)
 
         # Sliders de corte z/y/x
@@ -1425,8 +1546,7 @@ class AmyloidSpectPanel(QDialog):
         hmr_orient_row.addWidget(hmr_group, 4)   # HMR-SPECT: 4/14
         hmr_orient_row.addWidget(flip_group, 3)  # Orientación: 3/14 (compacto)
 
-        # --- Overlay / QC / Cortes (en hueco central de la fila) ---
-        hmr_orient_row.addWidget(overlay_qc_group, 4)  # Overlay/QC/Cortes: 4/14
+        # --- Overlay / QC / Cortes MOVIDO a columna derecha (arriba del MIP) ---
 
         # --- Zoom visual ---
         zoom_group = QGroupBox("Zoom")
@@ -1528,11 +1648,15 @@ class AmyloidSpectPanel(QDialog):
 
         main_splitter.addLayout(left_col, 6)  # 6 partes para imágenes (más espacio)
 
-        # --- COLUMNA DERECHA: Controles de ventana/Color (vertical) ---
+        # --- COLUMNA DERECHA: Controles + MIP ---
         right_col = QVBoxLayout()
-        right_col.setSpacing(8)
+        right_col.setSpacing(6)
 
-        # Grupo: Rango y Color SPECT (compacto, alineado derecha)
+        # ═══ FILA SUPERIOR: Ventana/Color (izq) + Overlay/QC/Cortes (der) ═══
+        top_right_row = QHBoxLayout()
+        top_right_row.setSpacing(6)
+
+        # --- Grupo: Rango y Color SPECT ---
         window_group = QGroupBox("Ventana / Color")
         window_group.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         window_group.setStyleSheet("QGroupBox { font-weight:600; }")
@@ -1602,9 +1726,32 @@ class AmyloidSpectPanel(QDialog):
         ct_win_row.addWidget(self._ct_window_combo)
         window_vbox.addLayout(ct_win_row)
 
-        right_col.addWidget(window_group)
+        trial_row = QHBoxLayout()
+        self._ct_trial_check = QCheckBox("PRUEBA CT nítida (BETA)")
+        self._ct_trial_check.setChecked(False)
+        self._ct_trial_check.setToolTip("Modo de prueba reversible. Si no convence, desmarcar para volver al estado actual.")
+        self._ct_trial_check.setStyleSheet("font-size:10px; color:#f59e0b; font-weight:600;")
+        self._ct_trial_check.toggled.connect(self._on_ct_trial_toggled)
+        trial_row.addWidget(self._ct_trial_check)
+        window_vbox.addLayout(trial_row)
+
+        trial_grid_row = QHBoxLayout()
+        self._ct_grid_trial_check = QCheckBox("PRUEBA CT nativa + SPECT escalado (BETA)")
+        self._ct_grid_trial_check.setChecked(False)
+        self._ct_grid_trial_check.setToolTip("Modo de prueba reversible: mantiene resolución CT nativa y remuestrea SPECT a grilla CT.")
+        self._ct_grid_trial_check.setStyleSheet("font-size:10px; color:#f59e0b; font-weight:600;")
+        self._ct_grid_trial_check.toggled.connect(self._on_ct_grid_trial_toggled)
+        trial_grid_row.addWidget(self._ct_grid_trial_check)
+        window_vbox.addLayout(trial_grid_row)
+
+        top_right_row.addWidget(window_group, 1)   # Ventana/Color: 1 parte
         
-        # MIP + VOIs (expande para llenar espacio restante en columna derecha)
+        # Overlay / QC / Cortes (al lado de Ventana/Color)
+        top_right_row.addWidget(overlay_qc_group, 1)  # Overlay/QC: 1 parte
+
+        right_col.addLayout(top_right_row)  # Fila con ambos grupos lado a lado
+        
+        # ═══ MIP 360° (debajo, ocupa todo el ancho) ═══
         right_col.addWidget(mip_group)
         
         # Sin addStretch: el MIP se expande para ocupar todo el espacio disponible
@@ -2374,6 +2521,15 @@ class AmyloidSpectPanel(QDialog):
             hi = lo + 1.0
         return np.clip((a - lo) / (hi - lo), 0.0, 1.0)
 
+    @staticmethod
+    def _enhance_ct_trial(img01: np.ndarray) -> np.ndarray:
+        """Realce visual SOLO para prueba (no modifica datos clínicos)."""
+        a = np.clip(np.asarray(img01, dtype=np.float64), 0.0, 1.0)
+        low = ndi.gaussian_filter(a, sigma=0.8)
+        amount = 0.9
+        sharp = a + amount * (a - low)
+        return np.clip(sharp, 0.0, 1.0)
+
     def _apply_cmap(self, img: np.ndarray) -> np.ndarray:
         a = np.asarray(img, dtype=np.float64)
         cmap_name = str(self._spect_cmap_combo.currentText() or "hot") if hasattr(self, "_spect_cmap_combo") else "hot"
@@ -2385,17 +2541,34 @@ class AmyloidSpectPanel(QDialog):
             return np.stack([a, np.clip(a * 0.75, 0, 1), np.zeros_like(a)], axis=-1)
 
     @staticmethod
-    def _pan_2d_center(img: np.ndarray, pan_yx: list[int] | tuple[int, int]) -> np.ndarray:
+    @staticmethod
+    def _pan_2d_center(img: np.ndarray, pan_yx: list[int] | tuple[int, int], order: int = 1) -> np.ndarray:
+        """Pan centrado con control de orden de interpolación.
+        
+        Args:
+            img: Imagen 2D o 3D.
+            pan_yx: Desplazamiento en píxeles (dy, dx).
+            order: Orden de interpolación scipy.ndi.shift (0=NN, 1=bilineal).
+        """
         arr = np.asarray(img, dtype=np.float64)
         if arr.ndim not in (2, 3):
             return arr
         dy, dx = int(pan_yx[0]), int(pan_yx[1])
         if dy == 0 and dx == 0:
             return arr
-        return ndi.shift(arr, shift=(dy, dx, 0) if arr.ndim == 3 else (dy, dx), order=1, mode="constant", cval=0.0)
+        return ndi.shift(arr, shift=(dy, dx, 0) if arr.ndim == 3 else (dy, dx), order=order, mode="constant", cval=0.0)
 
     @staticmethod
-    def _zoom_2d_center(img: np.ndarray, zoom_pct: int) -> np.ndarray:
+    def _zoom_2d_center(img: np.ndarray, zoom_pct: int, order: int = 1) -> np.ndarray:
+        """Zoom centrado con control de orden de interpolación.
+        
+        Args:
+            img: Imagen 2D.
+            zoom_pct: Porcentaje de zoom (100 = sin cambio).
+            order: Orden de interpolación scipy.ndi.zoom:
+                0 = nearest-neighbor (nítido, ideal para CT)
+                1 = bilineal (suave, ideal para SPECT)
+        """
         arr = np.asarray(img, dtype=np.float64)
         if arr.ndim != 2:
             return arr
@@ -2403,7 +2576,7 @@ class AmyloidSpectPanel(QDialog):
         if abs(z - 1.0) < 1e-6:
             return arr
         out_shape = arr.shape
-        scaled = ndi.zoom(arr, z, order=1)
+        scaled = ndi.zoom(arr, z, order=order)
         result = np.zeros(out_shape, dtype=np.float64)
         src_slices = []
         dst_slices = []
@@ -3071,6 +3244,141 @@ class AmyloidSpectPanel(QDialog):
         self._ct_window = str(self._ct_window_combo.currentData() or "bone")
         self._render_current_with_overlay()
 
+    def _on_ct_trial_toggled(self, checked: bool):
+        self._ct_visual_trial_mode = bool(checked)
+        if checked:
+            self._status.setText("[PRUEBA/BETA] Realce visual CT activado. Desmarcar para volver al estado actual.")
+            if hasattr(self, "_metrics"):
+                self._metrics.append("[PRUEBA/BETA] CT nítida activada (solo visual, reversible).")
+        else:
+            self._status.setText("Modo PRUEBA/BETA desactivado. CT volvió al estado actual.")
+            if hasattr(self, "_metrics"):
+                self._metrics.append("[PRUEBA/BETA] CT nítida desactivada (rollback aplicado).")
+        self._render_current_with_overlay()
+
+    @staticmethod
+    def _map_idx_between_grids(idx_ref: int, ref_n: int, tgt_n: int) -> int:
+        if ref_n <= 1 or tgt_n <= 1:
+            return 0
+        r = float(np.clip(idx_ref, 0, ref_n - 1)) / float(ref_n - 1)
+        return int(np.clip(round(r * float(tgt_n - 1)), 0, tgt_n - 1))
+
+    def _invalidate_ct_grid_trial_cache(self):
+        self._trial_cache_signature = None
+        self._trial_spect_on_ct = None
+        self._trial_ct_native = None
+        self._trial_ref_shape = None
+
+    def _ensure_ct_grid_trial_cache(self) -> bool:
+        if self._ct_volume is None or self._current_volume is None:
+            self._invalidate_ct_grid_trial_cache()
+            return False
+
+        sig = (
+            id(self._current_volume),
+            id(self._ct_volume),
+            bool(getattr(self, "_spect_flip_x_test", False)),
+            bool(getattr(self, "_spect_flip_y_test", False)),
+            bool(getattr(self, "_spect_flip_z_test", False)),
+            bool(getattr(self, "_ct_flip_x_test", False)),
+            bool(getattr(self, "_ct_flip_y_test", False)),
+            bool(getattr(self, "_ct_flip_z_test", False)),
+            tuple(np.asarray(self._spect_affine_ijk_to_lps).ravel()) if self._spect_affine_ijk_to_lps is not None else None,
+            tuple(np.asarray(self._ct_affine_ijk_to_lps).ravel()) if self._ct_affine_ijk_to_lps is not None else None,
+            tuple(self._spect_spacing_zyx) if self._spect_spacing_zyx is not None else None,
+            tuple(self._ct_spacing_zyx) if self._ct_spacing_zyx is not None else None,
+        )
+        if sig == self._trial_cache_signature and self._trial_spect_on_ct is not None and self._trial_ct_native is not None:
+            return True
+
+        try:
+            spect_tx = self._spect_transform_3d(np.asarray(self._current_volume, dtype=np.float64))
+            ct_tx = self._ct_transform_3d(np.asarray(self._ct_volume, dtype=np.float64))
+            spect_on_ct, _notes = resample_volume_to_spect_grid(
+                spect_tx,
+                ct_tx,
+                source_spacing_zyx=self._spect_spacing_zyx,
+                spect_spacing_zyx=self._ct_spacing_zyx,
+                source_affine_ijk_to_lps=self._spect_affine_ijk_to_lps,
+                spect_affine_ijk_to_lps=self._ct_affine_ijk_to_lps,
+                fill_value=float(np.min(spect_tx)) if spect_tx.size else 0.0,
+            )
+            self._trial_spect_on_ct = np.asarray(spect_on_ct, dtype=np.float64)
+            self._trial_ct_native = np.asarray(ct_tx, dtype=np.float64)
+            self._trial_ref_shape = tuple(int(v) for v in np.asarray(self._current_volume).shape[:3])
+            self._trial_cache_signature = sig
+            return True
+        except Exception:
+            self._invalidate_ct_grid_trial_cache()
+            return False
+
+    def _on_ct_grid_trial_toggled(self, checked: bool):
+        self._ct_grid_trial_mode = bool(checked)
+        self._invalidate_ct_grid_trial_cache()
+        if checked:
+            self._status.setText("[PRUEBA/BETA] CT nativa + SPECT en grilla CT activado. Desmarcar para rollback inmediato.")
+            if hasattr(self, "_metrics"):
+                self._metrics.append("[PRUEBA/BETA] CT nativa + SPECT escalado a CT activado (solo visual, reversible).")
+        else:
+            self._status.setText("Modo PRUEBA/BETA grilla CT desactivado. Rollback al estado actual aplicado.")
+            if hasattr(self, "_metrics"):
+                self._metrics.append("[PRUEBA/BETA] CT nativa + SPECT escalado a CT desactivado (rollback aplicado).")
+        self._render_current_with_overlay()
+
+    def _trial_slices_on_ct_grid(self) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]] | None:
+        if not self._ensure_ct_grid_trial_cache():
+            return None
+        sp = np.asarray(self._trial_spect_on_ct, dtype=np.float64)
+        ct = np.asarray(self._trial_ct_native, dtype=np.float64)
+        ref = self._trial_ref_shape or tuple(int(v) for v in sp.shape)
+
+        z_ref = int(np.clip(self._slice_idx.get("axial", max(0, ref[0] // 2)) + self._spect_view_offset.get("axial", 0), 0, max(0, ref[0] - 1)))
+        y_ref = int(np.clip(self._slice_idx.get("coronal", max(0, ref[1] // 2)) + self._spect_view_offset.get("coronal", 0), 0, max(0, ref[1] - 1)))
+        x_ref = int(np.clip(self._slice_idx.get("sagittal", max(0, ref[2] // 2)) + self._spect_view_offset.get("sagittal", 0), 0, max(0, ref[2] - 1)))
+
+        z = self._map_idx_between_grids(z_ref, ref[0], sp.shape[0])
+        y = self._map_idx_between_grids(y_ref, ref[1], sp.shape[1])
+        x = self._map_idx_between_grids(x_ref, ref[2], sp.shape[2])
+
+        sp_ax = self._window_spect(sp[z])
+        sp_co = self._window_spect(sp[:, y, :])
+        sp_sa = self._window_spect(sp[:, :, x])
+
+        ct_ax = self._window_ct(ct[z])
+        ct_co = self._window_ct(ct[:, y, :])
+        ct_sa = self._window_ct(ct[:, :, x])
+
+        # Corrección de aspecto físico para cortes no-axiales (z suele tener spacing mayor).
+        # Evita que coronal/sagital queden “achatados” al usar grilla CT nativa.
+        ct_sp = getattr(self, "_ct_spacing_zyx", None)
+        if ct_sp is not None and len(ct_sp) == 3:
+            z_mm = max(1e-6, float(ct_sp[0]))
+            y_mm = max(1e-6, float(ct_sp[1]))
+            x_mm = max(1e-6, float(ct_sp[2]))
+            zoom_co = (z_mm / x_mm, 1.0)  # coronal: (z, x)
+            zoom_sa = (z_mm / y_mm, 1.0)  # sagital: (z, y)
+            sp_co = ndi.zoom(sp_co, zoom_co, order=1)
+            ct_co = ndi.zoom(ct_co, zoom_co, order=1)
+            sp_sa = ndi.zoom(sp_sa, zoom_sa, order=1)
+            ct_sa = ndi.zoom(ct_sa, zoom_sa, order=1)
+
+        if bool(getattr(self, "_ct_visual_trial_mode", False)):
+            ct_ax = self._enhance_ct_trial(ct_ax)
+            ct_co = self._enhance_ct_trial(ct_co)
+            ct_sa = self._enhance_ct_trial(ct_sa)
+
+        sp_prev = {
+            "axial": self._pan_2d_center(self._zoom_2d_center(sp_ax, self._spect_zoom_pct, order=1), self._spect_pan_px["axial"], order=1),
+            "coronal": self._pan_2d_center(self._zoom_2d_center(sp_co, self._spect_zoom_pct, order=1), self._spect_pan_px["coronal"], order=1),
+            "sagittal": self._pan_2d_center(self._zoom_2d_center(sp_sa, self._spect_zoom_pct, order=1), self._spect_pan_px["sagittal"], order=1),
+        }
+        ct_prev = {
+            "axial": self._pan_2d_center(self._zoom_2d_center(ct_ax, self._ct_zoom_pct, order=1), self._ct_pan_px["axial"], order=1),
+            "coronal": self._pan_2d_center(self._zoom_2d_center(ct_co, self._ct_zoom_pct, order=1), self._ct_pan_px["coronal"], order=1),
+            "sagittal": self._pan_2d_center(self._zoom_2d_center(ct_sa, self._ct_zoom_pct, order=1), self._ct_pan_px["sagittal"], order=1),
+        }
+        return sp_prev, ct_prev
+
     def keyPressEvent(self, event):
         key = event.key()
         mods = event.modifiers()
@@ -3153,26 +3461,17 @@ class AmyloidSpectPanel(QDialog):
             return
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-        if bool(getattr(self, "_localization_cross_enabled", False)) and (ctrl or shift):
-            if self._localize_from_view_click(event, axis, target="ct" if ctrl else "spect"):
-                event.accept()
-                return
         if not (ctrl or shift):
             return
         self._drag_state = {
             "axis": axis,
             "target": "ct" if ctrl else "spect",
             "pos": event.position().toPoint(),
+            "moved": False,
         }
         event.accept()
 
     def _on_image_mouse_move(self, event, axis: str):
-        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-        if bool(getattr(self, "_localization_cross_enabled", False)) and (ctrl or shift):
-            if self._localize_from_view_click(event, axis, target="ct" if ctrl else "spect"):
-                event.accept()
-                return
         if not self._drag_state or self._drag_state.get("axis") != axis:
             return
         pos = event.position().toPoint()
@@ -3181,6 +3480,7 @@ class AmyloidSpectPanel(QDialog):
         dy = int(pos.y() - old.y())
         if dx == 0 and dy == 0:
             return
+        self._drag_state["moved"] = True
         target = self._drag_state.get("target")
         if target == "ct" and self._ct_auto_registered is not None:
             dz, dyw, dxw = self._drag_delta_to_world_zyx(axis, dx, dy)
@@ -3273,6 +3573,11 @@ class AmyloidSpectPanel(QDialog):
         return True
 
     def _on_image_mouse_release(self, event, axis: str):
+        if self._drag_state and self._drag_state.get("axis") == axis:
+            moved = bool(self._drag_state.get("moved", False))
+            target = str(self._drag_state.get("target") or "spect")
+            if (not moved) and bool(getattr(self, "_localization_cross_enabled", False)):
+                self._localize_from_view_click(event, axis, target=target)
         self._drag_state = None
         event.accept()
 
@@ -3356,10 +3661,15 @@ class AmyloidSpectPanel(QDialog):
         coronal = self._window_ct(vol[:, y, :])
         sagittal = self._window_ct(vol[:, :, x])
 
+        if bool(getattr(self, "_ct_visual_trial_mode", False)):
+            axial = self._enhance_ct_trial(axial)
+            coronal = self._enhance_ct_trial(coronal)
+            sagittal = self._enhance_ct_trial(sagittal)
+
         return {
-            "axial": self._pan_2d_center(self._zoom_2d_center(axial, self._ct_zoom_pct), self._ct_pan_px["axial"]),
-            "coronal": self._pan_2d_center(self._zoom_2d_center(coronal, self._ct_zoom_pct), self._ct_pan_px["coronal"]),
-            "sagittal": self._pan_2d_center(self._zoom_2d_center(sagittal, self._ct_zoom_pct), self._ct_pan_px["sagittal"]),
+            "axial": self._pan_2d_center(self._zoom_2d_center(axial, self._ct_zoom_pct, order=1), self._ct_pan_px["axial"], order=1),
+            "coronal": self._pan_2d_center(self._zoom_2d_center(coronal, self._ct_zoom_pct, order=1), self._ct_pan_px["coronal"], order=1),
+            "sagittal": self._pan_2d_center(self._zoom_2d_center(sagittal, self._ct_zoom_pct, order=1), self._ct_pan_px["sagittal"], order=1),
         }
 
     def _render_triplet(self, left_title: str, left_arr: np.ndarray, mid_title: str, mid_arr: np.ndarray, right_title: str, right_arr: np.ndarray):
@@ -3457,12 +3767,22 @@ class AmyloidSpectPanel(QDialog):
         if hasattr(self, "_fusion_lbl"):
             self._fusion_lbl.setText(f"{self._fusion_pct}%")
 
-        pv = self._slices_preview_at(self._current_volume)
         mode = str(self._qc_mode.currentData() or "off")
-
+        pv = None
         ct_prev = None
-        if self._ct_registered is not None and mode != "off":
-            ct_prev = self._ct_slices_preview_at(np.asarray(self._ct_registered, dtype=np.float64))
+
+        if bool(getattr(self, "_ct_grid_trial_mode", False)) and self._ct_volume is not None and mode != "off":
+            trial_pair = self._trial_slices_on_ct_grid()
+            if trial_pair is not None:
+                pv, ct_prev = trial_pair
+            else:
+                pv = self._slices_preview_at(self._current_volume)
+                if self._ct_registered is not None:
+                    ct_prev = self._ct_slices_preview_at(np.asarray(self._ct_registered, dtype=np.float64))
+        else:
+            pv = self._slices_preview_at(self._current_volume)
+            if self._ct_registered is not None and mode != "off":
+                ct_prev = self._ct_slices_preview_at(np.asarray(self._ct_registered, dtype=np.float64))
 
         if ct_prev is not None:
             ax_rgb = self._make_qc_rgb(pv["axial"], ct_prev["axial"], mode, self._qc_split_slider.value())
@@ -3556,11 +3876,12 @@ class AmyloidSpectPanel(QDialog):
                 raise ValueError(f"SPECT inválido para informe: {spect_vol.shape}")
 
             ct_vol = None
-            if self._ct_registered is not None:
-                ct_vol = self._ct_transform_3d(np.asarray(self._ct_registered, dtype=np.float64))
-            elif self._ct_volume is not None:
+            # Informe final: priorizar resolución nativa de CT (no CT degradada a grilla SPECT).
+            if self._ct_volume is not None:
                 tmp = self._ct_transform_3d(np.asarray(self._ct_volume, dtype=np.float64))
                 ct_vol = tmp if tmp.ndim == 3 else None
+            elif self._ct_registered is not None:
+                ct_vol = self._ct_transform_3d(np.asarray(self._ct_registered, dtype=np.float64))
 
             loc_points = self.get_localization_points()
             dlg = FusionReportLayoutDialog(
@@ -3573,7 +3894,17 @@ class AmyloidSpectPanel(QDialog):
                 cmap_fn=self._apply_cmap,
                 slice_idx=dict(self._slice_idx),
                 localization_points=loc_points,
+                display_spacing_zyx=(
+                    tuple(self._ct_spacing_zyx)
+                    if (ct_vol is not None and self._ct_spacing_zyx is not None and len(self._ct_spacing_zyx) == 3)
+                    else (tuple(self._spect_spacing_zyx) if (self._spect_spacing_zyx is not None and len(self._spect_spacing_zyx) == 3) else None)
+                ),
             )
+            if hasattr(self, "_metrics") and ct_vol is not None:
+                self._metrics.append(
+                    "[Informe fusión] CT en resolución nativa para salida final "
+                    f"(shape={tuple(int(v) for v in np.asarray(ct_vol).shape)})."
+                )
             dlg.exec()
         except Exception as exc:
             self._status.setText(f"Error abriendo vista informe fusión: {exc}")

@@ -1064,14 +1064,7 @@ class MainWindow(QMainWindow):
 			"sustracción ósea visual y exportación."
 		)
 		button_row.addWidget(self.amyloid_spect_btn, 9, 0, 1, 4)
-		self.dual_spect_btn = QPushButton("Dual-SPECT Washout")
-		self.dual_spect_btn.clicked.connect(self.open_dual_spect_window)
-		self.dual_spect_btn.setToolTip(
-			"Análisis dual-SPECT para washout cardíaco: carga T1 (1h) y T2 (3h), "
-			"calcula HMR en ambos tiempos y el washout porcentual. "
-			"Ayuda a diferenciar ATTR-CM de AL."
-		)
-		button_row.addWidget(self.dual_spect_btn, 10, 0, 1, 4)
+
 		# Ubicar Acciones justo debajo de la versión y la barra de progreso.
 		insert_at = self._sidebar_layout.indexOf(self._progress_bar) + 1
 		self._sidebar_layout.insertWidget(insert_at, button_box)
@@ -4103,15 +4096,7 @@ class MainWindow(QMainWindow):
 		self._amyloid_spect_window = dlg
 		return dlg
 
-	def open_dual_spect_window(self):
-		"""Abre el panel dual-SPECT para análisis de washout."""
-		from ui.dual_spect_panel import DualSpectPanel
-		dlg = DualSpectPanel(self)
-		dlg.show()
-		dlg.raise_()
-		dlg.activateWindow()
-		self._dual_spect_window = dlg
-		return dlg
+
 
 	def _amyloid_2d_image(self):
 		"""Extrae una imagen 2D del estudio para amiloidosis.
