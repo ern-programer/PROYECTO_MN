@@ -63,6 +63,9 @@ from core.amyloid_spect import (
     create_voi_from_localization,
     create_anatomical_heart_voi,
     create_bone_safe_mediastinum_voi,
+    # S/VD ratio
+    SvdRatioResult,
+    compute_spect_ratio,
 )
 
 
@@ -977,6 +980,17 @@ class AmyloidSpectPanel(QDialog):
         # VOIs temporales para visualización en vivo
         self._temp_voi_heart = None
         self._temp_voi_mediastinum = None
+
+        # === Sistema S/VD (ratio corazón/vértebra/aorta) ===
+        self._svd_points: dict[str, tuple[int, int, int] | None] = {
+            "S": None,  # Corazón
+            "V": None,  # Vértebra
+            "D": None,  # Aorta descendente
+        }
+        self._svd_active_roi = "S"  # ROI activa para depositar con clic
+        self._svd_result = None   # SvdRatioResult
+        self._svd_vertebra_radius = 15.0  # mm
+        self._svd_aorta_radius = 12.0     # mm
         
         # === F2.4: Estado edición manual de máscara CT ===
         self._mask_edit_active = False          # Si el modo edición está activo
@@ -1621,6 +1635,93 @@ class AmyloidSpectPanel(QDialog):
         ct_persist_row.addWidget(self._btn_restart_ct)
         
         hmr_layout.addLayout(ct_persist_row)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # GRUPO: Ratio S/VD (Corazón / Vértebra / Aorta) — EXPERIMENTAL
+        # ═══════════════════════════════════════════════════════════════════
+        svd_group = QGroupBox("Ratio S/VD (Corazón / Vértebra / Aorta) — Experimental")
+        svd_layout = QVBoxLayout(svd_group)
+        svd_layout.setSpacing(4)
+
+        # Fila 1: Selector de ROI activa + radios
+        svd_roi_row = QHBoxLayout()
+        svd_roi_row.addWidget(QLabel("ROI activa:"))
+        self._svd_roi_combo = QComboBox()
+        self._svd_roi_combo.addItem("S — Corazón", "S")
+        self._svd_roi_combo.addItem("V — Vértebra torácica", "V")
+        self._svd_roi_combo.addItem("D — Aorta descendente", "D")
+        self._svd_roi_combo.setCurrentIndex(0)
+        self._svd_roi_combo.setToolTip(
+            "Selecciona qué ROI vas a depositar con Ctrl/Shift+clic.\n"
+            "S = Corazón (usa radio corazón del HMR)\n"
+            "V = Vértebra torácica (radio propio)\n"
+            "D = Aorta descendente (radio propio)"
+        )
+        self._svd_roi_combo.currentIndexChanged.connect(self._on_svd_roi_changed)
+        svd_roi_row.addWidget(self._svd_roi_combo)
+
+        svd_roi_row.addWidget(QLabel("rV (mm):"))
+        self._svd_vertebra_spin = QDoubleSpinBox()
+        self._svd_vertebra_spin.setRange(5.0, 40.0)
+        self._svd_vertebra_spin.setValue(15.0)
+        self._svd_vertebra_spin.setSingleStep(1.0)
+        self._svd_vertebra_spin.setToolTip("Radio de la ROI vértebra (mm)")
+        svd_roi_row.addWidget(self._svd_vertebra_spin)
+
+        svd_roi_row.addWidget(QLabel("rD (mm):"))
+        self._svd_aorta_spin = QDoubleSpinBox()
+        self._svd_aorta_spin.setRange(5.0, 40.0)
+        self._svd_aorta_spin.setValue(12.0)
+        self._svd_aorta_spin.setSingleStep(1.0)
+        self._svd_aorta_spin.setToolTip("Radio de la ROI aorta (mm)")
+        svd_roi_row.addWidget(self._svd_aorta_spin)
+        svd_layout.addLayout(svd_roi_row)
+
+        # Fila 2: Botones depositar / limpiar / calcular
+        svd_btn_row = QHBoxLayout()
+        self._btn_svd_deposit = QPushButton("📍 Depositar punto")
+        self._btn_svd_deposit.setToolTip(
+            "Deposita la cruz actual en la ROI activa seleccionada.\n"
+            "Flujo: 1) Localización → clic en estructura → Depositar punto.\n"
+            "Repetir para S, V y D."
+        )
+        self._btn_svd_deposit.clicked.connect(self._on_svd_deposit)
+        svd_btn_row.addWidget(self._btn_svd_deposit)
+
+        self._btn_svd_clear = QPushButton("Limpiar")
+        self._btn_svd_clear.setToolTip("Borra los 3 puntos S/V/D")
+        self._btn_svd_clear.clicked.connect(self._on_svd_clear)
+        svd_btn_row.addWidget(self._btn_svd_clear)
+
+        self._btn_calc_svd = QPushButton("Calcular S/VD")
+        self._btn_calc_svd.clicked.connect(self._calculate_svd_ratio)
+        self._btn_calc_svd.setToolTip(
+            "Calcula S/VD = S / sqrt(V×D)\n"
+            "Requiere los 3 puntos S, V y D depositados."
+        )
+        svd_btn_row.addWidget(self._btn_calc_svd)
+        svd_layout.addLayout(svd_btn_row)
+
+        # Fila 3: Resultado
+        self._lbl_svd_result = QLabel("S/VD = N/D")
+        self._lbl_svd_result.setStyleSheet(
+            "font-size:14px; font-weight:700; color:#ffffff; background:#1e1b4b; padding:6px 12px;"
+        )
+        svd_layout.addWidget(self._lbl_svd_result)
+
+        # Fila 4: Escala de referencia
+        svd_scale_row = QHBoxLayout()
+        svd_scale_lbl = QLabel(
+            "<span style='color:#ef4444; font-weight:600;'>≥2.2 POSITIVO</span> · "
+            "<span style='color:#f59e0b; font-weight:600;'>1.8-2.2 EQUIVOCO</span> · "
+            "<span style='color:#22c55e; font-weight:600;'>&lt;1.8 NEGATIVO</span>"
+        )
+        svd_scale_lbl.setStyleSheet("font-size:10px; background:transparent;")
+        svd_scale_row.addWidget(svd_scale_lbl)
+        svd_scale_row.addStretch(1)
+        svd_layout.addLayout(svd_scale_row)
+
+        hmr_layout.addWidget(svd_group)
 
         # === F2.4: Edición manual de máscara CT (brush/erase) ===
         edit_group = QGroupBox("F2.4 Edición Manual de Máscara CT")
@@ -3313,6 +3414,41 @@ class AmyloidSpectPanel(QDialog):
                     painter.setPen(pen_m)
                     painter.drawEllipse(QPointF(cx_px, cy_px), r_px, r_px)
                     painter.drawText(cx_px + r_px + 4, cy_px - 4, f"M {temp_med.radius_mm:.0f}mm")
+
+                # === Esferas S/VD (corazón/vértebra/aorta) ===
+                svd_colors = {
+                    "S": QColor(239, 68, 68, 200),    # rojo
+                    "V": QColor(34, 197, 94, 200),    # verde
+                    "D": QColor(168, 85, 247, 200),   # violeta
+                }
+                svd_labels = {"S": "S", "V": "V", "D": "D"}
+                svd_radii = {
+                    "S": float(self._heart_radius_spin.value()) if hasattr(self, "_heart_radius_spin") else 30.0,
+                    "V": float(self._svd_vertebra_spin.value()) if hasattr(self, "_svd_vertebra_spin") else 15.0,
+                    "D": float(self._svd_aorta_spin.value()) if hasattr(self, "_svd_aorta_spin") else 12.0,
+                }
+                for roi_key in ("S", "V", "D"):
+                    pt = self._svd_points.get(roi_key)
+                    if pt is None:
+                        continue
+                    cz_p, cy_p, cx_p = float(pt[0]), float(pt[1]), float(pt[2])
+                    r_vol = svd_radii[roi_key] / max(spacing)
+                    if axis == "axial":
+                        cx_px = int(round(cx_p / max(1, shape[2] - 1) * (w - 1)))
+                        cy_px = int(round(cy_p / max(1, shape[1] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
+                    elif axis == "coronal":
+                        cx_px = int(round(cx_p / max(1, shape[2] - 1) * (w - 1)))
+                        cy_px = int(round(cz_p / max(1, shape[0] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
+                    else:
+                        cx_px = int(round(cy_p / max(1, shape[1] - 1) * (w - 1)))
+                        cy_px = int(round(cz_p / max(1, shape[0] - 1) * (h - 1)))
+                        r_px = int(round(r_vol / max(1, shape[1] - 1) * w))
+                    pen_svd = QPen(svd_colors[roi_key], 2, Qt.PenStyle.SolidLine)
+                    painter.setPen(pen_svd)
+                    painter.drawEllipse(QPointF(cx_px, cy_px), r_px, r_px)
+                    painter.drawText(cx_px + r_px + 4, cy_px - 4, svd_labels[roi_key])
             
             # Dibujar cruz de triangulación
             if show_triang:
@@ -3473,6 +3609,137 @@ class AmyloidSpectPanel(QDialog):
         if dist is not None:
             out.append({"label": "Distancia A→B", "value_mm": round(dist, 1)})
         return out
+
+    # ============================================================
+    # Sistema S/VD (ratio corazón / vértebra / aorta)
+    # ============================================================
+
+    def _on_svd_roi_changed(self) -> None:
+        """Cambia la ROI activa para depositar puntos S/V/D."""
+        roi = str(self._svd_roi_combo.currentData())
+        self._svd_active_roi = roi
+        labels = {"S": "Corazón", "V": "Vértebra", "D": "Aorta"}
+        self._status.setText(f"ROI activa: {labels.get(roi, roi)}. Depositá un punto y click 'Depositar punto'.")
+
+    def _on_svd_deposit(self) -> None:
+        """Deposita la cruz actual en la ROI activa S/V/D."""
+        pt = getattr(self, "_localization_point_zyx", None)
+        if pt is None:
+            self._status.setText("Primero depositá una cruz de localización (Ctrl/Shift+clic).")
+            return
+        roi = self._svd_active_roi
+        self._svd_points[roi] = (int(pt[0]), int(pt[1]), int(pt[2]))
+        labels = {"S": "Corazón", "V": "Vértebra", "D": "Aorta"}
+        self._status.setText(
+            f"ROI {labels.get(roi, roi)} fijada en Z/Y/X = {pt[0]+1}/{pt[1]+1}/{pt[2]+1}. "
+            f"Puntos S/V/D: "
+            f"{'✓' if self._svd_points['S'] else '✗'}/"
+            f"{'✓' if self._svd_points['V'] else '✗'}/"
+            f"{'✓' if self._svd_points['D'] else '✗'}"
+        )
+        self._render_selected_view()
+
+    def _on_svd_clear(self) -> None:
+        """Borra los 3 puntos S/V/D."""
+        self._svd_points = {"S": None, "V": None, "D": None}
+        self._svd_result = None
+        self._lbl_svd_result.setText("S/VD = N/D")
+        self._lbl_svd_result.setStyleSheet(
+            "font-size:14px; font-weight:700; color:#ffffff; background:#1e1b4b; padding:6px 12px;"
+        )
+        self._status.setText("Puntos S/V/D limpiados.")
+        self._render_selected_view()
+
+    def _calculate_svd_ratio(self) -> None:
+        """Calcula el ratio S/VD usando los 3 puntos depositados."""
+        try:
+            if self._current_volume is None:
+                QMessageBox.warning(self, "SINCRO", "Primero cargue un volumen SPECT.")
+                return
+
+            s_pt = self._svd_points.get("S")
+            v_pt = self._svd_points.get("V")
+            d_pt = self._svd_points.get("D")
+
+            missing = []
+            if s_pt is None:
+                missing.append("S (corazón)")
+            if v_pt is None:
+                missing.append("V (vértebra)")
+            if d_pt is None:
+                missing.append("D (aorta)")
+            if missing:
+                QMessageBox.warning(
+                    self, "SINCRO",
+                    f"Faltan puntos: {', '.join(missing)}.\n\n"
+                    "1. Active 'Localización'\n"
+                    "2. Seleccione ROI activa en el combo S/V/D\n"
+                    "3. Ctrl/Shift+clic en la estructura\n"
+                    "4. Click 'Depositar punto'\n"
+                    "5. Repita para S, V y D"
+                )
+                return
+
+            spacing = self._spect_spacing_or_default()
+            heart_radius = float(self._heart_radius_spin.value())
+            vertebra_radius = float(self._svd_vertebra_spin.value())
+            aorta_radius = float(self._svd_aorta_spin.value())
+
+            voi_heart = VOISphere(
+                cz=s_pt[0], cy=s_pt[1], cx=s_pt[2], radius_mm=heart_radius
+            )
+            voi_vertebra = VOISphere(
+                cz=v_pt[0], cy=v_pt[1], cx=v_pt[2], radius_mm=vertebra_radius
+            )
+            voi_aorta = VOISphere(
+                cz=d_pt[0], cy=d_pt[1], cx=d_pt[2], radius_mm=aorta_radius
+            )
+
+            vol_raw = getattr(self, "_unfiltered_volume", None)
+
+            result = compute_spect_ratio(
+                volume=self._current_volume,
+                spacing_zyx=spacing,
+                voi_heart=voi_heart,
+                voi_vertebra=voi_vertebra,
+                voi_aorta=voi_aorta,
+                volume_raw=vol_raw,
+            )
+            self._svd_result = result
+
+            # Mostrar resultado
+            self._lbl_svd_result.setText(result.s_vd_text)
+            cls = result.classification
+            color = {"POSITIVO": "#ef4444", "EQUIVOCO": "#f59e0b", "NEGATIVO": "#22c55e"}.get(cls, "#ffffff")
+            self._lbl_svd_result.setStyleSheet(
+                f"font-size:14px; font-weight:700; color:{color}; background:#1e1b4b; padding:6px 12px;"
+            )
+
+            self._status.setText(
+                f"S/VD={result.s_vd:.2f} · S/V={result.s_v:.2f} · S/D={result.s_d:.2f} · V/D={result.v_d:.2f} ({cls})"
+            )
+            self._metrics.append(
+                f"\n--- Ratio S/VD (SPECT 3D) ---\n"
+                f"- S (corazón)  Z/Y/X: {s_pt[0]+1}/{s_pt[1]+1}/{s_pt[2]+1} · r={heart_radius:.0f}mm\n"
+                f"- V (vértebra) Z/Y/X: {v_pt[0]+1}/{v_pt[1]+1}/{v_pt[2]+1} · r={vertebra_radius:.0f}mm\n"
+                f"- D (aorta)    Z/Y/X: {d_pt[0]+1}/{d_pt[1]+1}/{d_pt[2]+1} · r={aorta_radius:.0f}mm\n"
+                f"- S/VD = {result.s_vd:.3f} ({cls})\n"
+                f"- S/V  = {result.s_v:.3f}\n"
+                f"- S/D  = {result.s_d:.3f}\n"
+                f"- V/D  = {result.v_d:.3f}\n"
+                f"- Cuentas: S={result.s_counts:.0f} V={result.v_counts:.0f} D={result.d_counts:.0f}\n"
+                f"- Voxels:  S={result.s_voxels} V={result.v_voxels} D={result.d_voxels}\n"
+                f"- Spacing: {spacing[0]:.2f}/{spacing[1]:.2f}/{spacing[2]:.2f} mm"
+            )
+            self._render_selected_view()
+
+        except Exception as exc:
+            self._status.setText(f"Error calculando S/VD: {exc}")
+            QMessageBox.critical(self, "SINCRO", f"Error calculando S/VD:\n{exc}")
+
+    def get_svd_result(self) -> SvdRatioResult | None:
+        """Retorna el resultado S/VD calculado (para informes)."""
+        return self._svd_result
 
     def get_hmr_spect_result(self) -> HmrSpectResult | None:
         """Retorna el resultado HMR-SPECT calculado (para informes)."""

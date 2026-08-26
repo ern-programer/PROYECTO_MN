@@ -1026,7 +1026,7 @@ def register_ct_to_spect_rigid(
             ct_rs = ndi.zoom(ct, zoom_factors, order=1)
             notes.append(
                 "CT remuestreado por shape a grilla SPECT "
-                f"{ct.shape} -> {ct_rs.shape} (zoom={zoom_factors}); sin spacing físico disponible."
+                f"{ct.shape} -> {ct_rs.shape} (zoom={zoom_factors}; sin spacing físico disponible."
             )
     else:
         ct_rs = ct
@@ -2462,3 +2462,164 @@ def create_voi_from_localization(
         )
     
     return voi_heart, voi_mediastinum
+
+
+# =============================================================================
+# RATIO S/VD — Corazón / Vértebra / Aorta descendente (SPECT 3D)
+# =============================================================================
+# Referencia: Castano et al., J Nucl Cardiol 2024 — ratio S/VD en SPECT/CT
+# para amiloidosis cardíaca. Útil en casos equívocos (HMR planar 1.0–1.5).
+# S = cuentas ROI corazón, V = cuentas ROI vértebra, D = cuentas ROI aorta.
+# Ratio principal: S/VD = S / sqrt(V × D)  (media geométrica de V y D).
+# Ratios secundarios: S/V, S/D, V/D.
+# =============================================================================
+
+@dataclass
+class SvdRatioResult:
+    """Resultado del cálculo ratio S/VD en SPECT 3D."""
+
+    # Ratios principales
+    s_vd: float          # S / sqrt(V×D) — ratio principal (media geométrica)
+    s_v: float           # S / V
+    s_d: float           # S / D
+    v_d: float           # V / D (ratio de referencia normal)
+
+    # Cuentas por ROI
+    s_counts: float = 0.0       # Cuentas totales ROI corazón
+    v_counts: float = 0.0       # Cuentas totales ROI vértebra
+    d_counts: float = 0.0       # Cuentas totales ROI aorta
+
+    # Cuentas promedio por voxel
+    s_mean: float = 0.0
+    v_mean: float = 0.0
+    d_mean: float = 0.0
+
+    # Número de voxels por ROI
+    s_voxels: int = 0
+    v_voxels: int = 0
+    d_voxels: int = 0
+
+    # Volúmenes en mL
+    s_volume_ml: float = 0.0
+    v_volume_ml: float = 0.0
+    d_volume_ml: float = 0.0
+
+    # VOIs utilizadas
+    voi_heart: VOISphere | None = None
+    voi_vertebra: VOISphere | None = None
+    voi_aorta: VOISphere | None = None
+
+    # Clasificación
+    method: str = "VOI completa"
+
+    @property
+    def classification(self) -> str:
+        """Clasificación basada en S/VD.
+
+        Cutoffs preliminares (literatura en desarrollo):
+        - S/VD >= 2.2 → POSITIVO
+        - S/VD 1.8–2.2 → EQUIVOCO
+        - S/VD < 1.8 → NEGATIVO
+
+        NOTA: Estos cutoffs son orientativos y deben validarse con la
+        población local antes de uso clínico definitivo.
+        """
+        if self.s_vd >= 2.2:
+            return "POSITIVO"
+        if self.s_vd >= 1.8:
+            return "EQUIVOCO"
+        return "NEGATIVO"
+
+    @property
+    def s_vd_text(self) -> str:
+        return f"S/VD = {self.s_vd:.2f} ({self.classification})"
+
+
+def compute_spect_ratio(
+    volume: np.ndarray,
+    spacing_zyx: tuple[float, float, float],
+    voi_heart: VOISphere | VOIAnatomical,
+    voi_vertebra: VOISphere | VOIAnatomical,
+    voi_aorta: VOISphere | VOIAnatomical,
+    *,
+    volume_raw: np.ndarray | None = None,
+) -> SvdRatioResult:
+    """Calcula ratio S/VD (corazón / vértebra / aorta) en SPECT 3D.
+
+    Integra cuentas totales dentro de cada VOI esférica (o anatómica)
+    sobre el volumen SPECT y calcula:
+
+        S/VD = S / sqrt(V × D)
+        S/V  = S / V
+        S/D  = S / D
+        V/D  = V / D
+
+    Args:
+        volume: Volumen SPECT 3D filtrado (nz, ny, nx)
+        spacing_zyx: Espaciado en mm (sz, sy, sx)
+        voi_heart: VOI del corazón (S)
+        voi_vertebra: VOI de la vértebra torácica (V)
+        voi_aorta: VOI de la aorta descendente (D)
+        volume_raw: Volumen SPECT sin filtrar (opcional, para ratios raw)
+
+    Returns:
+        SvdRatioResult con todos los ratios y estadísticas.
+    """
+    vol = np.asarray(volume, dtype=np.float64)
+    if vol.ndim != 3:
+        raise ValueError(f"Se esperaba volumen 3D, recibido {vol.shape}")
+
+    # Generar máscaras 3D para cada ROI
+    mask_s = voi_heart.mask_3d(vol.shape, spacing_zyx)
+    mask_v = voi_vertebra.mask_3d(vol.shape, spacing_zyx)
+    mask_d = voi_aorta.mask_3d(vol.shape, spacing_zyx)
+
+    # Cuentas totales (volumen filtrado)
+    s_counts = float(vol[mask_s].sum())
+    v_counts = float(vol[mask_v].sum())
+    d_counts = float(vol[mask_d].sum())
+
+    # Voxels y medias
+    s_voxels = int(mask_s.sum())
+    v_voxels = int(mask_v.sum())
+    d_voxels = int(mask_d.sum())
+
+    s_mean = s_counts / max(s_voxels, 1) if s_voxels > 0 else 0.0
+    v_mean = v_counts / max(v_voxels, 1) if v_voxels > 0 else 0.0
+    d_mean = d_counts / max(d_voxels, 1) if d_voxels > 0 else 0.0
+
+    # Ratios (proteger contra división por cero)
+    eps = 1e-8
+    vd_geom = float(np.sqrt(max(v_counts, 0.0) * max(d_counts, 0.0)))
+    s_vd = s_counts / max(vd_geom, eps)
+    s_v = s_counts / max(v_counts, eps)
+    s_d = s_counts / max(d_counts, eps)
+    v_d = v_counts / max(d_counts, eps)
+
+    # Volúmenes
+    s_vol = voi_heart.volume_ml()
+    v_vol = voi_vertebra.volume_ml()
+    d_vol = voi_aorta.volume_ml()
+
+    return SvdRatioResult(
+        s_vd=s_vd,
+        s_v=s_v,
+        s_d=s_d,
+        v_d=v_d,
+        s_counts=s_counts,
+        v_counts=v_counts,
+        d_counts=d_counts,
+        s_mean=s_mean,
+        v_mean=v_mean,
+        d_mean=d_mean,
+        s_voxels=s_voxels,
+        v_voxels=v_voxels,
+        d_voxels=d_voxels,
+        s_volume_ml=s_vol,
+        v_volume_ml=v_vol,
+        d_volume_ml=d_vol,
+        voi_heart=voi_heart,
+        voi_vertebra=voi_vertebra,
+        voi_aorta=voi_aorta,
+        method="VOI completa",
+    )
