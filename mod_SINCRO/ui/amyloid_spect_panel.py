@@ -1776,12 +1776,25 @@ class AmyloidSpectPanel(QDialog):
         svd_btn_row.addWidget(self._btn_calc_svd)
         svd_layout.addLayout(svd_btn_row)
 
-        # Fila 3: Resultado
+        # Fila 3: Resultado + botón info
+        svd_result_row = QHBoxLayout()
         self._lbl_svd_result = QLabel("S/VD = N/D")
         self._lbl_svd_result.setStyleSheet(
             "font-size:14px; font-weight:700; color:#ffffff; background:#1e1b4b; padding:6px 12px;"
         )
-        svd_layout.addWidget(self._lbl_svd_result)
+        svd_result_row.addWidget(self._lbl_svd_result)
+        svd_result_row.addStretch(1)
+        # Botón ℹ de información S/VD
+        self._btn_svd_info = QPushButton("ℹ Interpretación S/VD")
+        self._btn_svd_info.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_svd_info.setStyleSheet(
+            "QPushButton { font-size:11px; font-weight:600; color:#6366f1; background:transparent; "
+            "border:1px dashed #6366f1; border-radius:4px; padding:4px 10px; }"
+            "QPushButton:hover { background:#eef2ff; }"
+        )
+        self._btn_svd_info.clicked.connect(self._show_svd_info_dialog)
+        svd_result_row.addWidget(self._btn_svd_info)
+        svd_layout.addLayout(svd_result_row)
 
         # Fila 4: Escala de referencia
         svd_scale_row = QHBoxLayout()
@@ -3810,6 +3823,173 @@ class AmyloidSpectPanel(QDialog):
         except Exception as exc:
             self._status.setText(f"Error calculando S/VD: {exc}")
             QMessageBox.critical(self, "SINCRO", f"Error calculando S/VD:\n{exc}")
+
+    def _show_svd_info_dialog(self) -> None:
+        """Abre un diálogo con la guía completa de interpretación del ratio S/VD."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("ℹ️ Interpretación del Ratio S/VD")
+        dlg.setMinimumSize(620, 580)
+        dlg.resize(640, 600)
+
+        layout = QVBoxLayout(dlg)
+
+        # QTextBrowser soporta HTML con scroll nativo
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setStyleSheet(
+            "QTextBrowser { font-size:13px; background:#0f172a; color:#e2e8f0; "
+            "border:1px solid #334155; border-radius:6px; padding:8px; }"
+        )
+        browser.setHtml("""
+<h2 style="color:#38bdf8; margin-top:0;">📐 Ratio S/VD — Guía de Interpretación</h2>
+
+<h3 style="color:#f59e0b;">¿Qué es el ratio S/VD?</h3>
+<p>El <b>ratio S/VD</b> es un índice semicuantitativo derivado de imágenes <b>SPECT 3D</b>
+que compara la captación miocárdica del radiofármaco (PYP/Tc-99m pirofosfato)
+contra dos referencias anatómicas simultáneas:</p>
+<ul>
+<li><b style="color:#ef4444;">S</b> = <b>Corazón</b> (miocardio ventricular izquierdo)</li>
+<li><b style="color:#22c55e;">V</b> = <b>Vértebra</b> (cuerpo vertebral torácico, usualmente T8-T10)</li>
+<li><b style="color:#a855f7;">D</b> = <b>Aorta</b> (pared aórtica descendente, referencia de sangre)</li>
+</ul>
+
+<h3 style="color:#f59e0b;">Fórmula</h3>
+<div style="background:#1e293b; padding:12px; border-radius:6px; text-align:center;
+font-size:18px; font-weight:bold; letter-spacing:1px; margin:8px 0;">
+S/√(V × D)
+</div>
+<p>El numerador <b>S</b> es la cuenta media normalizada por voxel en el VOI cardíaco.
+El denominador usa la <b>media geométrica</b> de las cuentas de vértebra (V) y aorta (D):
+√(V × D). Esto estabiliza la referencia frente a variaciones individuales
+(como osteoporosis que alteraría V sola, o anemia que alteraría D sola).</p>
+
+<h3 style="color:#f59e0b;">Valores de corte (puntos de corte orientativos)</h3>
+<table style="width:100%; border-collapse:collapse; margin:8px 0;">
+<tr style="background:#1e293b;">
+<th style="padding:8px; border:1px solid #334155; text-align:left;">Ratio S/VD</th>
+<th style="padding:8px; border:1px solid #334155; text-align:left;">Clasificación</th>
+<th style="padding:8px; border:1px solid #334155; text-align:left;">Color</th>
+<th style="padding:8px; border:1px solid #334155; text-align:left;">Significado clínico</th>
+</tr>
+<tr>
+<td style="padding:8px; border:1px solid #334155;"><b>≥ 2.20</b></td>
+<td style="padding:8px; border:1px solid #334155; color:#ef4444; font-weight:bold;">POSITIVO</td>
+<td style="padding:8px; border:1px solid #334155;">🔴 Rojo</td>
+<td style="padding:8px; border:1px solid #334155;">Captación miocárdica elevada, consistente con amiloidosis por ATTR (confirmar con contexto clínico)</td>
+</tr>
+<tr>
+<td style="padding:8px; border:1px solid #334155;"><b>1.80 – 2.19</b></td>
+<td style="padding:8px; border:1px solid #334155; color:#f59e0b; font-weight:bold;">EQUIVOCO</td>
+<td style="padding:8px; border:1px solid #334155;">🟡 Amarillo</td>
+<td style="padding:8px; border:1px solid #334155;">Zona gris. Requiere correlación con HMR planar, ecocardiograma, biomarcadores y cuadro clínico</td>
+</tr>
+<tr>
+<td style="padding:8px; border:1px solid #334155;"><b>&lt; 1.80</b></td>
+<td style="padding:8px; border:1px solid #334155; color:#22c55e; font-weight:bold;">NEGATIVO</td>
+<td style="padding:8px; border:1px solid #334155;">🟢 Verde</td>
+<td style="padding:8px; border:1px solid #334155;">Captación miocárdica dentro de rangos normales. Hace poco probable amiloidosis ATTR significativa</td>
+</tr>
+</table>
+
+<h3 style="color:#f59e0b;">Sub-ratios complementarios</h3>
+<table style="width:100%; border-collapse:collapse; margin:8px 0;">
+<tr style="background:#1e293b;">
+<th style="padding:6px; border:1px solid #334155;">Ratio</th>
+<th style="padding:6px; border:1px solid #334155;">Fórmula</th>
+<th style="padding:6px; border:1px solid #334155;">Uso</th>
+</tr>
+<tr><td style="padding:6px; border:1px solid #334155;"><b>S/V</b></td>
+<td style="padding:6px; border:1px solid #334155;">Corazón / Vértebra</td>
+<td style="padding:6px; border:1px solid #334155;">Comparación directa contra hueso (similar al HMR planar clásico)</td></tr>
+<tr><td style="padding:6px; border:1px solid #334155;"><b>S/D</b></td>
+<td style="padding:6px; border:1px solid #334155;">Corazón / Aorta</td>
+<td style="padding:6px; border:1px solid #334155;">Comparación contra pool sanguíneo (sensible a perfusión)</td></tr>
+<tr><td style="padding:6px; border:1px solid #334155;"><b>V/D</b></td>
+<td style="padding:6px; border:1px solid #334155;">Vértebra / Aorta</td>
+<td style="padding:6px; border:1px solid #334155;">Control de calidad: relación hueso/sangre esperada ~1.0–2.5</td></tr>
+</table>
+
+<h3 style="color:#f59e0b;">¿Por qué √(V×D) en vez de una sola referencia?</h3>
+<p>Usar <b>dos referencias</b> (hueso + sangre) en media geométrica tiene ventajas:</p>
+<ol>
+<li><b>Robustez:</b> si un paciente tiene osteoporosis (V bajo), D compensa. Si tiene anemia o bajo hematocrito (D atípico), V compensa.</li>
+<li><b>Consistencia:</b> reduce la varianza inter-paciente comparado con usar solo V (como hace el HMR planar).</li>
+<li><b>Detección de artefactos:</b> si V/D está fuera de rango 0.5–4.0, sugiere problema de posicionamiento o ROI mal colocada.</li>
+</ol>
+
+<h3 style="color:#f59e0b;">Diferencias con HMR planar (Perugini)</h3>
+<table style="width:100%; border-collapse:collapse; margin:8px 0;">
+<tr style="background:#1e293b;">
+<th style="padding:6px; border:1px solid #334155;">Aspecto</th>
+<th style="padding:6px; border:1px solid #334155;">HMR Planar</th>
+<th style="padding:6px; border:1px solid #334155;">S/VD SPECT 3D</th>
+</tr>
+<tr><td style="padding:6px; border:1px solid #334155;">Imagen</td>
+<td style="padding:6px; border:1px solid #334155;">Proyección planar torácica anterior</td>
+<td style="padding:6px; border:1px solid #334155;">Volumen SPECT reconstruido (64³ típico)</td></tr>
+<tr><td style="padding:6px; border:1px solid #334155;">Referencia</td>
+<td style="padding:6px; border:1px solid #334155;">Costillas contralaterales</td>
+<td style="padding:6px; border:1px solid #334155;">Vértebra + Aorta (√(V×D))</td></tr>
+<tr><td style="padding:6px; border:1px solid #334155;">Superposición</td>
+<td style="padding:6px; border:1px solid #334155;">Posible (corazón + costillas en misma línea)</td>
+<td style="padding:6px; border:1px solid #334155;">Mínima (VOIs 3D separados espacialmente)</td></tr>
+<tr><td style="padding:6px; border:1px solid #334155;">Corte positivo</td>
+<td style="padding:6px; border:1px solid #334155;">≥ 1.5 (Perugini)</td>
+<td style="padding:6px; border:1px solid #334155;">≥ 2.2 (orientativo, pendiente de validación)</td></tr>
+</table>
+
+<h3 style="color:#f59e0b;">Flujo diagnóstico sugerido</h3>
+<div style="background:#1e293b; padding:12px; border-radius:6px; font-family:monospace; font-size:12px; line-height:1.8;">
+<pre style="margin:0; color:#e2e8f0;">
+┌─────────────────────┐
+│  S/VD ≥ 2.2 POS     │ ──→ Consistente con ATTR+
+│                      │     Corroborar con:
+│                      │     • Ecocardiograma (strain)
+│                      │     • Biomarcadores (NT-proBNP, troponina)
+│                      │     • Clínica (IC, neuropatía)
+├─────────────────────┤
+│  S/VD 1.8–2.2 EQ    │ ──→ Zona gris
+│                      │     • Comparar con HMR planar
+│                      │     • Revisar posicionamiento VOI
+│                      │     • Evaluar sub-ratios S/V y S/D
+├─────────────────────┤
+│  S/VD < 1.8 NEG     │ ──→ Poco probable ATTR
+│                      │     Buscar otras causas de IC
+└─────────────────────┘
+</pre>
+</div>
+
+<h3 style="color:#f59e0b;">⚠️ Limitaciones y advertencias</h3>
+<ul>
+<li><b>Los puntos de corte son ORIENTATIVOS.</b> No sustituyen el juicio clínico del médico nuclear.</li>
+<li><b>Pendiente de validación clínica prospectiva.</b> Los valores de corte pueden ajustarse con más datos.</li>
+<li><b>Sensible al posicionamiento de VOIs.</b> Verifique que cada esfera esté centrada en la estructura correcta usando las vistas MPR.</li>
+<li><b>Depende de la calidad de reconstrucción SPECT.</b> Artefactos de atenuación, scatter o movimiento afectan los valores.</li>
+<li><b>No válido para otros radiofármacos.</b> Este ratio fue diseñado para <b>Tc-99m PYP</b> (pirofosfato).</li>
+</ul>
+
+<hr style="border-color:#334155; margin:16px 0;">
+<p style="color:#94a3ab; font-size:11px; text-align:center;">
+Módulo SINCRO — Ratio S/VD · Versión experimental fase 2<br>
+Basado en metodología publicada (Emory University / Huttlin et al.)<br>
+Los valores de corte deben validarse localmente antes de uso diagnóstico rutinario.
+</p>
+""")
+        layout.addWidget(browser)
+
+        # Botón cerrar
+        btn_box = QHBoxLayout()
+        btn_box.addStretch(1)
+        close_btn = QPushButton("Cerrar")
+        close_btn.setStyleSheet(
+            "background:#3b82f6; color:white; font-weight:bold; "
+            "padding:8px 24px; border-radius:4px; border:none;"
+        )
+        close_btn.clicked.connect(dlg.close)
+        btn_box.addWidget(close_btn)
+        layout.addLayout(btn_box)
+
+        dlg.exec()
 
     def get_svd_result(self) -> SvdRatioResult | None:
         """Retorna el resultado S/VD calculado (para informes)."""
