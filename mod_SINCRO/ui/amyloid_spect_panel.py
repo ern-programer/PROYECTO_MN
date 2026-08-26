@@ -136,6 +136,8 @@ class FusionReportLayoutDialog(QDialog):
         slice_idx: dict,
         localization_points: list[dict] | None = None,
         display_spacing_zyx: tuple[float, float, float] | None = None,
+        hmr_result: HmrSpectResult | None = None,
+        svd_result: SvdRatioResult | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("SINCRO — Vista informe fusión")
@@ -165,7 +167,8 @@ class FusionReportLayoutDialog(QDialog):
             "sagittal": int(slice_idx.get("sagittal", self._spect_vol.shape[2] // 2)),
         }
         self._localization_points = list(localization_points or [])
-        self._hmr_result: HmrSpectResult | None = None
+        self._hmr_result: HmrSpectResult | None = hmr_result
+        self._svd_result: SvdRatioResult | None = svd_result
         self._settings = QSettings("GAMMASYS", "SINCRO_AMYLO_SPECT")
         self._custom_layouts = self._load_custom_layouts()
         self._line_px = 1
@@ -846,6 +849,32 @@ class FusionReportLayoutDialog(QDialog):
                 if hmr.slice_idx is not None:
                     text_y += line_h
                     painter.drawText(dx, text_y, f"  Slice axial: {hmr.slice_idx}")
+                painter.restore()
+            # Agregar S/VD si fue calculado (optativo)
+            if self._svd_result:
+                painter.save()
+                font = QFont("Arial", 10)
+                painter.setFont(font)
+                painter.setPen(QColor(30, 30, 30))
+                text_y = dy + dh + 40
+                if self._localization_points:
+                    pass  # text_y ya avanzó por puntos
+                elif self._hmr_result:
+                    # Recalcular text_y después del bloque HMR
+                    text_y = dy + dh + 40 + 18 * 8  # aprox
+                line_h = 18
+                painter.drawText(dx, text_y, "Ratio S/VD (experimental):")
+                text_y += line_h + 4
+                svd = self._svd_result
+                painter.drawText(dx, text_y, f"  S/VD = {svd.s_vd:.2f} ({svd.classification})")
+                text_y += line_h
+                painter.drawText(dx, text_y, f"  S/V = {svd.s_v:.2f}  ·  S/D = {svd.s_d:.2f}  ·  V/D = {svd.v_d:.2f}")
+                text_y += line_h
+                painter.drawText(dx, text_y, f"  Cuentas: S={svd.s_counts:.0f}  V={svd.v_counts:.0f}  D={svd.d_counts:.0f}")
+                text_y += line_h
+                painter.drawText(dx, text_y, f"  Voxels: S={svd.s_voxels}  V={svd.v_voxels}  D={svd.d_voxels}")
+                text_y += line_h
+                painter.drawText(dx, text_y, "  ⚠ Cutoffs orientativos (validar con población local)")
                 painter.restore()
             painter.end()
             self._remember_path(path)
@@ -5976,6 +6005,8 @@ class AmyloidSpectPanel(QDialog):
                     if (ct_vol is not None and self._ct_spacing_zyx is not None and len(self._ct_spacing_zyx) == 3)
                     else (tuple(self._spect_spacing_zyx) if (self._spect_spacing_zyx is not None and len(self._spect_spacing_zyx) == 3) else None)
                 ),
+                hmr_result=getattr(self, "_hmr_result", None),
+                svd_result=getattr(self, "_svd_result", None),
             )
             if hasattr(self, "_metrics") and ct_vol is not None:
                 self._metrics.append(
