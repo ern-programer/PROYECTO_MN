@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QComboBox,
     QTextEdit,
+    QTextBrowser,
     QCheckBox,
     QGridLayout,
     QSlider,
