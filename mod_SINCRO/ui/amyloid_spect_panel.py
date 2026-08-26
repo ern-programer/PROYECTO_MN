@@ -1812,11 +1812,13 @@ class AmyloidSpectPanel(QDialog):
         hmr_layout.addWidget(svd_group)
 
         # === F2.4: Edición manual de máscara CT (brush/erase) ===
-        edit_group = QGroupBox("F2.4 Edición Manual de Máscara CT")
+        edit_group = QGroupBox("F2.4 Edición Máscara CT")
         edit_group.setStyleSheet(
-            "QGroupBox { font-weight:600; border:1px solid #4b5563; border-radius:6px; margin-top:12px; padding-top:8px; }"
+            "QGroupBox { font-weight:600; border:1px solid #4b5563; border-radius:6px; margin-top:6px; padding-top:4px; }"
         )
         edit_layout = QVBoxLayout(edit_group)
+        edit_layout.setSpacing(2)
+        edit_layout.setContentsMargins(3, 2, 3, 2)
         
         # Fila de controles principales
         edit_ctrl_row = QHBoxLayout()
@@ -1908,46 +1910,46 @@ class AmyloidSpectPanel(QDialog):
         
         # NOTA: edit_group se agrega a hmr_orient_row (fuera de hmr_group), más abajo
 
-        # --- Orientación prueba (COMPACTO) ---
+        # --- Orientación (ULTRA COMPACTO - una fila) ---
         flip_group = QGroupBox("Orientación")
         flip_grid = QGridLayout(flip_group)
-        flip_grid.setSpacing(2)
-        flip_grid.setContentsMargins(4, 4, 4, 4)
+        flip_grid.setSpacing(1)
+        flip_grid.setContentsMargins(3, 2, 3, 2)
         
         self._spect_flipx_check = QCheckBox("SPECT flip X")
         self._spect_flipx_check.setToolTip("Espeja SPECT en eje X")
         self._spect_flipx_check.toggled.connect(self._on_spect_orientation_test_toggled)
-        self._spect_flipx_check.setStyleSheet("font-size:10px;")
+        self._spect_flipx_check.setStyleSheet("font-size:9px;")
         flip_grid.addWidget(self._spect_flipx_check, 0, 0)
         
         self._spect_flipy_check = QCheckBox("SPECT flip Y")
         self._spect_flipy_check.setToolTip("Espeja SPECT en eje Y")
         self._spect_flipy_check.toggled.connect(self._on_spect_orientation_test_toggled)
-        self._spect_flipy_check.setStyleSheet("font-size:10px;")
+        self._spect_flipy_check.setStyleSheet("font-size:9px;")
         flip_grid.addWidget(self._spect_flipy_check, 0, 1)
         
         self._spect_flipz_check = QCheckBox("SPECT flip Z")
         self._spect_flipz_check.setToolTip("Espeja SPECT en eje Z")
         self._spect_flipz_check.toggled.connect(self._on_spect_orientation_test_toggled)
-        self._spect_flipz_check.setStyleSheet("font-size:10px;")
+        self._spect_flipz_check.setStyleSheet("font-size:9px;")
         flip_grid.addWidget(self._spect_flipz_check, 1, 0)
         
         self._ct_flipx_check = QCheckBox("CT flip X")
         self._ct_flipx_check.setToolTip("Espeja TC en eje X")
         self._ct_flipx_check.toggled.connect(self._on_ct_orientation_test_toggled)
-        self._ct_flipx_check.setStyleSheet("font-size:10px;")
+        self._ct_flipx_check.setStyleSheet("font-size:9px;")
         flip_grid.addWidget(self._ct_flipx_check, 1, 1)
         
         self._ct_flipy_check = QCheckBox("CT flip Y")
         self._ct_flipy_check.setToolTip("Espeja TC en eje Y")
         self._ct_flipy_check.toggled.connect(self._on_ct_orientation_test_toggled)
-        self._ct_flipy_check.setStyleSheet("font-size:10px;")
+        self._ct_flipy_check.setStyleSheet("font-size:9px;")
         flip_grid.addWidget(self._ct_flipy_check, 2, 0)
         
         self._ct_flipz_check = QCheckBox("CT flip Z")
         self._ct_flipz_check.setToolTip("Espeja TC en eje Z")
         self._ct_flipz_check.toggled.connect(self._on_ct_orientation_test_toggled)
-        self._ct_flipz_check.setStyleSheet("font-size:10px;")
+        self._ct_flipz_check.setStyleSheet("font-size:9px;")
         flip_grid.addWidget(self._ct_flipz_check, 2, 1)
         
         hmr_orient_row.addWidget(hmr_group, 5)   # HMR-SPECT: 5/17
@@ -1958,34 +1960,34 @@ class AmyloidSpectPanel(QDialog):
         # --- Zoom visual ---
         zoom_group = QGroupBox("Zoom")
         zoom_layout = QVBoxLayout(zoom_group)
-        zoom_layout.setSpacing(2)
-        zoom_layout.setContentsMargins(4, 4, 4, 4)
+        zoom_layout.setSpacing(1)
+        zoom_layout.setContentsMargins(3, 2, 3, 2)
 
         spect_zoom_row = QHBoxLayout()
         spect_zoom_row.setSpacing(4)
         self._spect_zoom_lbl = QLabel("SPECT:")
-        self._spect_zoom_lbl.setStyleSheet("font-size:10px;")
+        self._spect_zoom_lbl.setStyleSheet("font-size:9px;")
         spect_zoom_row.addWidget(self._spect_zoom_lbl)
         self._spect_zoom_spin = QSpinBox()
         self._spect_zoom_spin.setRange(50, 200)
         self._spect_zoom_spin.setValue(100)
         self._spect_zoom_spin.setSuffix("%")
         self._spect_zoom_spin.valueChanged.connect(self._on_zoom_changed)
-        self._spect_zoom_spin.setStyleSheet("font-size:10px;")
+        self._spect_zoom_spin.setStyleSheet("font-size:9px; padding:0px 2px;")
         spect_zoom_row.addWidget(self._spect_zoom_spin, 1)
         zoom_layout.addLayout(spect_zoom_row)
 
         ct_zoom_row = QHBoxLayout()
         ct_zoom_row.setSpacing(4)
         self._ct_zoom_lbl = QLabel("CT:")
-        self._ct_zoom_lbl.setStyleSheet("font-size:10px;")
+        self._ct_zoom_lbl.setStyleSheet("font-size:9px;")
         ct_zoom_row.addWidget(self._ct_zoom_lbl)
         self._ct_zoom_spin = QSpinBox()
         self._ct_zoom_spin.setRange(50, 200)
         self._ct_zoom_spin.setValue(100)
         self._ct_zoom_spin.setSuffix("%")
         self._ct_zoom_spin.valueChanged.connect(self._on_zoom_changed)
-        self._ct_zoom_spin.setStyleSheet("font-size:10px;")
+        self._ct_zoom_spin.setStyleSheet("font-size:9px; padding:0px 2px;")
         ct_zoom_row.addWidget(self._ct_zoom_spin, 1)
         zoom_layout.addLayout(ct_zoom_row)
 
@@ -1998,7 +2000,7 @@ class AmyloidSpectPanel(QDialog):
             "Cuando está activado, cambiar el zoom de SPECT también cambia el CT "
             "y viceversa. Desactívalos para ajustarlos independientemente."
         )
-        self._link_zoom_check.setStyleSheet("font-size:10px; color:#94a3b8;")
+        self._link_zoom_check.setStyleSheet("font-size:9px; color:#94a3b8;")
         self._link_zoom_check.stateChanged.connect(self._on_link_zoom_changed)
         link_zoom_row.addWidget(self._link_zoom_check, 1)
         zoom_layout.addLayout(link_zoom_row)
@@ -2008,8 +2010,8 @@ class AmyloidSpectPanel(QDialog):
         # --- Ajuste CT (nudge/rot/resets) ---
         ajuste_group = QGroupBox("Ajuste")
         ajuste_layout = QVBoxLayout(ajuste_group)
-        ajuste_layout.setSpacing(2)
-        ajuste_layout.setContentsMargins(4, 4, 4, 4)
+        ajuste_layout.setSpacing(1)
+        ajuste_layout.setContentsMargins(3, 2, 3, 2)
 
         # Nudge Δ z/y/x
         nudge_row = QHBoxLayout()
