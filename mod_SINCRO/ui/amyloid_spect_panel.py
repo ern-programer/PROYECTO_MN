@@ -1906,9 +1906,9 @@ class AmyloidSpectPanel(QDialog):
         )
         edit_layout.addWidget(self._mask_edit_status)
         
-        hmr_layout.addWidget(edit_group)
+        # NOTA: edit_group se agrega a hmr_orient_row (fuera de hmr_group), más abajo
 
-        # --- Orientación prueba (centro, COMPACTO) ---
+        # --- Orientación prueba (COMPACTO) ---
         flip_group = QGroupBox("Orientación")
         flip_grid = QGridLayout(flip_group)
         flip_grid.setSpacing(2)
@@ -1950,8 +1950,8 @@ class AmyloidSpectPanel(QDialog):
         self._ct_flipz_check.setStyleSheet("font-size:10px;")
         flip_grid.addWidget(self._ct_flipz_check, 2, 1)
         
-        hmr_orient_row.addWidget(hmr_group, 4)   # HMR-SPECT: 4/14
-        hmr_orient_row.addWidget(flip_group, 3)  # Orientación: 3/14 (compacto)
+        hmr_orient_row.addWidget(hmr_group, 5)   # HMR-SPECT: 5/17
+        hmr_orient_row.addWidget(flip_group, 2)  # Orientación: 2/17 (compacto)
 
         # --- Overlay / QC / Cortes MOVIDO a columna derecha (arriba del MIP) ---
 
@@ -2003,7 +2003,7 @@ class AmyloidSpectPanel(QDialog):
         link_zoom_row.addWidget(self._link_zoom_check, 1)
         zoom_layout.addLayout(link_zoom_row)
 
-        hmr_orient_row.addWidget(zoom_group, 3)  # Zoom: 3/14
+        hmr_orient_row.addWidget(zoom_group, 2)  # Zoom: 2/17
 
         # --- Ajuste CT (nudge/rot/resets) ---
         ajuste_group = QGroupBox("Ajuste")
@@ -2063,8 +2063,12 @@ class AmyloidSpectPanel(QDialog):
         reset_row.addWidget(self._btn_reset_offsets)
         ajuste_layout.addLayout(reset_row)
 
-        hmr_orient_row.addWidget(ajuste_group, 4)  # Ajuste: 4/14
-        left_col.addWidget(controls_container)  # Fila de boxes compacta (altura controlada)
+        hmr_orient_row.addWidget(ajuste_group, 3)  # Ajuste: 3/17
+        
+        # --- Edición Manual de Máscara CT (fila propia en hmr_orient_row) ---
+        hmr_orient_row.addWidget(edit_group, 4)    # Edición máscara: 4/17
+        
+        left_col.addWidget(controls_container)  # Fila de boxes compacta
         # ────────────────────────────────────────────────────────────────────────────
 
         main_splitter.addLayout(left_col, 6)  # 6 partes para imágenes (más espacio)
