@@ -4134,6 +4134,9 @@ class AmyloidSpectPanel(QDialog):
             tuple(self._spect_spacing_zyx) if self._spect_spacing_zyx is not None else None,
             tuple(self._ct_spacing_zyx) if self._ct_spacing_zyx is not None else None,
             tuple(getattr(self, '_ct_total_shift_zyx', (0.0, 0.0, 0.0))),  # Invalidar si cambia el registro/nudge
+            float(self._rot_z.value()) if hasattr(self, '_rot_z') else 0.0,  # rot Z nudge
+            float(self._rot_y.value()) if hasattr(self, '_rot_y') else 0.0,  # rot Y nudge
+            float(self._rot_x.value()) if hasattr(self, '_rot_x') else 0.0,  # rot X nudge
         )
         if sig == self._trial_cache_signature and self._trial_spect_on_ct is not None and self._trial_ct_native is not None:
             return True
@@ -4176,6 +4179,23 @@ class AmyloidSpectPanel(QDialog):
                 order=1,
             )
             ct_native_spacing = target_spacing
+            
+            # === Aplicar rotaciones del nudge (igual que _apply_ct_nudge) ===
+            # Las rotaciones están en grados y se aplican sobre la grilla 2x.
+            rot_z = float(self._rot_z.value()) if hasattr(self, '_rot_z') else 0.0
+            rot_y = float(self._rot_y.value()) if hasattr(self, '_rot_y') else 0.0
+            rot_x = float(self._rot_x.value()) if hasattr(self, '_rot_x') else 0.0
+            if abs(rot_z) > 1e-6:
+                ct_native = ndi.rotate(ct_native, angle=rot_z, axes=(1, 2), reshape=False, order=1, mode='nearest')
+            if abs(rot_y) > 1e-6:
+                ct_native = ndi.rotate(ct_native, angle=rot_y, axes=(0, 2), reshape=False, order=1, mode='nearest')
+            if abs(rot_x) > 1e-6:
+                ct_native = ndi.rotate(ct_native, angle=rot_x, axes=(0, 1), reshape=False, order=1, mode='nearest')
+            if hasattr(self, '_metrics') and (abs(rot_z) > 1e-6 or abs(rot_y) > 1e-6 or abs(rot_x) > 1e-6):
+                self._metrics.append(
+                    f"[CT-NATIVE] Rotaciones nudge aplicadas: "
+                    f"rot(z,y,x)=({rot_z:.1f},{rot_y:.1f},{rot_x:.1f})°"
+                )
             
             # === Aplicar shift de registro (alineación CT↔SPECT) ===
             # El shift total está en píxeles de la grilla SPECT original (64³).
@@ -5379,8 +5399,10 @@ class AmyloidSpectPanel(QDialog):
         self._status.setText("Offsets, pan, zoom y rango visual SPECT/CT reseteados.")
         self._render_current_with_overlay()
 
-    def _ct_slices_preview_at(self, volume: np.ndarray) -> dict[str, np.ndarray]:
-        vol = self._ct_transform_3d(np.asarray(volume, dtype=np.float64))
+    def _ct_slices_preview_at(self, volume: np.ndarray, *, already_transformed: bool = False) -> dict[str, np.ndarray]:
+        vol = np.asarray(volume, dtype=np.float64)
+        if not already_transformed:
+            vol = self._ct_transform_3d(vol)
         if vol.ndim != 3:
             return self._slices_preview_at(vol)
         z = int(np.clip(self._slice_idx.get("axial", vol.shape[0] // 2) + self._ct_view_offset.get("axial", 0), 0, vol.shape[0] - 1))
@@ -5507,11 +5529,11 @@ class AmyloidSpectPanel(QDialog):
             else:
                 pv = self._slices_preview_at(self._current_volume)
                 if self._ct_registered is not None:
-                    ct_prev = self._ct_slices_preview_at(np.asarray(self._ct_registered, dtype=np.float64))
+                    ct_prev = self._ct_slices_preview_at(np.asarray(self._ct_registered, dtype=np.float64), already_transformed=True)
         else:
             pv = self._slices_preview_at(self._current_volume)
             if self._ct_registered is not None and mode != "off":
-                ct_prev = self._ct_slices_preview_at(np.asarray(self._ct_registered, dtype=np.float64))
+                ct_prev = self._ct_slices_preview_at(np.asarray(self._ct_registered, dtype=np.float64), already_transformed=True)
 
         if ct_prev is not None:
             ax_rgb = self._make_qc_rgb(pv["axial"], ct_prev["axial"], mode, self._qc_split_slider.value())
