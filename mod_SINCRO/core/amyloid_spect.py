@@ -1991,29 +1991,23 @@ def segment_myocardium_from_ct(
     # Paso 4: Refinar dentro del componente mayor — umbral más estricto para miocardio
     refined_crop = major_component_crop.copy()
     
-    # ── MEJORA v2.6: Detección adaptativa de HU del miocardio ─────
-    # En lugar de HU fijos, analizar el histograma DENTRO del componente mayor
-    # para encontrar el pico de tejido miocárdico real.
+    # ── MEJORA v2.7: Detección adaptativa de HU del miocardio ─────
+    # Analizar el histograma DENTRO del componente mayor para encontrar
+    # el pico de tejido miocárdico real.
     ct_inside = ct_crop[major_component_crop]
     if ct_inside.size > 200:
-        # Histograma de HU dentro de la región candidata
         hist_bins = np.linspace(-200, 400, 121)  # 5 HU por bin
         hist_counts, bin_edges = np.histogram(ct_inside, bins=hist_bins)
-        # Encontrar el pico principal (excluyendo aire < -150 y hueso > 300)
         valid_range = (bin_edges[:-1] >= -150) & (bin_edges[:-1] <= 300)
         valid_counts = hist_counts.copy()
         valid_counts[~valid_range] = 0
         if valid_counts.max() > 0:
             peak_bin = np.argmax(valid_counts)
             peak_hu = (bin_edges[peak_bin] + bin_edges[peak_bin + 1]) / 2
-            
-            # Rango HU adaptativo alrededor del pico
-            # Miocardio típico: 40-150 HU (con contraste), 10-80 HU (sin contraste)
             adaptive_min = max(-50, peak_hu - 60)
-            adaptive_min = min(adaptive_min, 20)  # no bajar de -50 ni subir de 20
+            adaptive_min = min(adaptive_min, 20)
             adaptive_max = min(350, peak_hu + 120)
-            adaptive_max = max(adaptive_max, 150)  # no bajar de 150
-            
+            adaptive_max = max(adaptive_max, 150)
             myocardium_hu_min, myocardium_hu_max = adaptive_min, adaptive_max
             notes.append(f"HU adaptativo: pico={peak_hu:.0f}HU → rango [{adaptive_min:.0f}, {adaptive_max:.0f}]")
         else:
@@ -2025,63 +2019,99 @@ def segment_myocardium_from_ct(
     
     inner_mask = (ct_crop >= myocardium_hu_min) & (ct_crop <= myocardium_hu_max) & major_component_crop
     
-    if inner_mask.sum() > 100:  # Si hay suficientes voxels refinados
+    if inner_mask.sum() > 100:
         refined_crop = inner_mask
         notes.append(f"Refinamiento HU interno: [{myocardium_hu_min}, {myocardium_hu_max}]")
     else:
         notes.append("Refinamiento interno insuficiente (>100 voxels). Usando componente mayor.")
     
-    # ── MEJORA v2.6: Shaping anatómico — reducir forma cúbica ─────
-    # El componente conexa mayor tiende a ser bloques/cubos porque la caja
-    # de recorte es rectangular. Aplicamos un post-procesado que favorece
-    # formas más redondeadas/anatómicas (elipsoides).
+    # ── MEJORA v2.7: Shaping anatómico — crecimiento radial desde semilla ─
+    # El problema fundamental: la caja de recorte es rectangular y la
+    # componente conexa mayor tiende a llenarla → forma cúbica.
+    # Solución: en lugar de aceptar toda la componente, hacer crecimiento
+    # radial desde la semilla usando distance transform como guía.
+    # Esto produce una forma elipsoidal natural centrada en el corazón.
     try:
         from scipy.ndimage import distance_transform_edt, binary_fill_holes
         
-        # 4a. Rellenar huecos internos (la cavidad VI no debe estar llena,
-        # pero pequeños huecos por umbralización sí deben cerrarse)
+        # 4a. Rellenar huecos internos
         filled = binary_fill_holes(refined_crop)
         
-        # 4b. Distance transform → crear máscara de "núcleo" que sigue
-        # la forma real mejor que la componente conexa cruda
+        # 4b. Distance transform desde el BORDE de la máscara
+        # Valores altos = centro del miocardio, valores bajos = bordes
         dt = distance_transform_edt(filled)
         
-        # Umbral del DT al 30% del máximo interno (elimina protrusiones finas)
-        dt_threshold = float(dt.max()) * 0.30 if dt.max() > 0 else 1.0
-        core_mask = dt >= dt_threshold
-        
-        # 4c. Suavizar con operador morfológico esférico (no cúbico)
-        # Usamos una estructura esférica generada con distancia euclidiana
-        radius_vox = max(2, int(round(3.0 / min(sy, sx))))  # ~3mm esfera
-        yy, xx = np.mgrid[-radius_vox:radius_vox+1, -radius_vox:radius_vox+1]
-        zz = np.mgrid[-radius_vox:radius_vox+1]
-        sphere_struct = (xx**2 + yy**2 + zz**2) <= radius_vox**2
-        
-        from scipy.ndimage import binary_closing as sph_closing, binary_opening as sph_opening
-        shaped = sph_closing(core_mask, structure=sphere_struct, iterations=2)
-        shaped = sph_opening(shaped, structure=sphere_struct, iterations=1)
-        
-        # 4d. Intersectar con la máscara original refinada (no expandir fuera)
-        shaped = shaped & refined_crop
-        
-        # Solo usar si la nueva forma tiene volumen razonable (>50% del original)
-        new_vol = shaped.sum()
-        old_vol = refined_crop.sum()
-        if new_vol > old_vol * 0.4 and new_vol < old_vol * 2.0:
-            refined_crop = shaped
-            notes.append(
-                f"Shaping anatómico: {old_vol}→{new_vol} voxels "
-                f"({100*new_vol/old_vol:.0f}%) — forma suavizada"
-            )
+        # 4c. Encontrar la semilla dentro del crop (centro de masa o seed)
+        if seed_zyx is not None and bbox is not None:
+            z0, z1, y0, y1, x0, x1 = bbox
+            # Coordenadas de la semilla dentro del crop
+            sz_crop = seed_zyx[0] - z0
+            sy_crop = seed_zyx[1] - y0
+            sx_crop = seed_zyx[2] - x0
+            seed_in_crop = (sz_crop, sy_crop, sx_crop)
         else:
-            notes.append(
-                f"Shaping omitido: volumen extremo ({100*new_vol/old_vol:.0f}%). "
-                "Usando forma cruda."
-            )
+            # Usar centroide de la máscara
+            coords = np.argwhere(filled)
+            if coords.size > 0:
+                seed_in_crop = tuple(coords.mean(axis=0).astype(float))
+            else:
+                seed_in_crop = (ct_crop.shape[0]/2, ct_crop.shape[1]/2, ct_crop.shape[2]/2)
+        
+        # 4d. Distance transform desde la semilla (distancia euclidiana)
+        zz, yy, xx = np.mgrid[0:ct_crop.shape[0], 0:ct_crop.shape[1], 0:ct_crop.shape[2]]
+        dist_from_seed = np.sqrt(
+            (zz - seed_in_crop[0])**2 +
+            (yy - seed_in_crop[1])**2 +
+            (xx - seed_in_crop[2])**2
+        )
+        # Convertir a mm
+        dist_from_seed_mm = dist_from_seed * min(sy, sx)  # aproximación isotrópica
+        
+        # 4e. Crecimiento radial: mantener solo voxels dentro de un radio
+        # que contenga el ~80% del volumen del componente mayor.
+        # Esto elimina las "esquinas" del cubo que están lejos de la semilla.
+        dists_inside = dist_from_seed_mm[filled]
+        if dists_inside.size > 0:
+            # Radio que contiene el 80% de los voxels (percentil 80)
+            radius_80 = float(np.percentile(dists_inside, 80))
+            # Usar un radio ligeramente mayor para no cortar demasiado
+            effective_radius = radius_80 * 1.15
+            
+            # Máscara radial: voxels dentro del radio efectivo Y en la máscara
+            radial_mask = (dist_from_seed_mm <= effective_radius) & filled
+            
+            # 4f. Suavizar con morfología esférica
+            radius_vox = max(2, int(round(3.0 / min(sy, sx))))  # ~3mm esfera
+            sy_, sx_ = np.mgrid[-radius_vox:radius_vox+1, -radius_vox:radius_vox+1]
+            sz_ = np.mgrid[-radius_vox:radius_vox+1]
+            sphere_struct = (sx_**2 + sy_**2 + sz_**2) <= radius_vox**2
+            
+            from scipy.ndimage import binary_closing as sph_closing, binary_opening as sph_opening
+            shaped = sph_closing(radial_mask, structure=sphere_struct, iterations=2)
+            shaped = sph_opening(shaped, structure=sphere_struct, iterations=1)
+            shaped = binary_fill_holes(shaped)
+            
+            # Intersectar con la máscara original (no expandir fuera)
+            shaped = shaped & refined_crop
+            
+            # Solo usar si volumen razonable (>40% del original)
+            new_vol = shaped.sum()
+            old_vol = refined_crop.sum()
+            if new_vol > old_vol * 0.4 and new_vol < old_vol * 2.0:
+                refined_crop = shaped
+                notes.append(
+                    f"Shaping radial: {old_vol}→{new_vol} voxels "
+                    f"({100*new_vol/old_vol:.0f}%) — r_eff={effective_radius:.1f}mm"
+                )
+            else:
+                notes.append(
+                    f"Shaping radial omitido: vol extremo ({100*new_vol/old_vol:.0f}%). "
+                    "Usando forma cruda."
+                )
+        else:
+            notes.append("Shaping radial: sin voxels internos. Usando forma cruda.")
     except Exception as shaping_exc:
         notes.append(f"Shaping anatómico falló: {shaping_exc}. Usando forma cruda.")
-    else:
-        notes.append("Refinamiento interno insuficiente (>100 voxels). Usando componente mayor.")
     
     # Mapear la máscara recortada de vuelta al volumen completo
     refined = np.zeros(ct.shape, dtype=bool)

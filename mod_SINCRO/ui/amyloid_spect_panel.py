@@ -3673,11 +3673,15 @@ class AmyloidSpectPanel(QDialog):
                         getattr(self, "_mask_was_manually_edited", False)
                     )
                     
-                    # Reutilizar si: apply reciente OR preserve checked + máscara editada
-                    if (_reuse or (_preserve_checked and _mask_was_edited)) and _have_prev_seg:
-                        # Reutilizar la máscara editada tal cual
+                    # Reutilizar si:
+                    #   a) Apply reciente (_reuse)
+                    #   b) Preserve checked Y hay segmentación previa (cualquiera, no solo editada)
+                    #      Si el checkbox está activado, SIEMPRE preserva la máscara existente.
+                    #   c) Preserve checked Y máscara fue editada manualmente (redundante con b)
+                    if (_reuse or _preserve_checked) and _have_prev_seg:
+                        # Reutilizar la máscara existente tal cual
                         ct_seg = self._ct_segmentation
-                        self._metrics.append("🔒 Máscara manual PRESERVADA (no re-segmentada)")
+                        self._metrics.append("🔒 Máscara PRESERVADA (no re-segmentada)")
                     else:
                         ct_seg = segment_myocardium_from_ct(
                             ct_transformed,
@@ -3690,7 +3694,8 @@ class AmyloidSpectPanel(QDialog):
                     
                     # Resetear cache del cubo auto (nueva segmentación)
                     self._auto_cube_bbox_cached = None
-                    self._mask_was_manually_edited = False
+                    # NO resetear _mask_was_manually_edited aquí — se resetea solo
+                    # al hacer nueva segmentación (rama else) o al reiniciar CT
                     
                     # === F2.4: Habilitar edición manual de máscara ===
                     self._mask_edit_original = ct_seg.mask_3d.copy()
