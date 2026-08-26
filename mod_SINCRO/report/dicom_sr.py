@@ -1,12 +1,14 @@
 """Exportación DICOM Structured Report para puntos de localización.
 
 Implementa TID 1411 (Region and Spatial Coordinates) para puntos LOC.
+Incluye soporte opcional para métricas HMR-SPECT y ratio S/VD.
 Compatible con visualizadores DICOM estándar (OsiriX, 3D Slicer, etc.).
 
 Referencias:
 - DICOM PS3.3: Section A.35.9 (Enhanced SR)
 - TID 1411: Region and Spatial Coordinates
 - CID 218: Spatial Coordinates
+- CID 12: Quantitative Results
 """
 
 from __future__ import annotations
@@ -31,6 +33,8 @@ def create_localization_sr(
     spect_volume: np.ndarray | None = None,
     spacing_zyx: tuple[float, float, float] | None = None,
     output_path: str | Path | None = None,
+    hmr_result=None,          # HmrSpectResult opcional
+    svd_result=None,          # SvdRatioResult opcional
 ) -> Dataset:
     """Crea un DICOM-SR (Enhanced SR) con puntos de localización.
 
@@ -43,18 +47,20 @@ def create_localization_sr(
         spect_volume: Volumen SPECT (opcional, para validar coordenadas)
         spacing_zyx: Spacing (z, y, x) en mm (opcional)
         output_path: Ruta de salida (opcional, si se provee guarda el archivo)
+        hmr_result: HmrSpectResult opcional — se agrega como medición NUM
+        svd_result: SvdRatioResult opcional — se agrega como medición NUM
 
     Returns:
         Dataset DICOM-SR listo para guardar o transmitir
 
     Example:
         >>> points = [
-        ...     {"label": "A (ancla)", "zyx": [45, 64, 64]},
-        ...     {"label": "B (punto)", "zyx": [48, 70, 72]},
-        ...     {"label": "Distancia A→B", "value_mm": 12.5},
+        ...     {\"label\": \"A (ancla)\", \"zyx\": [45, 64, 64]},
+        ...     {\"label\": \"B (punto)\", \"zyx\": [48, 70, 72]},
+        ...     {\"label\": \"Distancia A→B\", \"value_mm\": 12.5},
         ... ]
         >>> sr = create_localization_sr(points, spect_ds, spacing_zyx=(4.8, 4.8, 4.8))
-        >>> pydicom.dcmwrite("localizacion_sr.dcm", sr)
+        >>> pydicom.dcmwrite(\"localizacion_sr.dcm\", sr)
     """
     # --- Metadatos básicos ---
     sr = Dataset()
@@ -132,6 +138,85 @@ def create_localization_sr(
             # Medición de distancia
             measurement = _create_distance_measurement(label, value_mm)
             content_seq.append(measurement)
+
+    # --- Métricas HMR-SPECT (opcional) ---
+    if hmr_result is not None:
+        try:
+            hmr_val = float(hmr_result.hmr) if hasattr(hmr_result, 'hmr') else None
+            if hmr_val is not None and __import__('math').isfinite(hmr_val):
+                hmr_meas = Dataset()
+                hmr_meas.RelationshipType = "CONTAINS"
+                hmr_meas.ValueType = "NUM"
+                hmr_meas.ConceptNameCodeSequence = DcmSequence([
+                    _create_coded_entry("GCM-001", "GAMMASYS", "Heart-to-Mediastinum Ratio SPECT")
+                ])
+                mv = Dataset()
+                mv.NumericValue = round(hmr_val, 3)
+                mv.MeasurementUnitsCodeSequence = DcmSequence([
+                    _create_coded_entry("{ratio}", "UCUM", "dimensionless")
+                ])
+                hmr_meas.MeasuredValueSequence = DcmSequence([mv])
+                cls_str = getattr(hmr_result, 'classification', '')
+                if cls_str:
+                    hmr_meas.ObservationDescription = f"HMR-SPECT={hmr_val:.2f} ({cls_str})"
+                else:
+                    hmr_meas.ObservationDescription = f"HMR-SPECT={hmr_val:.2f}"
+                content_seq.append(hmr_meas)
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+    # --- Métricas ratio S/VD (opcional) ---
+    if svd_result is not None:
+        try:
+            svd_val = float(svd_result.s_vd) if hasattr(svd_result, 's_vd') else None
+            if svd_val is not None and __import__('math').isfinite(svd_val):
+                # Ratio principal S/√(V×D)
+                svd_meas = Dataset()
+                svd_meas.RelationshipType = "CONTAINS"
+                svd_meas.ValueType = "NUM"
+                svd_meas.ConceptNameCodeSequence = DcmSequence([
+                    _create_coded_entry("GCM-002", "GAMMASYS", "S/VD Ratio (corazon/vertebra-aorta)")
+                ])
+                mv = Dataset()
+                mv.NumericValue = round(svd_val, 3)
+                mv.MeasurementUnitsCodeSequence = DcmSequence([
+                    _create_coded_entry("{ratio}", "UCUM", "dimensionless")
+                ])
+                svd_meas.MeasuredValueSequence = DcmSequence([mv])
+                cls_str = getattr(svd_result, 'classification', '')
+                sub_vals = []
+                for attr_name in ('s_v', 's_d', 'v_d'):
+                    v = getattr(svd_result, attr_name, None)
+                    if v is not None:
+                        sub_vals.append(f"{attr_name.replace('_', '/')}={float(v):.2f}")
+                desc = f"S/VD={svd_val:.2f}"
+                if cls_str:
+                    desc += f" ({cls_str})"
+                if sub_vals:
+                    desc += f" [{', '.join(sub_vals)}]"
+                svd_meas.ObservationDescription = desc
+                content_seq.append(svd_meas)
+
+                # Cuentas por ROI (S, V, D)
+                for roi_key, roi_label in [('s_counts', 'S (corazon)'), ('v_counts', 'V (vertebra)'), ('d_counts', 'D (aorta)')]:
+                    c = getattr(svd_result, roi_key, None)
+                    if c is not None:
+                        c_meas = Dataset()
+                        c_meas.RelationshipType = "CONTAINS"
+                        c_meas.ValueType = "NUM"
+                        c_meas.ConceptNameCodeSequence = DcmSequence([
+                            _create_coded_entry("GCM-003", "GAMMASYS", f"Cuentas {roi_label}")
+                        ])
+                        cv = Dataset()
+                        cv.NumericValue = round(float(c), 0)
+                        cv.MeasurementUnitsCodeSequence = DcmSequence([
+                            _create_coded_entry("{counts}", "UCUM", "counts")
+                        ])
+                        c_meas.MeasuredValueSequence = DcmSequence([cv])
+                        c_meas.ObservationDescription = f"{roi_label}: {float(c):.0f} cuentas"
+                        content_seq.append(c_meas)
+        except (AttributeError, TypeError, ValueError):
+            pass
 
     sr.ContentSequence = DcmSequence(content_seq)
 

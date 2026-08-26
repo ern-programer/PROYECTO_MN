@@ -749,7 +749,50 @@ class FusionReportLayoutDialog(QDialog):
             path += ".png"
         try:
             pix = self._render_body_to_pixmap()
-            ok = pix.save(path, "PNG")
+            # Crear imagen anotada con métricas si existen
+            img = pix.toImage()
+            painter2 = QPainter(img)
+            painter2.setRenderHint(QPainter.RenderHint.Antialiasing)
+            font = QFont("Consolas", 9)
+            painter2.setFont(font)
+            pen = QPen(QColor(0, 0, 0, 200))
+            pen.setWidthF(1.5)
+            painter2.setPen(pen)
+            # Fondo semi-transparente para legibilidad
+            margin_x = 8
+            margin_y = img.height() - 12
+            line_h = 16
+            has_metrics = False
+            # Dibujar HMR-SPECT si existe
+            if getattr(self, "_hmr_result", None):
+                has_metrics = True
+                hmr = self._hmr_result
+                color = QColor(0, 120, 0) if hmr.classification == "POSITIVO" else (
+                    QColor(180, 120, 0) if hmr.classification == "EQUIVOCO" else QColor(180, 0, 0))
+                painter2.setPen(QPen(color))
+                txt = f"HMR={hmr.hmr:.2f} ({hmr.classification})"
+                painter2.drawText(margin_x, margin_y, txt)
+                margin_y -= line_h
+            # Dibujar S/VD si existe
+            if getattr(self, "_svd_result", None):
+                has_metrics = True
+                svd = self._svd_result
+                color = QColor(180, 0, 0) if svd.classification == "POSITIVO" else (
+                    QColor(180, 120, 0) if svd.classification == "EQUIVOCO" else QColor(0, 120, 0))
+                painter2.setPen(QPen(color))
+                txt = f"S/VD={svd.s_vd:.2f} ({svd.classification})"
+                painter2.drawText(margin_x, margin_y, txt)
+                margin_y -= line_h
+                painter2.setPen(pen)
+                sub_txt = f"S/V={svd.s_v:.2f} S/D={svd.s_d:.2f} V/D={svd.v_d:.2f}"
+                painter2.drawText(margin_x, margin_y, sub_txt)
+                margin_y -= line_h
+            painter2.end()
+            if has_metrics:
+                pix_anot = QPixmap.fromImage(img)
+            else:
+                pix_anot = pix
+            ok = pix_anot.save(path, "PNG")
             if not ok:
                 raise RuntimeError("No se pudo escribir PNG")
             self._remember_path(path)
@@ -913,6 +956,8 @@ class FusionReportLayoutDialog(QDialog):
                 localization_points=self._localization_points,
                 spect_ds=spect_ds,
                 output_path=path,
+                hmr_result=getattr(self, "_hmr_result", None),
+                svd_result=getattr(self, "_svd_result", None),
             )
             self._remember_path(path)
             QMessageBox.information(self, "SINCRO", f"DICOM-SR exportado:\n{path}")
