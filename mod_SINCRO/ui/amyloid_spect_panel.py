@@ -1817,11 +1817,11 @@ class AmyloidSpectPanel(QDialog):
         # === F2.4: Edición manual de máscara CT (brush/erase) ===
         edit_group = QGroupBox("F2.4 Edición Máscara CT")
         edit_group.setStyleSheet(
-            "QGroupBox { font-weight:600; border:1px solid #4b5563; border-radius:6px; margin-top:6px; padding-top:4px; }"
+            "QGroupBox { font-weight:600; border:1px solid #4b5563; border-radius:6px; margin-top:18px; padding-top:14px; }"
         )
         edit_layout = QVBoxLayout(edit_group)
         edit_layout.setSpacing(2)
-        edit_layout.setContentsMargins(3, 2, 3, 2)
+        edit_layout.setContentsMargins(4, 10, 4, 4)
         
         # Fila de controles principales
         edit_ctrl_row = QHBoxLayout()
