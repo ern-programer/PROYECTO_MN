@@ -1429,6 +1429,50 @@ class AmyloidSpectPanel(QDialog):
         slice_row.addWidget(self._slice_x_lbl)
         slice_row.addWidget(self._slice_x, 1)
         overlay_qc_layout.addLayout(slice_row)
+        
+        # === Toggles de visibilidad de overlays en vistas MPR ===
+        vis_row = QHBoxLayout()
+        vis_row.setSpacing(4)
+        vis_row.setContentsMargins(0, 2, 0, 0)
+        
+        _vis_style = (
+            "QCheckBox { color:#94a3b8; font-size:10px; spacing:3px; }"
+            "QCheckBox::indicator { width:13px; height:13px; border-radius:2px; "
+            "border:1px solid #475569; background:#1e293b; }"
+            "QCheckBox::indicator:checked { background:#3b82f6; border-color:#3b82f6; }"
+            "QCheckBox::indicator:hover { border-color:#64748b; }"
+        )
+        
+        self._chk_show_mask_mpr = QCheckBox("Máscara CT")
+        self._chk_show_mask_mpr.setChecked(True)
+        self._chk_show_mask_mpr.setToolTip("Mostrar/ocultar máscara CT segmentada en vistas MPR")
+        self._chk_show_mask_mpr.setStyleSheet(_vis_style)
+        self._chk_show_mask_mpr.stateChanged.connect(self._on_mpr_visibility_changed)
+        vis_row.addWidget(self._chk_show_mask_mpr)
+        
+        self._chk_show_vois_mpr = QCheckBox("VOIs")
+        self._chk_show_vois_mpr.setChecked(True)
+        self._chk_show_vois_mpr.setToolTip("Mostrar/ocultar VOIs corazón/mediastino en vistas MPR")
+        self._chk_show_vois_mpr.setStyleSheet(_vis_style)
+        self._chk_show_vois_mpr.stateChanged.connect(self._on_mpr_visibility_changed)
+        vis_row.addWidget(self._chk_show_vois_mpr)
+        
+        self._chk_show_cross_mpr = QCheckBox("Cruces")
+        self._chk_show_cross_mpr.setChecked(True)
+        self._chk_show_cross_mpr.setToolTip("Mostrar/ocultar líneas de corte cruzadas en vistas MPR")
+        self._chk_show_cross_mpr.setStyleSheet(_vis_style)
+        self._chk_show_cross_mpr.stateChanged.connect(self._on_mpr_visibility_changed)
+        vis_row.addWidget(self._chk_show_cross_mpr)
+        
+        self._chk_show_loc_mpr = QCheckBox("Localización")
+        self._chk_show_loc_mpr.setChecked(True)
+        self._chk_show_loc_mpr.setToolTip("Mostrar/ocultar puntos de localización A/B en vistas MPR")
+        self._chk_show_loc_mpr.setStyleSheet(_vis_style)
+        self._chk_show_loc_mpr.stateChanged.connect(self._on_mpr_visibility_changed)
+        vis_row.addWidget(self._chk_show_loc_mpr)
+        
+        vis_row.addStretch()
+        overlay_qc_layout.addLayout(vis_row)
 
         # NOTA: overlay_qc_group se agrega en hmr_orient_row (entre Orientación y Zoom), no aquí
         # left_col.addWidget(overlay_qc_group)  ← MOVIDO A LA FILA DE BOXES
@@ -2585,6 +2629,10 @@ class AmyloidSpectPanel(QDialog):
     def _on_visual_controls_changed(self):
         self._persist_ui_state()
         self._render_current_with_overlay()
+    
+    def _on_mpr_visibility_changed(self):
+        """Toggle de visibilidad de overlays en vistas MPR."""
+        self._render_current_with_overlay()
 
     def _on_fusion_slider_changed(self, value: int):
         self._fusion_pct = int(value)
@@ -2892,11 +2940,17 @@ class AmyloidSpectPanel(QDialog):
 
     def _draw_triangulation_cross(self, pix: QPixmap, axis: str) -> QPixmap:
         """Dibuja referencias de corte cruzadas y VOIs sobre una vista MPR ya escalada."""
-        show_triang = bool(getattr(self, "_triangulation_cross_enabled", False))
-        show_loc = bool(getattr(self, "_localization_cross_enabled", False)) and getattr(self, "_localization_point_zyx", None) is not None
-        show_vois = bool(getattr(self, "_hmr_result", None)) is not None
-        show_temp_vois = bool(getattr(self, "_temp_voi_heart", None)) or bool(getattr(self, "_temp_voi_mediastinum", None))
-        if not (show_triang or show_loc or show_vois or show_temp_vois) or pix.isNull():
+        # === Respetar toggles de visibilidad del usuario ===
+        _show_cross = getattr(self, "_chk_show_cross_mpr", None) is None or self._chk_show_cross_mpr.isChecked()
+        _show_loc = getattr(self, "_chk_show_loc_mpr", None) is None or self._chk_show_loc_mpr.isChecked()
+        _show_vois = getattr(self, "_chk_show_vois_mpr", None) is None or self._chk_show_vois_mpr.isChecked()
+        _show_mask = getattr(self, "_chk_show_mask_mpr", None) is None or self._chk_show_mask_mpr.isChecked()
+        
+        show_triang = _show_cross and bool(getattr(self, "_triangulation_cross_enabled", False))
+        show_loc = _show_loc and bool(getattr(self, "_localization_cross_enabled", False)) and getattr(self, "_localization_point_zyx", None) is not None
+        show_vois = _show_vois and bool(getattr(self, "_hmr_result", None)) is not None
+        show_temp_vois = _show_vois and (bool(getattr(self, "_temp_voi_heart", None)) or bool(getattr(self, "_temp_voi_mediastinum", None)))
+        if not (show_triang or show_loc or show_vois or show_temp_vois or _show_mask) or pix.isNull():
             return pix
         vol = self._base_spect_volume if self._base_spect_volume is not None else self._current_volume
         if vol is None:
@@ -2947,23 +3001,14 @@ class AmyloidSpectPanel(QDialog):
             # usuario pueda ver el resultado de la segmentación automática
             # antes de decidir si necesita editar.
             _ct_seg_edit = getattr(self, "_ct_segmentation", None)
-            _show_mask = _ct_seg_edit is not None and (
+            _show_mask_overlay = _show_mask and _ct_seg_edit is not None and (
                 bool(getattr(self, "_mask_edit_active", False))
                 or bool(getattr(self, "_ct_anatomical_check", False) and self._ct_anatomical_check.isChecked())
             )
-            if _show_mask:
+            if _show_mask_overlay:
                 try:
                     _m = np.asarray(_ct_seg_edit.mask_3d, dtype=bool)
                     if _m.ndim == 3:
-                        # === DEBUG TEMPORAL ===
-                        _dbg_slc_cor = _m[:, int(np.clip(cur_y, 0, _m.shape[1] - 1)), :]
-                        _dbg_slc_sag = _m[:, :, int(np.clip(cur_x, 0, _m.shape[2] - 1))]
-                        print(f'[DEBUG-MASK] axis={axis} cur_z={cur_z} cur_y={cur_y} cur_x={cur_x} '
-                              f'mask_shape={_m.shape} w={w} h={h} '
-                              f'coronal_nonzero={np.count_nonzero(_dbg_slc_cor)} '
-                              f'sagittal_nonzero={np.count_nonzero(_dbg_slc_sag)}')
-                        # ====================
-
                         _fill = QColor(168, 85, 247, 70)  # violeta semi-transparente
                         painter.setPen(Qt.PenStyle.NoPen)
                         painter.setBrush(_fill)
@@ -3023,7 +3068,7 @@ class AmyloidSpectPanel(QDialog):
                 if hmr_res.voi_heart is not None:
                     voi_h = hmr_res.voi_heart
                     
-                    # Manejar tanto VOISphere como VOIAnatomical
+                    # Manejar tanto V y están visiblesOISphere como VOIAnatomical
                     if isinstance(voi_h, VOIAnatomical):
                         # Dibujar contorno anatómico del miocardio en TODOS los planos
                         pen_h = QPen(QColor(239, 68, 68, 220), 2, Qt.PenStyle.DashLine)
@@ -3642,6 +3687,10 @@ class AmyloidSpectPanel(QDialog):
                         )
                         
                     self._ct_segmentation = ct_seg
+                    
+                    # Resetear cache del cubo auto (nueva segmentación)
+                    self._auto_cube_bbox_cached = None
+                    self._mask_was_manually_edited = False
                     
                     # === F2.4: Habilitar edición manual de máscara ===
                     self._mask_edit_original = ct_seg.mask_3d.copy()
@@ -5229,6 +5278,8 @@ class AmyloidSpectPanel(QDialog):
         self._mask_edit_undo_stack.clear()
         self._mask_edit_has_changes = False
         self._reuse_edited_segmentation = False
+        self._mask_was_manually_edited = False
+        self._auto_cube_bbox_cached = None  # resetear cache del cubo auto
         
         # Deshabilitar controles
         self._btn_toggle_mask_edit.setEnabled(False)
@@ -5544,6 +5595,37 @@ class AmyloidSpectPanel(QDialog):
         if voi_med is None:
             voi_med = getattr(self, "_temp_voi_mediastinum", None)
         self._mip_widget.set_vois(voi_heart, voi_med)
+        
+        # === Pasar máscara CT y cubo automático al MIP ===
+        ct_seg = getattr(self, "_ct_segmentation", None)
+        if ct_seg is not None:
+            mask_3d = getattr(ct_seg, "mask_3d", None)
+            if mask_3d is not None:
+                # Transformar la máscara al mismo espacio que el volumen SPECT
+                mask_arr = np.asarray(mask_3d, dtype=bool)
+                mask_tx = self._spect_transform_3d(mask_arr.astype(np.float64)) > 0.5
+                self._mip_widget.set_mask_3d(mask_tx)
+            else:
+                self._mip_widget.set_mask_3d(None)
+            
+            # Cubo automático: guardar bbox la primera vez que se segmenta
+            # (antes de edición manual)
+            auto_bbox = getattr(self, "_auto_cube_bbox_cached", None)
+            if auto_bbox is None and not getattr(self, "_mask_was_manually_edited", False):
+                # Calcular bbox de la máscara actual (es la auto, no editada aún)
+                if mask_3d is not None:
+                    coords = np.argwhere(np.asarray(mask_3d, dtype=bool))
+                    if coords.size > 0:
+                        auto_bbox = (
+                            int(coords[:, 0].min()), int(coords[:, 0].max()),
+                            int(coords[:, 1].min()), int(coords[:, 1].max()),
+                            int(coords[:, 2].min()), int(coords[:, 2].max()),
+                        )
+                        self._auto_cube_bbox_cached = auto_bbox
+            self._mip_widget.set_auto_cube_bbox(auto_bbox)
+        else:
+            self._mip_widget.set_mask_3d(None)
+            self._mip_widget.set_auto_cube_bbox(None)
 
     def _show_fusion_report_layout(self):
         try:
