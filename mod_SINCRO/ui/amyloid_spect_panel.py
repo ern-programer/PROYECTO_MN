@@ -4373,9 +4373,15 @@ class AmyloidSpectPanel(QDialog):
         ct = self._trial_ct_native
         ref = self._trial_ref_shape or tuple(int(v) for v in sp.shape)
 
-        z_ref = int(np.clip(self._slice_idx.get("axial", max(0, ref[0] // 2)) + self._spect_view_offset.get("axial", 0), 0, max(0, ref[0] - 1)))
-        y_ref = int(np.clip(self._slice_idx.get("coronal", max(0, ref[1] // 2)) + self._spect_view_offset.get("coronal", 0), 0, max(0, ref[1] - 1)))
-        x_ref = int(np.clip(self._slice_idx.get("sagittal", max(0, ref[2] // 2)) + self._spect_view_offset.get("sagittal", 0), 0, max(0, ref[2] - 1)))
+        off_z = float(self._spect_view_offset.get("axial", 0.0))
+        off_y = float(self._spect_view_offset.get("coronal", 0.0))
+        off_x = float(self._spect_view_offset.get("sagittal", 0.0))
+        if abs(off_z) > 1e-6 or abs(off_y) > 1e-6 or abs(off_x) > 1e-6:
+            sp = ndi.shift(sp, shift=(off_z, off_y, off_x), order=1, mode='nearest')
+
+        z_ref = int(np.clip(self._slice_idx.get("axial", max(0, ref[0] // 2)), 0, max(0, ref[0] - 1)))
+        y_ref = int(np.clip(self._slice_idx.get("coronal", max(0, ref[1] // 2)), 0, max(0, ref[1] - 1)))
+        x_ref = int(np.clip(self._slice_idx.get("sagittal", max(0, ref[2] // 2)), 0, max(0, ref[2] - 1)))
 
         z = self._map_idx_between_grids(z_ref, ref[0], sp.shape[0])
         y = self._map_idx_between_grids(y_ref, ref[1], sp.shape[1])
@@ -4620,11 +4626,18 @@ class AmyloidSpectPanel(QDialog):
                 f"CT Δ(z,y,x)=({self._nudge_z.value():.1f},{self._nudge_y.value():.1f},{self._nudge_x.value():.1f}) px"
             )
         else:
-            pan = self._spect_pan_px
-            pan[axis][0] += dy
-            pan[axis][1] += dx
+            # Shift+arrastre en SPECT: igual que Ctrl+arrastre en CT,
+            # aplicar desplazamiento global 3D para que todas las vistas
+            # se ajusten juntas a la nueva posición.
+            dz, dyw, dxw = self._drag_delta_to_world_zyx(axis, dx, dy)
+            self._spect_view_offset["axial"] = float(np.clip(self._spect_view_offset.get("axial", 0.0) + dz, -64.0, 64.0))
+            self._spect_view_offset["coronal"] = float(np.clip(self._spect_view_offset.get("coronal", 0.0) + dyw, -64.0, 64.0))
+            self._spect_view_offset["sagittal"] = float(np.clip(self._spect_view_offset.get("sagittal", 0.0) + dxw, -64.0, 64.0))
             self._status.setText(
-                f"Shift+arrastre: SPECT pan {axis}=({pan[axis][0]},{pan[axis][1]}) px"
+                "Shift+arrastre (triangulado): "
+                f"SPECT Δ(z,y,x)=({self._spect_view_offset['axial']:.1f},"
+                f"{self._spect_view_offset['coronal']:.1f},"
+                f"{self._spect_view_offset['sagittal']:.1f}) px"
             )
             self._render_current_with_overlay()
         self._drag_state["pos"] = pos
@@ -5372,13 +5385,18 @@ class AmyloidSpectPanel(QDialog):
         vol = self._spect_transform_3d(np.asarray(volume, dtype=np.float64))
         if vol.ndim != 3:
             return central_slices_preview(vol)
+        off_z = float(self._spect_view_offset.get("axial", 0.0))
+        off_y = float(self._spect_view_offset.get("coronal", 0.0))
+        off_x = float(self._spect_view_offset.get("sagittal", 0.0))
+        if abs(off_z) > 1e-6 or abs(off_y) > 1e-6 or abs(off_x) > 1e-6:
+            vol = ndi.shift(vol, shift=(off_z, off_y, off_x), order=1, mode='nearest')
         z = int(np.clip(self._slice_idx.get("axial", vol.shape[0] // 2), 0, vol.shape[0] - 1))
         y = int(np.clip(self._slice_idx.get("coronal", vol.shape[1] // 2), 0, vol.shape[1] - 1))
         x = int(np.clip(self._slice_idx.get("sagittal", vol.shape[2] // 2), 0, vol.shape[2] - 1))
         return {
-            "axial": self._apply_zoom_pan_2d(self._window_spect(vol[int(np.clip(z + self._spect_view_offset.get("axial", 0), 0, vol.shape[0] - 1))]), self._spect_zoom_pct, self._spect_pan_px["axial"], order=1),
-            "coronal": self._apply_zoom_pan_2d(self._window_spect(vol[:, int(np.clip(y + self._spect_view_offset.get("coronal", 0), 0, vol.shape[1] - 1)), :]), self._spect_zoom_pct, self._spect_pan_px["coronal"], order=1),
-            "sagittal": self._apply_zoom_pan_2d(self._window_spect(vol[:, :, int(np.clip(x + self._spect_view_offset.get("sagittal", 0), 0, vol.shape[2] - 1))]), self._spect_zoom_pct, self._spect_pan_px["sagittal"], order=1),
+            "axial": self._apply_zoom_pan_2d(self._window_spect(vol[z]), self._spect_zoom_pct, self._spect_pan_px["axial"], order=1),
+            "coronal": self._apply_zoom_pan_2d(self._window_spect(vol[:, y, :]), self._spect_zoom_pct, self._spect_pan_px["coronal"], order=1),
+            "sagittal": self._apply_zoom_pan_2d(self._window_spect(vol[:, :, x]), self._spect_zoom_pct, self._spect_pan_px["sagittal"], order=1),
         }
 
     def _reset_view_offsets(self):
