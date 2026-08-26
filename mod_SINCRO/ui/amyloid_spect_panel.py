@@ -1568,19 +1568,17 @@ class AmyloidSpectPanel(QDialog):
         # ────────────────────────────────────────────────────────────────────────────
 
         # ═══════════════════════════════════════════════════════════════════
-        # CONTENEDOR DE CONTROLES: 2 FILAS
-        #   Fila 1: [HMR-SPEC] [Edición Manual Máscara CT]
-        #   Fila 2: [Orientación] [Zoom] [Ajuste] (petitos)
+        # CONTENEDOR DE CONTROLES: 2 COLUMNAS
+        #   Izquierda:  HMR-SPEC (~50% ancho)
+        #   Derecha:    Contenedor vertical:
+        #               Arriba: Edición Manual Máscara CT
+        #               Abajo:  [Orientación] [Zoom] [Ajuste] juntos
         # ═══════════════════════════════════════════════════════════════════
         controls_container = QWidget()
         controls_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        main_controls_layout = QVBoxLayout(controls_container)
+        main_controls_layout = QHBoxLayout(controls_container)
         main_controls_layout.setContentsMargins(0, 0, 0, 0)
-        main_controls_layout.setSpacing(4)
-
-        # --- FILA 1: HMR-SPEC (izq) + Edición Máscara CT (der) ---
-        top_row = QHBoxLayout()
-        top_row.setSpacing(4)
+        main_controls_layout.setSpacing(6)
         
         # --- HMR-SPECT (angosto, ~60%) ---
         hmr_group = QGroupBox("HMR-SPECT")
@@ -1957,7 +1955,7 @@ class AmyloidSpectPanel(QDialog):
         self._ct_flipz_check.setStyleSheet("font-size:9px;")
         flip_grid.addWidget(self._ct_flipz_check, 2, 1)
         
-        top_row.addWidget(hmr_group, 6)   # HMR-SPEC: 6/10 en fila superior
+        main_controls_layout.addWidget(hmr_group, 5)   # HMR-SPEC: 5/10 (izquierda ~50%)
 
         # --- Overlay / QC / Cortes MOVIDO a columna derecha (arriba del MIP) ---
 
@@ -2009,16 +2007,20 @@ class AmyloidSpectPanel(QDialog):
         link_zoom_row.addWidget(self._link_zoom_check, 1)
         zoom_layout.addLayout(link_zoom_row)
 
-        top_row.addWidget(edit_group, 4)    # Edición máscara: 4/10 en fila superior
+        # --- COLUMNA DERECHA: Edición Máscara (arriba) + Orient/Zoom/Ajuste (abajo) ---
+        right_side_widget = QWidget()
+        right_side_layout = QVBoxLayout(right_side_widget)
+        right_side_layout.setContentsMargins(0, 0, 0, 0)
+        right_side_layout.setSpacing(4)
 
-        main_controls_layout.addLayout(top_row)
+        # Arriba: Edición Máscara CT (ocupa todo el ancho de la columna derecha)
+        right_side_layout.addWidget(edit_group)
 
-        # --- FILA 2: Orientación + Zoom + Ajuste (petitos) ---
-        bottom_row = QHBoxLayout()
-        bottom_row.setSpacing(4)
-        bottom_row.addStretch(1)              # Empuja los 3 grupos a la derecha
-        bottom_row.addWidget(flip_group, 3)     # Orientación: 3/10
-        bottom_row.addWidget(zoom_group, 3)     # Zoom: 3/10
+        # Abajo: Orientación + Zoom + Ajuste en fila horizontal juntos
+        bottom_groups_row = QHBoxLayout()
+        bottom_groups_row.setSpacing(4)
+        bottom_groups_row.addWidget(flip_group, 3)      # Orientación
+        bottom_groups_row.addWidget(zoom_group, 3)      # Zoom
 
         # --- Ajuste CT (nudge/rot/resets) ---
         ajuste_group = QGroupBox("Ajuste")
@@ -2078,9 +2080,11 @@ class AmyloidSpectPanel(QDialog):
         reset_row.addWidget(self._btn_reset_offsets)
         ajuste_layout.addLayout(reset_row)
 
-        bottom_row.addWidget(ajuste_group, 4)   # Ajuste: 4/10
+        bottom_groups_row.addWidget(ajuste_group, 4)   # Ajuste
 
-        main_controls_layout.addLayout(bottom_row)
+        right_side_layout.addLayout(bottom_groups_row)
+
+        main_controls_layout.addWidget(right_side_widget, 5)  # Columna derecha: 5/10
 
         left_col.addWidget(controls_container)
         # ────────────────────────────────────────────────────────────────────────────
