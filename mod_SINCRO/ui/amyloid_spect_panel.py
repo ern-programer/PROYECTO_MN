@@ -8,7 +8,7 @@ import json
 import numpy as np
 
 from PyQt6.QtCore import QObject, Qt, QSettings, QThread, pyqtSignal, QPointF
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QPdfWriter, QPageSize, QPen, QColor, QFont, QTransform
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPdfWriter, QPageSize, QPen, QColor, QFont, QTransform, QPolygonF
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -56,10 +56,13 @@ from core.amyloid_spect import (
     refine_ct_to_spect_translation,
     # HMR-SPECT
     VOISphere,
+    VOIAnatomical,
     HmrSpectResult,
     HmrSpectMethod,
     compute_hmr_spect,
     create_voi_from_localization,
+    create_anatomical_heart_voi,
+    create_bone_safe_mediastinum_voi,
 )
 
 
@@ -911,6 +914,8 @@ class AmyloidSpectPanel(QDialog):
         self._ct_volume = None
         self._ct_registered = None
         self._ct_auto_registered = None
+        self._ct_registration_shift_zyx = (0.0, 0.0, 0.0)  # Shift de registro en píxeles SPECT
+        self._ct_total_shift_zyx = (0.0, 0.0, 0.0)  # Shift total (registro + nudge) en píxeles SPECT
         self._att_map_volume = None
         self._att_map_registered = None
         self._att_spacing_zyx = None
@@ -957,7 +962,9 @@ class AmyloidSpectPanel(QDialog):
         self._trial_cache_signature = None
         self._trial_spect_on_ct = None
         self._trial_ct_native = None
+        self._trial_ct_native_spacing = None
         self._trial_ref_shape = None
+        self._mip_vol_cache_sig = None  # Caché para evitar recalcular transform en cada scroll
         self._workflow_tag = "perf_spect_ct"
         self._dicom_profile_info = {}
         self._pending_camera_profile_adjust = None
@@ -970,6 +977,14 @@ class AmyloidSpectPanel(QDialog):
         # VOIs temporales para visualización en vivo
         self._temp_voi_heart = None
         self._temp_voi_mediastinum = None
+        
+        # === F2.4: Estado edición manual de máscara CT ===
+        self._mask_edit_active = False          # Si el modo edición está activo
+        self._mask_edit_paint_mode = True       # True = pintar, False = borrar
+        self._mask_edit_undo_stack = []         # Stack de máscaras previas para undo
+        self._mask_edit_original = None         # Máscara original antes de cualquier edición
+        self._mask_edit_has_changes = False     # Si hay cambios pendientes de aplicar
+        self._reuse_edited_segmentation = False # Reusar máscara editada en vez de re-segmentar
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -1470,7 +1485,7 @@ class AmyloidSpectPanel(QDialog):
         radius_row.addWidget(self._mediastinum_radius_spin)
         hmr_layout.addLayout(radius_row)
         
-        # Fila 3: Botón calcular y resultado
+        # Fila 3: Botón calcular, preservar máscara, volumen y resultado
         calc_row = QHBoxLayout()
         self._btn_calc_hmr = QPushButton("Calcular HMR-SPECT")
         self._btn_calc_hmr.clicked.connect(self._calculate_hmr_spect)
@@ -1480,7 +1495,26 @@ class AmyloidSpectPanel(QDialog):
             "- Cruz actual = centro VOI mediastino"
         )
         calc_row.addWidget(self._btn_calc_hmr)
-        
+
+        # Checkbox para preservar máscara manual al recalcular
+        self._preserve_mask_check = QCheckBox("🔒 Preservar máscara")
+        self._preserve_mask_check.setChecked(False)
+        self._preserve_mask_check.setToolTip(
+            "Cuando está activado:\n"
+            "- Si editaste la máscara manualmente, se REUTILIZA tal cual\n"
+            "- Solo se recalculan las VOIs con la nueva posición del punto B\n"
+            "- Útil cuando mueves el mediastino pero quieres mantener tu máscara cardíaca"
+        )
+        calc_row.addWidget(self._preserve_mask_check)
+
+        # Label de volumen visible SIEMPRE (no solo en consola oculta)
+        self._lbl_volume_display = QLabel("❤️ -- mL")
+        self._lbl_volume_display.setStyleSheet(
+            "font-size:12px; font-weight:600; color:#60a5fa; background:#111827; padding:4px 8px;"
+        )
+        self._lbl_volume_display.setMinimumWidth(120)
+        calc_row.addWidget(self._lbl_volume_display)
+
         self._lbl_hmr_result = QLabel("HMR-SPECT = N/D")
         self._lbl_hmr_result.setStyleSheet(
             "font-size:16px; font-weight:700; color:#ffffff; background:#000000; padding:6px 12px;"
@@ -1500,6 +1534,146 @@ class AmyloidSpectPanel(QDialog):
         scale_row.addWidget(scale_lbl)
         scale_row.addStretch(1)
         hmr_layout.addLayout(scale_row)
+
+        # La vía estable mantiene las VOIs esféricas exactamente en los
+        # puntos A/B. La segmentación CT queda aislada como opción beta.
+        self._ct_anatomical_check = QCheckBox("CT anatómica / PVE (experimental)")
+        self._ct_anatomical_check.setChecked(False)
+        self._ct_anatomical_check.setToolTip(
+            "Desactivado (recomendado): usa VOIs manuales esféricas ancladas en A/B.\n"
+            "Activado: prueba segmentación CT, edición de máscara y corrección PVE."
+        )
+        self._ct_anatomical_check.toggled.connect(self._on_ct_anatomical_mode_toggled)
+        hmr_layout.addWidget(self._ct_anatomical_check)
+
+        # === Botones de persistencia CT (guardar/cargar/reiniciar) ===
+        ct_persist_row = QHBoxLayout()
+        
+        self._btn_save_ct_state = QPushButton("💾 Guardar CT")
+        self._btn_save_ct_state.setToolTip(
+            "Guarda el estado actual de la segmentación CT (máscara, HMR, PVE)\n"
+            "en un archivo .json para retomar en otra sesión."
+        )
+        self._btn_save_ct_state.setEnabled(False)
+        self._btn_save_ct_state.clicked.connect(self._save_ct_state)
+        ct_persist_row.addWidget(self._btn_save_ct_state)
+        
+        self._btn_load_ct_state = QPushButton("📂 Cargar CT")
+        self._btn_load_ct_state.setToolTip(
+            "Carga un estado de segmentación CT guardado previamente.\n"
+            "Restaura máscara editada, volumen y resultados HMR."
+        )
+        self._btn_load_ct_state.clicked.connect(self._load_ct_state)
+        ct_persist_row.addWidget(self._btn_load_ct_state)
+        
+        self._btn_restart_ct = QPushButton("🗑️ Reiniciar CT")
+        self._btn_restart_ct.setStyleSheet("color:#ef4444; font-weight:bold;")
+        self._btn_restart_ct.setToolTip(
+            "BORRA toda la segmentación CT: máscara, HMR, PVE, edición manual.\n"
+            "Vuelve al estado inicial (VOIs esféricas manuales)."
+        )
+        self._btn_restart_ct.setEnabled(False)
+        self._btn_restart_ct.clicked.connect(self._restart_ct_state)
+        ct_persist_row.addWidget(self._btn_restart_ct)
+        
+        hmr_layout.addLayout(ct_persist_row)
+
+        # === F2.4: Edición manual de máscara CT (brush/erase) ===
+        edit_group = QGroupBox("F2.4 Edición Manual de Máscara CT")
+        edit_group.setStyleSheet(
+            "QGroupBox { font-weight:600; border:1px solid #4b5563; border-radius:6px; margin-top:12px; padding-top:8px; }"
+        )
+        edit_layout = QVBoxLayout(edit_group)
+        
+        # Fila de controles principales
+        edit_ctrl_row = QHBoxLayout()
+        
+        # Toggle modo edición
+        self._btn_toggle_mask_edit = QPushButton("✏️ Editar Máscara")
+        self._btn_toggle_mask_edit.setCheckable(True)
+        self._btn_toggle_mask_edit.setEnabled(False)
+        self._btn_toggle_mask_edit.setToolTip(
+            "Activa/desactiva el modo de edición manual de la máscara CT segmentada.\n"
+            "Una vez activado, pinta sobre la vista AXIAL para agregar o quitar tejido.\n"
+            "Requiere que exista una segmentación CT previa (Fase 2)."
+        )
+        self._btn_toggle_mask_edit.toggled.connect(self._on_mask_edit_toggled)
+        edit_ctrl_row.addWidget(self._btn_toggle_mask_edit)
+        
+        # Toggle pintar / borrar
+        self._btn_paint_erase = QPushButton("🖌️ Pintar")
+        self._btn_paint_erase.setCheckable(True)
+        self._btn_paint_erase.setChecked(True)  # Default: pintar
+        self._btn_paint_erase.setEnabled(False)
+        self._btn_paint_erase.setToolTip(
+            "🖌️ Pintar = Agregar tejido a la máscara (blanco)\n"
+            "🧹 Borrar = Quitar tejido de la máscara (negro)"
+        )
+        self._btn_paint_erase.toggled.connect(self._on_paint_erase_toggled)
+        edit_ctrl_row.addWidget(self._btn_paint_erase)
+        
+        # Radio del brush
+        edit_ctrl_row.addWidget(QLabel("Radio:"))
+        self._brush_radius_spin = QSpinBox()
+        self._brush_radius_spin.setRange(3, 50)
+        self._brush_radius_spin.setValue(10)
+        self._brush_radius_spin.setSuffix(" px")
+        self._brush_radius_spin.setEnabled(False)
+        self._brush_radius_spin.setToolTip("Radio del pincel en píxeles de pantalla")
+        edit_ctrl_row.addWidget(self._brush_radius_spin)
+        
+        edit_layout.addLayout(edit_ctrl_row)
+        
+        # Fila de acciones
+        edit_action_row = QHBoxLayout()
+        
+        # Deshacer última acción
+        self._btn_undo_mask = QPushButton("↩️ Deshacer")
+        self._btn_undo_mask.setEnabled(False)
+        self._btn_undo_mask.setToolTip("Deshacer la última acción de pincel")
+        self._btn_undo_mask.clicked.connect(self._undo_mask_edit)
+        edit_action_row.addWidget(self._btn_undo_mask)
+        
+        # Resetear a máscara original
+        self._btn_reset_mask = QPushButton("🔄 Reset Original")
+        self._btn_reset_mask.setEnabled(False)
+        self._btn_reset_mask.setToolTip(
+            "Restaurar la máscara CT a su estado original (antes de edición manual)"
+        )
+        self._btn_reset_mask.clicked.connect(self._reset_mask_to_original)
+        edit_action_row.addWidget(self._btn_reset_mask)
+        
+        # Aplicar y recalcular
+        self._btn_apply_mask_edit = QPushButton("✅ Aplicar → Recalcular")
+        self._btn_apply_mask_edit.setEnabled(False)
+        self._btn_apply_mask_edit.setStyleSheet(
+            "background-color:#059669; color:white; font-weight:bold; padding:6px 12px;"
+        )
+        self._btn_apply_mask_edit.setToolTip(
+            "Aplica los cambios de edición manual y recalcula HMR con la nueva máscara"
+        )
+        self._btn_apply_mask_edit.clicked.connect(self._apply_mask_edit_and_recalc)
+        edit_action_row.addWidget(self._btn_apply_mask_edit)
+        
+        # Exportar máscara como NIfTI para inspección 3D externa
+        self._btn_export_mask_nifti = QPushButton("💾 Exportar NIfTI")
+        self._btn_export_mask_nifti.setEnabled(False)
+        self._btn_export_mask_nifti.setToolTip(
+            "Guarda la máscara CT como archivo .nii.gz para abrir en 3D Slicer / ITK-SNAP"
+        )
+        self._btn_export_mask_nifti.clicked.connect(self._export_mask_nifti)
+        edit_action_row.addWidget(self._btn_export_mask_nifti)
+        
+        edit_layout.addLayout(edit_action_row)
+        
+        # Label de estado de edición
+        self._mask_edit_status = QLabel("Modo edición: INACTIVO")
+        self._mask_edit_status.setStyleSheet(
+            "color:#9ca3af; font-style:italic; font-size:11px;"
+        )
+        edit_layout.addWidget(self._mask_edit_status)
+        
+        hmr_layout.addWidget(edit_group)
 
         # --- Orientación prueba (centro, COMPACTO) ---
         flip_group = QGroupBox("Orientación")
@@ -1581,6 +1755,20 @@ class AmyloidSpectPanel(QDialog):
         self._ct_zoom_spin.setStyleSheet("font-size:10px;")
         ct_zoom_row.addWidget(self._ct_zoom_spin, 1)
         zoom_layout.addLayout(ct_zoom_row)
+
+        # Checkbox para anclar/desanclar zooms SPECT y CT
+        link_zoom_row = QHBoxLayout()
+        link_zoom_row.setSpacing(4)
+        self._link_zoom_check = QCheckBox("🔗 Anclar zooms")
+        self._link_zoom_check.setChecked(True)  # ANCLADOS por defecto
+        self._link_zoom_check.setToolTip(
+            "Cuando está activado, cambiar el zoom de SPECT también cambia el CT "
+            "y viceversa. Desactívalos para ajustarlos independientemente."
+        )
+        self._link_zoom_check.setStyleSheet("font-size:10px; color:#94a3b8;")
+        self._link_zoom_check.stateChanged.connect(self._on_link_zoom_changed)
+        link_zoom_row.addWidget(self._link_zoom_check, 1)
+        zoom_layout.addLayout(link_zoom_row)
 
         hmr_orient_row.addWidget(zoom_group, 3)  # Zoom: 3/14
 
@@ -1742,6 +1930,18 @@ class AmyloidSpectPanel(QDialog):
         self._ct_grid_trial_check.setStyleSheet("font-size:10px; color:#f59e0b; font-weight:600;")
         self._ct_grid_trial_check.toggled.connect(self._on_ct_grid_trial_toggled)
         trial_grid_row.addWidget(self._ct_grid_trial_check)
+        trial_grid_row.addStretch()
+        # Botón info CT (i en círculo)
+        self._ct_info_btn = QPushButton("\u2139\ufe0f")
+        self._ct_info_btn.setFixedSize(22, 22)
+        self._ct_info_btn.setToolTip("Rol del CT en diagnóstico de amiloidosis")
+        self._ct_info_btn.setStyleSheet(
+            "font-size:13px; border-radius:11px; background:#3b82f6; color:white;"
+            "border:none; font-weight:bold; font-style:italic;"
+        )
+        self._ct_info_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._ct_info_btn.clicked.connect(self._show_ct_role_info)
+        trial_grid_row.addWidget(self._ct_info_btn)
         window_vbox.addLayout(trial_grid_row)
 
         top_right_row.addWidget(window_group, 1)   # Ventana/Color: 1 parte
@@ -1762,7 +1962,8 @@ class AmyloidSpectPanel(QDialog):
         self._metrics = QTextEdit()
         self._metrics.setReadOnly(True)
         self._metrics.setStyleSheet("background:#0f172a; color:#e2e8f0; border:1px solid #334155;")
-        self._metrics.setMaximumHeight(120)  # Altura máxima cuando visible
+        self._metrics.setMaximumHeight(0)  # OCULTA por defecto
+        self._metrics.setVisible(False)  # Oculta al inicio
 
         # Botón toggle para ocultar/mostrar consola
         self._btn_toggle_console = QPushButton("▶ Consola")
@@ -2738,6 +2939,81 @@ class AmyloidSpectPanel(QDialog):
         out = QPixmap(pix)
         painter = QPainter(out)
         try:
+            # F2.4: overlay de máscara CT RELLENA en los TRES planos MPR.
+            # Se dibuja debajo de contornos/cruces y lee directamente de
+            # _ct_segmentation (misma fuente que pinta el pincel), así que
+            # refleja los cambios en vivo.  Visible siempre que exista
+            # segmentación CT (no requiere modo edición activo) para que el
+            # usuario pueda ver el resultado de la segmentación automática
+            # antes de decidir si necesita editar.
+            _ct_seg_edit = getattr(self, "_ct_segmentation", None)
+            _show_mask = _ct_seg_edit is not None and (
+                bool(getattr(self, "_mask_edit_active", False))
+                or bool(getattr(self, "_ct_anatomical_check", False) and self._ct_anatomical_check.isChecked())
+            )
+            if _show_mask:
+                try:
+                    _m = np.asarray(_ct_seg_edit.mask_3d, dtype=bool)
+                    if _m.ndim == 3:
+                        # === DEBUG TEMPORAL ===
+                        _dbg_slc_cor = _m[:, int(np.clip(cur_y, 0, _m.shape[1] - 1)), :]
+                        _dbg_slc_sag = _m[:, :, int(np.clip(cur_x, 0, _m.shape[2] - 1))]
+                        print(f'[DEBUG-MASK] axis={axis} cur_z={cur_z} cur_y={cur_y} cur_x={cur_x} '
+                              f'mask_shape={_m.shape} w={w} h={h} '
+                              f'coronal_nonzero={np.count_nonzero(_dbg_slc_cor)} '
+                              f'sagittal_nonzero={np.count_nonzero(_dbg_slc_sag)}')
+                        # ====================
+
+                        _fill = QColor(168, 85, 247, 70)  # violeta semi-transparente
+                        painter.setPen(Qt.PenStyle.NoPen)
+                        painter.setBrush(_fill)
+
+                        if axis == "axial":
+                            _mz = int(np.clip(cur_z, 0, _m.shape[0] - 1))
+                            _slc = _m[_mz]  # (ny, nx)
+                            _s0, _s1 = int(_slc.shape[0]), int(_slc.shape[1])
+                            if _s0 > 1 and _s1 > 1 and np.any(_slc):
+                                _cw = (w - 1) / max(1, (_s1 - 1))
+                                _ch = (h - 1) / max(1, (_s0 - 1))
+                                _ys, _xs = np.nonzero(_slc)
+                                for _yy, _xx in zip(_ys.tolist(), _xs.tolist()):
+                                    _px0 = int(round(_xx * _cw))
+                                    _py0 = int(round(_yy * _ch))
+                                    painter.drawRect(_px0, _py0, max(1, int(_cw) + 1), max(1, int(_ch) + 1))
+
+                        elif axis == "coronal":
+                            _my = int(np.clip(cur_y, 0, _m.shape[1] - 1))
+                            _slc = _m[:, _my, :]  # (nz, nx)
+                            _s0, _s1 = int(_slc.shape[0]), int(_slc.shape[1])
+                            if _s0 > 1 and _s1 > 1 and np.any(_slc):
+                                # En coronal: eje horizontal=X, eje vertical=Z
+                                _cw = (w - 1) / max(1, (_s1 - 1))   # X → ancho
+                                _ch = (h - 1) / max(1, (_s0 - 1))   # Z → alto
+                                _zs, _xs = np.nonzero(_slc)
+                                for _zz, _xx in zip(_zs.tolist(), _xs.tolist()):
+                                    _px0 = int(round(_xx * _cw))
+                                    _py0 = int(round(_zz * _ch))
+                                    painter.drawRect(_px0, _py0, max(1, int(_cw) + 1), max(1, int(_ch) + 1))
+
+                        else:  # sagittal
+                            _mx = int(np.clip(cur_x, 0, _m.shape[2] - 1))
+                            _slc = _m[:, :, _mx]  # (nz, ny)
+                            _s0, _s1 = int(_slc.shape[0]), int(_slc.shape[1])
+                            if _s0 > 1 and _s1 > 1 and np.any(_slc):
+                                # En sagital: eje horizontal=Y, eje vertical=Z
+                                _cw = (w - 1) / max(1, (_s1 - 1))   # Y → ancho
+                                _ch = (h - 1) / max(1, (_s0 - 1))   # Z → alto
+                                _zs, _ys = np.nonzero(_slc)
+                                for _zz, _yy in zip(_zs.tolist(), _ys.tolist()):
+                                    _px0 = int(round(_yy * _cw))
+                                    _py0 = int(round(_zz * _ch))
+                                    painter.drawRect(_px0, _py0, max(1, int(_cw) + 1), max(1, int(_ch) + 1))
+
+                        painter.setPen(Qt.PenStyle.SolidLine)
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                except Exception:
+                    pass
+            
             # Dibujar VOIs si existen
             if show_vois and hasattr(self, "_hmr_result") and self._hmr_result is not None:
                 hmr_res = self._hmr_result
@@ -2746,55 +3022,200 @@ class AmyloidSpectPanel(QDialog):
                 # VOI corazón (rojo punteado)
                 if hmr_res.voi_heart is not None:
                     voi_h = hmr_res.voi_heart
-                    # Centro en índices de volumen
-                    cz_h, cy_h, cx_h = voi_h.cz, voi_h.cy, voi_h.cx
-                    # Radio en píxeles de volumen
-                    r_vol = voi_h.radius_mm / max(spacing)
                     
-                    if axis == "axial":
-                        # Vista axial: X horizontal, Y vertical
-                        cx_px = int(round(cx_h / max(1, shape[2] - 1) * (w - 1)))
-                        cy_px = int(round(cy_h / max(1, shape[1] - 1) * (h - 1)))
-                        r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
-                    elif axis == "coronal":
-                        # Vista coronal: X horizontal, Z vertical
-                        cx_px = int(round(cx_h / max(1, shape[2] - 1) * (w - 1)))
-                        cy_px = int(round(cz_h / max(1, shape[0] - 1) * (h - 1)))
-                        r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
-                    else:  # sagittal
-                        # Vista sagittal: Y horizontal, Z vertical
-                        cx_px = int(round(cy_h / max(1, shape[1] - 1) * (w - 1)))
-                        cy_px = int(round(cz_h / max(1, shape[0] - 1) * (h - 1)))
-                        r_px = int(round(r_vol / max(1, shape[1] - 1) * w))
-                    
-                    pen_h = QPen(QColor(239, 68, 68, 220), 2, Qt.PenStyle.DashLine)
-                    painter.setPen(pen_h)
-                    painter.drawEllipse(QPointF(cx_px, cy_px), r_px, r_px)
-                    painter.drawText(cx_px + r_px + 4, cy_px - 4, f"Corazón {voi_h.radius_mm:.0f}mm")
+                    # Manejar tanto VOISphere como VOIAnatomical
+                    if isinstance(voi_h, VOIAnatomical):
+                        # Dibujar contorno anatómico del miocardio en TODOS los planos
+                        pen_h = QPen(QColor(239, 68, 68, 220), 2, Qt.PenStyle.DashLine)
+                        painter.setPen(pen_h)
+
+                        if axis == "axial":
+                            cur_z_idx = int(round(cur_z))
+                            contour = voi_h.get_contour_for_slice(cur_z_idx)
+                            if contour is not None and len(contour) > 2:
+                                points = [QPointF(
+                                    int(round(c[1] / max(1, shape[2] - 1) * (w - 1))),
+                                    int(round(c[0] / max(1, shape[1] - 1) * (h - 1)))
+                                ) for c in contour]
+                                polygon = QPolygonF(points)
+                                painter.drawPolygon(polygon)
+                                cx_px = int(round(voi_h.cx / max(1, shape[2] - 1) * (w - 1)))
+                                cy_px = int(round(voi_h.cy / max(1, shape[1] - 1) * (h - 1)))
+                                painter.drawText(cx_px + 10, cy_px - 4, "♥ Anatómico-CT")
+                            else:
+                                cx_px = int(round(voi_h.cx / max(1, shape[2] - 1) * (w - 1)))
+                                cy_px = int(round(voi_h.cy / max(1, shape[1] - 1) * (h - 1)))
+                                pen_dot = QPen(QColor(239, 68, 68, 150), 1, Qt.PenStyle.DotLine)
+                                painter.setPen(pen_dot)
+                                painter.drawEllipse(QPointF(cx_px, cy_px), 4, 4)
+                                painter.drawText(cx_px + 6, cy_px - 4, "♥ CT")
+                                painter.setPen(pen_h)  # restaurar
+
+                        elif axis == "coronal":
+                            cur_y_idx = int(round(cur_y))
+                            contour = voi_h.get_contour_for_coronal(cur_y_idx)
+                            if contour is not None and len(contour) > 2:
+                                # Contorno retorna (z, x); en coronal: X=horizontal, Z=vertical
+                                points = [QPointF(
+                                    int(round(c[1] / max(1, shape[2] - 1) * (w - 1))),   # x → X screen
+                                    int(round(c[0] / max(1, shape[0] - 1) * (h - 1)))    # z → Y screen
+                                ) for c in contour]
+                                polygon = QPolygonF(points)
+                                painter.drawPolygon(polygon)
+                                cx_px = int(round(voi_h.cx / max(1, shape[2] - 1) * (w - 1)))
+                                cy_px = int(round(voi_h.cz / max(1, shape[0] - 1) * (h - 1)))
+                                painter.drawText(cx_px + 10, cy_px - 4, "♥ Anatómico-CT")
+                            else:
+                                cx_px = int(round(voi_h.cx / max(1, shape[2] - 1) * (w - 1)))
+                                cy_px = int(round(voi_h.cz / max(1, shape[0] - 1) * (h - 1)))
+                                pen_dot = QPen(QColor(239, 68, 68, 150), 1, Qt.PenStyle.DotLine)
+                                painter.setPen(pen_dot)
+                                painter.drawEllipse(QPointF(cx_px, cy_px), 4, 4)
+                                painter.drawText(cx_px + 6, cy_px - 4, "♥ CT")
+                                painter.setPen(pen_h)
+
+                        else:  # sagittal
+                            cur_x_idx = int(round(cur_x))
+                            contour = voi_h.get_contour_for_sagittal(cur_x_idx)
+                            if contour is not None and len(contour) > 2:
+                                # Contorno retorna (z, y); en sagital: Y=horizontal, Z=vertical
+                                points = [QPointF(
+                                    int(round(c[1] / max(1, shape[1] - 1) * (w - 1))),   # y → X screen
+                                    int(round(c[0] / max(1, shape[0] - 1) * (h - 1)))    # z → Y screen
+                                ) for c in contour]
+                                polygon = QPolygonF(points)
+                                painter.drawPolygon(polygon)
+                                cx_px = int(round(voi_h.cy / max(1, shape[1] - 1) * (w - 1)))
+                                cy_px = int(round(voi_h.cz / max(1, shape[0] - 1) * (h - 1)))
+                                painter.drawText(cx_px + 10, cy_px - 4, "♥ Anatómico-CT")
+                            else:
+                                cx_px = int(round(voi_h.cy / max(1, shape[1] - 1) * (w - 1)))
+                                cy_px = int(round(voi_h.cz / max(1, shape[0] - 1) * (h - 1)))
+                                pen_dot = QPen(QColor(239, 68, 68, 150), 1, Qt.PenStyle.DotLine)
+                                painter.setPen(pen_dot)
+                                painter.drawEllipse(QPointF(cx_px, cy_px), 4, 4)
+                                painter.drawText(cx_px + 6, cy_px - 4, "♥ CT")
+                                painter.setPen(pen_h)
+                    else:
+                        # VOI esférica tradicional (o anatómica en vistas no-axiales)
+                        cz_h, cy_h, cx_h = voi_h.cz, voi_h.cy, voi_h.cx
+                        r_vol = float(getattr(voi_h, "radius_mm", 30.0)) / max(spacing)
+                        
+                        if axis == "axial":
+                            # Vista axial: X horizontal, Y vertical
+                            cx_px = int(round(cx_h / max(1, shape[2] - 1) * (w - 1)))
+                            cy_px = int(round(cy_h / max(1, shape[1] - 1) * (h - 1)))
+                            r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
+                        elif axis == "coronal":
+                            # Vista coronal: X horizontal, Z vertical
+                            cx_px = int(round(cx_h / max(1, shape[2] - 1) * (w - 1)))
+                            cy_px = int(round(cz_h / max(1, shape[0] - 1) * (h - 1)))
+                            r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
+                        else:  # sagittal
+                            # Vista sagittal: Y horizontal, Z vertical
+                            cx_px = int(round(cy_h / max(1, shape[1] - 1) * (w - 1)))
+                            cy_px = int(round(cz_h / max(1, shape[0] - 1) * (h - 1)))
+                            r_px = int(round(r_vol / max(1, shape[1] - 1) * w))
+                        
+                        pen_h = QPen(QColor(239, 68, 68, 220), 2, Qt.PenStyle.DashLine)
+                        painter.setPen(pen_h)
+                        painter.drawEllipse(QPointF(cx_px, cy_px), r_px, r_px)
+                        _r_label = float(getattr(voi_h, "radius_mm", 0.0))
+                        painter.drawText(cx_px + r_px + 4, cy_px - 4, f"Corazón {_r_label:.0f}mm")
                 
                 # VOI mediastino (azul punteado)
                 if hmr_res.voi_mediastinum is not None:
                     voi_m = hmr_res.voi_mediastinum
-                    cz_m, cy_m, cx_m = voi_m.cz, voi_m.cy, voi_m.cx
-                    r_vol = voi_m.radius_mm / max(spacing)
                     
-                    if axis == "axial":
-                        cx_px = int(round(cx_m / max(1, shape[2] - 1) * (w - 1)))
-                        cy_px = int(round(cy_m / max(1, shape[1] - 1) * (h - 1)))
-                        r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
-                    elif axis == "coronal":
-                        cx_px = int(round(cx_m / max(1, shape[2] - 1) * (w - 1)))
-                        cy_px = int(round(cz_m / max(1, shape[0] - 1) * (h - 1)))
-                        r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
-                    else:  # sagittal
-                        cx_px = int(round(cy_m / max(1, shape[1] - 1) * (w - 1)))
-                        cy_px = int(round(cz_m / max(1, shape[0] - 1) * (h - 1)))
-                        r_px = int(round(r_vol / max(1, shape[1] - 1) * w))
-                    
-                    pen_m = QPen(QColor(59, 130, 246, 220), 2, Qt.PenStyle.DashLine)
-                    painter.setPen(pen_m)
-                    painter.drawEllipse(QPointF(cx_px, cy_px), r_px, r_px)
-                    painter.drawText(cx_px + r_px + 4, cy_px - 4, f"Mediastino {voi_m.radius_mm:.0f}mm")
+                    if isinstance(voi_m, VOIAnatomical):
+                        # Contorno anatómico del mediastino en TODOS los planos
+                        pen_m = QPen(QColor(59, 130, 246, 220), 2, Qt.PenStyle.DashLine)
+                        painter.setPen(pen_m)
+
+                        if axis == "axial":
+                            cur_z_idx = int(round(cur_z))
+                            contour_m = voi_m.get_contour_for_slice(cur_z_idx)
+                            if contour_m is not None and len(contour_m) > 2:
+                                points_m = [QPointF(
+                                    int(round(c[1] / max(1, shape[2] - 1) * (w - 1))),
+                                    int(round(c[0] / max(1, shape[1] - 1) * (h - 1)))
+                                ) for c in contour_m]
+                                painter.drawPolygon(QPolygonF(points_m))
+                                cx_px = int(round(voi_m.cx / max(1, shape[2] - 1) * (w - 1)))
+                                cy_px = int(round(voi_m.cy / max(1, shape[1] - 1) * (h - 1)))
+                                painter.drawText(cx_px + 10, cy_px - 4, "Mediastino-CT")
+                            else:
+                                cx_px = int(round(voi_m.cx / max(1, shape[2] - 1) * (w - 1)))
+                                cy_px = int(round(voi_m.cy / max(1, shape[1] - 1) * (h - 1)))
+                                pen_dot = QPen(QColor(59, 130, 246, 150), 1, Qt.PenStyle.DotLine)
+                                painter.setPen(pen_dot)
+                                painter.drawEllipse(QPointF(cx_px, cy_px), 4, 4)
+                                painter.drawText(cx_px + 6, cy_px - 4, "Medi CT")
+                                painter.setPen(pen_m)
+
+                        elif axis == "coronal":
+                            cur_y_idx = int(round(cur_y))
+                            contour_m = voi_m.get_contour_for_coronal(cur_y_idx)
+                            if contour_m is not None and len(contour_m) > 2:
+                                points_m = [QPointF(
+                                    int(round(c[1] / max(1, shape[2] - 1) * (w - 1))),
+                                    int(round(c[0] / max(1, shape[0] - 1) * (h - 1)))
+                                ) for c in contour_m]
+                                painter.drawPolygon(QPolygonF(points_m))
+                                cx_px = int(round(voi_m.cx / max(1, shape[2] - 1) * (w - 1)))
+                                cy_px = int(round(voi_m.cz / max(1, shape[0] - 1) * (h - 1)))
+                                painter.drawText(cx_px + 10, cy_px - 4, "Mediastino-CT")
+                            else:
+                                cx_px = int(round(voi_m.cx / max(1, shape[2] - 1) * (w - 1)))
+                                cy_px = int(round(voi_m.cz / max(1, shape[0] - 1) * (h - 1)))
+                                pen_dot = QPen(QColor(59, 130, 246, 150), 1, Qt.PenStyle.DotLine)
+                                painter.setPen(pen_dot)
+                                painter.drawEllipse(QPointF(cx_px, cy_px), 4, 4)
+                                painter.drawText(cx_px + 6, cy_px - 4, "Medi CT")
+                                painter.setPen(pen_m)
+
+                        else:  # sagittal
+                            cur_x_idx = int(round(cur_x))
+                            contour_m = voi_m.get_contour_for_sagittal(cur_x_idx)
+                            if contour_m is not None and len(contour_m) > 2:
+                                points_m = [QPointF(
+                                    int(round(c[1] / max(1, shape[1] - 1) * (w - 1))),
+                                    int(round(c[0] / max(1, shape[0] - 1) * (h - 1)))
+                                ) for c in contour_m]
+                                painter.drawPolygon(QPolygonF(points_m))
+                                cx_px = int(round(voi_m.cy / max(1, shape[1] - 1) * (w - 1)))
+                                cy_px = int(round(voi_m.cz / max(1, shape[0] - 1) * (h - 1)))
+                                painter.drawText(cx_px + 10, cy_px - 4, "Mediastino-CT")
+                            else:
+                                cx_px = int(round(voi_m.cy / max(1, shape[1] - 1) * (w - 1)))
+                                cy_px = int(round(voi_m.cz / max(1, shape[0] - 1) * (h - 1)))
+                                pen_dot = QPen(QColor(59, 130, 246, 150), 1, Qt.PenStyle.DotLine)
+                                painter.setPen(pen_dot)
+                                painter.drawEllipse(QPointF(cx_px, cy_px), 4, 4)
+                                painter.drawText(cx_px + 6, cy_px - 4, "Medi CT")
+                                painter.setPen(pen_m)
+                    else:
+                        cz_m, cy_m, cx_m = voi_m.cz, voi_m.cy, voi_m.cx
+                        r_vol = float(getattr(voi_m, "radius_mm", 30.0)) / max(spacing)
+                        
+                        if axis == "axial":
+                            cx_px = int(round(cx_m / max(1, shape[2] - 1) * (w - 1)))
+                            cy_px = int(round(cy_m / max(1, shape[1] - 1) * (h - 1)))
+                            r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
+                        elif axis == "coronal":
+                            cx_px = int(round(cx_m / max(1, shape[2] - 1) * (w - 1)))
+                            cy_px = int(round(cz_m / max(1, shape[0] - 1) * (h - 1)))
+                            r_px = int(round(r_vol / max(1, shape[2] - 1) * w))
+                        else:  # sagittal
+                            cx_px = int(round(cy_m / max(1, shape[1] - 1) * (w - 1)))
+                            cy_px = int(round(cz_m / max(1, shape[0] - 1) * (h - 1)))
+                            r_px = int(round(r_vol / max(1, shape[1] - 1) * w))
+                        
+                        pen_m = QPen(QColor(59, 130, 246, 220), 2, Qt.PenStyle.DashLine)
+                        painter.setPen(pen_m)
+                        painter.drawEllipse(QPointF(cx_px, cy_px), r_px, r_px)
+                        _rm_label = float(getattr(voi_m, "radius_mm", 0.0))
+                        painter.drawText(cx_px + r_px + 4, cy_px - 4, f"Mediastino {_rm_label:.0f}mm")
             
             # Dibujar VOIs temporales (en vivo durante posicionamiento)
             if show_temp_vois and not show_vois:  # Solo si no hay resultado final
@@ -3012,6 +3433,102 @@ class AmyloidSpectPanel(QDialog):
         """Retorna el resultado HMR-SPECT calculado (para informes)."""
         return self._hmr_result
 
+    def _on_ct_anatomical_mode_toggled(self, checked: bool) -> None:
+        """Aísla la vía CT experimental sin alterar el flujo manual estable.
+        
+        NOTA: A partir de v2.5, los datos CT se PRESERVAN al desactivar.
+        Solo se ocultan los controles de edición manual. Use 'Reiniciar CT'
+        para borrar realmente los datos.
+        """
+        enabled = bool(checked)
+        self._btn_paint_erase.setEnabled(enabled)
+        self._brush_radius_spin.setEnabled(enabled)
+
+        if not enabled:
+            # === PRESERVAR datos (no borrar!) ===
+            if self._mask_edit_active:
+                self._btn_toggle_mask_edit.setChecked(False)
+            
+            # Deshabilitar controles de edición pero NO borrar datos
+            self._btn_toggle_mask_edit.setEnabled(False)
+            self._btn_undo_mask.setEnabled(False)
+            self._btn_reset_mask.setEnabled(False)
+            self._btn_apply_mask_edit.setEnabled(False)
+            if hasattr(self, '_btn_export_mask_nifti'):
+                self._btn_export_mask_nifti.setEnabled(False)
+            # Botones de persistencia: guardar/reiniciar desactivados, cargar siempre activo
+            if hasattr(self, '_btn_save_ct_state'):
+                self._btn_save_ct_state.setEnabled(False)
+            if hasattr(self, '_btn_restart_ct'):
+                self._btn_restart_ct.setEnabled(False)
+            
+            # Mostrar estado de VOIs manuales (si existen)
+            ct_seg = getattr(self, '_ct_segmentation', None)
+            if ct_seg is not None:
+                voxel_count = int(ct_seg.mask_3d.sum())
+                spacing = self._spect_spacing_or_default()
+                voxel_vol_mm3 = spacing[0] * spacing[1] * spacing[2]
+                volume_ml = (voxel_count * voxel_vol_mm3) / 1000.0
+                self._mask_edit_status.setText(
+                    f"💾 CT preservado | {voxel_count} vox | ❤️ {volume_ml:.1f} mL "
+                    f"(reactive checkbox para editar)"
+                )
+            else:
+                self._mask_edit_status.setText("Modo manual estable: VOIs esféricas ancladas en A/B")
+            
+            anchor = getattr(self, "_localization_anchor_zyx", None)
+            point = getattr(self, "_localization_point_zyx", None)
+            if anchor is not None:
+                self._temp_voi_heart = VOISphere(
+                    cz=int(anchor[0]), cy=int(anchor[1]), cx=int(anchor[2]),
+                    radius_mm=float(self._heart_radius_spin.value()),
+                )
+            if point is not None:
+                self._temp_voi_mediastinum = VOISphere(
+                    cz=int(point[0]), cy=int(point[1]), cx=int(point[2]),
+                    radius_mm=float(self._mediastinum_radius_spin.value()),
+                )
+            
+            # NO borrar hmr_result ni ct_segmentation — solo cambiar texto si no hay datos
+            if self._hmr_result is None:
+                self._lbl_hmr_result.setText("HMR-SPECT = N/D · recalcular")
+                self._lbl_hmr_result.setStyleSheet(
+                    "font-size:14px; font-weight:700; color:#ffffff; "
+                    "background:#000000; padding:6px 12px;"
+                )
+            self._status.setText(
+                "CT anatómica desactivada (datos preservados). Reactive para continuar editando."
+            )
+        else:
+            self._btn_toggle_mask_edit.setEnabled(False)
+            
+            # Restaurar controles si hay datos CT
+            ct_seg = getattr(self, '_ct_segmentation', None)
+            if ct_seg is not None:
+                self._btn_toggle_mask_edit.setEnabled(True)
+                if hasattr(self, '_btn_export_mask_nifti'):
+                    self._btn_export_mask_nifti.setEnabled(True)
+                # Habilitar botones de persistencia
+                if hasattr(self, '_btn_save_ct_state'):
+                    self._btn_save_ct_state.setEnabled(True)
+                if hasattr(self, '_btn_restart_ct'):
+                    self._btn_restart_ct.setEnabled(True)
+                voxel_count = int(ct_seg.mask_3d.sum())
+                spacing = self._spect_spacing_or_default()
+                voxel_vol_mm3 = spacing[0] * spacing[1] * spacing[2]
+                volume_ml = (voxel_count * voxel_vol_mm3) / 1000.0
+                self._mask_edit_status.setText(
+                    f"🟢 CT restaurado | {voxel_count} vox | ❤️ {volume_ml:.1f} mL"
+                )
+            else:
+                self._mask_edit_status.setText(
+                    "CT experimental activado. Calcule HMR para generar la máscara."
+                )
+            self._status.setText(
+                "CT anatómica/PVE experimental activado. Las VOIs pueden diferir de A/B."
+            )
+        self._render_selected_view()
+
     def _calculate_hmr_spect(self) -> None:
         """Calcula HMR-SPECT usando VOIs esféricas desde puntos de localización."""
         try:
@@ -3053,13 +3570,143 @@ class AmyloidSpectPanel(QDialog):
             heart_radius = float(self._heart_radius_spin.value())
             mediastinum_radius = float(self._mediastinum_radius_spin.value())
             
-            # Crear VOIs desde puntos de localización
+            # Crear VOIs desde puntos de localización (base esférica)
             voi_heart, voi_mediastinum = create_voi_from_localization(
                 anchor_zyx=anchor,
                 point_zyx=point,
                 heart_radius_mm=heart_radius,
                 mediastinum_radius_mm=mediastinum_radius
             )
+            
+            # ── Fase 2: Mejorar VOIs con anatomía CT si disponible ─────
+            voi_type_used = "esférica"
+            ct_seg = None
+            
+            use_ct_anatomical = bool(
+                hasattr(self, "_ct_anatomical_check")
+                and self._ct_anatomical_check.isChecked()
+            )
+
+            if (
+                use_ct_anatomical
+                and getattr(self, "_ct_volume", None) is not None
+                and getattr(self, "_ct_spacing_zyx", None) is not None
+            ):
+                try:
+                    from core.amyloid_spect import (
+                        segment_myocardium_from_ct,
+                        create_anatomical_heart_voi,
+                        create_bone_safe_mediastinum_voi,
+                    )
+                    
+                    # ── LÓGICA DE PRESERVACIÓN DE MÁSCARA ─────────────
+                    # Calcular ct_transformed y spacing SIEMPRE (lo usa el
+                    # mediastino y, si no reutilizamos, la segmentación).
+                    _ct_reg = getattr(self, "_ct_registered", None)
+                    _ct_vol = _ct_reg if _ct_reg is not None else self._ct_volume
+                    if _ct_reg is not None:
+                        ct_spacing_used = spacing  # grilla SPECT
+                    else:
+                        ct_spacing_used = self._ct_spacing_zyx
+                    ct_transformed = self._ct_transform_3d(np.asarray(_ct_vol, dtype=np.float64))
+                    
+                    # 3 fuentes de reutilización (OR lógico):
+                    #   a) El usuario acaba de aplicar edición manual (_reuse_edited_segmentation)
+                    #   b) El checkbox "🔒 Preservar máscara" está activado
+                    #   c) Hay segmentación previa que fue editada manualmente
+                    _reuse = bool(getattr(self, "_reuse_edited_segmentation", False))
+                    _have_prev_seg = getattr(self, "_ct_segmentation", None) is not None
+                    _preserve_checked = (
+                        hasattr(self, "_preserve_mask_check")
+                        and self._preserve_mask_check.isChecked()
+                        and _have_prev_seg
+                    )
+                    
+                    # Detectar si la máscara previa fue editada manualmente
+                    # (tiene flag _mask_was_manually_editado o tiene voxels != auto)
+                    _mask_was_edited = bool(
+                        getattr(self, "_mask_was_manually_edited", False)
+                    )
+                    
+                    # Reutilizar si: apply reciente OR preserve checked + máscara editada
+                    if (_reuse or (_preserve_checked and _mask_was_edited)) and _have_prev_seg:
+                        # Reutilizar la máscara editada tal cual
+                        ct_seg = self._ct_segmentation
+                        self._metrics.append("🔒 Máscara manual PRESERVADA (no re-segmentada)")
+                    else:
+                        ct_seg = segment_myocardium_from_ct(
+                            ct_transformed,
+                            ct_spacing_used,
+                            seed_zyx=anchor,
+                            seed_radius_mm=max(heart_radius * 1.5, 50.0),
+                        )
+                        
+                    self._ct_segmentation = ct_seg
+                    
+                    # === F2.4: Habilitar edición manual de máscara ===
+                    self._mask_edit_original = ct_seg.mask_3d.copy()
+                    self._mask_edit_undo_stack.clear()
+                    self._mask_edit_has_changes = False
+                    if hasattr(self, '_btn_toggle_mask_edit'):
+                        self._btn_toggle_mask_edit.setEnabled(True)
+                        self._btn_reset_mask.setEnabled(False)
+                        self._btn_apply_mask_edit.setEnabled(False)
+                        self._btn_undo_mask.setEnabled(False)
+                        if hasattr(self, '_btn_export_mask_nifti'):
+                            self._btn_export_mask_nifti.setEnabled(True)
+                        if hasattr(self, '_btn_save_ct_state'):
+                            self._btn_save_ct_state.setEnabled(True)
+                        if hasattr(self, '_btn_restart_ct'):
+                            self._btn_restart_ct.setEnabled(True)
+                        self._mask_edit_status.setText(
+                            f"✅ Segmentación CT lista ({int(ct_seg.mask_3d.sum())} voxels). "
+                            "Pulsa 'Editar Máscara' para refinar."
+                        )
+                    
+                    # Crear VOI anatómica del corazón (reemplaza la esfera)
+                    # ct_spacing_used = spacing SPECT cuando el CT ya está
+                    # registrado a la grilla SPECT (evita deformar/desplazar).
+                    voi_heart_anat = create_anatomical_heart_voi(
+                        ct_segmentation=ct_seg,
+                        spect_shape=self._current_volume.shape,
+                        spect_spacing=spacing,
+                        ct_spacing=ct_spacing_used,
+                    )
+                    
+                    # Crear VOI de mediastino que evita hueso
+                    # El punto B (mediastino) está en coordenadas de la grilla
+                    # SPECT/display, por eso el ct_volume y su spacing deben
+                    # corresponder a esa misma grilla (ct_transformed registrado).
+                    voi_med_anat = create_bone_safe_mediastinum_voi(
+                        ct_volume=ct_transformed,
+                        ct_spacing=ct_spacing_used,
+                        mediastinum_center_zyx=(float(point[0]), float(point[1]), float(point[2])),
+                        mediastinum_radius_mm=mediastinum_radius,
+                        spect_shape=self._current_volume.shape,
+                        spect_spacing=spacing,
+                    )
+                    
+                    # Verificar que las VOI anatómicas tengan suficiente contenido
+                    min_pixels_heart = 50  # mínimo píxeles para VOI corazón válida
+                    heart_mask = voi_heart_anat.mask_3d()
+                    heart_pixel_count = int(np.sum(heart_mask)) if isinstance(heart_mask, np.ndarray) else 0
+                    
+                    if heart_pixel_count >= min_pixels_heart:
+                        voi_heart = voi_heart_anat
+                        voi_type_used = "anatómica-CT"
+                        
+                        med_mask = voi_med_anat.mask_3d()
+                        med_pixel_count = int(np.sum(med_mask)) if isinstance(med_mask, np.ndarray) else 0
+                        if med_pixel_count >= 10:
+                            voi_mediastinum = voi_med_anat
+                            voi_type_used = "anatómica-CT (hueso-safe)"
+                    else:
+                        self._metrics.append(f"[Fase2] VOI anatómica muy pequeña ({heart_pixel_count} px), usando esfera")
+                        
+                    self._metrics.append(f"[Fase2] VOI tipo: {voi_type_used}")
+                    
+                except Exception as exc_f2:
+                    self._metrics.append(f"[Fase2] No se pudo crear VOI anatómica: {exc_f2}")
             
             # Buscar volumen raw (sin filtrar) si está disponible
             # Usar _base_spect_volume como raw (volumen base sin procesamiento)
@@ -3083,27 +3730,98 @@ class AmyloidSpectPanel(QDialog):
             
             self._hmr_result = result
             
+            # ── Corrección PVE (si hay CT disponible) ──────────────────
+            pve_result = None
+            # ct_seg ya puede existir del bloque Fase 2 anterior
+            if (
+                use_ct_anatomical
+                and ct_seg is None
+                and getattr(self, "_ct_volume", None) is not None
+                and getattr(self, "_ct_spacing_zyx", None) is not None
+            ):
+                try:
+                    from core.amyloid_spect import (
+                        segment_myocardium_from_ct,
+                        apply_pve_correction_to_hmr,
+                    )
+                    _ct_reg = getattr(self, "_ct_registered", None)
+                    ct_vol = _ct_reg if _ct_reg is not None else self._ct_volume
+                    ct_transformed = self._ct_transform_3d(np.asarray(ct_vol, dtype=np.float64))
+                    
+                    ct_seg = segment_myocardium_from_ct(
+                        ct_transformed,
+                        self._ct_spacing_zyx,
+                        seed_zyx=anchor,
+                        seed_radius_mm=max(heart_radius * 1.5, 50.0),
+                    )
+                    self._ct_segmentation = ct_seg
+                    # Habilitar F2.4 también desde bloque PVE
+                    self._mask_edit_original = ct_seg.mask_3d.copy()
+                    self._mask_edit_undo_stack.clear()
+                    self._mask_edit_has_changes = False
+                    if hasattr(self, '_btn_toggle_mask_edit'):
+                        self._btn_toggle_mask_edit.setEnabled(True)
+                        if hasattr(self, '_btn_export_mask_nifti'):
+                            self._btn_export_mask_nifti.setEnabled(True)
+                except Exception as exc_seg:
+                    self._metrics.append(f"[PVE] No se pudo segmentar CT: {exc_seg}")
+            
+            if ct_seg is not None:
+                try:
+                    from core.amyloid_spect import apply_pve_correction_to_hmr
+                    pve_result = apply_pve_correction_to_hmr(
+                        result,
+                        ct_segmentation=ct_seg,
+                        fwhm_mm=12.0,  # Típico para SPECT cardíaco con colimador LEHR
+                    )
+                    self._pve_result = pve_result
+                except Exception as exc:
+                    self._metrics.append(f"[PVE] No se pudo aplicar corrección PVE: {exc}")
+            
             # Actualizar UI con resultado (mostrar ambos HMR si están disponibles)
-            if result.hmr_raw is not None:
+            if pve_result is not None:
+                hmr_text = (
+                    f"HMR original = {pve_result.hmr_original:.2f} ({pve_result.classification_original})\n"
+                    f"HMR corregido PVE = {pve_result.hmr_pve_corrected:.2f} ({pve_result.classification_corrected})"
+                )
+            elif result.hmr_raw is not None:
                 hmr_text = f"HMR (filtrado) = {result.hmr:.2f}\nHMR (raw) = {result.hmr_raw:.2f}"
             else:
                 hmr_text = f"HMR-SPECT = {result.hmr:.2f}"
             
             self._lbl_hmr_result.setText(hmr_text)
             
-            # Color según clasificación del HMR raw (si existe) o filtrado
-            # HMR ALTO = mucha captación cardíaca = POSITIVO para amiloidosis
-            hmr_clinical = result.hmr_raw if result.hmr_raw is not None else result.hmr
-            if hmr_clinical >= 1.6:
-                color = "#ef4444"  # Rojo - POSITIVO
-                classification = "POSITIVO"
-            elif hmr_clinical >= 1.5:
-                color = "#f59e0b"  # Naranja - EQUIVOCO
-                classification = "EQUIVOCO"
-            else:
-                color = "#22c55e"  # Verde - NEGATIVO
-                classification = "NEGATIVO"
+            # ── Actualizar volumen VISIBLE (no solo en consola oculta) ──
+            if hasattr(self, '_lbl_volume_display'):
+                heart_vol = getattr(result, 'heart_volume_ml', None)
+                med_vol = getattr(result, 'mediastinum_volume_ml', None)
+                if heart_vol is not None:
+                    vol_text = f"❤️ {heart_vol:.1f} mL"
+                    if med_vol is not None:
+                        vol_text += f" | 🩻 {med_vol:.1f} mL"
+                    self._lbl_volume_display.setText(vol_text)
+                # También mostrar volumen de máscara CT si existe
+                if ct_seg is not None:
+                    ct_vol_ml = getattr(ct_seg, 'volume_mm3', 0) / 1000.0
+                    if ct_vol_ml > 0:
+                        current = self._lbl_volume_display.text()
+                        self._lbl_volume_display.setText(f"{current} | 📦 CT {ct_vol_ml:.1f}mL")
             
+            # Color según clasificación del HMR corregido (si existe) o raw/filtrado
+            if pve_result is not None:
+                hmr_clinical = pve_result.hmr_pve_corrected
+                classification = pve_result.classification_corrected
+            else:
+                hmr_clinical = result.hmr_raw if result.hmr_raw is not None else result.hmr
+                if hmr_clinical >= 1.6:
+                    classification = "POSITIVO"
+                elif hmr_clinical >= 1.5:
+                    classification = "EQUIVOCO"
+                else:
+                    classification = "NEGATIVO"
+
+            color = "#22c55e" if classification == "NEGATIVO" else "#f59e0b" if classification == "EQUIVOCO" else "#ef4444"
+
             self._lbl_hmr_result.setStyleSheet(
                 f"font-size:14px; font-weight:700; color:{color}; "
                 f"background:#000000; padding:6px 12px;"
@@ -3118,6 +3836,7 @@ class AmyloidSpectPanel(QDialog):
                 details += f"HMR: {result.hmr:.2f}\n"
             details += f"Clasificación: {classification}\n\n"
             details += f"Método: {result.method}\n"
+            details += f"Tipo VOI: {voi_type_used}\n"
             details += f"Cuentas corazón: {result.heart_counts:.0f}"
             if result.heart_counts_raw > 0:
                 details += f" (raw: {result.heart_counts_raw:.0f})"
@@ -3126,6 +3845,21 @@ class AmyloidSpectPanel(QDialog):
                 details += f" (raw: {result.mediastinum_counts_raw:.0f})"
             details += f"\nVolumen corazón: {result.heart_volume_ml:.1f} mL"
             details += f"\nVolumen mediastino: {result.mediastinum_volume_ml:.1f} mL"
+            
+            # === Volumen cardíaco desde máscara CT manual (si existe) ===
+            ct_seg = getattr(self, '_ct_segmentation', None)
+            if ct_seg is not None and hasattr(ct_seg, 'mask_3d'):
+                mask_voxels = int(ct_seg.mask_3d.sum())
+                if mask_voxels > 0:
+                    spacing = self._spect_spacing_or_default()
+                    voxel_vol_mm3 = spacing[0] * spacing[1] * spacing[2]
+                    mask_volume_ml = (mask_voxels * voxel_vol_mm3) / 1000.0
+                    details += f"\n\n=== Máscara CT Manual ==="
+                    details += f"\nVoxels máscara: {mask_voxels}"
+                    details += f"\n❤️ Volumen máscara: {mask_volume_ml:.1f} mL ({mask_voxels * voxel_vol_mm3:.0f} mm³)"
+                    # Guardar para referencia futura
+                    ct_seg.volume_mm3 = mask_voxels * voxel_vol_mm3
+            
             if result.slice_idx is not None:
                 details += f"\nSlice axial: {result.slice_idx}"
             
@@ -3140,6 +3874,33 @@ class AmyloidSpectPanel(QDialog):
             # Advertencia si el mediastino tiene muy pocas cuentas
             if result.mediastinum_mean < 1.0:
                 details += "\n\n⚠️ ADVERTENCIA: El mediastino tiene\nmuy bajas cuentas (<1 cts/píxel).\n¿Está el VOI en una zona vacía?"
+            
+            # ── Información PVE si disponible ────────────────────────
+            if pve_result is not None:
+                details += f"\n\n{'='*40}\n🔬 CORRECCIÓN PVE (Efecto Volumen Parcial)\n{'='*40}"
+                details += f"\nGrosor pared (CT): {pve_result.wall_thickness_mm:.1f} mm"
+                details += f"\nFWHM sistema: {pve_result.fwhm_mm:.1f} mm"
+                details += f"\nCoeficiente RC: {pve_result.rc_heart:.3f}"
+                details += f"\nFactor corrección: {pve_result.pve_factor:.3f}"
+                details += f"\nΔ HMR: {pve_result.delta_pct:+.1f}%"
+                
+                if ct_seg is not None:
+                    details += f"\n\nSegmentación CT:"
+                    details += f"\n  Volumen miocardio: {ct_seg.volume_mm3/1000:.1f} mL"
+                    details += f"\n  Slices con tejido: {ct_seg.n_slices}"
+                    if ct_seg.wall_thickness_mm:
+                        details += "\n  Grosor por segmento:"
+                        for seg, thick in list(ct_seg.wall_thickness_mm.items())[:4]:
+                            details += f"\n    {seg}: {thick:.1f} mm"
+                
+                if pve_result.classification_original != pve_result.classification_corrected:
+                    details += f"\n\n⚠️ ¡LA PVE CAMBIÓ LA CLASIFICACIÓN!"
+                    details += f"\n   {pve_result.classification_original} → {pve_result.classification_corrected}"
+                    details += f"\n   Revisar calidad de la segmentación CT."
+                
+                # Notas del proceso PVE
+                for note in pve_result.notes[-5:]:
+                    details += f"\n{note}"
             
             QMessageBox.information(self, "SINCRO — HMR-SPECT", details)
             
@@ -3226,9 +3987,39 @@ class AmyloidSpectPanel(QDialog):
             self._slice_x_lbl.setText(f"x {self._slice_idx['sagittal'] + 1}/{shape[2]}")
         self._render_current_with_overlay()
 
+    def _on_link_zoom_changed(self, state: int):
+        """Handler cuando se ancla/desancalan los zooms."""
+        is_linked = (state == Qt.CheckState.Checked.value())
+        # Si se acaba de anclar, sincronizar el valor del CT al SPECT
+        if is_linked:
+            spect_val = int(self._spect_zoom_spin.value())
+            self._ct_zoom_spin.blockSignals(True)
+            self._ct_zoom_spin.setValue(spect_val)
+            self._ct_zoom_spin.blockSignals(False)
+            self._ct_zoom_pct = spect_val
+    
     def _on_zoom_changed(self):
-        self._spect_zoom_pct = int(self._spect_zoom_spin.value())
-        self._ct_zoom_pct = int(self._ct_zoom_spin.value())
+        """Handler cuando cambia algún spinbox de zoom."""
+        new_spect = int(self._spect_zoom_spin.value())
+        new_ct = int(self._ct_zoom_spin.value())
+        
+        # Si están anclados, sincronizar
+        is_linked = getattr(self, '_link_zoom_check', None) is not None and self._link_zoom_check.isChecked()
+        if is_linked:
+            sender = self.sender()
+            if sender == self._spect_zoom_spin:
+                self._ct_zoom_spin.blockSignals(True)
+                self._ct_zoom_spin.setValue(new_spect)
+                self._ct_zoom_spin.blockSignals(False)
+                new_ct = new_spect
+            elif sender == self._ct_zoom_spin:
+                self._spect_zoom_spin.blockSignals(True)
+                self._spect_zoom_spin.setValue(new_ct)
+                self._spect_zoom_spin.blockSignals(False)
+                new_spect = new_ct
+        
+        self._spect_zoom_pct = new_spect
+        self._ct_zoom_pct = new_ct
         self._render_current_with_overlay()
 
     def _on_spect_range_changed(self, low: int, high: int):
@@ -3267,6 +4058,7 @@ class AmyloidSpectPanel(QDialog):
         self._trial_cache_signature = None
         self._trial_spect_on_ct = None
         self._trial_ct_native = None
+        self._trial_ct_native_spacing = None
         self._trial_ref_shape = None
 
     def _ensure_ct_grid_trial_cache(self) -> bool:
@@ -3287,6 +4079,7 @@ class AmyloidSpectPanel(QDialog):
             tuple(np.asarray(self._ct_affine_ijk_to_lps).ravel()) if self._ct_affine_ijk_to_lps is not None else None,
             tuple(self._spect_spacing_zyx) if self._spect_spacing_zyx is not None else None,
             tuple(self._ct_spacing_zyx) if self._ct_spacing_zyx is not None else None,
+            tuple(getattr(self, '_ct_total_shift_zyx', (0.0, 0.0, 0.0))),  # Invalidar si cambia el registro/nudge
         )
         if sig == self._trial_cache_signature and self._trial_spect_on_ct is not None and self._trial_ct_native is not None:
             return True
@@ -3294,17 +4087,92 @@ class AmyloidSpectPanel(QDialog):
         try:
             spect_tx = self._spect_transform_3d(np.asarray(self._current_volume, dtype=np.float64))
             ct_tx = self._ct_transform_3d(np.asarray(self._ct_volume, dtype=np.float64))
-            spect_on_ct, _notes = resample_volume_to_spect_grid(
-                spect_tx,
+            
+            # === Estrategia: CT nativo recortado al FOV del SPECT ===
+            # En vez de expandir el SPECT al FOV completo del CT (que deja el corazón
+            # pequeño y al borde), recortamos el CT al FOV del SPECT pero a mayor
+            # resolución (2x o 3x la grilla SPECT original).
+            # Esto da CT nítido + SPECT bien dimensionado.
+            spect_sp = self._spect_spacing_zyx or (6.8, 6.8, 6.8)
+            ct_sp = self._ct_spacing_zyx or (1.0, 1.0, 1.0)
+            
+            # Grilla objetivo: 2x la resolución SPECT en cada eje (128³ si SPECT es 64³)
+            target_shape = tuple(int(spect_tx.shape[i] * 2) for i in range(3))
+            target_spacing = tuple(float(spect_sp[i]) / 2.0 for i in range(3))
+            
+            # Crear affine del SPECT escalada 2x (mismo FOV, spacing/2)
+            spect_affine_2x = None
+            if self._spect_affine_ijk_to_lps is not None:
+                sa = np.asarray(self._spect_affine_ijk_to_lps, dtype=np.float64).copy()
+                # Dividir spacing (elementos diagonales) por 2, mantener origen
+                sa[0, 0] /= 2.0
+                sa[1, 1] /= 2.0
+                sa[2, 2] /= 2.0
+                spect_affine_2x = sa
+            
+            # Remuestrear CT a la grilla objetivo (mayor resolución, mismo FOV que SPECT)
+            ct_native, ct_notes = resample_volume_to_spect_grid(
                 ct_tx,
-                source_spacing_zyx=self._spect_spacing_zyx,
-                spect_spacing_zyx=self._ct_spacing_zyx,
-                source_affine_ijk_to_lps=self._spect_affine_ijk_to_lps,
-                spect_affine_ijk_to_lps=self._ct_affine_ijk_to_lps,
-                fill_value=float(np.min(spect_tx)) if spect_tx.size else 0.0,
+                np.zeros(target_shape),  # solo usa el shape
+                source_spacing_zyx=ct_sp,
+                spect_spacing_zyx=target_spacing,
+                source_affine_ijk_to_lps=self._ct_affine_ijk_to_lps,
+                spect_affine_ijk_to_lps=spect_affine_2x,
+                fill_value=-1024.0,
+                order=1,
             )
-            self._trial_spect_on_ct = np.asarray(spect_on_ct, dtype=np.float64)
-            self._trial_ct_native = np.asarray(ct_tx, dtype=np.float64)
+            ct_native_spacing = target_spacing
+            
+            # === Aplicar shift de registro (alineación CT↔SPECT) ===
+            # El shift total está en píxeles de la grilla SPECT original (64³).
+            # Convertir a píxeles de la grilla objetivo (128³): multiplicar por 2.
+            total_shift = getattr(self, '_ct_total_shift_zyx', (0.0, 0.0, 0.0))
+            if any(abs(s) > 0.01 for s in total_shift):
+                shift_target = (
+                    float(total_shift[0]) * 2.0,
+                    float(total_shift[1]) * 2.0,
+                    float(total_shift[2]) * 2.0,
+                )
+                ct_native = ndi.shift(ct_native, shift=shift_target, order=1, mode='nearest')
+                if hasattr(self, '_metrics'):
+                    self._metrics.append(
+                        f"[CT-NATIVE] Shift registro aplicado: "
+                        f"Δ(z,y,x)=({shift_target[0]:.1f},{shift_target[1]:.1f},{shift_target[2]:.1f}) px (grid 2x)"
+                    )
+            
+            # SPECT → misma grilla objetivo (2x upsampling, suave)
+            spect_on_ct, notes = resample_volume_to_spect_grid(
+                spect_tx,
+                ct_native,
+                source_spacing_zyx=spect_sp,
+                spect_spacing_zyx=target_spacing,
+                source_affine_ijk_to_lps=self._spect_affine_ijk_to_lps,
+                spect_affine_ijk_to_lps=spect_affine_2x,
+                fill_value=float(np.min(spect_tx)) if spect_tx.size else 0.0,
+                order=1,  # bilineal: SPECT se ve suave al hacer upsampling
+            )
+            # Diagnóstico de registro
+            if hasattr(self, '_metrics'):
+                for n in notes:
+                    self._metrics.append(f"[CT-NATIVE] {n}")
+                self._metrics.append(
+                    f"[CT-NATIVE] SPECT {spect_tx.shape} → grid {spect_on_ct.shape} | "
+                    f"CT {ct_tx.shape} → {ct_native.shape} (2x SPECT res)"
+                )
+                # Detectar si el corazón está al borde
+                sp_nonzero = np.argwhere(spect_on_ct > float(np.percentile(spect_on_ct, 90)))
+                if len(sp_nonzero) > 0:
+                    z_min, y_min, x_min = sp_nonzero.min(axis=0)
+                    z_max, y_max, x_max = sp_nonzero.max(axis=0)
+                    self._metrics.append(
+                        f"[CT-NATIVE] SPECT 90% percentile bbox: "
+                        f"z=[{z_min}-{z_max}/{spect_on_ct.shape[0]}] "
+                        f"y=[{y_min}-{y_max}/{spect_on_ct.shape[1]}] "
+                        f"x=[{x_min}-{x_max}/{spect_on_ct.shape[2]}]"
+                    )
+            self._trial_spect_on_ct = np.ascontiguousarray(np.asarray(spect_on_ct, dtype=np.float32))  # float32 ahorra memoria
+            self._trial_ct_native = np.ascontiguousarray(np.asarray(ct_native, dtype=np.float32))
+            self._trial_ct_native_spacing = ct_native_spacing
             self._trial_ref_shape = tuple(int(v) for v in np.asarray(self._current_volume).shape[:3])
             self._trial_cache_signature = sig
             return True
@@ -3325,11 +4193,110 @@ class AmyloidSpectPanel(QDialog):
                 self._metrics.append("[PRUEBA/BETA] CT nativa + SPECT escalado a CT desactivado (rollback aplicado).")
         self._render_current_with_overlay()
 
+    # ─────────────────────────────────────────────
+    # Diálogo: Rol del CT en amiloidosis cardíaca
+    # ─────────────────────────────────────────────
+    def _show_ct_role_info(self):
+        from PyQt6.QtWidgets import QTextBrowser, QDialogButtonBox
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("ℹ️ Rol del CT en Amiloidosis Cardíaca SPECT/CT")
+        dlg.setMinimumWidth(580)
+        dlg.setMinimumHeight(520)
+
+        vbox = QVBoxLayout(dlg)
+
+        text = QTextBrowser()
+        text.setOpenExternalLinks(True)
+        text.setStyleSheet(
+            "font-size:11px; line-height:1.45; padding:8px; "
+            "background:#f8fafc; border-radius:6px;"
+        )
+        text.setHtml(
+            "<h2 style='color:#1e40af;'>📋 Rol del CT en Amiloidosis Cardíaca SPECT/CT</h2>"
+
+            "<h3 style='color:#2563eb;margin-top:14px;'>1. Corrección de Atenuación (AC)</h3>"
+            "<p>El CT se usa para generar un <b>μ-map</b> (mapa de atenuación) que corrige la atenuación fotónica del SPECT. Sin esta corrección:</p>"
+            "<ul>"
+            "<li>La pared <b>anterior</b> aparece falsamente hipocaptante (esternón, costillas)"
+            "<li>La pared <b>inferior</b> puede sobreestimarse"
+            "<li>Las cuantificaciones de <b>SUV</b> o <b>Uptake Ratio</b> se sesgan"
+            "</ul>"
+
+            "<h3 style='color:#2563eb;margin-top:12px;'>2. Localización Anatómica (Fusión)</h3>"
+            "<p>Permite confirmar que la captación del trazador:</p>"
+            "<ul>"
+            "<li>Es <b>miocárdica</b> (pared del VI) y no sanguínea, costal, esternal o mamaria"
+            "<li>Distingue captura <b>cardíaca</b> vs <b>vascular</b> (aorta, arterias)"
+            "<li>Localiza captación extracardíca relevante (hígado, bazo, músculo)"
+            "</ul>"
+
+            "<h3 style='color:#2563eb;margin-top:12px;'>3. Cálculo de Relaciones H/C (Heart-to-Contralateral)</h3>"
+            "<p>El estándar de Perkins (JNC 2005, actualizado por Perugini) requiere medir ROI en:</p>"
+            "<ul>"
+            "<li><b>Heart</b> (miocardio) — localizado con precisión gracias al CT"
+            "<li><b>Contralateral</b> (tejido circulante, típicamente tórax derecho) — evitando costillas/grasa"
+            "</ul>"
+            "<p>La fusión SPECT/CT mejora la reproducibilidad del placement de ROIs.</p>"
+
+            "<h3 style='color:#2563eb;margin-top:12px;'>4. Detección de Patrón de Captación</h3>"
+            "<p>Con CT se distingue visualmente:</p>"
+            "<table style='border-collapse:collapse;width:100%;margin:6px 0;'>"
+            "<tr style='background:#dbeafe;'><th style='padding:6px;text-align:left;border:1px solid #bfdbfe;'>Patrón</th><th style='padding:6px;text-align:left;border:1px solid #bfdbfe;'>Significado</th></tr>"
+            "<tr><td style='padding:5px;border:1px solid #e5e7eb;'><b>Difuso miocárdico</b></td><td style='padding:5px;border:1px solid #e5e7eb;'>Sugestivo de amiloidosis (score 2-3)</td></tr>"
+            "<tr><td style='padding:5px;border:1px solid #e5e7eb;'><b>Focal/subendocárdico</b></td><td style='padding:5px;border:1px solid #e5e7eb;'>Más sugestivo de isquemia/infarto</td></tr>"
+            "<tr><td style='padding:5px;border:1px solid #e5e7eb;'><b>Costal/óseo</b></td><td style='padding:5px;border:1px solid #e5e7eb;'>Degenerativa, no cardíaca</td></tr>"
+            "</table>"
+
+            "<h3 style='color:#2563eb;margin-top:12px;'>5. Exclusión de Miméticos</h3>"
+            "<p>El CT ayuda a descartar:</p>"
+            "<ul>"
+            "<li><b>Derrame pericárdico</b> (atenúa el SPECT)"
+            "<li><b>Calcificaciones masivas</b> (pueden confundirse)"
+            "<li><b>Artefactos de movimiento</b> (correlacionando anatomía)"
+            "<li><b>Hipertrofia asimétrica</b> (HOCM vs amiloidosis)"
+            "</ul>"
+
+            "<hr style='border:none;border-top:1px dashed #cbd5e1;margin:14px 0;'/>"
+
+            "<div style='background:#fef3c7;padding:10px;border-radius:6px;border-left:4px solid #f59e0b;'>"
+            "<b style='color:#92400e;'>⚠️ Limitación Importante</b>"
+            "<p style='margin:4px 0 0 0;color:#78350f;font-size:10.5px;'>"
+            "El CT que llega es frecuentemente un <b>CT de baja dosis</b> (del SPECT/CT híbrido) — no un CT diagnóstico cardíaco contrastado.<br/>"
+            "Su resolución es limitada (~1–2 mm vs 0.5 mm de un CT cardíaco), pero suficiente para:<br/>"
+            "✅ Corrección de atenuación &nbsp;|&nbsp; ✅ Fusión anatómica &nbsp;|&nbsp; ✅ Corrección PVE &nbsp;|&nbsp; ❌ No para evaluar LVE ni realce tardío"
+            "</p>"
+            "</div>"
+
+            "<hr style='border:none;border-top:1px dashed #cbd5e1;margin:14px 0;'/>"
+
+            "<div style='background:#dbeafe;padding:10px;border-radius:6px;border-left:4px solid #3b82f6;'>"
+            "<b style='color:#1e40af;'>🔬 Corrección PVE Implementada (v1.60.0+)</b>"
+            "<p style='margin:4px 0 0 0;color:#1e3a8a;font-size:10.5px;'>"
+            "<b>Efecto de Volumen Parcial (PVE):</b> La resolución SPECT (~12mm FWHM) es similar al grosor de la pared miocárdica (~10-14mm).<br/>"
+            "Cada voxel mezcla actividad del miocardio y la cavidad, <b>subestimando el HMR hasta 20-40%</b>.<br/><br/>"
+            "<b>Solución implementada:</b><br/>"
+            "1️⃣ Segmentación automática del miocardio desde CT<br/>"
+            "2️⃣ Medición de grosor parietal por segmento (AHA)<br/>"
+            "3️⃣ Cálculo de Coeficiente de Recuperación (RC) analítico<br/>"
+            "4️⃣ Aplicación al HMR: HMR_corr = HMR_orig ÷ RC<br/><br/>"
+            "La corrección se aplica automáticamente cuando hay CT cargado y se calcula HMR."
+            "</p>"
+            "</div>"
+        )
+        vbox.addWidget(text)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btns.rejected.connect(dlg.close)
+        vbox.addWidget(btns)
+
+        dlg.exec()
+
     def _trial_slices_on_ct_grid(self) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]] | None:
         if not self._ensure_ct_grid_trial_cache():
             return None
-        sp = np.asarray(self._trial_spect_on_ct, dtype=np.float64)
-        ct = np.asarray(self._trial_ct_native, dtype=np.float64)
+        sp = self._trial_spect_on_ct  # ya float32 contiguo
+        ct = self._trial_ct_native
         ref = self._trial_ref_shape or tuple(int(v) for v in sp.shape)
 
         z_ref = int(np.clip(self._slice_idx.get("axial", max(0, ref[0] // 2)) + self._spect_view_offset.get("axial", 0), 0, max(0, ref[0] - 1)))
@@ -3340,6 +4307,7 @@ class AmyloidSpectPanel(QDialog):
         y = self._map_idx_between_grids(y_ref, ref[1], sp.shape[1])
         x = self._map_idx_between_grids(x_ref, ref[2], sp.shape[2])
 
+        # Extraer slices 2D (operación O(1) en numpy)
         sp_ax = self._window_spect(sp[z])
         sp_co = self._window_spect(sp[:, y, :])
         sp_sa = self._window_spect(sp[:, :, x])
@@ -3348,36 +4316,94 @@ class AmyloidSpectPanel(QDialog):
         ct_co = self._window_ct(ct[:, y, :])
         ct_sa = self._window_ct(ct[:, :, x])
 
-        # Corrección de aspecto físico para cortes no-axiales (z suele tener spacing mayor).
-        # Evita que coronal/sagital queden “achatados” al usar grilla CT nativa.
-        ct_sp = getattr(self, "_ct_spacing_zyx", None)
+        # Corrección de aspecto físico para cortes no-axiales.
+        # Usar el spacing del CT nativo reducido (no el original) para que el aspecto sea correcto.
+        ct_sp = getattr(self, "_trial_ct_native_spacing", None) or getattr(self, "_ct_spacing_zyx", None)
         if ct_sp is not None and len(ct_sp) == 3:
             z_mm = max(1e-6, float(ct_sp[0]))
             y_mm = max(1e-6, float(ct_sp[1]))
             x_mm = max(1e-6, float(ct_sp[2]))
-            zoom_co = (z_mm / x_mm, 1.0)  # coronal: (z, x)
-            zoom_sa = (z_mm / y_mm, 1.0)  # sagital: (z, y)
-            sp_co = ndi.zoom(sp_co, zoom_co, order=1)
-            ct_co = ndi.zoom(ct_co, zoom_co, order=1)
-            sp_sa = ndi.zoom(sp_sa, zoom_sa, order=1)
-            ct_sa = ndi.zoom(ct_sa, zoom_sa, order=1)
+            # coronal: eje vertical=z, horizontal=x → repetir z para mantener aspecto
+            ratio_co = z_mm / x_mm
+            ratio_sa = z_mm / y_mm
+            sp_co, ct_co = self._aspect_correct_2d(sp_co, ct_co, ratio_co)
+            sp_sa, ct_sa = self._aspect_correct_2d(sp_sa, ct_sa, ratio_sa)
 
         if bool(getattr(self, "_ct_visual_trial_mode", False)):
             ct_ax = self._enhance_ct_trial(ct_ax)
             ct_co = self._enhance_ct_trial(ct_co)
             ct_sa = self._enhance_ct_trial(ct_sa)
 
+        # Zoom/pan: solo si no es 100% (evita ndi.zoom innecesario)
         sp_prev = {
-            "axial": self._pan_2d_center(self._zoom_2d_center(sp_ax, self._spect_zoom_pct, order=1), self._spect_pan_px["axial"], order=1),
-            "coronal": self._pan_2d_center(self._zoom_2d_center(sp_co, self._spect_zoom_pct, order=1), self._spect_pan_px["coronal"], order=1),
-            "sagittal": self._pan_2d_center(self._zoom_2d_center(sp_sa, self._spect_zoom_pct, order=1), self._spect_pan_px["sagittal"], order=1),
+            "axial": self._apply_zoom_pan_2d(sp_ax, self._spect_zoom_pct, self._spect_pan_px["axial"], order=1),
+            "coronal": self._apply_zoom_pan_2d(sp_co, self._spect_zoom_pct, self._spect_pan_px["coronal"], order=1),
+            "sagittal": self._apply_zoom_pan_2d(sp_sa, self._spect_zoom_pct, self._spect_pan_px["sagittal"], order=1),
         }
         ct_prev = {
-            "axial": self._pan_2d_center(self._zoom_2d_center(ct_ax, self._ct_zoom_pct, order=1), self._ct_pan_px["axial"], order=1),
-            "coronal": self._pan_2d_center(self._zoom_2d_center(ct_co, self._ct_zoom_pct, order=1), self._ct_pan_px["coronal"], order=1),
-            "sagittal": self._pan_2d_center(self._zoom_2d_center(ct_sa, self._ct_zoom_pct, order=1), self._ct_pan_px["sagittal"], order=1),
+            "axial": self._apply_zoom_pan_2d(ct_ax, self._ct_zoom_pct, self._ct_pan_px["axial"], order=0),
+            "coronal": self._apply_zoom_pan_2d(ct_co, self._ct_zoom_pct, self._ct_pan_px["coronal"], order=0),
+            "sagittal": self._apply_zoom_pan_2d(ct_sa, self._ct_zoom_pct, self._ct_pan_px["sagittal"], order=0),
         }
         return sp_prev, ct_prev
+
+    @staticmethod
+    def _aspect_correct_2d(img_a: np.ndarray, img_b: np.ndarray, ratio: float) -> tuple[np.ndarray, np.ndarray]:
+        """Corrige aspecto físico de dos imágenes 2D simultáneamente.
+        
+        Si ratio ≈ entero, usa np.repeat (rapidísimo).
+        Si no, usa ndi.zoom con prefilter=False.
+        """
+        if abs(ratio - 1.0) < 0.05:
+            return img_a, img_b
+        # Buscar factor entero cercano
+        n_int = max(1, int(round(ratio)))
+        if abs(ratio - n_int) < 0.15 and n_int >= 1:
+            # np.repeat es O(N) sin interpolación — instantáneo
+            return np.repeat(img_a, n_int, axis=0), np.repeat(img_b, n_int, axis=0)
+        # Fallback: ndi.zoom con prefilter=False (evita cómputo extra)
+        za = ndi.zoom(img_a, (ratio, 1.0), order=1, prefilter=False)
+        zb = ndi.zoom(img_b, (ratio, 1.0), order=1, prefilter=False)
+        return za, zb
+
+    @staticmethod
+    def _apply_zoom_pan_2d(img: np.ndarray, zoom_pct: int, pan_yx: list[int] | tuple[int, int], order: int = 1) -> np.ndarray:
+        """Aplica zoom y pan a imagen 2D. Evita ndi.zoom si zoom=100% y pan=0."""
+        arr = np.asarray(img, dtype=np.float64)
+        dy, dx = int(pan_yx[0]), int(pan_yx[1])
+        z = max(0.05, float(zoom_pct) / 100.0)
+        
+        if abs(z - 1.0) < 1e-6 and dy == 0 and dx == 0:
+            return arr  # caso común: sin zoom ni pan → retorno directo
+        
+        if abs(z - 1.0) < 1e-6:
+            # Solo pan: usar roll (O(N), sin interpolación)
+            return np.roll(arr, shift=(dy, dx), axis=(0, 1))
+        
+        # Zoom + pan: ndi.zoom con prefilter=False
+        out_shape = arr.shape
+        scaled = ndi.zoom(arr, z, order=order, prefilter=False)
+        result = np.zeros(out_shape, dtype=np.float64)
+        src_slices = []
+        dst_slices = []
+        for src_len, dst_len in zip(scaled.shape, out_shape):
+            if src_len <= dst_len:
+                src0 = 0
+                src1 = src_len
+                dst0 = (dst_len - src_len) // 2
+                dst1 = dst0 + src_len
+            else:
+                src0 = (src_len - dst_len) // 2
+                src1 = src0 + dst_len
+                dst0 = 0
+                dst1 = dst_len
+            src_slices.append(slice(src0, src1))
+            dst_slices.append(slice(dst0, dst1))
+        result[tuple(dst_slices)] = scaled[tuple(src_slices)]
+        
+        if dy != 0 or dx != 0:
+            result = np.roll(result, shift=(dy, dx), axis=(0, 1))
+        return result
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -3457,6 +4483,21 @@ class AmyloidSpectPanel(QDialog):
         self._localization_point_zyx = (z, y, x)
 
     def _on_image_mouse_press(self, event, axis: str):
+        # === F2.4: Si modo edición activo, interceptar click en CUALQUIER plano ===
+        if self._mask_edit_active:
+            if event.button() == Qt.MouseButton.LeftButton:
+                # Botón IZQUIERDO = PINTAR
+                self._mask_edit_paint_mode = True
+                self._apply_brush_stroke(event, axis)
+                event.accept()
+                return
+            elif event.button() == Qt.MouseButton.RightButton:
+                # Botón DERECHO = BORRAR
+                self._mask_edit_paint_mode = False
+                self._apply_brush_stroke(event, axis)
+                event.accept()
+                return
+        
         if event.button() != Qt.MouseButton.LeftButton:
             return
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
@@ -3472,6 +4513,19 @@ class AmyloidSpectPanel(QDialog):
         event.accept()
 
     def _on_image_mouse_move(self, event, axis: str):
+        # === F2.4: Si modo edición activo y botón presionado, pintar/borrar en CUALQUIER plano ===
+        if self._mask_edit_active:
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self._mask_edit_paint_mode = True
+                self._apply_brush_stroke(event, axis)
+                event.accept()
+                return
+            elif event.buttons() & Qt.MouseButton.RightButton:
+                self._mask_edit_paint_mode = False
+                self._apply_brush_stroke(event, axis)
+                event.accept()
+                return
+        
         if not self._drag_state or self._drag_state.get("axis") != axis:
             return
         pos = event.position().toPoint()
@@ -3581,6 +4635,625 @@ class AmyloidSpectPanel(QDialog):
         self._drag_state = None
         event.accept()
 
+    # ============================================================
+    # F2.4: Edición manual de máscara CT (brush/erase)
+    # ============================================================
+    
+    def _on_mask_edit_toggled(self, checked: bool):
+        """Activa/desactiva el modo de edición de máscara CT."""
+        from PyQt6.QtGui import QCursor
+        from PyQt6.QtCore import Qt
+        
+        self._mask_edit_active = checked
+        
+        if checked:
+            # Verificar que exista segmentación CT
+            ct_seg = getattr(self, '_ct_segmentation', None)
+            if ct_seg is None:
+                self._btn_toggle_mask_edit.setChecked(False)
+                self._status.setText("❌ F2.4: No hay segmentación CT disponible. Cargar CT y calcular HMR primero.")
+                return
+            
+            # Guardar máscara original si es la primera vez
+            if self._mask_edit_original is None:
+                self._mask_edit_original = ct_seg.mask_3d.copy()
+            
+            # Cambiar cursor
+            self._axial_lbl.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+            self._btn_toggle_mask_edit.setText("✏️ Editando...")
+            self._btn_toggle_mask_edit.setStyleSheet(
+                "background-color:#7c3aed; color:white; font-weight:bold; padding:6px 12px;"
+            )
+            # Calcular y mostrar volumen inicial
+            voxel_count = int(ct_seg.mask_3d.sum())
+            spacing = self._spect_spacing_or_default()
+            voxel_vol_mm3 = spacing[0] * spacing[1] * spacing[2]
+            volume_mm3 = voxel_count * voxel_vol_mm3
+            volume_ml = volume_mm3 / 1000.0
+            
+            self._mask_edit_status.setText(
+                f"🟢 Modo edición ACTIVO | 🖌️ Izq=PINTAR 🧹 Der=BORRAR | "
+                f"❤️ Volumen: {volume_ml:.1f} mL ({voxel_count} voxels)"
+            )
+            self._mask_edit_status.setStyleSheet("color:#a78bfa; font-style:normal; font-weight:600;")
+            self._status.setText("✏️ F2.4: Modo edición activo. Izq=pintar, Der=borrar en CUALQUIER vista MPR.")
+        else:
+            # Restaurar cursor
+            self._axial_lbl.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            self._btn_toggle_mask_edit.setText("✏️ Editar Máscara")
+            self._btn_toggle_mask_edit.setStyleSheet("")
+            self._mask_edit_status.setText("Modo edición: INACTIVO")
+            self._mask_edit_status.setStyleSheet("color:#9ca3af; font-style:italic; font-size:11px;")
+            if self._mask_edit_has_changes:
+                self._status.setText("F2.4: Edición pausada. Hay cambios pendientes → 'Aplicar → Recalcular'")
+            else:
+                self._status.setText("F2.4: Modo edición desactivado.")
+    
+    def _on_paint_erase_toggled(self, checked: bool):
+        """Toggle entre modo pintar y borrar.
+        
+        NOTA: Ahora el modo se selecciona automáticamente con el mouse:
+        - Botón IZQUIERDO = Pintar
+        - Botón DERECHO = Borrar
+        Este botón sigue funcionando como override manual si se necesita.
+        """
+        self._mask_edit_paint_mode = checked  # True = pintar, False = borrar
+        if checked:
+            self._btn_paint_erase.setText("🖌️ Pintar (izq)")
+            self._btn_paint_erase.setStyleSheet(
+                "background-color:#2563eb; color:white; font-weight:bold;"
+            )
+        else:
+            self._btn_paint_erase.setText("🧹 Borrar (der)")
+            self._btn_paint_erase.setStyleSheet(
+                "background-color:#dc2626; color:white; font-weight:bold;"
+            )
+    
+    def _apply_brush_stroke(self, event, axis: str):
+        """Aplica un stroke del pincel en la posición del mouse.
+        
+        Funciona en los 3 planos MPR:
+        - axial: modifica mask_3d[z], mapea (px,py) -> (y,x)
+        - coronal: modifica mask_3d[:,y,:], mapea (px,py) -> (z,x)
+        - sagittal: modifica mask_3d[:,:,x], mapea (px,py) -> (z,y)
+        """
+        ct_seg = getattr(self, '_ct_segmentation', None)
+        if ct_seg is None:
+            return
+        
+        lbl = self._axis_label(axis)
+        pm = lbl.pixmap()
+        if pm is None or pm.isNull():
+            return
+        
+        # Posición del mouse relativa al pixmap
+        pos = event.position().toPoint()
+        lbl_w, lbl_h = max(1, int(lbl.width())), max(1, int(lbl.height()))
+        pm_w, pm_h = max(1, int(pm.width())), max(1, int(pm.height()))
+        x0 = max(0, (lbl_w - pm_w) // 2)
+        y0 = max(0, (lbl_h - pm_h) // 2)
+        
+        px = int(np.clip(pos.x() - x0, 0, pm_w - 1))
+        py = int(np.clip(pos.y() - y0, 0, pm_h - 1))
+        
+        # Convertir a coordenadas del volumen según el plano
+        mask_shape = ct_seg.mask_3d.shape  # (nz, ny, nx)
+        
+        # Variables compartidas para undo y volumen
+        slice_idx = -1
+        current_slice = None
+        
+        try:
+            if axis == "axial":
+                z_idx = int(np.clip(self._slice_idx.get("axial", mask_shape[0] // 2), 0, mask_shape[0] - 1))
+                slice_idx = z_idx
+                v0 = int(round(py / max(1, pm_h - 1) * (mask_shape[1] - 1)))  # Y
+                v1 = int(round(px / max(1, pm_w - 1) * (mask_shape[2] - 1)))  # X
+                v0 = int(np.clip(v0, 0, mask_shape[1] - 1))
+                v1 = int(np.clip(v1, 0, mask_shape[2] - 1))
+                r0 = max(1, int(round(int(self._brush_radius_spin.value()) / max(1, pm_h - 1) * (mask_shape[1] - 1))))
+                r1 = max(1, int(round(int(self._brush_radius_spin.value()) / max(1, pm_w - 1) * (mask_shape[2] - 1))))
+                # Guardar slice para undo
+                current_slice = ct_seg.mask_3d[z_idx].copy()
+                
+                # Crear brush y aplicar
+                yy, xx = np.meshgrid(np.arange(-r0, r0 + 1), np.arange(-r1, r1 + 1), indexing='ij')
+                dist = np.sqrt((yy / max(r0, 1))**2 + (xx / max(r1, 1))**2)
+                brush_mask = dist <= 1.0
+                
+                y_start = max(0, v0 - r0); y_end = min(mask_shape[1], v0 + r0 + 1)
+                x_start = max(0, v1 - r1); x_end = min(mask_shape[2], v1 + r1 + 1)
+                by_start = max(0, r0 - v0); by_end = by_start + (y_end - y_start)
+                bx_start = max(0, r1 - v1); bx_end = bx_start + (x_end - x_start)
+                
+                if self._mask_edit_paint_mode:
+                    ct_seg.mask_3d[z_idx, y_start:y_end, x_start:x_end] |= brush_mask[by_start:by_end, bx_start:bx_end]
+                else:
+                    ct_seg.mask_3d[z_idx, y_start:y_end, x_start:x_end] &= ~brush_mask[by_start:by_end, bx_start:bx_end]
+                    
+            elif axis == "coronal":
+                y_idx = int(np.clip(self._slice_idx.get("coronal", mask_shape[1] // 2), 0, mask_shape[1] - 1))
+                slice_idx = y_idx
+                # En coronal: pantalla (px=X, py=Z) -> volumen (z, x)
+                v0 = int(round(py / max(1, pm_h - 1) * (mask_shape[0] - 1)))  # Z
+                v1 = int(round(px / max(1, pm_w - 1) * (mask_shape[2] - 1)))  # X
+                v0 = int(np.clip(v0, 0, mask_shape[0] - 1))
+                v1 = int(np.clip(v1, 0, mask_shape[2] - 1))
+                r0 = max(1, int(round(int(self._brush_radius_spin.value()) / max(1, pm_h - 1) * (mask_shape[0] - 1))))
+                r1 = max(1, int(round(int(self._brush_radius_spin.value()) / max(1, pm_w - 1) * (mask_shape[2] - 1))))
+                # Guardar slice coronal para undo (copiar el slice 2D completo)
+                current_slice = ct_seg.mask_3d[:, y_idx, :].copy()
+                
+                # Crear brush y aplicar sobre slice coronal [:, y_idx, :]
+                zz, xx = np.meshgrid(np.arange(-r0, r0 + 1), np.arange(-r1, r1 + 1), indexing='ij')
+                dist = np.sqrt((zz / max(r0, 1))**2 + (xx / max(r1, 1))**2)
+                brush_mask = dist <= 1.0
+                
+                z_start = max(0, v0 - r0); z_end = min(mask_shape[0], v0 + r0 + 1)
+                x_start = max(0, v1 - r1); x_end = min(mask_shape[2], v1 + r1 + 1)
+                bz_start = max(0, r0 - v0); bz_end = bz_start + (z_end - z_start)
+                bx_start = max(0, r1 - v1); bx_end = bx_start + (x_end - x_start)
+                
+                # Validar shapes antes de asignar
+                target_shape = (z_end - z_start, x_end - x_start)
+                source_shape = (bz_end - bz_start, bx_end - bx_start)
+                if target_shape == source_shape:
+                    if self._mask_edit_paint_mode:
+                        ct_seg.mask_3d[z_start:z_end, y_idx, x_start:x_end] |= brush_mask[bz_start:bz_end, bx_start:bx_end]
+                    else:
+                        ct_seg.mask_3d[z_start:z_end, y_idx, x_start:x_end] &= ~brush_mask[bz_start:bz_end, bx_start:bx_end]
+                else:
+                    print(f'[BRUSH-WARN] Shape mismatch coronal: target={target_shape} source={source_shape}')
+                    
+            else:  # sagittal
+                x_idx = int(np.clip(self._slice_idx.get("sagittal", mask_shape[2] // 2), 0, mask_shape[2] - 1))
+                slice_idx = x_idx
+                # En sagital: pantalla (px=Y, py=Z) -> volumen (z, y)
+                v0 = int(round(py / max(1, pm_h - 1) * (mask_shape[0] - 1)))  # Z
+                v1 = int(round(px / max(1, pm_w - 1) * (mask_shape[1] - 1)))  # Y
+                v0 = int(np.clip(v0, 0, mask_shape[0] - 1))
+                v1 = int(np.clip(v1, 0, mask_shape[1] - 1))
+                r0 = max(1, int(round(int(self._brush_radius_spin.value()) / max(1, pm_h - 1) * (mask_shape[0] - 1))))
+                r1 = max(1, int(round(int(self._brush_radius_spin.value()) / max(1, pm_w - 1) * (mask_shape[1] - 1))))
+                # Guardar slice sagital para undo
+                current_slice = ct_seg.mask_3d[:, :, x_idx].copy()
+                
+                # Crear brush y aplicar sobre slice sagital [:, :, x_idx]
+                zz, yy = np.meshgrid(np.arange(-r0, r0 + 1), np.arange(-r1, r1 + 1), indexing='ij')
+                dist = np.sqrt((zz / max(r0, 1))**2 + (yy / max(r1, 1))**2)
+                brush_mask = dist <= 1.0
+                
+                z_start = max(0, v0 - r0); z_end = min(mask_shape[0], v0 + r0 + 1)
+                y_start = max(0, v1 - r1); y_end = min(mask_shape[1], v1 + r1 + 1)
+                bz_start = max(0, r0 - v0); bz_end = bz_start + (z_end - z_start)
+                by_start = max(0, r1 - v1); by_end = by_start + (y_end - y_start)
+                
+                # Validar shapes antes de asignar
+                target_shape = (z_end - z_start, y_end - y_start)
+                source_shape = (bz_end - bz_start, by_end - by_start)
+                if target_shape == source_shape:
+                    if self._mask_edit_paint_mode:
+                        ct_seg.mask_3d[z_start:z_end, y_start:y_end, x_idx] |= brush_mask[bz_start:bz_end, by_start:by_end]
+                    else:
+                        ct_seg.mask_3d[z_start:z_end, y_start:y_end, x_idx] &= ~brush_mask[bz_start:bz_end, by_start:by_end]
+                else:
+                    print(f'[BRUSH-WARN] Shape mismatch sagittal: target={target_shape} source={source_shape}')
+                    
+        except Exception as e:
+            print(f'[BRUSH-ERROR] {axis}: {type(e).__name__}: {e}')
+            return  # No guardar en undo si falló
+        
+        # Guardar en stack de undo con formato correcto: (axis, idx, prev_slice)
+        if current_slice is not None and slice_idx >= 0:
+            self._mask_edit_undo_stack.append((axis, slice_idx, current_slice.copy()))
+            if len(self._mask_edit_undo_stack) > 20:
+                self._mask_edit_undo_stack.pop(0)
+        
+        # Marcar cambios pendientes
+        self._mask_edit_has_changes = True
+        self._btn_undo_mask.setEnabled(True)
+        self._btn_reset_mask.setEnabled(True)
+        self._btn_apply_mask_edit.setEnabled(True)
+        
+        # Calcular volumen cardíaco en tiempo real
+        voxel_count = int(ct_seg.mask_3d.sum())
+        spacing = self._spect_spacing_or_default()
+        voxel_vol_mm3 = spacing[0] * spacing[1] * spacing[2]
+        volume_mm3 = voxel_count * voxel_vol_mm3
+        volume_ml = volume_mm3 / 1000.0
+        
+        # Nombre del slice según plano
+        if axis == "axial":
+            slice_name = f"Z={slice_idx+1}/{mask_shape[0]}"
+            slice_voxels = int(ct_seg.mask_3d[slice_idx].sum())
+        elif axis == "coronal":
+            slice_name = f"Y={slice_idx+1}/{mask_shape[1]}"
+            slice_voxels = int(ct_seg.mask_3d[:, slice_idx, :].sum())
+        else:
+            slice_name = f"X={slice_idx+1}/{mask_shape[2]}"
+            slice_voxels = int(ct_seg.mask_3d[:, :, slice_idx].sum())
+        
+        # Actualizar status con volumen cardíaco
+        brush_radius_px = int(self._brush_radius_spin.value())
+        self._mask_edit_status.setText(
+            f"🟢 {axis.capitalize()} {slice_name} | "
+            f"Slice: {slice_voxels} vox | Total: {voxel_count} vox | "
+            f"❤️ Volumen: {volume_ml:.1f} mL ({volume_mm3:.0f} mm³) | "
+            f"{'🖌️ PINTAR' if self._mask_edit_paint_mode else '🧹 BORRAR'} r={brush_radius_px}px"
+        )
+        
+        # Guardar volumen calculado en el objeto VOIAnatomical para reportes
+        ct_seg.volume_mm3 = volume_mm3
+        
+        # Re-renderizar para mostrar cambios en vivo
+        self._render_current_with_overlay()
+    
+    def _undo_mask_edit(self):
+        """Deshace la última acción de pincel (funciona en los 3 planos)."""
+        if not self._mask_edit_undo_stack:
+            return
+        
+        ct_seg = getattr(self, '_ct_segmentation', None)
+        if ct_seg is None:
+            return
+        
+        mask_shape = ct_seg.mask_3d.shape
+        entry = self._mask_edit_undo_stack.pop()
+        
+        # Formato nuevo: (axis, slice_idx, prev_slice)
+        if len(entry) == 3:
+            plane, idx, prev_slice = entry
+            if plane == "axial":
+                ct_seg.mask_3d[idx] = prev_slice
+                label_txt = f"↩️ Deshecho axial Z={idx+1}"
+            elif plane == "coronal":
+                ct_seg.mask_3d[:, idx, :] = prev_slice
+                label_txt = f"↩️ Deshecho coronal Y={idx+1}"
+            else:  # sagittal
+                ct_seg.mask_3d[:, :, idx] = prev_slice
+                label_txt = f"↩️ Deshecho sagital X={idx+1}"
+        else:
+            # Formato viejo por compatibilidad: (z_idx, prev_slice)
+            z_idx, prev_slice = entry
+            ct_seg.mask_3d[z_idx] = prev_slice
+            label_txt = f"↩️ Deshecho slice {z_idx+1}"
+        
+        if not self._mask_edit_undo_stack:
+            self._btn_undo_mask.setEnabled(False)
+        
+        # Recalcular volumen después de deshacer
+        voxel_count = int(ct_seg.mask_3d.sum())
+        spacing = self._spect_spacing_or_default()
+        voxel_vol_mm3 = spacing[0] * spacing[1] * spacing[2]
+        volume_mm3 = voxel_count * voxel_vol_mm3
+        volume_ml = volume_mm3 / 1000.0
+        ct_seg.volume_mm3 = volume_mm3
+        
+        self._mask_edit_status.setText(
+            f"{label_txt} | Voxels: {voxel_count} | "
+            f"❤️ Volumen: {volume_ml:.1f} mL ({volume_mm3:.0f} mm³)"
+        )
+        self._render_current_with_overlay()
+    
+    def _reset_mask_to_original(self):
+        """Restaura la máscara CT a su estado original (pre-edición)."""
+        ct_seg = getattr(self, '_ct_segmentation', None)
+        if ct_seg is None or self._mask_edit_original is None:
+            return
+        
+        ct_seg.mask_3d[:] = self._mask_edit_original[:]
+        self._mask_edit_undo_stack.clear()
+        self._mask_edit_has_changes = False
+        
+        self._btn_undo_mask.setEnabled(False)
+        self._btn_reset_mask.setEnabled(False)
+        self._btn_apply_mask_edit.setEnabled(False)
+        
+        # Recalcular volumen después de restaurar
+        voxel_count = int(ct_seg.mask_3d.sum())
+        spacing = self._spect_spacing_or_default()
+        voxel_vol_mm3 = spacing[0] * spacing[1] * spacing[2]
+        volume_mm3 = voxel_count * voxel_vol_mm3
+        volume_ml = volume_mm3 / 1000.0
+        ct_seg.volume_mm3 = volume_mm3
+        
+        self._mask_edit_status.setText(
+            f"🔄 Máscara restaurada | Voxels: {voxel_count} | "
+            f"❤️ Volumen: {volume_ml:.1f} mL ({volume_mm3:.0f} mm³)"
+        )
+        self._status.setText("F2.4: Máscara restaurada a su estado original (segmentación automática).")
+        self._render_current_with_overlay()
+    
+    def _apply_mask_edit_and_recalc(self):
+        """Aplica los cambios de edición manual y recalcula HMR."""
+        ct_seg = getattr(self, '_ct_segmentation', None)
+        if ct_seg is None:
+            return
+        
+        # Confirmar cambios: actualizar original
+        self._mask_edit_original = ct_seg.mask_3d.copy()
+        self._mask_edit_has_changes = False
+        self._mask_edit_undo_stack.clear()
+        
+        # Actualizar botones
+        self._btn_reset_mask.setEnabled(False)
+        self._btn_apply_mask_edit.setEnabled(False)
+        self._btn_undo_mask.setEnabled(False)
+        
+        voxel_count = int(ct_seg.mask_3d.sum())
+        spacing = self._spect_spacing_or_default()
+        voxel_vol_mm3 = spacing[0] * spacing[1] * spacing[2]
+        volume_mm3 = voxel_count * voxel_vol_mm3
+        volume_ml = volume_mm3 / 1000.0
+        ct_seg.volume_mm3 = volume_mm3
+        
+        # Recalcular centroide de la máscara editada (crítico para posición correcta en MIP)
+        from scipy.ndimage import center_of_mass as _com
+        mask_arr = np.asarray(ct_seg.mask_3d, dtype=bool)
+        if mask_arr.sum() > 0:
+            try:
+                new_centroid = _com(mask_arr)
+                ct_seg.centroid_zyx = (float(new_centroid[0]), float(new_centroid[1]), float(new_centroid[2]))
+            except Exception:
+                pass  # Mantener centroide anterior si falla
+        
+        self._mask_edit_status.setText(
+            f"✅ Cambios aplicados | Voxels: {voxel_count} | "
+            f"❤️ Volumen: {volume_ml:.1f} mL ({volume_mm3:.0f} mm³)"
+        )
+        self._status.setText(f"✅ F2.4: Máscara editada aplicada ({voxel_count} voxels). Recalculando HMR...")
+        
+        # Marcar que esta máscara fue editada manualmente (para preservación futura)
+        self._mask_was_manually_edited = True
+        
+        # Desactivar modo edición
+        if self._mask_edit_active:
+            self._btn_toggle_mask_edit.setChecked(False)
+        
+        # Re-calcular HMR usando la máscara editada (no re-segmentar)
+        self._reuse_edited_segmentation = True
+        try:
+            self._calculate_hmr_spect()
+        finally:
+            self._reuse_edited_segmentation = False
+
+    def _export_mask_nifti(self):
+        """Exporta la máscara CT segmentada como NIfTI .nii.gz para 3D Slicer."""
+        ct_seg = getattr(self, "_ct_segmentation", None)
+        if ct_seg is None:
+            QMessageBox.warning(self, "SINCRO", "No hay segmentación CT para exportar.")
+            return
+
+        try:
+            import nibabel as nib
+        except ImportError:
+            QMessageBox.warning(
+                self, "SINCRO",
+                "Falta 'nibabel'. Instalar con:\n  pip install nibabel"
+            )
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportar máscara NIfTI",
+            "mascara_miocardio_ct.nii.gz",
+            "NIfTI (*.nii.gz *.nii)",
+        )
+        if not path:
+            return
+
+        try:
+            mask = np.asarray(ct_seg.mask_3d, dtype=np.uint8)
+            spacing = self._spect_spacing_or_default()
+            sz, sy, sx = (float(v) for v in spacing)
+            affine = np.diag([sx, sy, sz, 1.0])
+            img = nib.Nifti1Image(mask, affine)
+            img.header.set_zooms((sx, sy, sz))
+            nib.save(img, path)
+            self._status.setText(f"💾 Máscara exportada: {path}")
+            self._mask_edit_status.setText(
+                f"💾 Exportada: {path} ({int(mask.sum())} voxels)"
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "SINCRO", f"Error al exportar:\n{exc}")
+
+    # ============================================================
+    # Persistencia de estado CT (guardar/cargar/reiniciar)
+    # ============================================================
+    
+    def _save_ct_state(self):
+        """Guarda el estado completo de la segmentación CT en archivo JSON."""
+        ct_seg = getattr(self, '_ct_segmentation', None)
+        if ct_seg is None:
+            QMessageBox.warning(self, "SINCRO", "No hay segmentación CT para guardar.")
+            return
+        
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Guardar Estado CT",
+            f"ct_state_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            "JSON (*.json)",
+        )
+        if not path:
+            return
+        
+        try:
+            import json
+            
+            state = {
+                'version': '2.5',
+                'timestamp': datetime.now().isoformat(),
+                'mask_3d': ct_seg.mask_3d.tolist(),
+                'mask_shape': list(ct_seg.mask_3d.shape),
+                'volume_mm3': getattr(ct_seg, 'volume_mm3', 0.0),
+                'centroid_zyx': list(ct_seg.centroid_zyx) if hasattr(ct_seg, 'centroid_zyx') else [32, 32, 32],
+                'spect_spacing': list(self._spect_spacing_or_default()),
+                # Guardar HMR si existe
+                'hmr_result': None,
+                'pve_result': None,
+            }
+            
+            if self._hmr_result is not None:
+                hr = self._hmr_result
+                state['hmr_result'] = {
+                    'hmr': hr.hmr,
+                    'hmr_raw': hr.hmr_raw,
+                    'classification': hr.classification,
+                    'heart_counts': float(hr.heart_counts),
+                    'mediastinum_counts': float(hr.mediastinum_counts),
+                    'heart_volume_ml': hr.heart_volume_ml,
+                    'method': hr.method,
+                }
+            
+            if self._pve_result is not None:
+                pr = self._pve_result
+                state['pve_result'] = {
+                    'hmr_original': pr.hmr_original,
+                    'hmr_pve_corrected': pr.hmr_pve_corrected,
+                    'classification_original': pr.classification_original,
+                    'classification_corrected': pr.classification_corrected,
+                }
+            
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2)
+            
+            voxel_count = int(ct_seg.mask_3d.sum())
+            self._status.setText(f"💾 Estado CT guardado: {path} ({voxel_count} voxels)")
+            self._metrics.append(f"[CT-STATE] Guardado en: {path}")
+            
+        except Exception as exc:
+            QMessageBox.critical(self, "SINCRO", f"Error al guardar estado:\n{exc}")
+            import traceback
+            traceback.print_exc()
+    
+    def _load_ct_state(self):
+        """Carga un estado de segmentación CT guardado previamente."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Cargar Estado CT",
+            "",
+            "JSON (*.json)",
+        )
+        if not path:
+            return
+        
+        try:
+            import json
+            
+            with open(path, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+            
+            # Validar versión
+            version = state.get('version', '1.0')
+            self._metrics.append(f"[CT-STATE] Cargando v{version} desde: {path}")
+            
+            # Reconstruir máscara 3D
+            mask_data = np.array(state['mask_3d'], dtype=bool)
+            centroid = tuple(state.get('centroid_zyx', [32, 32, 32]))
+            volume_mm3 = state.get('volume_mm3', 0.0)
+            
+            from mod_SINCRO.core.amyloid_spect import VOIAnatomical
+            
+            new_ct_seg = VOIAnatomical(
+                mask_3d_data=mask_data,
+                centroid_zyx=centroid,
+                source="ct_segmentation_loaded",
+                volume_mm3=volume_mm3,
+            )
+            
+            # Aplicar estado cargado
+            self._ct_segmentation = new_ct_seg
+            self._mask_edit_original = mask_data.copy()
+            self._mask_edit_undo_stack.clear()
+            self._mask_edit_has_changes = False
+            
+            # Restaurar HMR si existe
+            if state.get('hmr_result'):
+                hr_data = state['hmr_result']
+                from mod_SINCRO.core.amyloid_spect import HmrSpectResult
+                # Crear un resultado HMR simplificado
+                self._lbl_hmr_result.setText(f"HMR = {hr_data['hmr']:.2f} (cargado)")
+                self._metrics.append(f"[CT-STATE] HMR restaurado: {hr_data['hmr']:.2f}")
+            
+            # Habilitar controles
+            self._btn_toggle_mask_edit.setEnabled(True)
+            self._btn_export_mask_nifti.setEnabled(True)
+            self._btn_restart_ct.setEnabled(True)
+            self._btn_save_ct_state.setEnabled(True)
+            
+            # Activar checkbox CT anatómico si no lo está
+            if not self._ct_anatomical_check.isChecked():
+                self._ct_anatomical_check.setChecked(True)
+            
+            # Mostrar volumen
+            voxel_count = int(mask_data.sum())
+            spacing = tuple(state.get('spect_spacing', [6.8, 6.8, 6.8]))
+            voxel_vol_mm3 = spacing[0] * spacing[1] * spacing[2]
+            volume_ml = (voxel_count * voxel_vol_mm3) / 1000.0
+            
+            self._mask_edit_status.setText(
+                f"📂 CT cargado | {voxel_count} vox | ❤️ {volume_ml:.1f} mL"
+            )
+            self._status.setText(f"📂 Estado CT cargado desde: {path}")
+            self._render_selected_view()
+            
+        except Exception as exc:
+            QMessageBox.critical(self, "SINCRO", f"Error al cargar estado:\n{exc}")
+            import traceback
+            traceback.print_exc()
+    
+    def _restart_ct_state(self):
+        """Reinicia completamente la segmentación CT, volviendo al estado inicial."""
+        ct_seg = getattr(self, '_ct_segmentation', None)
+        if ct_seg is None:
+            QMessageBox.information(self, "SINCRO", "No hay segmentación CT para reiniciar.")
+            return
+        
+        reply = QMessageBox.question(
+            self, "Reiniciar CT",
+            "¿Está seguro de BORRAR toda la segmentación CT?\n\n"
+            "Esto eliminará:\n"
+            "• Máscara editada manualmente\n"
+            "• Resultados HMR/PVE\n"
+            "• Historial de undo\n\n"
+            "No se puede deshacer.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        # Borrar TODO el estado CT
+        self._ct_segmentation = None
+        self._hmr_result = None
+        self._pve_result = None
+        self._mask_edit_original = None
+        self._mask_edit_undo_stack.clear()
+        self._mask_edit_has_changes = False
+        self._reuse_edited_segmentation = False
+        
+        # Deshabilitar controles
+        self._btn_toggle_mask_edit.setEnabled(False)
+        self._btn_undo_mask.setEnabled(False)
+        self._btn_reset_mask.setEnabled(False)
+        self._btn_apply_mask_edit.setEnabled(False)
+        self._btn_export_mask_nifti.setEnabled(False)
+        self._btn_save_ct_state.setEnabled(False)
+        self._btn_restart_ct.setEnabled(False)
+        
+        # Resetear UI
+        self._mask_edit_status.setText("Modo manual estable: VOIs esféricas ancladas en A/B")
+        self._lbl_hmr_result.setText("HMR-SPECT = N/D · recalcular")
+        self._lbl_hmr_result.setStyleSheet(
+            "font-size:14px; font-weight:700; color:#ffffff; "
+            "background:#000000; padding:6px 12px;"
+        )
+        
+        # Desactivar checkbox
+        self._ct_anatomical_check.setChecked(False)
+        
+        self._status.setText("🗑️ Segmentación CT reiniciada completamente. Recalcule HMR para empezar de nuevo.")
+        self._metrics.append("[CT-STATE] Reinicio completo de segmentación CT.")
+        self._render_selected_view()
+
     def _axis_label(self, axis: str) -> QLabel:
         if axis == "axial":
             return self._axial_lbl
@@ -3627,9 +5300,9 @@ class AmyloidSpectPanel(QDialog):
         y = int(np.clip(self._slice_idx.get("coronal", vol.shape[1] // 2), 0, vol.shape[1] - 1))
         x = int(np.clip(self._slice_idx.get("sagittal", vol.shape[2] // 2), 0, vol.shape[2] - 1))
         return {
-            "axial": self._pan_2d_center(self._zoom_2d_center(self._window_spect(vol[int(np.clip(z + self._spect_view_offset.get("axial", 0), 0, vol.shape[0] - 1))]), self._spect_zoom_pct), self._spect_pan_px["axial"]),
-            "coronal": self._pan_2d_center(self._zoom_2d_center(self._window_spect(vol[:, int(np.clip(y + self._spect_view_offset.get("coronal", 0), 0, vol.shape[1] - 1)), :]), self._spect_zoom_pct), self._spect_pan_px["coronal"]),
-            "sagittal": self._pan_2d_center(self._zoom_2d_center(self._window_spect(vol[:, :, int(np.clip(x + self._spect_view_offset.get("sagittal", 0), 0, vol.shape[2] - 1))]), self._spect_zoom_pct), self._spect_pan_px["sagittal"]),
+            "axial": self._apply_zoom_pan_2d(self._window_spect(vol[int(np.clip(z + self._spect_view_offset.get("axial", 0), 0, vol.shape[0] - 1))]), self._spect_zoom_pct, self._spect_pan_px["axial"], order=1),
+            "coronal": self._apply_zoom_pan_2d(self._window_spect(vol[:, int(np.clip(y + self._spect_view_offset.get("coronal", 0), 0, vol.shape[1] - 1)), :]), self._spect_zoom_pct, self._spect_pan_px["coronal"], order=1),
+            "sagittal": self._apply_zoom_pan_2d(self._window_spect(vol[:, :, int(np.clip(x + self._spect_view_offset.get("sagittal", 0), 0, vol.shape[2] - 1))]), self._spect_zoom_pct, self._spect_pan_px["sagittal"], order=1),
         }
 
     def _reset_view_offsets(self):
@@ -3667,9 +5340,9 @@ class AmyloidSpectPanel(QDialog):
             sagittal = self._enhance_ct_trial(sagittal)
 
         return {
-            "axial": self._pan_2d_center(self._zoom_2d_center(axial, self._ct_zoom_pct, order=1), self._ct_pan_px["axial"], order=1),
-            "coronal": self._pan_2d_center(self._zoom_2d_center(coronal, self._ct_zoom_pct, order=1), self._ct_pan_px["coronal"], order=1),
-            "sagittal": self._pan_2d_center(self._zoom_2d_center(sagittal, self._ct_zoom_pct, order=1), self._ct_pan_px["sagittal"], order=1),
+            "axial": self._apply_zoom_pan_2d(axial, self._ct_zoom_pct, self._ct_pan_px["axial"], order=0),
+            "coronal": self._apply_zoom_pan_2d(coronal, self._ct_zoom_pct, self._ct_pan_px["coronal"], order=0),
+            "sagittal": self._apply_zoom_pan_2d(sagittal, self._ct_zoom_pct, self._ct_pan_px["sagittal"], order=0),
         }
 
     def _render_triplet(self, left_title: str, left_arr: np.ndarray, mid_title: str, mid_arr: np.ndarray, right_title: str, right_arr: np.ndarray):
@@ -3830,23 +5503,33 @@ class AmyloidSpectPanel(QDialog):
         """Configura el widget MIP rotatorio con el volumen y VOIs actuales."""
         if not hasattr(self, "_mip_widget"):
             return
-            
-        # Pasar volumen al widget
-        if self._current_volume is not None:
-            spacing = getattr(self, "_voxel_spacing_mm", (4.0, 4.0, 4.0))
-            # Usar el MISMO transform (flips X/Y/Z) que los cortes, para que
-            # los VOIs (definidos en coords de la vista) coincidan con el MIP.
-            vol_tx = self._spect_transform_3d(np.asarray(self._current_volume, dtype=np.float64))
-            self._mip_widget.set_volume(vol_tx, spacing)
-        else:
-            self._mip_widget.set_volume(None)
-        # Pasar volumen sin filtro para toggle (con mismo transform)
-        _uf = getattr(self, "_unfiltered_volume", None)
-        if _uf is not None:
-            _uf = self._spect_transform_3d(np.asarray(_uf, dtype=np.float64))
-        self._mip_widget.set_volume_unfiltered(_uf)
-            
-        # Pasar colormap
+        
+        # === Optimización: cachear el volumen transformado para no recalcular en cada scroll ===
+        vol_id = id(self._current_volume)
+        flip_sig = (
+            bool(getattr(self, "_spect_flip_x_test", False)),
+            bool(getattr(self, "_spect_flip_y_test", False)),
+            bool(getattr(self, "_spect_flip_z_test", False)),
+        )
+        cache_sig = (vol_id, flip_sig)
+        if cache_sig != getattr(self, "_mip_vol_cache_sig", None):
+            # Solo recalcular si cambió el volumen o los flips
+            if self._current_volume is not None:
+                spacing = getattr(self, "_voxel_spacing_mm", (4.0, 4.0, 4.0))
+                vol_tx = self._spect_transform_3d(np.asarray(self._current_volume, dtype=np.float64))
+                self._mip_widget.set_volume(vol_tx, spacing)
+            else:
+                self._mip_widget.set_volume(None)
+            # Volumen sin filtro
+            _uf = getattr(self, "_unfiltered_volume", None)
+            if _uf is not None:
+                _uf_tx = self._spect_transform_3d(np.asarray(_uf, dtype=np.float64))
+                self._mip_widget.set_volume_unfiltered(_uf_tx)
+            else:
+                self._mip_widget.set_volume_unfiltered(None)
+            self._mip_vol_cache_sig = cache_sig
+        
+        # Pasar colormap (siempre, por si cambió)
         self._mip_widget.set_colormap(self._apply_cmap)
         
         # Pasar VOIs si existen
@@ -4398,6 +6081,15 @@ class AmyloidSpectPanel(QDialog):
             self._task_progress_step(90, "Renderizando registro...")
             self._ct_auto_registered = np.asarray(ct_reg, dtype=np.float64)
             self._ct_registered = np.asarray(ct_reg, dtype=np.float64)
+            # Guardar shift total de registro (en píxeles de grilla SPECT)
+            self._ct_registration_shift_zyx = (
+                float(shift_zyx[0]) + float(fine_shift_zyx[0]),
+                float(shift_zyx[1]) + float(fine_shift_zyx[1]),
+                float(shift_zyx[2]) + float(fine_shift_zyx[2]),
+            )
+            self._ct_total_shift_zyx = self._ct_registration_shift_zyx
+            # Invalidar caché del modo CT nativa para que use el nuevo shift
+            self._invalidate_ct_grid_trial_cache()
             for spin in (self._nudge_z, self._nudge_y, self._nudge_x, self._rot_z, self._rot_y, self._rot_x):
                 spin.blockSignals(True)
                 spin.setValue(0.0)
@@ -4450,6 +6142,8 @@ class AmyloidSpectPanel(QDialog):
         shift = (float(self._nudge_z.value()), float(self._nudge_y.value()), float(self._nudge_x.value()))
         rot = (float(self._rot_z.value()), float(self._rot_y.value()), float(self._rot_x.value()))
         ct = np.asarray(self._ct_auto_registered, dtype=np.float64)
+        # Invalidar caché del modo CT nativa (el nudge cambia la alineación)
+        self._invalidate_ct_grid_trial_cache()
         if abs(rot[0]) > 1e-6:
             ct = ndi.rotate(ct, angle=rot[0], axes=(1, 2), reshape=False, order=1, mode="nearest")
         if abs(rot[1]) > 1e-6:
@@ -4457,6 +6151,12 @@ class AmyloidSpectPanel(QDialog):
         if abs(rot[2]) > 1e-6:
             ct = ndi.rotate(ct, angle=rot[2], axes=(0, 1), reshape=False, order=1, mode="nearest")
         self._ct_registered = ndi.shift(ct, shift=shift, order=1, mode="nearest")
+        # Guardar shift total (registro + nudge) para modo CT nativa
+        self._ct_total_shift_zyx = (
+            self._ct_registration_shift_zyx[0] + shift[0],
+            self._ct_registration_shift_zyx[1] + shift[1],
+            self._ct_registration_shift_zyx[2] + shift[2],
+        )
         self._status.setText(
             f"Ajuste CT manual Δ(z,y,x)=({shift[0]:.1f},{shift[1]:.1f},{shift[2]:.1f}) px · "
             f"rot(z,y,x)=({rot[0]:.1f},{rot[1]:.1f},{rot[2]:.1f})°"
@@ -4471,6 +6171,9 @@ class AmyloidSpectPanel(QDialog):
             spin.blockSignals(False)
         if self._ct_auto_registered is not None:
             self._ct_registered = np.asarray(self._ct_auto_registered, dtype=np.float64)
+            # Resetear shift total al shift de registro solo
+            self._ct_total_shift_zyx = self._ct_registration_shift_zyx
+        self._invalidate_ct_grid_trial_cache()
         if update_view:
             self._render_current_with_overlay()
             self._persist_ui_state()

@@ -466,7 +466,25 @@ class MipRotatorWidget(QWidget):
         try:
             # Centro del VOI en coordenadas de volumen original
             cz, cy, cx = voi.cz, voi.cy, voi.cx
-            r_mm = voi.radius_mm
+            # VOIAnatomical no tiene radius_mm — calcular desde máscara o usar default
+            r_mm = getattr(voi, 'radius_mm', None)
+            if r_mm is None:
+                # Para VOIAnatomical: estimar radio equivalente desde el volumen de la máscara
+                try:
+                    mask_vol = getattr(voi, 'mask_3d_data', None)
+                    if mask_vol is not None and hasattr(mask_vol, 'sum'):
+                        n_voxels = int(mask_vol.sum())
+                        if n_voxels > 0:
+                            # Radio de esfera equivalente: V = (4/3)πr³ → r = (3V/4π)^(1/3)
+                            # Usar spacing REAL del volumen, no 6.8 fijo
+                            avg_spacing = float(np.mean(self._spacing_mm)) if self._spacing_mm else 6.8
+                            r_mm = (3.0 * n_voxels / (4.0 * np.pi)) ** (1.0 / 3.0) * avg_spacing
+                        else:
+                            r_mm = 20.0
+                    else:
+                        r_mm = 20.0
+                except Exception:
+                    r_mm = 20.0
 
             # Volumen: (z, y, x)
             nz, ny, nx = vol_shape
@@ -508,11 +526,22 @@ class MipRotatorWidget(QWidget):
             mm_per_px = max(1e-6, 0.5 * (spacing_z + spacing_x))
             r_px = int(max(2, np.round(float(r_mm) / mm_per_px)))
             
-            # Dibujar círculo (1px, sin etiqueta)
-            pen = QPen(color, 1, Qt.PenStyle.SolidLine)
+            # Dibujar círculo con etiqueta de identificación
+            pen = QPen(color, 2, Qt.PenStyle.SolidLine)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(QPointF(cx_px, cy_px), r_px, r_px)
+            
+            # Etiqueta de identificación (♥ para corazón, Med para mediastino)
+            if r_px > 8:
+                font = QFont("Arial", max(7, min(10, r_px // 3)))
+                painter.setFont(font)
+                # Sombra para legibilidad
+                shadow_color = QColor(0, 0, 0, 180)
+                painter.setPen(QPen(shadow_color, 1))
+                painter.drawText(int(cx_px) + r_px + 2, int(cy_px) + 2, label)
+                painter.setPen(QPen(color, 1))
+                painter.drawText(int(cx_px) + r_px + 1, int(cy_px) + 1, label)
             
         except Exception as e:
             print(f"Error dibujando VOI: {e}")

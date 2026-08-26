@@ -228,6 +228,7 @@ def _resample_ct_to_spect_affine(
     ct_affine: np.ndarray,
     spect_affine: np.ndarray,
     fill_value: float,
+    order: int = 0,
 ) -> np.ndarray:
     """Remuestrea CT en la grilla IJK del SPECT usando affines IJK→LPS."""
     ct_to_spect = np.linalg.inv(ct_affine) @ spect_affine
@@ -238,7 +239,7 @@ def _resample_ct_to_spect_affine(
         matrix=matrix,
         offset=offset,
         output_shape=tuple(int(v) for v in spect_shape),
-        order=0,
+        order=order,
         mode="constant",
         cval=float(fill_value),
     )
@@ -253,8 +254,14 @@ def resample_volume_to_spect_grid(
     source_affine_ijk_to_lps: np.ndarray | None = None,
     spect_affine_ijk_to_lps: np.ndarray | None = None,
     fill_value: float | None = None,
+    order: int = 0,
 ) -> tuple[np.ndarray, list[str]]:
-    """Remuestrea un volumen fuente a la grilla del SPECT sin corrimiento por máscara."""
+    """Remuestrea un volumen fuente a la grilla del SPECT sin corrimiento por máscara.
+    
+    Args:
+        order: Orden de interpolación. 0=nearest-neighbor (rápido, ideal para CT
+            downsampling), 1=bilineal (suave, ideal para SPECT upsampling).
+    """
     src = np.asarray(source_volume, dtype=np.float64)
     sp = np.asarray(spect_volume, dtype=np.float64)
     if src.ndim != 3 or sp.ndim != 3:
@@ -273,10 +280,11 @@ def resample_volume_to_spect_grid(
             np.asarray(source_affine_ijk_to_lps, dtype=np.float64),
             np.asarray(spect_affine_ijk_to_lps, dtype=np.float64),
             fill_value=fv,
+            order=order,
         )
         notes.append(
             "Remuestreo a grilla SPECT por geometría DICOM completa "
-            f"(IPP/IOP/spacing): {src.shape} -> {rs.shape}."
+            f"(IPP/IOP/spacing): {src.shape} -> {rs.shape} (order={order})."
         )
         return rs, notes
 
@@ -285,12 +293,12 @@ def resample_volume_to_spect_grid(
             max(1e-6, float(source_spacing_zyx[i])) / max(1e-6, float(spect_spacing_zyx[i]))
             for i in range(3)
         )
-        phys = ndi.zoom(src, zoom_factors, order=0)
+        phys = ndi.zoom(src, zoom_factors, order=order)
         rs = _center_crop_or_pad_3d(phys, sp.shape, fill_value=fv)
         notes.append(
             "Remuestreo a grilla SPECT por espaciado físico "
             f"shape {src.shape} -> físico {phys.shape} -> {rs.shape}; "
-            f"spacing src z/y/x={source_spacing_zyx}, SPECT z/y/x={spect_spacing_zyx}, zoom={zoom_factors}."
+            f"spacing src z/y/x={source_spacing_zyx}, SPECT z/y/x={spect_spacing_zyx}, zoom={zoom_factors} (order={order})."
         )
         return rs, notes
 
@@ -299,10 +307,10 @@ def resample_volume_to_spect_grid(
         sp.shape[1] / max(src.shape[1], 1),
         sp.shape[2] / max(src.shape[2], 1),
     )
-    rs = ndi.zoom(src, zoom_factors, order=0)
+    rs = ndi.zoom(src, zoom_factors, order=order)
     notes.append(
         "Remuestreo a grilla SPECT por shape "
-        f"{src.shape} -> {rs.shape} (zoom={zoom_factors}); sin spacing físico disponible."
+        f"{src.shape} -> {rs.shape} (zoom={zoom_factors}, order={order}); sin spacing físico disponible."
     )
     return rs, notes
 
@@ -1430,6 +1438,278 @@ class VOISphere:
         return (self.cz, self.cy, radius_px)
 
 
+# =============================================================================
+# VOI ANATÓMICA — Fase 2: ROI conformada a la anatomía del miocardio desde CT
+# =============================================================================
+
+@dataclass
+class VOIAnatomical:
+    """VOI definida por una máscara binaria 3D (ej: miocardio segmentado desde CT).
+    
+    Reemplaza la esfera genérica por una ROI que sigue exactamente la forma
+    anatómica del miocardio, eliminando spill-in de cavidad y tejido adyacente.
+    """
+    mask_3d_data: np.ndarray          # Máscara binaria bool/uint8 3D (nz, ny, nx)
+    centroid_zyx: tuple[float, float, float]  # Centroide para referencia visual
+    source: str = "ct_segmentation"   # Origen de la máscara
+    volume_mm3: float = 0.0           # Volumen físico en mm³ (si se conoce)
+    
+    def __post_init__(self):
+        arr = np.asarray(self.mask_3d_data)
+        # Asegurar que sea escalar 0/1 o bool, no un objeto raro
+        if arr.ndim > 0:
+            self.mask_3d_data = arr.astype(bool)
+        else:
+            self.mask_3d_data = np.atleast_1d(arr).astype(bool)
+    
+    def mask_3d(self, shape: tuple[int, int, int] | None = None,
+                spacing_zyx: tuple[float, float, float] | None = None) -> np.ndarray:
+        """Retorna la máscara 3D. Compatible interfaz VOISphere."""
+        # Forzar que mask_3d_data sea ndarray bool válido
+        if not isinstance(self.mask_3d_data, np.ndarray):
+            self.mask_3d_data = np.asarray(self.mask_3d_data, dtype=bool)
+        if self.mask_3d_data.ndim != 3:
+            # Si no es 3D, intentar reshape o retornar vacío con shape solicitado
+            if shape is not None:
+                return np.zeros(shape, dtype=bool)
+            return np.zeros((1,1,1), dtype=bool)
+        if shape is not None and tuple(self.mask_3d_data.shape) != tuple(shape):
+            # Resize si las dimensiones no coinciden (raro pero posible)
+            from scipy.ndimage import zoom
+            factors = [s / m for s, m in zip(shape, self.mask_3d_data.shape)]
+            return zoom(self.mask_3d_data.astype(np.float32), order=0) > 0.5
+        return self.mask_3d_data.copy()
+    
+    def mask_slice(self, z_idx: int, shape_2d: tuple[int, int] | None = None,
+                   spacing_yx: tuple[float, float] | None = None) -> np.ndarray:
+        """Extrae máscara 2D para un slice axial. Compatible interfaz VOISphere."""
+        z_idx = int(np.clip(z_idx, 0, self.mask_3d_data.shape[0] - 1))
+        return self.mask_3d_data[z_idx].copy()
+    
+    def volume_ml(self) -> float:
+        """Volumen en mL. Si se proporcionó volume_mm3, lo usa; sino cuenta voxels."""
+        if self.volume_mm3 > 0:
+            return self.volume_mm3 / 1000.0
+        # Fallback: contar voxels (sin spacing, aproximado)
+        return float(self.mask_3d_data.sum())  # voxel count
+    
+    @property
+    def cz(self) -> float:
+        return self.centroid_zyx[0]
+    
+    @property
+    def cy(self) -> float:
+        return self.centroid_zyx[1]
+    
+    @property
+    def cx(self) -> float:
+        return self.centroid_zyx[2]
+    
+    def _find_contour_2d(self, mask_2d: np.ndarray) -> np.ndarray | None:
+        """Extrae contorno mayor de una máscara 2D usando OpenCV.
+        
+        Args:
+            mask_2d: Máscara booleana/uint8 2D (ny, nx) o (nz, nx) o (nz, ny).
+            
+        Returns:
+            Array (N,2) de coordenadas (row, col), o None si está vacío.
+        """
+        try:
+            if not bool(np.any(mask_2d)):
+                return None
+            import cv2
+            m8 = mask_2d.astype(np.uint8)
+            contours, _ = cv2.findContours(m8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                return None
+            biggest = max(contours, key=cv2.contourArea)
+            pts = biggest.reshape(-1, 2)  # (N, 2) formato OpenCV (x=col, y=row)
+            return pts[:, ::-1].astype(np.float64)  # → (row, col)
+        except Exception:
+            return None
+
+    def get_contour_for_slice(self, z_idx: int) -> np.ndarray | None:
+        """Retorna contorno ORDENADO (N,2) para dibujar overlay en slice axial.
+        
+        Usa cv2.findContours para obtener los puntos en orden perimetral
+        (necesario para drawPolygon; argwhere daría orden de barrido → caos).
+        
+        Returns:
+            Array (N,2) de coordenadas (row, col) del contorno mayor, o None si vacío.
+        """
+        try:
+            slice_mask = self.mask_slice(z_idx)
+            return self._find_contour_2d(slice_mask)
+        except Exception:
+            return None
+
+    def get_contour_for_coronal(self, y_idx: int) -> np.ndarray | None:
+        """Retorna contorno (N,2) para un slice coronal (eje Y fijo).
+        
+        El slice coronal corta el volumen en Y, dando una imagen (Z, X).
+        Las coordenadas retornadas son (z, x) para mapeo a pantalla.
+        
+        Returns:
+            Array (N,2) de (z, x), o None si vacío.
+        """
+        try:
+            y_idx = int(np.clip(y_idx, 0, self.mask_3d_data.shape[1] - 1))
+            slice_mask = self.mask_3d_data[:, y_idx, :]  # (nz, nx)
+            return self._find_contour_2d(slice_mask)
+        except Exception:
+            return None
+
+    def get_contour_for_sagittal(self, x_idx: int) -> np.ndarray | None:
+        """Retorna contorno (N,2) para un slice sagital (eje X fijo).
+        
+        El slice sagital corta el volumen en X, dando una imagen (Z, Y).
+        Las coordenadas retornadas son (z, y) para mapeo a pantalla.
+        
+        Returns:
+            Array (N,2) de (z, y), o None si vacío.
+        """
+        try:
+            x_idx = int(np.clip(x_idx, 0, self.mask_3d_data.shape[2] - 1))
+            slice_mask = self.mask_3d_data[:, :, x_idx]  # (nz, ny)
+            return self._find_contour_2d(slice_mask)
+        except Exception:
+            return None
+
+
+def create_anatomical_heart_voi(
+    ct_segmentation: MyocardialSegmentationResult,
+    spect_shape: tuple[int, int, int],
+    spect_spacing: tuple[float, float, float],
+    ct_spacing: tuple[float, float, float],
+) -> VOIAnatomical:
+    """Crea una VOI anatómica del corazón a partir de la segmentación CT.
+    
+    La máscara CT (alta resolución) se resamplea al espacio SPECT para que
+    cada voxel SPECT tenga su correspondiente etiqueta anatómica.
+    
+    Args:
+        ct_segmenting: Resultado de segment_myocardium_from_ct()
+        spect_shape: Shape del volumen SPECT (nz, ny, nx)
+        spect_spacing: Spacing del SPECT (sz, sy, sx) en mm
+        ct_spacing: Spacing del CT (sz_ct, sy_ct, sx_ct) en mm
+        
+    Returns:
+        VOIAnatomical lista para usar en compute_hmr_spect()
+    """
+    from scipy.ndimage import zoom
+    
+    ct_mask = ct_segmentation.mask_3d  # (nz_ct, ny_ct, nx_ct)
+    
+    if ct_mask.shape == spect_shape:
+        # Misma resolución (caso raro)
+        resampled = ct_mask.astype(bool)
+    else:
+        # Resamplear CT → espacio SPECT
+        zoom_factors = [
+            spect_shape[i] / ct_mask.shape[i] for i in range(3)
+        ]
+        # Usar orden 0 (nearest neighbor) para mantener binario
+        resampled = zoom(ct_mask.astype(np.float32), zoom_factors, order=0) > 0.5
+    
+    # Asegurar shape correcto (clip/pad si hay diferencias de redondeo)
+    if resampled.shape != spect_shape:
+        target = np.zeros(spect_shape, dtype=bool)
+        slices_t = tuple(slice(0, min(resampled.shape[d], spect_shape[d])) for d in range(3))
+        target[slices_t] = resampled[slices_t]
+        resampled = target
+    
+    return VOIAnatomical(
+        mask_3d_data=resampled,
+        centroid_zyx=ct_segmentation.centroid_zyx,
+        source="ct_myocardium",
+        volume_mm3=ct_segmentation.volume_mm3,
+    )
+
+
+def create_bone_safe_mediastinum_voi(
+    ct_volume: np.ndarray,
+    ct_spacing: tuple[float, float, float],
+    mediastinum_center_zyx: tuple[float, float, float],
+    mediastinum_radius_mm: float,
+    spect_shape: tuple[int, int, int],
+    spect_spacing: tuple[float, float, float],
+    bone_hu_threshold: float = 400.0,
+) -> VOIAnatomical:
+    """Crea VOI de mediastino que evita hueso (costillas, esternón).
+    
+    El problema clásico: una VOI esférica de mediastino puede incluir parte
+    de una costilla, inflando artificialmente las cuentas y subestimando HMR.
+    
+    Esta función usa el CT para crear una máscara que excluye regiones óseas.
+    
+    Args:
+        ct_volume: Volumen CT en HU
+        ct_spacing: Spacing CT (sz, sy, sx)
+        mediastinum_center_zyx: Centro deseado del VOI mediastino
+        mediastinum_radius_mm: Radio de la esfera base
+        spect_shape: Shape del volumen SPECT destino
+        spect_spacing: Spacing del SPECT
+        bone_hu_threshold: Umbral HU para detectar hueso
+        
+    Returns:
+        VOIAnatomical con máscara libre de hueso
+    """
+    from scipy.ndimage import zoom, binary_dilation, binary_erosion
+    
+    ct_vol = np.asarray(ct_volume, dtype=np.float64)
+    nz_ct, ny_ct, nx_ct = ct_vol.shape
+    sz_ct, sy_ct, sx_ct = ct_spacing
+    
+    # Crear esfera base en espacio CT
+    zz, yy, xx = np.meshgrid(
+        np.arange(nz_ct) * sz_ct,
+        np.arange(ny_ct) * sy_ct,
+        np.arange(nx_ct) * sx_ct,
+        indexing='ij'
+    )
+    cz, cy, cx = mediastinum_center_zyx
+    dist = np.sqrt((zz - cz * sz_ct)**2 + (yy - cy * sy_ct)**2 + (xx - cx * sx_ct)**2)
+    sphere_ct = dist <= mediastinum_radius_mm
+    
+    # Máscara de hueso (HU > threshold)
+    bone_mask = ct_vol > bone_hu_threshold
+    
+    # Dilatar hueso ligeramente para crear margen de seguridad (2-3mm)
+    bone_margin_mm = 3.0
+    bone_dilated = bone_mask
+    for d in range(3):
+        iterations = max(1, int(round(bone_margin_mm / ct_spacing[d])))
+        if iterations > 0:
+            bone_dilated = binary_dilation(bone_dilated, iterations=iterations)
+    
+    # VOI final = esfera AND NOT hueso
+    mediastinum_ct = sphere_ct & ~bone_dilated
+    
+    # Si quedó muy pequeño o vacío, volver a la esfera sin restricción
+    if float(mediastinum_ct.sum()) < float(sphere_ct.sum()) * 0.3:
+        mediastinum_ct = sphere_ct.copy()
+    
+    # Resamplear CT → espacio SPECT
+    if mediastinum_ct.shape != spect_shape:
+        zoom_factors = [spect_shape[i] / mediastinum_ct.shape[i] for i in range(3)]
+        resampled = zoom(mediastinum_ct.astype(np.float32), zoom_factors, order=0) > 0.5
+    else:
+        resampled = mediastinum_ct.astype(bool)
+    
+    # Clip/pad si necesario
+    if resampled.shape != spect_shape:
+        target = np.zeros(spect_shape, dtype=bool)
+        slices_t = tuple(slice(0, min(resampled.shape[d], spect_shape[d])) for d in range(3))
+        target[slices_t] = resampled[slices_t]
+        resampled = target
+    
+    return VOIAnatomical(
+        mask_3d_data=resampled,
+        centroid_zyx=mediastinum_center_zyx,
+        source="ct_bonesafe_mediastinum",
+    )
+
+
 @dataclass
 class HmrSpectResult:
     """Resultado del cálculo HMR en SPECT 3D."""
@@ -1476,8 +1756,8 @@ class HmrSpectMethod(enum.Enum):
 def compute_hmr_spect(
     volume: np.ndarray,
     spacing_zyx: tuple[float, float, float],
-    voi_heart: VOISphere,
-    voi_mediastinum: VOISphere,
+    voi_heart: VOISphere | VOIAnatomical,
+    voi_mediastinum: VOISphere | VOIAnatomical,
     method: HmrSpectMethod = HmrSpectMethod.VOI_COMPLETE,
     slice_idx: int | None = None,
     volume_raw: np.ndarray | None = None,
@@ -1571,6 +1851,544 @@ def compute_hmr_spect(
         voi_mediastinum=voi_mediastinum,
         method=method.value,
         slice_idx=used_slice,
+    )
+
+
+# =============================================================================
+# CORRECCIÓN DE EFECTO DE VOLUMEN PARCIAL (PVE) — Fase 1
+# =============================================================================
+# El PVE subestima la actividad en estructuras pequeñas (pared miocárdica ~10-14 mm)
+# cuando la resolución SPECT (FWHM ~10-15 mm) es comparable al tamaño del objeto.
+# El CT de alta resolución permite: segmentar el miocardio, medir grosor por segmento,
+# y aplicar coeficientes de recuperación (RC) para corregir el HMR.
+# =============================================================================
+
+@dataclass
+class MyocardialSegmentationResult:
+    """Resultado de la segmentación miocárdica desde CT."""
+    
+    mask_3d: np.ndarray                    # Máscara binaria 3D del miocardio
+    mask_axial_slices: list[np.ndarray]   # Lista de máscaras 2D por slice axial
+    centroid_zyx: tuple[float, float, float]  # Centroide de la máscara
+    volume_mm3: float                      # Volumen segmentado en mm³
+    n_slices: int                          # Número de slices axiales con tejido
+    wall_thickness_mm: dict[str, float]    # Grosor por segmento AHA simplificado
+    mean_wall_thickness_mm: float          # Grosor promedio ponderado
+    notes: list[str]                       # Notas del proceso
+
+
+def segment_myocardium_from_ct(
+    ct_volume: np.ndarray,
+    spacing_zyx: tuple[float, float, float],
+    *,
+    seed_zyx: tuple[float, float, float] | None = None,
+    seed_radius_mm: float = 50.0,
+    hu_min: float = -100.0,
+    hu_max: float = 300.0,
+    min_volume_mm3: float = 5000.0,
+    max_volume_mm3: float = 500000.0,
+    dilation_mm: float = 3.0,
+    erosion_mm: float = 2.0,
+) -> MyocardialSegmentationResult:
+    """Segmenta el miocardio del ventrículo izquierdo desde un volumen CT.
+
+    Estrategia:
+    1. Si hay semilla (seed_zyx), recortar el volumen a una caja 3D alrededor
+       de la semilla antes de cualquier procesamiento.  Esto evita que la
+       componente conexa mayor sea toda la caja torácica.
+    2. Umbralizado HU para incluir miocardio, sangre pool y paredes.
+    3. Operaciones morfológicas (dilatación + erosión) para limpiar.
+    4. Componente conexa 3D más grande dentro de la caja (asume que el VI es
+       la estructura mayor en esa región restringida).
+    5. Refinamiento con umbral más ajustado dentro de la máscara.
+
+    Args:
+        ct_volume: Volumen CT en HU (nz, ny, nx)
+        spacing_zyx: Espaciado físico (sz, sy, sx) en mm
+        seed_zyx: Semilla (z, y, x) en coordenadas de voxel del volumen CT.
+            Típicamente el ancla A que el usuario coloca sobre el corazón.
+            Si es None, segmenta todo el volumen (comportamiento legacy).
+        seed_radius_mm: Radio de la caja 3D alrededor de la semilla (mm).
+        hu_min/max: Rango HU inicial para tejido blando cardíaco
+        min/max_volume_mm3: Filtros de volumen plausible para VI
+        dilation_mm: Dilatación morfológica previa (cierra huecos)
+        erosion_mm: Erosión morfológica posterior (separa de otras estructuras)
+
+    Returns:
+        MyocardialSegmentationResult con máscara y métricas
+    """
+    ct = np.asarray(ct_volume, dtype=np.float64)
+    sz, sy, sx = spacing_zyx
+    notes: list[str] = []
+
+    # Paso 0: Restringir a una caja 3D alrededor de la semilla si está dada.
+    # Esto evita que la componente conexa mayor sea todo el tórax/hígado.
+    bbox = None  # (z0, z1, y0, y1, x0, x1) en coords del volumen completo
+    if seed_zyx is not None:
+        sz_vox = max(1, int(round(seed_radius_mm / sz)))
+        sy_vox = max(1, int(round(seed_radius_mm / sy)))
+        sx_vox = max(1, int(round(seed_radius_mm / sx)))
+        cz, cy, cx = float(seed_zyx[0]), float(seed_zyx[1]), float(seed_zyx[2])
+        z0 = max(0, int(cz) - sz_vox)
+        z1 = min(ct.shape[0], int(cz) + sz_vox + 1)
+        y0 = max(0, int(cy) - sy_vox)
+        y1 = min(ct.shape[1], int(cy) + sy_vox + 1)
+        x0 = max(0, int(cx) - sx_vox)
+        x1 = min(ct.shape[2], int(cx) + sx_vox + 1)
+        bbox = (z0, z1, y0, y1, x0, x1)
+        ct_crop = ct[z0:z1, y0:y1, x0:x1]
+        notes.append(
+            f"Semilla ({cz:.1f},{cy:.1f},{cx:.1f}) → caja "
+            f"[{z0}:{z1},{y0}:{y1},{x0}:{x1}] "
+            f"({z1-z0}x{y1-y0}x{x1-x0} voxels, r={seed_radius_mm:.0f}mm)"
+        )
+    else:
+        ct_crop = ct
+        notes.append("Sin semilla: segmentación global (legacy)")
+
+    # Paso 1: Umbralizado inicial — tejido blando cardíaco (sobre la caja)
+    soft_mask = (ct_crop >= hu_min) & (ct_crop <= hu_max)
+    notes.append(f"Umbral HU inicial: [{hu_min}, {hu_max}] → {soft_mask.sum()} voxels")
+    
+    if not np.any(soft_mask):
+        notes.append("WARNING: Umbral inicial vacío. Expandiendo rango a [-200, 500].")
+        soft_mask = (ct_crop >= -200.0) & (ct_crop <= 500.0)
+    
+    # Paso 2: Morfología — cerrar pequeños huecos, separar estructuras adyacentes
+    dil_iter = max(1, int(round(dilation_mm / min(sy, sx))))
+    ero_iter = max(1, int(round(erosion_mm / min(sy, sx))))
+    
+    from scipy.ndimage import binary_dilation, binary_erosion, binary_closing, label
+    
+    struct = ndi.generate_binary_structure(3, 1)  # Conectividad 6 (cruz 3D)
+    
+    closed = binary_closing(soft_mask, structure=struct, iterations=dil_iter)
+    dilated = binary_dilation(closed, structure=struct, iterations=dil_iter)
+    eroded = binary_erosion(dilated, structure=struct, iterations=ero_iter)
+    notes.append(f"Morfología: close({dil_iter})→dilate({dil_iter})→erode({ero_iter})")
+    
+    # Paso 3: Componente conexa 3D más grande dentro de la caja
+    labeled, n_features = label(eroded)
+    if n_features == 0:
+        notes.append("ERROR: Sin componentes conexos. Retornando máscara vacía.")
+        return MyocardialSegmentationResult(
+            mask_3d=np.zeros(ct.shape, dtype=bool),
+            mask_axial_slices=[],
+            centroid_zyx=(0.0, 0.0, 0.0),
+            volume_mm3=0.0,
+            n_slices=0,
+            wall_thickness_mm={},
+            mean_wall_thickness_mm=0.0,
+            notes=notes,
+        )
+    
+    # Encontrar componente mayor dentro de la caja
+    component_sizes = np.bincount(labeled.ravel())[1:]  # Ignorar fondo (0)
+    largest_label = int(np.argmax(component_sizes)) + 1
+    major_component_crop = labeled == largest_label
+    notes.append(f"Componentes 3D: {n_features}. Seleccionado el mayor (label={largest_label}, {component_sizes[largest_label-1]} voxels)")
+    
+    # Paso 4: Refinar dentro del componente mayor — umbral más estricto para miocardio
+    refined_crop = major_component_crop.copy()
+    
+    # ── MEJORA v2.6: Detección adaptativa de HU del miocardio ─────
+    # En lugar de HU fijos, analizar el histograma DENTRO del componente mayor
+    # para encontrar el pico de tejido miocárdico real.
+    ct_inside = ct_crop[major_component_crop]
+    if ct_inside.size > 200:
+        # Histograma de HU dentro de la región candidata
+        hist_bins = np.linspace(-200, 400, 121)  # 5 HU por bin
+        hist_counts, bin_edges = np.histogram(ct_inside, bins=hist_bins)
+        # Encontrar el pico principal (excluyendo aire < -150 y hueso > 300)
+        valid_range = (bin_edges[:-1] >= -150) & (bin_edges[:-1] <= 300)
+        valid_counts = hist_counts.copy()
+        valid_counts[~valid_range] = 0
+        if valid_counts.max() > 0:
+            peak_bin = np.argmax(valid_counts)
+            peak_hu = (bin_edges[peak_bin] + bin_edges[peak_bin + 1]) / 2
+            
+            # Rango HU adaptativo alrededor del pico
+            # Miocardio típico: 40-150 HU (con contraste), 10-80 HU (sin contraste)
+            adaptive_min = max(-50, peak_hu - 60)
+            adaptive_min = min(adaptive_min, 20)  # no bajar de -50 ni subir de 20
+            adaptive_max = min(350, peak_hu + 120)
+            adaptive_max = max(adaptive_max, 150)  # no bajar de 150
+            
+            myocardium_hu_min, myocardium_hu_max = adaptive_min, adaptive_max
+            notes.append(f"HU adaptativo: pico={peak_hu:.0f}HU → rango [{adaptive_min:.0f}, {adaptive_max:.0f}]")
+        else:
+            myocardium_hu_min, myocardium_hu_max = 0.0, 250.0
+            notes.append("HU adaptativo falló, usando default [0, 250]")
+    else:
+        myocardium_hu_min, myocardium_hu_max = 0.0, 250.0
+        notes.append("Pocos voxels para HU adaptativo, usando default [0, 250]")
+    
+    inner_mask = (ct_crop >= myocardium_hu_min) & (ct_crop <= myocardium_hu_max) & major_component_crop
+    
+    if inner_mask.sum() > 100:  # Si hay suficientes voxels refinados
+        refined_crop = inner_mask
+        notes.append(f"Refinamiento HU interno: [{myocardium_hu_min}, {myocardium_hu_max}]")
+    else:
+        notes.append("Refinamiento interno insuficiente (>100 voxels). Usando componente mayor.")
+    
+    # ── MEJORA v2.6: Shaping anatómico — reducir forma cúbica ─────
+    # El componente conexa mayor tiende a ser bloques/cubos porque la caja
+    # de recorte es rectangular. Aplicamos un post-procesado que favorece
+    # formas más redondeadas/anatómicas (elipsoides).
+    try:
+        from scipy.ndimage import distance_transform_edt, binary_fill_holes
+        
+        # 4a. Rellenar huecos internos (la cavidad VI no debe estar llena,
+        # pero pequeños huecos por umbralización sí deben cerrarse)
+        filled = binary_fill_holes(refined_crop)
+        
+        # 4b. Distance transform → crear máscara de "núcleo" que sigue
+        # la forma real mejor que la componente conexa cruda
+        dt = distance_transform_edt(filled)
+        
+        # Umbral del DT al 30% del máximo interno (elimina protrusiones finas)
+        dt_threshold = float(dt.max()) * 0.30 if dt.max() > 0 else 1.0
+        core_mask = dt >= dt_threshold
+        
+        # 4c. Suavizar con operador morfológico esférico (no cúbico)
+        # Usamos una estructura esférica generada con distancia euclidiana
+        radius_vox = max(2, int(round(3.0 / min(sy, sx))))  # ~3mm esfera
+        yy, xx = np.mgrid[-radius_vox:radius_vox+1, -radius_vox:radius_vox+1]
+        zz = np.mgrid[-radius_vox:radius_vox+1]
+        sphere_struct = (xx**2 + yy**2 + zz**2) <= radius_vox**2
+        
+        from scipy.ndimage import binary_closing as sph_closing, binary_opening as sph_opening
+        shaped = sph_closing(core_mask, structure=sphere_struct, iterations=2)
+        shaped = sph_opening(shaped, structure=sphere_struct, iterations=1)
+        
+        # 4d. Intersectar con la máscara original refinada (no expandir fuera)
+        shaped = shaped & refined_crop
+        
+        # Solo usar si la nueva forma tiene volumen razonable (>50% del original)
+        new_vol = shaped.sum()
+        old_vol = refined_crop.sum()
+        if new_vol > old_vol * 0.4 and new_vol < old_vol * 2.0:
+            refined_crop = shaped
+            notes.append(
+                f"Shaping anatómico: {old_vol}→{new_vol} voxels "
+                f"({100*new_vol/old_vol:.0f}%) — forma suavizada"
+            )
+        else:
+            notes.append(
+                f"Shaping omitido: volumen extremo ({100*new_vol/old_vol:.0f}%). "
+                "Usando forma cruda."
+            )
+    except Exception as shaping_exc:
+        notes.append(f"Shaping anatómico falló: {shaping_exc}. Usando forma cruda.")
+    else:
+        notes.append("Refinamiento interno insuficiente (>100 voxels). Usando componente mayor.")
+    
+    # Mapear la máscara recortada de vuelta al volumen completo
+    refined = np.zeros(ct.shape, dtype=bool)
+    if bbox is not None:
+        z0, z1, y0, y1, x0, x1 = bbox
+        refined[z0:z1, y0:y1, x0:x1] = refined_crop
+    else:
+        refined = refined_crop
+    
+    # Calcular volumen
+    voxel_volume_mm3 = sz * sy * sx
+    volume_mm3 = float(refined.sum()) * voxel_volume_mm3
+    
+    if volume_mm3 < min_volume_mm3 or volume_mm3 > max_volume_mm3:
+        notes.append(
+            f"WARNING: Volumen {volume_mm3:.0f} mm³ fuera de rango esperado "
+            f"[{min_volume_mm3:.0f}, {max_volume_mm3:.0f}]. "
+            f"La segmentación puede ser incorrecta."
+        )
+    
+    # Centroide
+    coords = np.argwhere(refined)
+    if coords.size > 0:
+        centroid = coords.mean(axis=0).astype(float)
+        centroid_zyx = (float(centroid[0]), float(centroid[1]), float(centroid[2]))
+    else:
+        centroid_zyx = (ct.shape[0] / 2.0, ct.shape[1] / 2.0, ct.shape[2] / 2.0)
+    
+    # Extraer máscaras 2D por slice axial (para visualización y grosor)
+    mask_slices = []
+    slices_with_tissue = 0
+    for z in range(ct.shape[0]):
+        slc = refined[z]
+        mask_slices.append(slc)
+        if slc.sum() > 0:
+            slices_with_tissue += 1
+    
+    # Medición de grosor parietal (aproximada por distancia al centroide en cada slice)
+    wall_thickness = _measure_wall_thickness_per_segment(refined, centroid_zyx, spacing_zyx)
+    mean_thickness = float(np.mean(list(wall_thickness.values()))) if wall_thickness else 0.0
+    
+    notes.append(f"Volumen segmentado: {volume_mm3:.0f} mm³ ({volume_mm3/1000:.1f} mL)")
+    notes.append(f"Slices axiales con tejido: {slices_with_tissue}/{ct.shape[0]}")
+    notes.append(f"Grosor medio pared: {mean_thickness:.1f} mm")
+    
+    return MyocardialSegmentationResult(
+        mask_3d=refined,
+        mask_axial_slices=mask_slices,
+        centroid_zyx=centroid_zyx,
+        volume_mm3=volume_mm3,
+        n_slices=slices_with_tissue,
+        wall_thickness_mm=wall_thickness,
+        mean_wall_thickness_mm=mean_thickness,
+        notes=notes,
+    )
+
+
+def _measure_wall_thickness_per_segment(
+    mask_3d: np.ndarray,
+    centroid_zyx: tuple[float, float, float],
+    spacing_zyx: tuple[float, float, float],
+) -> dict[str, float]:
+    """Mide el grosor de la pared miocárdica en 6 segmentos (AHA simplificado).
+    
+    Para cada slice axial con tejido, proyecta rayos desde el centroide en
+    6 direcciones (septal, anterior, lateral, inferior, anteroseptal, inferolateral)
+    y mide la distancia al borde de la máscara.
+    """
+    from scipy.ndimage import distance_transform_edt
+    
+    sz, sy, sx = spacing_zyx
+    cz, cy, cx = centroid_zyx
+    
+    # Direcciones angulares (grados) para 6 segmentos en short-axis
+    segments = {
+        "anterior":      0,    # arriba (posterior en convención radiológica)
+        "anteroseptal":  60,
+        "inferior":     120,  # abajo (anterior)
+        "inferolateral": 180,
+        "lateral":      240,
+        "septal":       300,
+    }
+    
+    thicknesses: dict[str, float] = {}
+    distances = distance_transform_edt(mask_3d, sampling=spacing_zyx)
+    
+    cz_idx, cy_idx, cx_idx = int(round(cz)), int(round(cy)), int(round(cx))
+    
+    # Verificar que el centroide caiga dentro de la máscara (o cerca)
+    if not (0 <= cz_idx < mask_3d.shape[0] and 0 <= cy_idx < mask_3d.shape[1] and 0 <= cx_idx < mask_3d.shape[2]):
+        # Centroide fuera → usar centro geométrico de la máscara
+        coords = np.argwhere(mask_3d)
+        if coords.size > 0:
+            cz_idx, cy_idx, cx_idx = tuple(int(v) for v in coords.mean(axis=0).round().astype(int))
+    
+    # Para cada dirección, medir distancia al borde en el plano axial del centroide
+    rad = np.pi / 180.0
+    for seg_name, angle_deg in segments.items():
+        angle_rad = angle_deg * rad
+        
+        # Muestrear varios puntos a lo largo del radio en esa dirección
+        dists = []
+        for r_px in range(5, 80):  # hasta ~80 px (~80-160 mm dependiendo de spacing)
+            dy = int(round(r_px * np.sin(angle_rad)))
+            dx = int(round(r_px * np.cos(angle_rad)))
+            yy, xx = cy_idx + dy, cx_idx + dx
+            
+            if 0 <= yy < mask_3d.shape[1] and 0 <= xx < mask_3d.shape[2]:
+                if mask_3d[cz_idx, yy, xx]:
+                    # Dentro de la máscara — guardar distancia EDT en mm
+                    d_mm = float(distances[cz_idx, yy, xx])
+                    dists.append(d_mm)
+                else:
+                    # Fuera de la máscora — si ya tenemos mediciones, parar
+                    if len(dists) > 2:
+                        break
+        
+        if dists:
+            # Grosor ≈ 2 × distancia media al borde (desde centro hacia afuera)
+            thicknesses[seg_name] = 2.0 * float(np.median(dists))
+        else:
+            thicknesses[seg_name] = 12.0  # fallback grosor típico
+    
+    return thicknesses
+
+
+@dataclass
+class PVERecoveryCoefficients:
+    """Coeficientes de Recuperación (RC) para corrección PVE."""
+    
+    rc_heart: float           # RC global para VOI corazón
+    rc_per_segment: dict[str, float]  # RC por segmento AHA
+    fwhm_mm: float            # FWHM del sistema usado
+    mean_wall_thickness_mm: float
+    method: str = "analytical_gaussian"
+    
+    @property
+    def pve_correction_factor(self) -> float:
+        """Factor por el cual multiplicar cuentas para corregir PVE.
+        
+        C_corregido = C_medido / RC  →  factor = 1/RC
+        Si RC=0.7 (30% de pérdida), factor≈1.43 (+43% de corrección)
+        """
+        return 1.0 / max(self.rc_heart, 0.1)
+
+
+def compute_pve_recovery_coefficients(
+    wall_thickness_mm: float | dict[str, float],
+    fwhm_mm: float = 12.0,
+    *,
+    method: str = "analytical_gaussian",
+) -> PVERecoveryCoefficients:
+    """Calcula Coeficientes de Recuperación (RC) para corrección PVE.
+    
+    Modelo analítico basado en la aproximación gaussiana de la PSF:
+    
+    RC(d) = 1 - exp(-d² / (4 × σ²))   [modelo simplificado Hoffman 1979]
+    
+    donde d = grosor del objeto y σ = FWHM / (2√(2ln2))
+    
+    Para objetos grandes (d >> FWHM), RC → 1.0 (sin pérdida).
+    Para objetos pequeños (d << FWHM), RC → 0 (pérdida total).
+    
+    Args:
+        wall_thickness_mm: Grosor parietal (float global o dict por segmento)
+        fwhm_mm: Resolución espacial FWHM del sistema SPECT (típico 10-15 mm)
+        method: Modelo de RC ('analytical_gaussian' o 'empirical_lookup')
+        
+    Returns:
+        PVERecocoveryCoefficients con RC global y por segmento
+    """
+    sigma_mm = fwhm_mm / (2.0 * np.sqrt(2.0 * np.log(2.0)))  # ≈ FWHM / 2.355
+    
+    def _rc_for_thickness(d_mm: float) -> float:
+        """RC para un grosor dado usando modelo gaussiano."""
+        if d_mm <= 0:
+            return 0.1  # mínimo para evitar división por cero
+        if method == "analytical_gaussian":
+            # Modelo de Hoffman modificado: RC ≈ erf(d / (2√2 × σ))
+            import math
+            arg = d_mm / (2.0 * np.sqrt(2.0) * sigma_mm)
+            if arg > 5.0:
+                return 1.0  # saturación
+            return float(np.clip(float(math.erf(arg)), 0.15, 1.0))
+        else:
+            # Lookup empírico (placeholder)
+            return float(np.clip(d_mm / (d_mm + sigma_mm), 0.2, 1.0))
+    
+    if isinstance(wall_thickness_mm, dict):
+        rc_per_seg = {seg: _rc_for_thickness(d) for seg, d in wall_thickness_mm.items()}
+        rc_global = float(np.mean(list(rc_per_seg.values())))
+        mean_thick = float(np.mean(list(wall_thickness_mm.values())))
+    else:
+        rc_global = _rc_for_thickness(wall_thickness_mm)
+        rc_per_seg = {"global": rc_global}
+        mean_thick = wall_thickness_mm
+    
+    return PVERecoveryCoefficients(
+        rc_heart=rc_global,
+        rc_per_segment=rc_per_seg,
+        fwhm_mm=fwhm_mm,
+        mean_wall_thickness_mm=mean_thick,
+        method=method,
+    )
+
+
+@dataclass
+class HMRSpectPVECorrected:
+    """Resultado HMR-SPECT con corrección PVE aplicada."""
+    
+    hmr_original: float         # HMR sin corrección (el que se venía calculando)
+    hmr_pve_corrected: float    # HMR corregido por PVE
+    pve_factor: float           # Factor de corrección aplicado (1/RC)
+    rc_heart: float             # Coeficiente de recuperación usado
+    wall_thickness_mm: float    # Grosor parietal promedio
+    fwhm_mm: float              # FWHM asumido
+    classification_original: str
+    classification_corrected: str
+    delta_pct: float            # Cambio porcentual ((HMR_corr/HMR_orig)-1)×100
+    notes: list[str]
+
+
+def apply_pve_correction_to_hmr(
+    hmr_result: HmrSpectResult,
+    ct_segmentation: MyocardialSegmentationResult | None = None,
+    *,
+    fwhm_mm: float = 12.0,
+    force_wall_thickness_mm: float | None = None,
+) -> HMRSpectPVECorrected:
+    """Aplica corrección PVE a un resultado HMR-SPECT existente.
+    
+    La corrección se aplica solo al numerador (cuentas del corazón),
+    asumiendo que el ROI contralateral (mediastino/tórax derecho) es
+    suficientemente grande como para tener RC ≈ 1.0.
+    
+    Fórmula:
+        HMR_corr = (C_heart / RC_heart) / C_contralateral
+                = HMR_original × (1 / RC_heart)
+                = HMR_original × PVE_factor
+    
+    Args:
+        hmr_result: Resultado HMR original de compute_hmr_spect()
+        ct_segmentation: Segmentación miocárdica desde CT (opcional pero recomendado)
+        fwhm_mm: FWHM del sistema si no hay segmentación CT
+        force_wall_thickness_mm: Forzar grosor (sin CT)
+        
+    Returns:
+        HMRSpectPVECorrected con HMR original y corregido
+    """
+    notes: list[str] = []
+    
+    # Determinar grosor parietal
+    if ct_segmentation is not None and ct_segmentation.mean_wall_thickness_mm > 0:
+        wall_mm = ct_segmentation.mean_wall_thickness_mm
+        wall_source = "CT segmentation"
+        seg_notes = ct_segmentation.notes[:3]  # Primeras 3 notas
+        notes.extend(seg_notes)
+    elif force_wall_thickness_mm is not None:
+        wall_mm = force_wall_thickness_mm
+        wall_source = "user-specified"
+    else:
+        wall_mm = 12.0  # grosor típico pared VI normal
+        wall_source = "assumed typical"
+        notes.append(f"WARNING: Sin segmentación CT ni grosor forzado. Asumiendo grosor típico {wall_mm} mm.")
+    
+    # Calcular RC
+    rc_result = compute_pve_recovery_coefficients(wall_mm, fwhm_mm=fwhm_mm)
+    rc = rc_result.rc_heart
+    pve_factor = rc_result.pve_correction_factor
+    
+    # Aplicar corrección
+    hmr_orig = hmr_result.hmr_raw if hmr_result.hmr_raw is not None else hmr_result.hmr
+    hmr_corr = hmr_orig * pve_factor
+    
+    # Clasificaciones
+    class_orig = hmr_result.classification
+    if hmr_corr >= 1.6:
+        class_corr = "POSITIVO"
+    elif hmr_corr >= 1.5:
+        class_corr = "EQUIVOCO"
+    else:
+        class_corr = "NEGATIVO"
+    
+    delta_pct = ((hmr_corr / max(hmr_orig, 1e-8)) - 1.0) * 100.0
+    
+    notes.append(f"PVE: FWHM={fwhm_mm}mm, grosor={wall_mm:.1f}mm ({wall_source}), RC={rc:.3f}")
+    notes.append(f"PVE: factor corrección={pve_factor:.3f}, ΔHMR={delta_pct:+.1f}%")
+    notes.append(f"HMR original={hmr_orig:.2f} ({class_orig}) → corregido={hmr_corr:.2f} ({class_corr})")
+    
+    # Alerta si la corrección cambia la clasificación
+    if class_orig != class_corr:
+        notes.append(
+            f"⚠️ LA CORRECCIÓN PVE CAMBIÓ LA CLASIFICACIÓN: {class_orig} → {class_corr}. "
+            "Revisar calidad de la segmentación CT."
+        )
+    
+    return HMRSpectPVECorrected(
+        hmr_original=hmr_orig,
+        hmr_pve_corrected=hmr_corr,
+        pve_factor=pve_factor,
+        rc_heart=rc,
+        wall_thickness_mm=wall_mm,
+        fwhm_mm=fwhm_mm,
+        classification_original=class_orig,
+        classification_corrected=class_corr,
+        delta_pct=delta_pct,
+        notes=notes,
     )
 
 
