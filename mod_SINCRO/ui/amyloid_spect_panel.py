@@ -2016,7 +2016,9 @@ class AmyloidSpectPanel(QDialog):
         # --- FILA 2: Orientación + Zoom + Ajuste (petitos) ---
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(4)
+        bottom_row.addStretch(1)              # Empuja los 3 grupos a la derecha
         bottom_row.addWidget(flip_group, 3)     # Orientación: 3/10
+        bottom_row.addWidget(zoom_group, 3)     # Zoom: 3/10
 
         # --- Ajuste CT (nudge/rot/resets) ---
         ajuste_group = QGroupBox("Ajuste")
