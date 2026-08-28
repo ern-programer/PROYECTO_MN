@@ -4914,6 +4914,45 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             )
             ct_native_spacing = target_spacing
             
+            # SPECT → misma grilla objetivo (2x upsampling, suave). Se calcula
+            # primero para poder resolver la orientación de la CT contra él.
+            spect_on_ct, notes = resample_volume_to_spect_grid(
+                spect_tx,
+                np.zeros(target_shape),
+                source_spacing_zyx=spect_sp,
+                spect_spacing_zyx=target_spacing,
+                source_affine_ijk_to_lps=self._spect_affine_ijk_to_lps,
+                spect_affine_ijk_to_lps=spect_affine_2x,
+                fill_value=float(np.min(spect_tx)) if spect_tx.size else 0.0,
+                order=1,  # bilineal: SPECT se ve suave al hacer upsampling
+            )
+
+            # Misma estandarización de orientación que el registro (v1.66.5):
+            # el camino affine de estos equipos puede dejar ejes permutados.
+            from core.amyloid_spect import _auto_flip_ct_to_spect
+            ct_native, flip_note, flip_score = _auto_flip_ct_to_spect(ct_native, spect_on_ct)
+            if hasattr(self, '_metrics'):
+                self._metrics.append(f"[CT-NATIVE] {flip_note}")
+            if flip_score < 0.30:
+                cand, _ = resample_volume_to_spect_grid(
+                    ct_tx,
+                    np.zeros(target_shape),
+                    source_spacing_zyx=ct_sp,
+                    spect_spacing_zyx=target_spacing,
+                    source_affine_ijk_to_lps=None,
+                    spect_affine_ijk_to_lps=None,
+                    fill_value=-1024.0,
+                    order=1,
+                )
+                cand, cand_note, cand_score = _auto_flip_ct_to_spect(cand, spect_on_ct)
+                if cand_score > flip_score:
+                    ct_native = cand
+                    if hasattr(self, '_metrics'):
+                        self._metrics.append(
+                            f"[CT-NATIVE] Acuerdo affine pobre (NCC={flip_score:.3f}): "
+                            f"candidato físico adoptado (NCC={cand_score:.3f}). {cand_note}"
+                        )
+
             # === Aplicar rotaciones del nudge (igual que _apply_ct_nudge) ===
             # Las rotaciones están en grados y se aplican sobre la grilla 2x.
             rot_z = float(self._rot_z.value()) if hasattr(self, '_rot_z') else 0.0
@@ -4948,17 +4987,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                         f"Δ(z,y,x)=({shift_target[0]:.1f},{shift_target[1]:.1f},{shift_target[2]:.1f}) px (grid 2x)"
                     )
             
-            # SPECT → misma grilla objetivo (2x upsampling, suave)
-            spect_on_ct, notes = resample_volume_to_spect_grid(
-                spect_tx,
-                ct_native,
-                source_spacing_zyx=spect_sp,
-                spect_spacing_zyx=target_spacing,
-                source_affine_ijk_to_lps=self._spect_affine_ijk_to_lps,
-                spect_affine_ijk_to_lps=spect_affine_2x,
-                fill_value=float(np.min(spect_tx)) if spect_tx.size else 0.0,
-                order=1,  # bilineal: SPECT se ve suave al hacer upsampling
-            )
+            # SPECT ya remuestreado arriba (antes de resolver orientación CT).
             # Diagnóstico de registro
             if hasattr(self, '_metrics'):
                 for n in notes:
