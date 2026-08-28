@@ -4877,7 +4877,10 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
 
         try:
             spect_tx = self._spect_transform_3d(np.asarray(self._current_volume, dtype=np.float64))
-            ct_tx = self._ct_transform_3d(np.asarray(self._ct_volume, dtype=np.float64))
+            # CT sin flips de usuario: la orientación base la resuelve el auto-flip
+            # y los checkboxes CT se aplican DESPUÉS (si se aplicaran antes, el
+            # auto-flip los desharía y parecerían muertos).
+            ct_tx = np.asarray(self._ct_volume, dtype=np.float64)
             
             # === Estrategia: CT nativo recortado al FOV del SPECT ===
             # En vez de expandir el SPECT al FOV completo del CT (que deja el corazón
@@ -4914,18 +4917,16 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             )
             ct_native_spacing = target_spacing
             
-            # SPECT → misma grilla objetivo (2x upsampling, suave). Se calcula
-            # primero para poder resolver la orientación de la CT contra él.
-            spect_on_ct, notes = resample_volume_to_spect_grid(
-                spect_tx,
-                np.zeros(target_shape),
-                source_spacing_zyx=spect_sp,
-                spect_spacing_zyx=target_spacing,
-                source_affine_ijk_to_lps=self._spect_affine_ijk_to_lps,
-                spect_affine_ijk_to_lps=spect_affine_2x,
-                fill_value=float(np.min(spect_tx)) if spect_tx.size else 0.0,
-                order=1,  # bilineal: SPECT se ve suave al hacer upsampling
-            )
+            # SPECT → grilla objetivo: la grilla 2x es por construcción el mismo
+            # FOV con spacing/2, así que el remuestreo exacto es zoom ×2. Usar el
+            # affine de adquisición aquí deformaba el SPECT (no describe la
+            # grilla reconstruida en estos crudos).
+            spect_on_ct = ndi.zoom(spect_tx, 2.0, order=1, prefilter=False)
+            if spect_on_ct.shape != tuple(target_shape):
+                pad = np.full(target_shape, float(np.min(spect_tx)) if spect_tx.size else 0.0, dtype=np.float64)
+                sl = tuple(slice(0, min(spect_on_ct.shape[d], target_shape[d])) for d in range(3))
+                pad[sl] = spect_on_ct[sl]
+                spect_on_ct = pad
 
             # Misma estandarización de orientación que el registro (v1.66.5):
             # el camino affine de estos equipos puede dejar ejes permutados.
@@ -4952,6 +4953,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                             f"[CT-NATIVE] Acuerdo affine pobre (NCC={flip_score:.3f}): "
                             f"candidato físico adoptado (NCC={cand_score:.3f}). {cand_note}"
                         )
+
+            # Flips manuales del usuario: relativos a la orientación auto-resuelta.
+            ct_native = self._ct_transform_3d(ct_native)
 
             # === Aplicar rotaciones del nudge (igual que _apply_ct_nudge) ===
             # Las rotaciones están en grados y se aplican sobre la grilla 2x.
@@ -4990,8 +4994,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             # SPECT ya remuestreado arriba (antes de resolver orientación CT).
             # Diagnóstico de registro
             if hasattr(self, '_metrics'):
-                for n in notes:
-                    self._metrics.append(f"[CT-NATIVE] {n}")
+                self._metrics.append("[CT-NATIVE] SPECT remuestreado a grilla 2x por zoom exacto (sin affine).")
                 self._metrics.append(
                     f"[CT-NATIVE] SPECT {spect_tx.shape} → grid {spect_on_ct.shape} | "
                     f"CT {ct_tx.shape} → {ct_native.shape} (2x SPECT res)"
