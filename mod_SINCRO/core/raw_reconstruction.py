@@ -397,6 +397,9 @@ def _iterative_reconstruct_volume_fast(
     subsets: int,
     slice_range: tuple[int, int] | None = None,
     progress=None,
+    mu_map_3d: np.ndarray | None = None,
+    mu_scale: float = 1.0,
+    px_cm: float = 1.0,
 ) -> np.ndarray:
     """MLEM/OSEM volumétrico en float32: geometría idéntica al path por corte.
 
@@ -404,7 +407,8 @@ def _iterative_reconstruct_volume_fast(
     volumen (z,y,x) alrededor de z equivale a rotar cada corte 2D por separado;
     hacerlo en una sola llamada elimina el overhead Python de
     cortes × iteraciones × ángulos rotaciones individuales (~18k para 128³).
-    Aplica cuando no hay PSF/AC/MAP (el caso clínico común).
+    Con ``mu_map_3d`` modela atenuación en el update (AC iterativa): los rayos
+    integran sobre axis=1 y tau acumula µ hacia el detector (lado y=N-1).
     """
     measured = np.clip(np.asarray(proj, dtype=np.float32), 0.0, None)
     n_angles, height, width = measured.shape
@@ -417,24 +421,43 @@ def _iterative_reconstruct_volume_fast(
         out = np.zeros((height, width, width), dtype=np.float64)
         return out
 
+    mu_band = None
+    if mu_map_3d is not None:
+        mu_band = np.clip(np.asarray(mu_map_3d, dtype=np.float32)[z0:z1 + 1], 0.0, None)
+        mu_band = mu_band * np.float32(max(0.0, float(mu_scale)))
+        _px = np.float32(max(1e-6, float(px_cm)))
+
+    def _transmission(angle: float) -> np.ndarray | None:
+        if mu_band is None:
+            return None
+        mu_rot = _rotate_volume_z(mu_band, -float(angle))
+        tau = np.cumsum(mu_rot[:, ::-1, :], axis=1)[:, ::-1, :] * _px
+        return np.exp(-tau, dtype=np.float32)
+
     image = np.full((nz, width, width), max(float(band.mean()), 1.0), dtype=np.float32)
     subset_count = max(1, min(int(subsets), int(theta.size)))
     angle_indices = np.arange(theta.size)
     eps = np.float32(1e-6)
 
-    # Sensibilidad por subset: retroproyección volumétrica de unos (constante en z).
-    # ndimage libera el GIL: el bucle de ángulos se paraleliza con hilos.
+    # Sensibilidad por subset: retroproyección volumétrica de A^T 1 (con AC =
+    # retroproyección de la transmisión). ndimage libera el GIL: hilos.
     from concurrent.futures import ThreadPoolExecutor
     import os as _os
     n_workers = max(2, min(8, int(_os.cpu_count() or 4)))
     ones_slab = np.ones((nz, width, width), dtype=np.float32)
     sens: dict[int, np.ndarray] = {}
+
+    def _sensitivity_part(angle: float) -> np.ndarray:
+        trans = _transmission(angle)
+        slab = ones_slab if trans is None else trans
+        return _rotate_volume_z(slab, float(angle))
+
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         for subset_id in range(subset_count):
             idx = angle_indices[subset_id::subset_count]
             if idx.size == 0:
                 continue
-            parts = list(pool.map(lambda a: _rotate_volume_z(ones_slab, float(a)), theta[idx]))
+            parts = list(pool.map(_sensitivity_part, theta[idx]))
             acc = np.sum(parts, axis=0, dtype=np.float32)
             acc *= np.float32(np.pi / (2.0 * float(idx.size)))
             sens[subset_id] = np.maximum(acc, eps)
@@ -450,9 +473,15 @@ def _iterative_reconstruct_volume_fast(
                 def _angle_contribution(args):
                     k, a = args
                     rot = _rotate_volume_z(image, -float(a))
-                    prof = rot.sum(axis=1)
+                    trans = _transmission(a)
+                    if trans is not None:
+                        prof = (rot * trans).sum(axis=1)
+                    else:
+                        prof = rot.sum(axis=1)
                     ratio_prof = band[k] / np.maximum(prof, eps)
                     slab = np.repeat(ratio_prof[:, np.newaxis, :], width, axis=1)
+                    if trans is not None:
+                        slab = slab * trans
                     return _rotate_volume_z(slab, float(a))
 
                 parts = list(pool.map(_angle_contribution, zip(idx.tolist(), theta[idx])))
@@ -538,8 +567,8 @@ def reconstruct_projection_volume(
     use_map = (float(map_beta) > 0.0 and str(map_prior).lower() not in ("none", "")) or bool(map_adaptive)
     # Camino rápido volumétrico (float32, rotación 3D por ángulo): mismo
     # resultado geométrico que el bucle por corte, sin overhead Python por slice.
-    # Aplica al caso clínico común: sin PSF, sin AC y sin prior MAP.
-    if psf is None and mu_map_3d is None and not use_map:
+    # Soporta AC (mu_map); quedan fuera PSF (RR) y priors MAP.
+    if psf is None and not use_map:
         return _iterative_reconstruct_volume_fast(
             proj,
             theta,
@@ -547,6 +576,9 @@ def reconstruct_projection_volume(
             subsets=effective_subsets,
             slice_range=slice_range,
             progress=progress,
+            mu_map_3d=mu_map_3d,
+            mu_scale=float(attenuation_mu_scale),
+            px_cm=float(attenuation_pixel_size_cm),
         )
     # La imagen de "sensibilidad" (retroproyección de un sinograma de unos) NO
     # depende de los datos medidos ni de la iteración actual: solo depende de
@@ -670,7 +702,8 @@ def _simple_backprojection(
         slab = np.tile(profile.reshape(1, out_size), (out_size, 1))
         if mu2 is not None:
             mu_rot = rotate(mu2, angle=-float(angle), reshape=False, order=1, mode="constant", cval=0.0)
-            tau = np.cumsum(np.clip(mu_rot, 0.0, None)[:, ::-1], axis=1)[:, ::-1] * max(1e-6, float(attenuation_pixel_size_cm))
+            # Mismo eje y lado que el forward: rayos sobre axis=0, detector en y=N-1.
+            tau = np.cumsum(np.clip(mu_rot, 0.0, None)[::-1, :], axis=0)[::-1, :] * max(1e-6, float(attenuation_pixel_size_cm))
             slab = slab * np.exp(-max(0.0, float(attenuation_mu_scale)) * tau)
         if psf is not None:
             from core.resolution_recovery import variable_depth_gaussian
@@ -703,7 +736,9 @@ def _forward_project_slice(
             rot = variable_depth_gaussian(rot, psf)
         if mu2 is not None:
             mu_rot = rotate(mu2, angle=-float(angle), reshape=False, order=1, mode="constant", cval=0.0)
-            tau = np.cumsum(np.clip(mu_rot, 0.0, None)[:, ::-1], axis=1)[:, ::-1] * max(1e-6, float(attenuation_pixel_size_cm))
+            # El rayo integra sobre axis=0 (prof = sum(axis=0)); tau acumula µ
+            # desde cada voxel hacia el detector (lado y=N-1) sobre ese MISMO eje.
+            tau = np.cumsum(np.clip(mu_rot, 0.0, None)[::-1, :], axis=0)[::-1, :] * max(1e-6, float(attenuation_pixel_size_cm))
             trans = np.exp(-max(0.0, float(attenuation_mu_scale)) * tau)
             prof = (rot * trans).sum(axis=0)
         else:

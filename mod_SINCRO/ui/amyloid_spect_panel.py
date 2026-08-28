@@ -1096,7 +1096,8 @@ class AmyloidSpectPanel(QDialog):
         self._preset_combo.addItem("Manual", "manual")
         self._preset_combo.addItem("AMYLO 360 estándar 128", "amylo360_std128")
         self._preset_combo.addItem("AMYLO 360 alta definición", "amylo360_hd")
-        self._preset_combo.addItem("Clínico OSEM 8×4 + Butter (Xeleris)", "clinical_osem")
+        self._preset_combo.addItem("Clínico OSEM suave (2×10)", "clinical_osem_soft")
+        self._preset_combo.addItem("Clínico OSEM 8×4 + Butter", "clinical_osem")
         self._preset_combo.setToolTip(
             "Presets PYP/SPECT 360. 128x128 es recomendación de adquisición; "
             "si el DICOM trae otra matriz, se reconstruye en la matriz adquirida."
@@ -1312,10 +1313,17 @@ class AmyloidSpectPanel(QDialog):
         self._ac_iter_check = QCheckBox("AC iterativa")
         self._ac_iter_check.setToolTip("Activa corrección por atenuación dentro del update OSEM/MLEM (requiere ATT MAP cargado).")
         self._ac_mu_scale_spin = QDoubleSpinBox()
-        self._ac_mu_scale_spin.setRange(0.10, 3.00)
+        self._ac_mu_scale_spin.setRange(0.0001, 1000.0)
         self._ac_mu_scale_spin.setSingleStep(0.05)
-        self._ac_mu_scale_spin.setDecimals(2)
+        self._ac_mu_scale_spin.setDecimals(4)
         self._ac_mu_scale_spin.setValue(1.00)
+        self._ac_mu_scale_spin.setToolTip(
+            "Factor que lleva el ATT MAP a µ en cm⁻¹.\n"
+            "Referencia Tc-99m (140 keV): agua/tejido blando = 0.154 cm⁻¹, "
+            "pulmón ≈ 0.04, hueso ≈ 0.25.\n"
+            "Si el mapa ya está en cm⁻¹ → 1.0. Si está ×1000 (µ ≈ 154) → 0.001.\n"
+            "Al cargar el ATT MAP la consola muestra la mediana medida y la escala sugerida."
+        )
         for widget in (self._bg_check, self._scatter_check, self._scatter_k_spin, self._post_check, self._post_sigma_spin, self._denoise_plus_check, self._denoise_plus_k_spin, self._ac_iter_check, self._ac_mu_scale_spin, self._gated_method_combo):
             if hasattr(widget, "valueChanged"):
                 widget.valueChanged.connect(self._persist_ui_state)
@@ -2723,6 +2731,24 @@ class AmyloidSpectPanel(QDialog):
             self._denoise_plus_k_spin.setValue(0.20)
             self._ac_iter_check.setChecked(True)
             self._ac_mu_scale_spin.setValue(1.00)
+        elif preset == "clinical_osem_soft":
+            self._set_combo_by_data(self._recon_combo, "osem")
+            self._set_combo_by_data(self._ung_method_combo, "osem")
+            self._set_combo_by_data(self._gated_method_combo, "osem")
+            self._set_combo_by_data(self._ung_filter_combo, "none")
+            self._ung_cutoff_spin.setValue(0.50)
+            self._ung_order_spin.setValue(1)
+            self._set_combo_by_data(self._gated_filter_combo, "none")
+            self._gated_cutoff_spin.setValue(0.50)
+            self._gated_order_spin.setValue(1)
+            self._iter_spin.setValue(2)
+            self._subsets_spin.setValue(10)
+            self._bg_check.setChecked(False)
+            self._scatter_check.setChecked(False)
+            self._post_check.setChecked(True)
+            self._post_sigma_spin.setValue(1.0)
+            self._denoise_plus_check.setChecked(False)
+            # AC iterativa: se respeta el estado actual.
         elif preset == "clinical_osem":
             self._set_combo_by_data(self._recon_combo, "osem")
             self._set_combo_by_data(self._ung_method_combo, "osem")
@@ -2739,7 +2765,7 @@ class AmyloidSpectPanel(QDialog):
             self._scatter_check.setChecked(False)
             self._post_check.setChecked(False)
             self._denoise_plus_check.setChecked(False)
-            # AC iterativa: se respeta el estado actual (Xeleris reconstruye con AC).
+            # AC iterativa: se respeta el estado actual del checkbox.
         for widget in (
             self._ung_method_combo,
             self._ung_filter_combo,
@@ -2820,11 +2846,26 @@ class AmyloidSpectPanel(QDialog):
                 gated_denoise_plus_k=0.45,
                 display_slice_step_px=1,
             )
+        if preset == "clinical_osem_soft":
+            # Perfil suave: pocas actualizaciones (2×10) + gaussiano 3D.
+            return RawReconConfig(
+                reconstruction_method="osem",
+                gated_method="osem",
+                ungated_filter=ProjectionFilterConfig("none", 0.50, 1),
+                gated_filter=ProjectionFilterConfig("none", 0.50, 1),
+                iterative_iterations=2,
+                osem_subsets=10,
+                post_filter_sigma_ungated_px=1.0,
+                post_filter_sigma_gated_px=1.1,
+                display_slice_step_px=1,
+                attenuation_correction=bool(self._ac_iter_check.isChecked()),
+                attenuation_mu_scale=float(self._ac_mu_scale_spin.value()),
+            )
         if preset == "clinical_osem":
-            # Protocolo óseo Xeleris calcado: OSEM 8it×4sub + Butterworth 3D
-            # 0.35/5 post-recon + descuento de fondo. Las 32 actualizaciones
-            # limpian fondo y definen hueso; el Butterworth corta el ruido fino
-            # sin difuminar bordes (a diferencia del gaussiano).
+            # Protocolo óseo clásico: OSEM 8it×4sub + Butterworth 3D 0.35/5
+            # post-recon + descuento de fondo. Las 32 actualizaciones limpian
+            # fondo y definen hueso; el Butterworth corta el ruido fino sin
+            # difuminar bordes (a diferencia del gaussiano).
             return RawReconConfig(
                 reconstruction_method="osem",
                 gated_method="osem",

@@ -575,6 +575,19 @@ def load_attenuation_map_from_path(path: str) -> AttenuationMapResult:
     iop, ipp = _extract_iop_ipp_from_dataset(first_ds)
     affine_ijk_to_lps = _affine_from_iop_ipp_spacing(iop, ipp, spacing_zyx)
     notes.append(f"Serie ATT MAP cargada: {desc} · cortes={int(vol.shape[0])} · shape={tuple(vol.shape)}.")
+    # Diagnóstico de unidades µ: para Tc-99m (140 keV) el agua/tejido blando
+    # debe quedar en ~0.15 cm⁻¹ tras aplicar µ-scale. Se estima la mediana del
+    # tejido (voxeles no-cero) y se sugiere la escala que la lleva a 0.154.
+    _nz = np.asarray(vol, dtype=np.float64)
+    _nz = _nz[_nz > 0]
+    if _nz.size > 100:
+        _med = float(np.median(_nz))
+        _sug = 0.154 / _med if _med > 1e-9 else 1.0
+        notes.append(
+            f"µ mediana (no-cero): {_med:.4g}. Referencia Tc-99m 140 keV: agua=0.154 cm⁻¹, "
+            f"hueso≈0.25 cm⁻¹. µ-scale sugerido ≈ {_sug:.4g} "
+            "(si el mapa ya está en cm⁻¹, dejar 1.0)."
+        )
     if spacing_zyx is not None:
         notes.append(f"Spacing ATT MAP z/y/x={spacing_zyx[0]:.3f}/{spacing_zyx[1]:.3f}/{spacing_zyx[2]:.3f} mm.")
     if affine_ijk_to_lps is not None:
