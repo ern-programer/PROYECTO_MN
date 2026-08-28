@@ -132,6 +132,25 @@ def _ct_pixels_hu(ds) -> np.ndarray:
     return arr * slope + intercept
 
 
+def _ensure_hu_calibration(vol: np.ndarray) -> tuple[np.ndarray, list[str]]:
+    """Corrige CT sin intercept declarado (valores = HU + 1024, aire en 0).
+
+    Sin esta corrección las ventanas fijas por tejido (pulmón/blanda/ósea)
+    caen en rangos equivocados y no aíslan nada.
+    """
+    notes: list[str] = []
+    v = np.asarray(vol, dtype=np.float64)
+    vmin = float(v.min())
+    p999 = float(np.percentile(v, 99.9))
+    if vmin >= -10.0 and p999 > 1200.0:
+        v = v - 1024.0
+        notes.append(
+            "CT sin RescaleIntercept útil: valores detectados como HU+1024; "
+            "se aplicó offset -1024 (aire ≈ -1000 HU) para calibrar ventanas por tejido."
+        )
+    return v, notes
+
+
 def _affine_from_iop_ipp_spacing(iop, ipp, spacing_zyx: tuple[float, float, float] | None) -> np.ndarray | None:
     if iop is None or ipp is None or spacing_zyx is None:
         return None
@@ -418,6 +437,9 @@ def load_ct_volume_from_path(path: str) -> CTVolumeResult:
         spacing_zyx,
     )
     notes.append(f"Serie CT cargada: {desc} · cortes={int(vol.shape[0])} · shape={tuple(vol.shape)}.")
+    vol, hu_notes = _ensure_hu_calibration(vol)
+    notes.extend(hu_notes)
+    notes.append(f"Rango CT: {float(vol.min()):.0f} a {float(vol.max()):.0f} HU.")
     if spacing_zyx is not None:
         notes.append(f"Spacing CT z/y/x={spacing_zyx[0]:.3f}/{spacing_zyx[1]:.3f}/{spacing_zyx[2]:.3f} mm.")
     if len(series) > 1 and not selected_uid:
