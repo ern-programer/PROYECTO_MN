@@ -6370,10 +6370,10 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         if ct_seg is not None:
             mask_3d = getattr(ct_seg, "mask_3d", None)
             if mask_3d is not None:
-                # Transformar la máscara al mismo espacio que el volumen SPECT
-                mask_arr = np.asarray(mask_3d, dtype=bool)
-                mask_tx = self._spect_transform_3d(mask_arr.astype(np.float64)) > 0.5
-                self._mip_widget.set_mask_3d(mask_tx)
+                # La máscara ya vive en la grilla de display (se segmentó sobre
+                # la CT registrada transformada): pasar tal cual. Aplicarle
+                # _spect_transform_3d otra vez la espejaba en el MIP.
+                self._mip_widget.set_mask_3d(np.asarray(mask_3d, dtype=bool))
             else:
                 self._mip_widget.set_mask_3d(None)
             
