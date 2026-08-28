@@ -1001,6 +1001,44 @@ def apply_visual_bone_suppression(
     )
 
 
+def _auto_flip_ct_to_spect(ct_rs: np.ndarray, spect: np.ndarray) -> tuple[np.ndarray, str]:
+    """Resuelve la orientación de la CT probando las 8 combinaciones de flips.
+
+    Cuando el affine DICOM no es utilizable, el remuestreo por spacing conserva
+    la escala pero no la orientación de ejes. Se elige la combinación que
+    maximiza la correlación entre la CT suavizada y el SPECT (ambos con señal
+    dominada por el cuerpo/hueso), que es invariante a unidades.
+    """
+    sp = np.asarray(spect, dtype=np.float64)
+    sp_s = ndi.gaussian_filter(sp, 2.0)
+    sp_n = sp_s - sp_s.mean()
+    sp_norm = float(np.sqrt((sp_n ** 2).sum())) or 1.0
+    base = np.asarray(ct_rs, dtype=np.float64)
+    best = (None, -2.0, (False, False, False))
+    for fz in (False, True):
+        for fy in (False, True):
+            for fx in (False, True):
+                cand = base
+                if fz:
+                    cand = np.flip(cand, axis=0)
+                if fy:
+                    cand = np.flip(cand, axis=1)
+                if fx:
+                    cand = np.flip(cand, axis=2)
+                c_s = ndi.gaussian_filter(np.clip(cand, 0.0, None), 2.0)
+                c_n = c_s - c_s.mean()
+                denom = float(np.sqrt((c_n ** 2).sum())) or 1.0
+                score = float((c_n * sp_n).sum()) / (denom * sp_norm)
+                if score > best[1]:
+                    best = (np.ascontiguousarray(cand), score, (fz, fy, fx))
+    flips = best[2]
+    note = (
+        f"Orientación CT auto-resuelta por correlación con SPECT: flips z/y/x = "
+        f"{flips[0]}/{flips[1]}/{flips[2]} (NCC={best[1]:.3f})."
+    )
+    return best[0] if best[0] is not None else base, note
+
+
 def register_ct_to_spect_rigid(
     ct_volume: np.ndarray,
     spect_volume: np.ndarray,
@@ -1043,11 +1081,13 @@ def register_ct_to_spect_rigid(
                 )
                 ct_phys = ndi.zoom(ct, zoom_factors, order=1)
                 ct_rs = _center_crop_or_pad_3d(ct_phys, sp.shape, fill_value=float(np.min(ct)))
+                ct_rs, flip_note = _auto_flip_ct_to_spect(ct_rs, sp)
                 notes.append(
                     "Geometría DICOM incompatible con la grilla reconstruida SPECT: "
                     "el remuestreo affine quedó vacío. Se aplicó fallback por espaciado físico "
                     f"{ct.shape} -> {ct_phys.shape} -> {ct_rs.shape}."
                 )
+                notes.append(flip_note)
             else:
                 notes.append(
                     "CT remuestreado a grilla SPECT usando geometría DICOM completa "

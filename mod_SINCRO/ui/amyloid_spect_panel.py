@@ -6843,6 +6843,19 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._att_affine_ijk_to_lps = getattr(att, "affine_ijk_to_lps", None)
             self._att_path = att.source_path
             self._btn_apply_ac.setEnabled(self._base_spect_volume is not None)
+            # Autoaplicar el mu-scale sugerido: tejido blando debe quedar en
+            # 0.154 cm^-1 (Tc-99m); sin esto la AC con mapas escalados destruye la imagen.
+            nz = self._att_map_volume[self._att_map_volume > 0]
+            if nz.size > 100:
+                med = float(np.median(nz))
+                if med > 1e-9:
+                    suggested = 0.154 / med
+                    if abs(suggested - float(self._ac_mu_scale_spin.value())) / max(suggested, 1e-9) > 0.05:
+                        self._ac_mu_scale_spin.setValue(round(suggested, 4))
+                        self._metrics.append(
+                            f"- µ-scale autoaplicado: {suggested:.4g} (mediana mapa {med:.4g} → 0.154 cm⁻¹). "
+                            "Ajustar manualmente si el mapa no es de tejido blando dominante."
+                        )
             self._status.setText(f"ATT MAP cargado · {att.series_description} · shape {self._att_map_volume.shape}")
             self._metrics.append("\n--- ATT MAP cargado ---")
             for note in att.notes:
