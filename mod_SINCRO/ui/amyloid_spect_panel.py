@@ -3769,14 +3769,13 @@ class AmyloidSpectPanel(QDialog):
 
     def _on_localization_cross_toggled(self, checked: bool) -> None:
         self._localization_cross_enabled = bool(checked)
-        if not checked:
-            self._localization_point_zyx = None
-            self._localization_anchor_zyx = None
+        # Apagar solo OCULTA la cruz; A/B y las VOIs colocadas se conservan
+        # para no invalidar el flujo de máscara + HMR (antes se borraban).
         if hasattr(self, "_settings"):
             self._settings.setValue("global/localization_cross", bool(checked))
         self._status.setText(
             "Localización activada: Ctrl+clic/arrastre = CT, Shift+clic/arrastre = SPECT."
-            if checked else "Localización desactivada."
+            if checked else "Localización oculta (los puntos A/B se conservan)."
         )
         self._render_selected_view()
 
@@ -4282,6 +4281,12 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             # Verificar puntos de localización
             anchor = getattr(self, "_localization_anchor_zyx", None)
             point = getattr(self, "_localization_point_zyx", None)
+            # B estable: usar el centro del círculo azul dibujado (fijado en el
+            # momento del clic). La cruz viva navega con los cortes y deriva,
+            # lo que muestreaba el mediastino en otra posición.
+            tv_med = getattr(self, "_temp_voi_mediastinum", None)
+            if tv_med is not None:
+                point = (int(round(tv_med.cz)), int(round(tv_med.cy)), int(round(tv_med.cx)))
             
             if anchor is None:
                 QMessageBox.warning(
@@ -4600,6 +4605,8 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             details += f"Clasificación: {classification}\n\n"
             details += f"Método: {result.method}\n"
             details += f"Tipo VOI: {voi_type_used}\n"
+            details += f"A usado (Z/Y/X): {anchor[0]+1}/{anchor[1]+1}/{anchor[2]+1}\n"
+            details += f"B usado (Z/Y/X): {point[0]+1}/{point[1]+1}/{point[2]+1}\n"
             details += f"Media corazón: {result.heart_mean:.2f} cts/píxel"
             details += f"\nMedia mediastino: {result.mediastinum_mean:.2f} cts/píxel"
             details += f"\nCuentas totales corazón: {result.heart_counts:.0f}"

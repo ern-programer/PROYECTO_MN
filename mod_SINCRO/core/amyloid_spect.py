@@ -1589,7 +1589,7 @@ class VOIAnatomical:
             # Resize si las dimensiones no coinciden (raro pero posible)
             from scipy.ndimage import zoom
             factors = [s / m for s, m in zip(shape, self.mask_3d_data.shape)]
-            return zoom(self.mask_3d_data.astype(np.float32), order=0) > 0.5
+            return zoom(self.mask_3d_data.astype(np.float32), factors, order=0) > 0.5
         return self.mask_3d_data.copy()
     
     def mask_slice(self, z_idx: int, shape_2d: tuple[int, int] | None = None,
