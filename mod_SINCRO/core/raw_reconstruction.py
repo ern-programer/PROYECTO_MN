@@ -360,6 +360,91 @@ def reconstruct_fbp_volume(
     return volume
 
 
+def _rotate_volume_z(volume: np.ndarray, angle_deg: float) -> np.ndarray:
+    """Rota todos los cortes axiales a la vez (una llamada C, ejes y-x)."""
+    return rotate(volume, angle=float(angle_deg), axes=(1, 2), reshape=False, order=1, mode="constant", cval=0.0, prefilter=False)
+
+
+def _iterative_reconstruct_volume_fast(
+    proj: np.ndarray,
+    theta: np.ndarray,
+    *,
+    iterations: int,
+    subsets: int,
+    slice_range: tuple[int, int] | None = None,
+    progress=None,
+) -> np.ndarray:
+    """MLEM/OSEM volumétrico en float32: geometría idéntica al path por corte.
+
+    En SPECT paralelo cada corte axial es independiente, así que rotar el
+    volumen (z,y,x) alrededor de z equivale a rotar cada corte 2D por separado;
+    hacerlo en una sola llamada elimina el overhead Python de
+    cortes × iteraciones × ángulos rotaciones individuales (~18k para 128³).
+    Aplica cuando no hay PSF/AC/MAP (el caso clínico común).
+    """
+    measured = np.clip(np.asarray(proj, dtype=np.float32), 0.0, None)
+    n_angles, height, width = measured.shape
+    theta = np.asarray(theta, dtype=np.float64)
+    z0, z1 = _resolve_slice_range(slice_range, height)
+    # Volumen de trabajo (banda de cortes): (nz, width, width)
+    band = measured[:, z0:z1 + 1, :]
+    nz = band.shape[1]
+    if not np.any(band > 0):
+        out = np.zeros((height, width, width), dtype=np.float64)
+        return out
+
+    image = np.full((nz, width, width), max(float(band.mean()), 1.0), dtype=np.float32)
+    subset_count = max(1, min(int(subsets), int(theta.size)))
+    angle_indices = np.arange(theta.size)
+    eps = np.float32(1e-6)
+
+    # Sensibilidad por subset: retroproyección volumétrica de unos (constante en z).
+    # ndimage libera el GIL: el bucle de ángulos se paraleliza con hilos.
+    from concurrent.futures import ThreadPoolExecutor
+    import os as _os
+    n_workers = max(2, min(8, int(_os.cpu_count() or 4)))
+    ones_slab = np.ones((nz, width, width), dtype=np.float32)
+    sens: dict[int, np.ndarray] = {}
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        for subset_id in range(subset_count):
+            idx = angle_indices[subset_id::subset_count]
+            if idx.size == 0:
+                continue
+            parts = list(pool.map(lambda a: _rotate_volume_z(ones_slab, float(a)), theta[idx]))
+            acc = np.sum(parts, axis=0, dtype=np.float32)
+            acc *= np.float32(np.pi / (2.0 * float(idx.size)))
+            sens[subset_id] = np.maximum(acc, eps)
+
+        total_updates = max(1, int(iterations)) * subset_count
+        done_updates = 0
+        for _iter in range(max(1, int(iterations))):
+            for subset_id in range(subset_count):
+                idx = angle_indices[subset_id::subset_count]
+                if idx.size == 0:
+                    continue
+
+                def _angle_contribution(args):
+                    k, a = args
+                    rot = _rotate_volume_z(image, -float(a))
+                    prof = rot.sum(axis=1)
+                    ratio_prof = band[k] / np.maximum(prof, eps)
+                    slab = np.repeat(ratio_prof[:, np.newaxis, :], width, axis=1)
+                    return _rotate_volume_z(slab, float(a))
+
+                parts = list(pool.map(_angle_contribution, zip(idx.tolist(), theta[idx])))
+                correction = np.sum(parts, axis=0, dtype=np.float32)
+                correction *= np.float32(np.pi / (2.0 * float(idx.size)))
+                image *= correction / sens[subset_id]
+                np.clip(image, 0.0, None, out=image)
+                done_updates += 1
+                if progress is not None:
+                    progress(done_updates / total_updates)
+
+    out = np.zeros((height, width, width), dtype=np.float64)
+    out[z0:z1 + 1] = image.astype(np.float64)
+    return out
+
+
 def reconstruct_projection_volume(
     projections: np.ndarray,
     angles_deg: np.ndarray | None = None,
@@ -426,6 +511,19 @@ def reconstruct_projection_volume(
                 f"esperado {(height, width, width)}, recibido {mu_map_3d.shape}"
             )
     effective_subsets = int(subsets) if method_key == "osem" else 1
+    use_map = (float(map_beta) > 0.0 and str(map_prior).lower() not in ("none", "")) or bool(map_adaptive)
+    # Camino rápido volumétrico (float32, rotación 3D por ángulo): mismo
+    # resultado geométrico que el bucle por corte, sin overhead Python por slice.
+    # Aplica al caso clínico común: sin PSF, sin AC y sin prior MAP.
+    if psf is None and mu_map_3d is None and not use_map:
+        return _iterative_reconstruct_volume_fast(
+            proj,
+            theta,
+            iterations=int(iterations),
+            subsets=effective_subsets,
+            slice_range=slice_range,
+            progress=progress,
+        )
     # La imagen de "sensibilidad" (retroproyección de un sinograma de unos) NO
     # depende de los datos medidos ni de la iteración actual: solo depende de
     # la geometría (ángulos del subset + tamaño de detector/salida), que es

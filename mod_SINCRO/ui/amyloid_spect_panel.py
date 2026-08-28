@@ -1035,7 +1035,7 @@ class AmyloidSpectPanel(QDialog):
         self._ct_flip_y_test = False
         self._ct_flip_z_test = False
         self._ct_window = "bone"
-        self._ct_visual_trial_mode = False
+        self._ct_visual_trial_mode = True
         self._ct_grid_trial_mode = False
         self._trial_cache_signature = None
         self._trial_spect_on_ct = None
@@ -1095,6 +1095,7 @@ class AmyloidSpectPanel(QDialog):
         self._preset_combo.addItem("Manual", "manual")
         self._preset_combo.addItem("AMYLO 360 estándar 128", "amylo360_std128")
         self._preset_combo.addItem("AMYLO 360 alta definición", "amylo360_hd")
+        self._preset_combo.addItem("Clínico OSEM (suave)", "clinical_osem")
         self._preset_combo.setToolTip(
             "Presets PYP/SPECT 360. 128x128 es recomendación de adquisición; "
             "si el DICOM trae otra matriz, se reconstruye en la matriz adquirida."
@@ -2170,9 +2171,9 @@ class AmyloidSpectPanel(QDialog):
         window_vbox.addLayout(ct_win_row)
 
         trial_row = QHBoxLayout()
-        self._ct_trial_check = QCheckBox("PRUEBA CT nítida (BETA)")
-        self._ct_trial_check.setChecked(False)
-        self._ct_trial_check.setToolTip("Modo de prueba reversible. Si no convence, desmarcar para volver al estado actual.")
+        self._ct_trial_check = QCheckBox("CT nítida")
+        self._ct_trial_check.setChecked(True)
+        self._ct_trial_check.setToolTip("Realce visual del MPR de CT (activado por defecto). Desmarcar para ver la CT sin realce.")
         self._ct_trial_check.setStyleSheet("font-size:10px; color:#f59e0b; font-weight:600;")
         self._ct_trial_check.toggled.connect(self._on_ct_trial_toggled)
         trial_row.addWidget(self._ct_trial_check)
@@ -2557,6 +2558,8 @@ class AmyloidSpectPanel(QDialog):
         self._settings.setValue("global/denoise_plus_k", float(self._denoise_plus_k_spin.value()))
         self._settings.setValue("global/ac_iter", bool(self._ac_iter_check.isChecked()))
         self._settings.setValue("global/ac_mu_scale", float(self._ac_mu_scale_spin.value()))
+        if hasattr(self, "_ct_trial_check"):
+            self._settings.setValue("global/ct_sharp", bool(self._ct_trial_check.isChecked()))
         if self._current_spect_path:
             prefix = self._study_settings_prefix()
             self._settings.setValue(f"{prefix}/preset", preset)
@@ -2602,6 +2605,10 @@ class AmyloidSpectPanel(QDialog):
         self._denoise_plus_k_spin.setValue(float(self._settings.value("global/denoise_plus_k", 0.20) or 0.20))
         self._ac_iter_check.setChecked(str(self._settings.value("global/ac_iter", "false")).lower() == "true")
         self._ac_mu_scale_spin.setValue(float(self._settings.value("global/ac_mu_scale", 1.0) or 1.0))
+        if hasattr(self, "_ct_trial_check"):
+            ct_sharp = str(self._settings.value("global/ct_sharp", "true")).lower() == "true"
+            self._ct_trial_check.setChecked(ct_sharp)
+            self._ct_visual_trial_mode = ct_sharp
         self._qc_split_slider.setValue(int(self._settings.value("global/split_pct", 50) or 50))
         self._blend_slider.setValue(int(self._settings.value("global/overlay_pct", 35) or 35))
         fusion = int(self._settings.value("global/fusion_pct", 55) or 55)
@@ -2688,6 +2695,25 @@ class AmyloidSpectPanel(QDialog):
             self._denoise_plus_k_spin.setValue(0.20)
             self._ac_iter_check.setChecked(True)
             self._ac_mu_scale_spin.setValue(1.00)
+        elif preset == "clinical_osem":
+            self._set_combo_by_data(self._recon_combo, "osem")
+            self._set_combo_by_data(self._ung_method_combo, "osem")
+            self._set_combo_by_data(self._gated_method_combo, "osem")
+            self._set_combo_by_data(self._ung_filter_combo, "none")
+            self._ung_cutoff_spin.setValue(0.50)
+            self._ung_order_spin.setValue(1)
+            self._set_combo_by_data(self._gated_filter_combo, "none")
+            self._gated_cutoff_spin.setValue(0.50)
+            self._gated_order_spin.setValue(1)
+            self._iter_spin.setValue(2)
+            self._subsets_spin.setValue(10)
+            self._bg_check.setChecked(False)
+            self._scatter_check.setChecked(False)
+            self._post_check.setChecked(True)
+            self._post_sigma_spin.setValue(1.0)
+            self._denoise_plus_check.setChecked(False)
+            self._ac_iter_check.setChecked(False)
+            self._ac_mu_scale_spin.setValue(1.00)
         for widget in (
             self._ung_method_combo,
             self._ung_filter_combo,
@@ -2766,6 +2792,20 @@ class AmyloidSpectPanel(QDialog):
                 ungated_denoise_plus_k=0.20,
                 gated_denoise_plus=True,
                 gated_denoise_plus_k=0.45,
+                display_slice_step_px=1,
+            )
+        if preset == "clinical_osem":
+            # Perfil tipo Xeleris: pocas actualizaciones OSEM (2×10) y el control
+            # de ruido delegado al post-filtro 3D, no a cortar iteraciones tarde.
+            return RawReconConfig(
+                reconstruction_method="osem",
+                gated_method="osem",
+                ungated_filter=ProjectionFilterConfig("none", 0.50, 1),
+                gated_filter=ProjectionFilterConfig("none", 0.50, 1),
+                iterative_iterations=2,
+                osem_subsets=10,
+                post_filter_sigma_ungated_px=1.0,
+                post_filter_sigma_gated_px=1.1,
                 display_slice_step_px=1,
             )
         return RawReconConfig(
@@ -2975,10 +3015,18 @@ class AmyloidSpectPanel(QDialog):
 
     @staticmethod
     def _normalize(arr: np.ndarray) -> np.ndarray:
+        # Percentiles en vez de min/max: un voxel caliente aislado no debe
+        # oscurecer todo el corte (MPR "negros" de la comparativa vs Xeleris).
         a = np.asarray(arr, dtype=np.float64)
-        mn, mx = float(np.min(a)), float(np.max(a))
-        if mx - mn < 1e-9:
+        finite = a[np.isfinite(a)]
+        if finite.size == 0:
             return np.zeros_like(a, dtype=np.float64)
+        mn = float(np.percentile(finite, 0.5))
+        mx = float(np.percentile(finite, 99.5))
+        if mx - mn < 1e-9:
+            mn, mx = float(finite.min()), float(finite.max())
+            if mx - mn < 1e-9:
+                return np.zeros_like(a, dtype=np.float64)
         return np.clip((a - mn) / (mx - mn), 0.0, 1.0)
 
     def _window_spect(self, arr: np.ndarray) -> np.ndarray:
@@ -4688,13 +4736,11 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
     def _on_ct_trial_toggled(self, checked: bool):
         self._ct_visual_trial_mode = bool(checked)
         if checked:
-            self._status.setText("[PRUEBA/BETA] Realce visual CT activado. Desmarcar para volver al estado actual.")
-            if hasattr(self, "_metrics"):
-                self._metrics.append("[PRUEBA/BETA] CT nítida activada (solo visual, reversible).")
+            self._status.setText("CT nítida activada (realce visual del MPR de CT).")
         else:
-            self._status.setText("Modo PRUEBA/BETA desactivado. CT volvió al estado actual.")
-            if hasattr(self, "_metrics"):
-                self._metrics.append("[PRUEBA/BETA] CT nítida desactivada (rollback aplicado).")
+            self._status.setText("CT nítida desactivada.")
+        if hasattr(self, "_settings"):
+            self._settings.setValue("global/ct_sharp", bool(checked))
         self._render_current_with_overlay()
 
     @staticmethod
@@ -5017,9 +5063,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             "sagittal": self._apply_zoom_pan_2d(sp_sa, self._spect_zoom_pct, self._spect_pan_px["sagittal"], order=1),
         }
         ct_prev = {
-            "axial": self._apply_zoom_pan_2d(ct_ax, self._ct_zoom_pct, self._ct_pan_px["axial"], order=0),
-            "coronal": self._apply_zoom_pan_2d(ct_co, self._ct_zoom_pct, self._ct_pan_px["coronal"], order=0),
-            "sagittal": self._apply_zoom_pan_2d(ct_sa, self._ct_zoom_pct, self._ct_pan_px["sagittal"], order=0),
+            "axial": self._apply_zoom_pan_2d(ct_ax, self._ct_zoom_pct, self._ct_pan_px["axial"], order=1),
+            "coronal": self._apply_zoom_pan_2d(ct_co, self._ct_zoom_pct, self._ct_pan_px["coronal"], order=1),
+            "sagittal": self._apply_zoom_pan_2d(ct_sa, self._ct_zoom_pct, self._ct_pan_px["sagittal"], order=1),
         }
         return sp_prev, ct_prev
 
@@ -6029,9 +6075,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             sagittal = self._enhance_ct_trial(sagittal)
 
         return {
-            "axial": self._apply_zoom_pan_2d(axial, self._ct_zoom_pct, self._ct_pan_px["axial"], order=0),
-            "coronal": self._apply_zoom_pan_2d(coronal, self._ct_zoom_pct, self._ct_pan_px["coronal"], order=0),
-            "sagittal": self._apply_zoom_pan_2d(sagittal, self._ct_zoom_pct, self._ct_pan_px["sagittal"], order=0),
+            "axial": self._apply_zoom_pan_2d(axial, self._ct_zoom_pct, self._ct_pan_px["axial"], order=1),
+            "coronal": self._apply_zoom_pan_2d(coronal, self._ct_zoom_pct, self._ct_pan_px["coronal"], order=1),
+            "sagittal": self._apply_zoom_pan_2d(sagittal, self._ct_zoom_pct, self._ct_pan_px["sagittal"], order=1),
         }
 
     def _render_triplet(self, left_title: str, left_arr: np.ndarray, mid_title: str, mid_arr: np.ndarray, right_title: str, right_arr: np.ndarray):
