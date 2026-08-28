@@ -1001,10 +1001,23 @@ def register_ct_to_spect_rigid(
                 np.asarray(spect_affine_ijk_to_lps, dtype=np.float64),
                 fill_value=float(np.min(ct)),
             )
-            notes.append(
-                "CT remuestreado a grilla SPECT usando geometría DICOM completa "
-                f"(IPP/IOP/spacing): {ct.shape} -> {ct_rs.shape}."
-            )
+            if float(np.ptp(ct)) > 1e-6 and float(np.ptp(ct_rs)) <= 1e-6 and ct_spacing_zyx is not None and spect_spacing_zyx is not None:
+                zoom_factors = tuple(
+                    max(1e-6, float(ct_spacing_zyx[i])) / max(1e-6, float(spect_spacing_zyx[i]))
+                    for i in range(3)
+                )
+                ct_phys = ndi.zoom(ct, zoom_factors, order=1)
+                ct_rs = _center_crop_or_pad_3d(ct_phys, sp.shape, fill_value=float(np.min(ct)))
+                notes.append(
+                    "Geometría DICOM incompatible con la grilla reconstruida SPECT: "
+                    "el remuestreo affine quedó vacío. Se aplicó fallback por espaciado físico "
+                    f"{ct.shape} -> {ct_phys.shape} -> {ct_rs.shape}."
+                )
+            else:
+                notes.append(
+                    "CT remuestreado a grilla SPECT usando geometría DICOM completa "
+                    f"(IPP/IOP/spacing): {ct.shape} -> {ct_rs.shape}."
+                )
         elif ct_spacing_zyx is not None and spect_spacing_zyx is not None:
             zoom_factors = tuple(
                 max(1e-6, float(ct_spacing_zyx[i])) / max(1e-6, float(spect_spacing_zyx[i]))
@@ -1762,7 +1775,7 @@ def compute_hmr_spect(
     slice_idx: int | None = None,
     volume_raw: np.ndarray | None = None,
 ) -> HmrSpectResult:
-    """Calcula HMR-SPECT = Cuentas VOI corazón / Cuentas VOI mediastino.
+    """Calcula HMR-SPECT = media VOI corazón / media VOI mediastino.
     
     Args:
         volume: Volumen SPECT 3D filtrado (nz, ny, nx) - el que se visualiza
@@ -1805,10 +1818,12 @@ def compute_hmr_spect(
         slice_idx = int(np.clip(slice_idx, 0, vol.shape[0] - 1))
         
         slice_2d = vol[slice_idx]
-        spacing_yx = (spacing_zyx[1], spacing_zyx[2])
-        
-        mask_h = voi_heart.mask_slice(slice_idx, slice_2d.shape, spacing_yx)
-        mask_m = voi_mediastinum.mask_slice(slice_idx, slice_2d.shape, spacing_yx)
+
+        # Cortar las máscaras 3D conserva la distancia al centro en Z. Usar
+        # mask_slice() directamente convertía toda esfera en un círculo de radio
+        # máximo, incluso cuando su centro estaba muy lejos del corte elegido.
+        mask_h = voi_heart.mask_3d(vol.shape, spacing_zyx)[slice_idx]
+        mask_m = voi_mediastinum.mask_3d(vol.shape, spacing_zyx)[slice_idx]
         
         heart_counts = float(slice_2d[mask_h].sum())
         mediastinum_counts = float(slice_2d[mask_m].sum())
@@ -1823,16 +1838,34 @@ def compute_hmr_spect(
         
         used_slice = slice_idx
     
-    hmr = heart_counts / max(mediastinum_counts, 1e-8)
-    hmr_raw = None
-    if vol_raw is not None and mediastinum_counts_raw > 0:
-        hmr_raw = heart_counts_raw / mediastinum_counts_raw
-    
     # Calcular estadísticas de diagnóstico
     heart_pixels = int(mask_h.sum())
     mediastinum_pixels = int(mask_m.sum())
+    if heart_pixels == 0:
+        raise ValueError("La VOI del corazón no intersecta el volumen/corte seleccionado.")
+    if mediastinum_pixels == 0:
+        raise ValueError(
+            "La VOI del mediastino no intersecta el volumen/corte seleccionado. "
+            "Reubique el punto B al mismo nivel axial o use VOI completa."
+        )
+
     heart_mean = heart_counts / max(heart_pixels, 1) if heart_pixels > 0 else 0.0
     mediastinum_mean = mediastinum_counts / max(mediastinum_pixels, 1) if mediastinum_pixels > 0 else 0.0
+    signal_floor = max(float(np.nanmax(np.abs(vol))) * 1e-4, 1e-8)
+    if not np.isfinite(mediastinum_mean) or mediastinum_mean <= signal_floor:
+        raise ValueError(
+            "La VOI del mediastino tiene señal nula o insuficiente. "
+            "Revise el punto B y confirme que esté dentro del tórax, no en el fondo."
+        )
+
+    hmr = heart_mean / mediastinum_mean
+    hmr_raw = None
+    if vol_raw is not None:
+        heart_mean_raw = heart_counts_raw / heart_pixels
+        mediastinum_mean_raw = mediastinum_counts_raw / mediastinum_pixels
+        raw_floor = max(float(np.nanmax(np.abs(vol_raw))) * 1e-4, 1e-8)
+        if np.isfinite(mediastinum_mean_raw) and mediastinum_mean_raw > raw_floor:
+            hmr_raw = heart_mean_raw / mediastinum_mean_raw
     
     return HmrSpectResult(
         hmr=hmr,
@@ -2588,13 +2621,33 @@ def compute_spect_ratio(
     v_mean = v_counts / max(v_voxels, 1) if v_voxels > 0 else 0.0
     d_mean = d_counts / max(d_voxels, 1) if d_voxels > 0 else 0.0
 
-    # Ratios (proteger contra división por cero)
-    eps = 1e-8
-    vd_geom = float(np.sqrt(max(v_counts, 0.0) * max(d_counts, 0.0)))
-    s_vd = s_counts / max(vd_geom, eps)
-    s_v = s_counts / max(v_counts, eps)
-    s_d = s_counts / max(d_counts, eps)
-    v_d = v_counts / max(d_counts, eps)
+    if s_voxels == 0 or v_voxels == 0 or d_voxels == 0:
+        missing = [
+            label
+            for label, count in (("S (corazón)", s_voxels), ("V (vértebra)", v_voxels), ("D (aorta)", d_voxels))
+            if count == 0
+        ]
+        raise ValueError(f"Las VOI no intersectan el volumen: {', '.join(missing)}.")
+
+    signal_floor = max(float(np.nanmax(np.abs(vol))) * 1e-4, 1e-8)
+    invalid_refs = [
+        label
+        for label, mean in (("V (vértebra)", v_mean), ("D (aorta)", d_mean))
+        if not np.isfinite(mean) or mean <= signal_floor
+    ]
+    if invalid_refs:
+        raise ValueError(
+            "Señal nula o insuficiente en " + ", ".join(invalid_refs) +
+            ". Revise la colocación de los puntos sobre la fusión SPECT/CT."
+        )
+
+    # Los radios pueden ser diferentes; usar medias evita que el cociente dependa
+    # del número de voxels incluido por cada VOI.
+    vd_geom = float(np.sqrt(max(v_mean, 0.0) * max(d_mean, 0.0)))
+    s_vd = s_mean / vd_geom
+    s_v = s_mean / v_mean
+    s_d = s_mean / d_mean
+    v_d = v_mean / d_mean
 
     # Volúmenes
     s_vol = voi_heart.volume_ml()

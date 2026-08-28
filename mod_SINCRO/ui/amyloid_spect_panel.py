@@ -2885,6 +2885,16 @@ class AmyloidSpectPanel(QDialog):
             vol = np.ascontiguousarray(np.flip(vol, axis=0))
         return vol
 
+    def _spect_display_volume(self, volume: np.ndarray) -> np.ndarray:
+        """Devuelve el SPECT en la misma grilla donde se localizan las VOI."""
+        vol = self._spect_transform_3d(volume)
+        off_z = float(self._spect_view_offset.get("axial", 0.0))
+        off_y = float(self._spect_view_offset.get("coronal", 0.0))
+        off_x = float(self._spect_view_offset.get("sagittal", 0.0))
+        if abs(off_z) > 1e-6 or abs(off_y) > 1e-6 or abs(off_x) > 1e-6:
+            vol = ndi.shift(vol, shift=(off_z, off_y, off_x), order=1, mode="nearest")
+        return vol
+
     def _ct_transform_3d(self, volume: np.ndarray) -> np.ndarray:
         vol = np.asarray(volume, dtype=np.float64)
         if bool(getattr(self, "_ct_flip_x_test", False)):
@@ -2893,6 +2903,19 @@ class AmyloidSpectPanel(QDialog):
             vol = np.ascontiguousarray(np.flip(vol, axis=1))
         if bool(getattr(self, "_ct_flip_z_test", False)):
             vol = np.ascontiguousarray(np.flip(vol, axis=0))
+        return vol
+
+    def _ct_registered_visual_transform(self, volume: np.ndarray) -> np.ndarray:
+        vol = np.asarray(volume, dtype=np.float64)
+        registered = getattr(self, "_ct_registered_flip_signature", (False, False, False))
+        current = (
+            bool(getattr(self, "_ct_flip_x_test", False)),
+            bool(getattr(self, "_ct_flip_y_test", False)),
+            bool(getattr(self, "_ct_flip_z_test", False)),
+        )
+        for axis, changed in ((2, current[0] != registered[0]), (1, current[1] != registered[1]), (0, current[2] != registered[2])):
+            if changed:
+                vol = np.ascontiguousarray(np.flip(vol, axis=axis))
         return vol
 
     def _task_progress_start(self, message: str):
@@ -3807,13 +3830,15 @@ class AmyloidSpectPanel(QDialog):
 
             vol_raw = getattr(self, "_unfiltered_volume", None)
 
+            analysis_volume = self._spect_display_volume(self._current_volume)
+            analysis_volume_raw = self._spect_display_volume(vol_raw) if vol_raw is not None else None
             result = compute_spect_ratio(
-                volume=self._current_volume,
+                volume=analysis_volume,
                 spacing_zyx=spacing,
                 voi_heart=voi_heart,
                 voi_vertebra=voi_vertebra,
                 voi_aorta=voi_aorta,
-                volume_raw=vol_raw,
+                volume_raw=analysis_volume_raw,
             )
             self._svd_result = result
 
@@ -3837,6 +3862,7 @@ class AmyloidSpectPanel(QDialog):
                 f"- S/V  = {result.s_v:.3f}\n"
                 f"- S/D  = {result.s_d:.3f}\n"
                 f"- V/D  = {result.v_d:.3f}\n"
+                f"- Medias: S={result.s_mean:.3f} V={result.v_mean:.3f} D={result.d_mean:.3f} cts/voxel\n"
                 f"- Cuentas: S={result.s_counts:.0f} V={result.v_counts:.0f} D={result.d_counts:.0f}\n"
                 f"- Voxels:  S={result.s_voxels} V={result.v_voxels} D={result.d_voxels}\n"
                 f"- Spacing: {spacing[0]:.2f}/{spacing[1]:.2f}/{spacing[2]:.2f} mm"
@@ -3844,6 +3870,12 @@ class AmyloidSpectPanel(QDialog):
             self._render_selected_view()
 
         except Exception as exc:
+            self._svd_result = None
+            self._lbl_svd_result.setText("S/VD = N/D · revisar VOI")
+            self._lbl_svd_result.setStyleSheet(
+                "font-size:14px; font-weight:700; color:#f59e0b; "
+                "background:#1e1b4b; padding:6px 12px;"
+            )
             self._status.setText(f"Error calculando S/VD: {exc}")
             QMessageBox.critical(self, "SINCRO", f"Error calculando S/VD:\n{exc}")
 
@@ -4197,7 +4229,12 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                         ct_spacing_used = spacing  # grilla SPECT
                     else:
                         ct_spacing_used = self._ct_spacing_zyx
-                    ct_transformed = self._ct_transform_3d(np.asarray(_ct_vol, dtype=np.float64))
+                    if _ct_reg is not None:
+                        ct_transformed = self._ct_registered_visual_transform(
+                            np.asarray(_ct_vol, dtype=np.float64)
+                        )
+                    else:
+                        ct_transformed = self._ct_transform_3d(np.asarray(_ct_vol, dtype=np.float64))
                     
                     # 3 fuentes de reutilización (OR lógico):
                     #   a) El usuario acaba de aplicar edición manual (_reuse_edited_segmentation)
@@ -4317,13 +4354,15 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 volume_raw = None
             
             # Calcular HMR-SPECT
+            analysis_volume = self._spect_display_volume(self._current_volume)
+            analysis_volume_raw = self._spect_display_volume(volume_raw) if volume_raw is not None else None
             result = compute_hmr_spect(
-                volume=self._current_volume,
+                volume=analysis_volume,
                 spacing_zyx=spacing,
                 voi_heart=voi_heart,
                 voi_mediastinum=voi_mediastinum,
                 method=method,
-                volume_raw=volume_raw
+                volume_raw=analysis_volume_raw,
             )
             
             self._hmr_result = result
@@ -4344,7 +4383,12 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                     )
                     _ct_reg = getattr(self, "_ct_registered", None)
                     ct_vol = _ct_reg if _ct_reg is not None else self._ct_volume
-                    ct_transformed = self._ct_transform_3d(np.asarray(ct_vol, dtype=np.float64))
+                    if _ct_reg is not None:
+                        ct_transformed = self._ct_registered_visual_transform(
+                            np.asarray(ct_vol, dtype=np.float64)
+                        )
+                    else:
+                        ct_transformed = self._ct_transform_3d(np.asarray(ct_vol, dtype=np.float64))
                     
                     ct_seg = segment_myocardium_from_ct(
                         ct_transformed,
@@ -4435,10 +4479,12 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             details += f"Clasificación: {classification}\n\n"
             details += f"Método: {result.method}\n"
             details += f"Tipo VOI: {voi_type_used}\n"
-            details += f"Cuentas corazón: {result.heart_counts:.0f}"
+            details += f"Media corazón: {result.heart_mean:.2f} cts/píxel"
+            details += f"\nMedia mediastino: {result.mediastinum_mean:.2f} cts/píxel"
+            details += f"\nCuentas totales corazón: {result.heart_counts:.0f}"
             if result.heart_counts_raw > 0:
                 details += f" (raw: {result.heart_counts_raw:.0f})"
-            details += f"\nCuentas mediastino: {result.mediastinum_counts:.0f}"
+            details += f"\nCuentas totales mediastino: {result.mediastinum_counts:.0f}"
             if result.mediastinum_counts_raw > 0:
                 details += f" (raw: {result.mediastinum_counts_raw:.0f})"
             details += f"\nVolumen corazón: {result.heart_volume_ml:.1f} mL"
@@ -4465,9 +4511,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             details += f"\n\n{'='*30}\nDIAGNÓSTICO VOIs:\n"
             details += f"Píxeles corazón: {result.heart_pixels}\n"
             details += f"Píxeles mediastino: {result.mediastinum_pixels}\n"
-            details += f"Media corazón: {result.heart_mean:.2f} cts/píxel\n"
-            details += f"Media mediastino: {result.mediastinum_mean:.2f} cts/píxel\n"
-            details += f"Ratio medias: {result.heart_mean/max(result.mediastinum_mean, 0.01):.2f}"
+            details += f"Ratio de medias usado: {result.hmr:.2f}"
             
             # Advertencia si el mediastino tiene muy pocas cuentas
             if result.mediastinum_mean < 1.0:
@@ -4506,6 +4550,14 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._render_selected_view()
             
         except Exception as exc:
+            self._hmr_result = None
+            self._pve_result = None
+            self._lbl_hmr_result.setText("HMR-SPECT = N/D · revisar VOI")
+            self._lbl_hmr_result.setStyleSheet(
+                "font-size:14px; font-weight:700; color:#f59e0b; "
+                "background:#000000; padding:6px 12px;"
+            )
+            self._status.setText(f"Error calculando HMR-SPECT: {exc}")
             QMessageBox.critical(self, "SINCRO", f"Error calculando HMR-SPECT:\n{exc}")
 
     @staticmethod
@@ -5926,14 +5978,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         return (float(dy_px) * sz * sens, float(dx_px) * sy * sens, 0.0)
 
     def _slices_preview_at(self, volume: np.ndarray) -> dict[str, np.ndarray]:
-        vol = self._spect_transform_3d(np.asarray(volume, dtype=np.float64))
+        vol = self._spect_display_volume(np.asarray(volume, dtype=np.float64))
         if vol.ndim != 3:
             return central_slices_preview(vol)
-        off_z = float(self._spect_view_offset.get("axial", 0.0))
-        off_y = float(self._spect_view_offset.get("coronal", 0.0))
-        off_x = float(self._spect_view_offset.get("sagittal", 0.0))
-        if abs(off_z) > 1e-6 or abs(off_y) > 1e-6 or abs(off_x) > 1e-6:
-            vol = ndi.shift(vol, shift=(off_z, off_y, off_x), order=1, mode='nearest')
         z = int(np.clip(self._slice_idx.get("axial", vol.shape[0] // 2), 0, vol.shape[0] - 1))
         y = int(np.clip(self._slice_idx.get("coronal", vol.shape[1] // 2), 0, vol.shape[1] - 1))
         x = int(np.clip(self._slice_idx.get("sagittal", vol.shape[2] // 2), 0, vol.shape[2] - 1))
@@ -5963,7 +6010,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
 
     def _ct_slices_preview_at(self, volume: np.ndarray, *, already_transformed: bool = False) -> dict[str, np.ndarray]:
         vol = np.asarray(volume, dtype=np.float64)
-        if not already_transformed:
+        if already_transformed:
+            vol = self._ct_registered_visual_transform(vol)
+        else:
             vol = self._ct_transform_3d(vol)
         if vol.ndim != 3:
             return self._slices_preview_at(vol)
@@ -6754,6 +6803,11 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._task_progress_step(90, "Renderizando registro...")
             self._ct_auto_registered = np.asarray(ct_reg, dtype=np.float64)
             self._ct_registered = np.asarray(ct_reg, dtype=np.float64)
+            self._ct_registered_flip_signature = (
+                bool(self._ct_flip_x_test),
+                bool(self._ct_flip_y_test),
+                bool(self._ct_flip_z_test),
+            )
             # Guardar shift total de registro (en píxeles de grilla SPECT)
             self._ct_registration_shift_zyx = (
                 float(shift_zyx[0]) + float(fine_shift_zyx[0]),
