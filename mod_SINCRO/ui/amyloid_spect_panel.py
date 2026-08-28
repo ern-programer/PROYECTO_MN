@@ -1027,6 +1027,7 @@ class AmyloidSpectPanel(QDialog):
         self._ct_drag_sensitivity = 0.35
         self._spect_win_low = 0
         self._spect_win_high = 100
+        self._spect_display_sigma = 0.8
         self._fusion_pct = 55
         self._spect_flip_x_test = False
         self._spect_flip_y_test = False
@@ -1095,7 +1096,7 @@ class AmyloidSpectPanel(QDialog):
         self._preset_combo.addItem("Manual", "manual")
         self._preset_combo.addItem("AMYLO 360 estándar 128", "amylo360_std128")
         self._preset_combo.addItem("AMYLO 360 alta definición", "amylo360_hd")
-        self._preset_combo.addItem("Clínico OSEM (suave)", "clinical_osem")
+        self._preset_combo.addItem("Clínico OSEM 8×4 + Butter (Xeleris)", "clinical_osem")
         self._preset_combo.setToolTip(
             "Presets PYP/SPECT 360. 128x128 es recomendación de adquisición; "
             "si el DICOM trae otra matriz, se reconstruye en la matriz adquirida."
@@ -2156,6 +2157,25 @@ class AmyloidSpectPanel(QDialog):
         color_row.addWidget(self._spect_cmap_combo)
         window_vbox.addLayout(color_row)
 
+        # Suavizado de vista SPECT (solo display, tipo filtro de visor Xeleris)
+        smooth_row = QHBoxLayout()
+        smooth_row.addWidget(QLabel("Suavizar vista:"))
+        self._spect_smooth_spin = QDoubleSpinBox()
+        self._spect_smooth_spin.setRange(0.0, 3.0)
+        self._spect_smooth_spin.setSingleStep(0.1)
+        self._spect_smooth_spin.setDecimals(1)
+        self._spect_smooth_spin.setValue(0.8)
+        self._spect_smooth_spin.setToolTip(
+            "Suavizado gaussiano SOLO de la vista SPECT (σ en píxeles).\n"
+            "No modifica el volumen ni la cuantificación (HMR/S·VD).\n"
+            "0 = sin suavizado."
+        )
+        self._spect_smooth_spin.setFixedWidth(60)
+        self._spect_smooth_spin.setStyleSheet("font-size:10px; padding:1px 4px;")
+        self._spect_smooth_spin.valueChanged.connect(self._on_spect_display_smooth_changed)
+        smooth_row.addWidget(self._spect_smooth_spin)
+        window_vbox.addLayout(smooth_row)
+
         # Ventana CT (compacto)
         ct_win_row = QHBoxLayout()
         ct_win_row.addWidget(QLabel("Ventana CT:"))
@@ -2560,6 +2580,8 @@ class AmyloidSpectPanel(QDialog):
         self._settings.setValue("global/ac_mu_scale", float(self._ac_mu_scale_spin.value()))
         if hasattr(self, "_ct_trial_check"):
             self._settings.setValue("global/ct_sharp", bool(self._ct_trial_check.isChecked()))
+        if hasattr(self, "_spect_smooth_spin"):
+            self._settings.setValue("global/spect_display_sigma", float(self._spect_smooth_spin.value()))
         if self._current_spect_path:
             prefix = self._study_settings_prefix()
             self._settings.setValue(f"{prefix}/preset", preset)
@@ -2609,6 +2631,12 @@ class AmyloidSpectPanel(QDialog):
             ct_sharp = str(self._settings.value("global/ct_sharp", "true")).lower() == "true"
             self._ct_trial_check.setChecked(ct_sharp)
             self._ct_visual_trial_mode = ct_sharp
+        if hasattr(self, "_spect_smooth_spin"):
+            sigma = float(self._settings.value("global/spect_display_sigma", 0.8) or 0.0)
+            self._spect_smooth_spin.blockSignals(True)
+            self._spect_smooth_spin.setValue(sigma)
+            self._spect_smooth_spin.blockSignals(False)
+            self._spect_display_sigma = sigma
         self._qc_split_slider.setValue(int(self._settings.value("global/split_pct", 50) or 50))
         self._blend_slider.setValue(int(self._settings.value("global/overlay_pct", 35) or 35))
         fusion = int(self._settings.value("global/fusion_pct", 55) or 55)
@@ -2705,15 +2733,13 @@ class AmyloidSpectPanel(QDialog):
             self._set_combo_by_data(self._gated_filter_combo, "none")
             self._gated_cutoff_spin.setValue(0.50)
             self._gated_order_spin.setValue(1)
-            self._iter_spin.setValue(2)
-            self._subsets_spin.setValue(10)
-            self._bg_check.setChecked(False)
+            self._iter_spin.setValue(8)
+            self._subsets_spin.setValue(4)
+            self._bg_check.setChecked(True)
             self._scatter_check.setChecked(False)
-            self._post_check.setChecked(True)
-            self._post_sigma_spin.setValue(1.0)
+            self._post_check.setChecked(False)
             self._denoise_plus_check.setChecked(False)
-            self._ac_iter_check.setChecked(False)
-            self._ac_mu_scale_spin.setValue(1.00)
+            # AC iterativa: se respeta el estado actual (Xeleris reconstruye con AC).
         for widget in (
             self._ung_method_combo,
             self._ung_filter_combo,
@@ -2795,18 +2821,24 @@ class AmyloidSpectPanel(QDialog):
                 display_slice_step_px=1,
             )
         if preset == "clinical_osem":
-            # Perfil tipo Xeleris: pocas actualizaciones OSEM (2×10) y el control
-            # de ruido delegado al post-filtro 3D, no a cortar iteraciones tarde.
+            # Protocolo óseo Xeleris calcado: OSEM 8it×4sub + Butterworth 3D
+            # 0.35/5 post-recon + descuento de fondo. Las 32 actualizaciones
+            # limpian fondo y definen hueso; el Butterworth corta el ruido fino
+            # sin difuminar bordes (a diferencia del gaussiano).
             return RawReconConfig(
                 reconstruction_method="osem",
                 gated_method="osem",
                 ungated_filter=ProjectionFilterConfig("none", 0.50, 1),
                 gated_filter=ProjectionFilterConfig("none", 0.50, 1),
-                iterative_iterations=2,
-                osem_subsets=10,
-                post_filter_sigma_ungated_px=1.0,
-                post_filter_sigma_gated_px=1.1,
+                iterative_iterations=8,
+                osem_subsets=4,
+                background_subtract=True,
+                post_filter_kind="butterworth",
+                post_filter_cutoff=0.35,
+                post_filter_order=5,
                 display_slice_step_px=1,
+                attenuation_correction=bool(self._ac_iter_check.isChecked()),
+                attenuation_mu_scale=float(self._ac_mu_scale_spin.value()),
             )
         return RawReconConfig(
             reconstruction_method=method,
@@ -4733,6 +4765,18 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         self._ct_window = str(self._ct_window_combo.currentData() or "bone")
         self._render_current_with_overlay()
 
+    def _on_spect_display_smooth_changed(self, value: float):
+        self._spect_display_sigma = max(0.0, float(value))
+        if hasattr(self, "_settings"):
+            self._settings.setValue("global/spect_display_sigma", self._spect_display_sigma)
+        self._render_selected_view()
+
+    def _smooth_display_2d(self, img: np.ndarray) -> np.ndarray:
+        sigma = float(getattr(self, "_spect_display_sigma", 0.0))
+        if sigma < 0.05:
+            return img
+        return ndi.gaussian_filter(np.asarray(img, dtype=np.float64), sigma=sigma, mode="nearest")
+
     def _on_ct_trial_toggled(self, checked: bool):
         self._ct_visual_trial_mode = bool(checked)
         if checked:
@@ -6031,9 +6075,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         y = int(np.clip(self._slice_idx.get("coronal", vol.shape[1] // 2), 0, vol.shape[1] - 1))
         x = int(np.clip(self._slice_idx.get("sagittal", vol.shape[2] // 2), 0, vol.shape[2] - 1))
         return {
-            "axial": self._apply_zoom_pan_2d(self._window_spect(vol[z]), self._spect_zoom_pct, self._spect_pan_px["axial"], order=1),
-            "coronal": self._apply_zoom_pan_2d(self._window_spect(vol[:, y, :]), self._spect_zoom_pct, self._spect_pan_px["coronal"], order=1),
-            "sagittal": self._apply_zoom_pan_2d(self._window_spect(vol[:, :, x]), self._spect_zoom_pct, self._spect_pan_px["sagittal"], order=1),
+            "axial": self._apply_zoom_pan_2d(self._window_spect(self._smooth_display_2d(vol[z])), self._spect_zoom_pct, self._spect_pan_px["axial"], order=1),
+            "coronal": self._apply_zoom_pan_2d(self._window_spect(self._smooth_display_2d(vol[:, y, :])), self._spect_zoom_pct, self._spect_pan_px["coronal"], order=1),
+            "sagittal": self._apply_zoom_pan_2d(self._window_spect(self._smooth_display_2d(vol[:, :, x])), self._spect_zoom_pct, self._spect_pan_px["sagittal"], order=1),
         }
 
     def _reset_view_offsets(self):

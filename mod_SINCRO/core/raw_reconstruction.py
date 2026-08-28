@@ -69,6 +69,12 @@ class RawReconConfig:
     post_filter_sigma_px: float = 0.0
     post_filter_sigma_ungated_px: float | None = None
     post_filter_sigma_gated_px: float | None = None
+    # Post-filtro alternativo Butterworth 3D radial (protocolo Xeleris óseo:
+    # OSEM 8×4 + Butter 0.35/5 post-recon). kind: "gaussian" | "butterworth".
+    # Con "butterworth" se ignoran las sigmas y se usa cutoff/orden (frac. Nyquist).
+    post_filter_kind: str = "gaussian"
+    post_filter_cutoff: float = 0.35
+    post_filter_order: int = 5
     # --- Feta axial (cilindro del corazón) ---
     # Rango de cortes axiales (z = fila del detector) a reconstruir, inclusive:
     # (z0, z1). None = volumen completo. En SPECT paralelo cada corte z se
@@ -237,6 +243,24 @@ def _validate_config(config: RawReconConfig) -> RawReconConfig:
     if nitida2_mode not in {"none", "temporal", "spatiotemporal"}:
         raise ValueError("nitida2_mode debe ser 'none', 'temporal' o 'spatiotemporal'")
     return config
+
+
+def _butterworth_3d(volume: np.ndarray, cutoff: float, order: int) -> np.ndarray:
+    """Butterworth 3D radial post-recon (cutoff en fracción de Nyquist).
+
+    Misma convención de respuesta que filter_projections: corta el ruido de alta
+    frecuencia preservando frecuencias medias (bordes óseos), a diferencia del
+    gaussiano que atenúa todo el espectro.
+    """
+    vol = np.asarray(volume, dtype=np.float64)
+    cutoff = float(np.clip(float(cutoff), 1e-4, 1.0))
+    order = max(1, int(order))
+    fz = np.abs(np.fft.fftfreq(vol.shape[0])) / 0.5
+    fy = np.abs(np.fft.fftfreq(vol.shape[1])) / 0.5
+    fx = np.abs(np.fft.fftfreq(vol.shape[2])) / 0.5
+    freq = np.sqrt(fz[:, None, None] ** 2 + fy[None, :, None] ** 2 + fx[None, None, :] ** 2)
+    resp = 1.0 / np.sqrt(1.0 + (freq / cutoff) ** (2 * order))
+    return np.fft.ifftn(np.fft.fftn(vol) * resp).real
 
 
 def filter_projections(projections: np.ndarray, config: ProjectionFilterConfig) -> np.ndarray:
@@ -1351,7 +1375,17 @@ def reconstruct_raw_gated_pipeline(
     # Guardar copia SIN filtro para toggle en UI (se asigna al result al final)
     _ungated_unfiltered = np.ascontiguousarray(ungated_volume.copy())
 
-    if post_ung > 0.05 or post_gat > 0.05:
+    _post_kind = str(getattr(cfg, "post_filter_kind", "gaussian") or "gaussian").strip().lower()
+    if _post_kind == "butterworth":
+        if progress_callback is not None:
+            progress_callback(0.96, "Aplicando post-filtro Butterworth 3D...")
+        _bc = float(getattr(cfg, "post_filter_cutoff", 0.35))
+        _bo = int(getattr(cfg, "post_filter_order", 5))
+        ungated_volume = np.clip(_butterworth_3d(ungated_volume, _bc, _bo), 0.0, None)
+        for g in range(gated_volume.shape[0]):
+            gated_volume[g] = np.clip(_butterworth_3d(gated_volume[g], _bc, _bo), 0.0, None)
+        notes.append(f"Post-filtro Butterworth 3D: cutoff={_bc:.2f} Nyquist, orden={_bo} (ungated y gated).")
+    elif post_ung > 0.05 or post_gat > 0.05:
         if progress_callback is not None:
             progress_callback(0.96, "Aplicando post-filtro (suavizado)...")
         if post_ung > 0.05:
