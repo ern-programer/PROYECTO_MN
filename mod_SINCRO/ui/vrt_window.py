@@ -37,7 +37,8 @@ class VrtWindow(QDialog):
                  spect_volume: np.ndarray | None = None,
                  spacing_zyx: tuple | None = None,
                  vois: list[dict] | None = None,
-                 mask_3d: np.ndarray | None = None):
+                 mask_3d: np.ndarray | None = None,
+                 voi_mask_3d: np.ndarray | None = None):
         super().__init__(parent)
         self.setWindowTitle("VRT 3D — Render volumétrico óseo (experimental)")
         self.setWindowFlags(
@@ -73,14 +74,18 @@ class VrtWindow(QDialog):
         self._factor_hq = min(1.0, float(self.MAX_SIDE_HQ) / float(max(ct.shape)))
         self._factor_fast = min(1.0, float(self.MAX_SIDE_FAST) / float(max(ct.shape)))
         self._vois = list(vois) if vois else []
-        self._mask_hq = self._mask_fast = None
-        if mask_3d is not None and np.any(mask_3d):
-            m = np.asarray(mask_3d, dtype=np.float32)
+        # Máscaras volumétricas: CT segmentada (turquesa) y VOI de cuantificación (rojo)
+        self._masks: list[dict] = []
+        for m_src, rgb in ((mask_3d, (64, 224, 208)), (voi_mask_3d, (248, 113, 113))):
+            if m_src is None or not np.any(m_src):
+                continue
+            m = np.asarray(m_src, dtype=np.float32)
             m_hq = ndi.zoom(m, self._factor_hq, order=0, prefilter=False) if self._factor_hq < 0.999 else m
             m_fast = ndi.zoom(m, self._factor_fast, order=0, prefilter=False) if self._factor_fast < 0.999 else m
-            self._mask_hq = np.ascontiguousarray(m_hq > 0.5)
-            self._mask_fast = np.ascontiguousarray(m_fast > 0.5)
-        self._show_overlays = bool(self._vois or self._mask_hq is not None)
+            self._masks.append({"hq": np.ascontiguousarray(m_hq > 0.5),
+                                "fast": np.ascontiguousarray(m_fast > 0.5),
+                                "rgb": rgb})
+        self._show_overlays = bool(self._vois or self._masks)
 
         # Percentil de focos SPECT (sobre el volumen sin rotar, una sola vez)
         self._sp_p100 = float(np.max(self._sp_hq)) if self._sp_hq is not None else 0.0
@@ -222,8 +227,11 @@ class VrtWindow(QDialog):
         row3.addWidget(self._chk_table)
         self._chk_overlays = QCheckBox("VOIs/Máscara")
         self._chk_overlays.setChecked(self._show_overlays)
-        self._chk_overlays.setEnabled(bool(self._vois or self._mask_hq is not None))
-        self._chk_overlays.setToolTip("Proyectar VOIs (círculos) y contorno de la máscara CT sobre el 3D.")
+        self._chk_overlays.setEnabled(bool(self._vois or self._masks))
+        self._chk_overlays.setToolTip(
+            "Proyectar VOIs (círculos), máscara CT (turquesa)\n"
+            "y VOI de cuantificación HMR (rojo) sobre el 3D."
+        )
         self._chk_overlays.toggled.connect(self._on_params_changed)
         row3.addWidget(self._chk_overlays)
         row3.addSpacing(12)
@@ -492,10 +500,12 @@ class VrtWindow(QDialog):
             img = np.clip(color_acc * self._brightness * 255.0, 0, 255).astype(np.uint8)
             img = np.ascontiguousarray(img)
 
-            # Overlay: contorno de la máscara CT proyectada (rotada igual que el volumen)
-            if self._show_overlays:
-                mask = self._mask_fast if self._fast_mode else self._mask_hq
-                if mask is not None and mask.shape == shape:
+            # Overlay: contorno de cada máscara proyectada (rotada igual que el volumen)
+            if self._show_overlays and self._masks:
+                for mk in self._masks:
+                    mask = mk["fast"] if self._fast_mode else mk["hq"]
+                    if mask is None or mask.shape != shape:
+                        continue
                     m = mask.astype(np.float32)
                     if abs(self._azimuth) > 0.25:
                         m = ndi.rotate(m, self._azimuth, axes=(2, 1), reshape=False,
@@ -506,9 +516,10 @@ class VrtWindow(QDialog):
                     m2d = np.max(m, axis=1) > 0.5
                     if m2d.any():
                         edge = m2d ^ ndi.binary_erosion(m2d, iterations=1)
+                        rgb = np.array(mk["rgb"], dtype=np.float32)
                         img[m2d] = (img[m2d].astype(np.float32) * 0.82
-                                    + np.array([0, 46, 46], dtype=np.float32)).clip(0, 255).astype(np.uint8)
-                        img[edge] = (64, 224, 208)  # contorno turquesa
+                                    + rgb * 0.18).clip(0, 255).astype(np.uint8)
+                        img[edge] = tuple(int(c) for c in mk["rgb"])
 
             h, w = img.shape[:2]
             qimg = QImage(img.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()

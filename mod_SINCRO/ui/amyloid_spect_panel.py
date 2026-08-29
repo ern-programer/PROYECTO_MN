@@ -6785,11 +6785,26 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                         m = ndi.zoom(m, zf, order=0, prefilter=False)
                     mask_vrt = m > 0.5
 
+            # VOI de cuantificación HMR (anatómica): la máscara real usada en el
+            # cálculo (la que reporta el volumen en mL), en grilla display SPECT.
+            voi_mask_vrt = None
+            if ct_vol is not None:
+                hmr_res = getattr(self, "_hmr_result", None)
+                voi_h = getattr(hmr_res, "voi_heart", None) if hmr_res is not None else None
+                vm_src = getattr(voi_h, "mask_3d_data", None) if voi_h is not None else None
+                if vm_src is not None:
+                    vm = np.asarray(vm_src, dtype=np.float32)
+                    if vm.ndim == 3 and vm.any():
+                        if vm.shape != ct_vol.shape:
+                            zf = tuple(ct_vol.shape[i] / max(1, vm.shape[i]) for i in range(3))
+                            vm = ndi.zoom(vm, zf, order=0, prefilter=False)
+                        voi_mask_vrt = vm > 0.5
+
             self._task_progress_step(60, "Abriendo ventana VRT (quita camilla)...")
             from ui.vrt_window import VrtWindow
             dlg = VrtWindow(self, ct_volume=ct_vol, spect_volume=sp_vol,
                             spacing_zyx=getattr(self, "_trial_ct_native_spacing", None),
-                            vois=vois, mask_3d=mask_vrt)
+                            vois=vois, mask_3d=mask_vrt, voi_mask_3d=voi_mask_vrt)
             self._task_progress_done("VRT 3D listo")
             dlg.show()
         except Exception as exc:
