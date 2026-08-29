@@ -1003,6 +1003,71 @@ def apply_visual_bone_suppression(
     )
 
 
+def remove_ct_table(
+    ct_volume: np.ndarray,
+    *,
+    body_hu_threshold: float = -400.0,
+    fill_value: float = -1000.0,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Elimina la camilla de la CT conservando solo el cuerpo del paciente.
+
+    Método clásico (equivalente al ROI automático de camilla de las estaciones
+    comerciales): umbral de tejido, erosión para desconectar camilla↔espalda,
+    mayor componente conexa 3D (el cuerpo), dilatación de recuperación y
+    relleno de huecos internos (pulmones/vía aérea).
+
+    Returns:
+        (ct_sin_camilla, body_mask_bool, notas)
+    """
+    ct = np.asarray(ct_volume, dtype=np.float64)
+    if ct.ndim != 3:
+        raise ValueError(f"Se esperaba CT 3D, recibido {ct.shape}")
+    notes: list[str] = []
+
+    tissue = ct > float(body_hu_threshold)
+    if not np.any(tissue):
+        notes.append("Camilla: sin voxeles de tejido sobre el umbral; no se modifica la CT.")
+        return ct.copy(), np.ones_like(ct, dtype=bool), notes
+
+    # Erosión 2D por corte (la camilla toca la espalda a lo largo de z: separar
+    # en el plano axial evita comer el cuerpo en los extremos del eje z).
+    st2d = np.ones((1, 3, 3), dtype=bool)
+    eroded = ndi.binary_erosion(tissue, structure=st2d, iterations=3)
+    if not np.any(eroded):
+        eroded = tissue
+
+    labels, n_labels = ndi.label(eroded)
+    if n_labels > 1:
+        sizes = ndi.sum_labels(np.ones_like(labels, dtype=np.int32), labels, index=np.arange(1, n_labels + 1))
+        body_label = int(np.argmax(sizes)) + 1
+        body = labels == body_label
+        removed_frac = 1.0 - float(sizes.max()) / max(float(sizes.sum()), 1.0)
+        notes.append(
+            f"Camilla: {n_labels} componentes de tejido; se conserva la mayor "
+            f"({removed_frac * 100.0:.1f}% de voxeles descartados como camilla/accesorios)."
+        )
+    else:
+        body = eroded
+        notes.append("Camilla: una sola componente de tejido (camilla ya fuera de FOV o pegada al cuerpo).")
+
+    # Recuperar el borde erosionado y cerrar huecos internos por corte.
+    body = ndi.binary_dilation(body, structure=st2d, iterations=4)
+    body &= tissue
+    body = ndi.binary_fill_holes(body, structure=np.array([[[0, 0, 0], [0, 1, 0], [0, 0, 0]],
+                                                           [[0, 1, 0], [1, 1, 1], [0, 1, 0]],
+                                                           [[0, 0, 0], [0, 1, 0], [0, 0, 0]]], dtype=bool))
+    for z in range(body.shape[0]):
+        body[z] = ndi.binary_fill_holes(body[z])
+
+    cleaned = ct.copy()
+    cleaned[~body] = float(fill_value)
+    notes.append(
+        f"Camilla eliminada: {int((~body & tissue).sum())} voxeles de tejido no-cuerpo "
+        f"reemplazados por {fill_value:.0f} HU."
+    )
+    return cleaned, body, notes
+
+
 def _auto_flip_ct_to_spect(ct_rs: np.ndarray, spect: np.ndarray) -> tuple[np.ndarray, str, float]:
     """Resuelve la orientación de la CT probando las 8 combinaciones de flips.
 

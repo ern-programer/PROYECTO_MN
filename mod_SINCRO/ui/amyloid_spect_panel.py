@@ -1201,6 +1201,16 @@ class AmyloidSpectPanel(QDialog):
         self._btn_export_axes_dcm.setEnabled(False)
         flow.addWidget(self._btn_export_axes_dcm, 1, 8)
 
+        self._btn_vrt = QPushButton("🦴 VRT 3D")
+        self._btn_vrt.clicked.connect(self._open_vrt_window)
+        self._btn_vrt.setEnabled(False)
+        self._btn_vrt.setToolTip(
+            "Render volumétrico 3D esquelético de la CT (ventana propia).\n"
+            "Con SPECT registrado superpone los focos calientes en violeta.\n"
+            "Quita la camilla automáticamente."
+        )
+        flow.addWidget(self._btn_vrt, 2, 6, 1, 2)
+
         self._btn_fusion_layout = QPushButton("6b. Vista informe fusión")
         self._btn_fusion_layout.clicked.connect(self._show_fusion_report_layout)
         self._btn_fusion_layout.setEnabled(False)
@@ -6663,6 +6673,40 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         else:
             self._mip_widget.set_ct_volume(None)
 
+    def _open_vrt_window(self):
+        """Abre la ventana VRT 3D con CT en alta resolución + SPECT en su grilla."""
+        if self._ct_volume is None:
+            self._status.setText("VRT 3D: cargar primero una CT (3a/3b).")
+            return
+        try:
+            self._task_progress_start("Preparando volúmenes VRT...")
+            ct_vol = None
+            sp_vol = None
+            # Preferir el caché CT nativa 2x: resuelve orientación, registro y
+            # deja CT y SPECT en la MISMA grilla isotrópica de alta resolución.
+            if self._current_volume is not None and self._ensure_ct_grid_trial_cache():
+                ct_vol = np.asarray(self._trial_ct_native, dtype=np.float32)
+                sp_vol = np.asarray(self._trial_spect_on_ct, dtype=np.float32)
+            elif self._ct_registered is not None:
+                ct_vol = self._ct_registered_visual_transform(
+                    np.asarray(self._ct_registered, dtype=np.float64)
+                ).astype(np.float32)
+                if self._current_volume is not None:
+                    sp_vol = self._spect_display_volume(
+                        np.asarray(self._current_volume, dtype=np.float64)
+                    ).astype(np.float32)
+            else:
+                ct_vol = self._ct_transform_3d(np.asarray(self._ct_volume, dtype=np.float64)).astype(np.float32)
+            self._task_progress_step(60, "Abriendo ventana VRT (quita camilla)...")
+            from ui.vrt_window import VrtWindow
+            dlg = VrtWindow(self, ct_volume=ct_vol, spect_volume=sp_vol,
+                            spacing_zyx=getattr(self, "_trial_ct_native_spacing", None))
+            self._task_progress_done("VRT 3D listo")
+            dlg.show()
+        except Exception as exc:
+            self._progress.setFormat("Error")
+            self._status.setText(f"Error abriendo VRT 3D: {exc}")
+
     def _show_fusion_report_layout(self):
         try:
             if self._base_spect_volume is None and self._current_volume is None:
@@ -7080,6 +7124,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._fusion_slider.setEnabled(False)
             self._ct_opacity_slider.setEnabled(False)
             self._btn_register.setEnabled(self._base_spect_volume is not None)
+            self._btn_vrt.setEnabled(True)
             self._status.setText(f"CT cargado · {ct.series_description} · shape {self._ct_volume.shape}")
             self._metrics.append("\n--- CT cargado ---")
             for note in ct.notes:
