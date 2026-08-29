@@ -2775,7 +2775,7 @@ class AmyloidSpectPanel(QDialog):
                     self._load_ct_path(ct_path)
                     return
             if saved >= self._STAGE_REGISTERED:
-                if not getattr(self, "_ct_auto_registered", False):
+                if getattr(self, "_ct_auto_registered", None) is None:
                     self._metrics.append("→ Registrando CT↔SPECT...")
                     self._register_ct_to_spect()
                     return
@@ -3144,16 +3144,9 @@ class AmyloidSpectPanel(QDialog):
                 check.setChecked(str(val).lower() == "true")
                 check.blockSignals(False)
         # --- Nudges y rotaciones CT ---
-        if hasattr(self, "_nudge_z"):
-            for spin, key in (
-                (self._nudge_z, "ct_nudge_z"), (self._nudge_y, "ct_nudge_y"), (self._nudge_x, "ct_nudge_x"),
-                (self._rot_z, "ct_rot_z"), (self._rot_y, "ct_rot_y"), (self._rot_x, "ct_rot_x"),
-            ):
-                val = self._settings.value(f"{prefix}/{key}")
-                if val is not None:
-                    spin.blockSignals(True)
-                    spin.setValue(float(val))
-                    spin.blockSignals(False)
+        # NO se restauran automáticamente: son deltas sobre el registro CT↔SPECT de
+        # aquella sesión. Aplicarlos sin ese registro desplaza CT/máscara/VOIs
+        # (puntos VRT y máscara MIP en cualquier lado). Quedan guardados como referencia.
         # --- Paths CT / atenuación ---
         ct_saved = str(self._settings.value(f"{prefix}/ct_path", "") or "")
         att_saved = str(self._settings.value(f"{prefix}/att_path", "") or "")
