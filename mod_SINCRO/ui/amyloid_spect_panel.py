@@ -1769,6 +1769,16 @@ class AmyloidSpectPanel(QDialog):
         self._ct_anatomical_check.toggled.connect(self._on_ct_anatomical_mode_toggled)
         anat_row = QHBoxLayout()
         anat_row.addWidget(self._ct_anatomical_check)
+        self._btn_pve_info = QPushButton("ℹ PVE")
+        self._btn_pve_info.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_pve_info.setToolTip("Qué es el efecto de volumen parcial (PVE) y cómo interpretar el HMR corregido.")
+        self._btn_pve_info.setStyleSheet(
+            "QPushButton { font-size:11px; font-weight:600; color:#6366f1; background:transparent; "
+            "border:1px dashed #6366f1; border-radius:4px; padding:4px 10px; }"
+            "QPushButton:hover { background:#eef2ff; }"
+        )
+        self._btn_pve_info.clicked.connect(self._show_pve_info_dialog)
+        anat_row.addWidget(self._btn_pve_info)
         anat_row.addStretch(1)
         anat_row.addWidget(QLabel("Tope VOI (mL):"))
         self._voi_target_ml_spin = QSpinBox()
@@ -4514,6 +4524,91 @@ class AmyloidSpectPanel(QDialog):
             )
             self._status.setText(f"Error calculando S/VD: {exc}")
             QMessageBox.critical(self, "SINCRO", f"Error calculando S/VD:\n{exc}")
+
+    def _show_pve_info_dialog(self) -> None:
+        """Abre un diálogo con la explicación del efecto de volumen parcial (PVE)."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("ℹ️ Efecto de Volumen Parcial (PVE)")
+        dlg.setMinimumSize(620, 580)
+        dlg.resize(660, 640)
+
+        layout = QVBoxLayout(dlg)
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setStyleSheet(
+            "QTextBrowser { font-size:13px; background:#0f172a; color:#e2e8f0; "
+            "border:1px solid #334155; border-radius:6px; padding:8px; }"
+        )
+        browser.setHtml("""
+<h2 style="color:#38bdf8; margin-top:0;">🔬 Efecto de Volumen Parcial (PVE)</h2>
+
+<h3 style="color:#f59e0b;">¿Qué es el PVE?</h3>
+<p><b>PVE = Partial Volume Effect</b> (efecto de volumen parcial). Es un fenómeno físico del SPECT:
+cuando la estructura que emite es <b>del mismo orden de tamaño que la resolución de la cámara</b>,
+las cuentas se "desparraman" fuera del objeto y el valor medido queda <b>subestimado</b>.</p>
+<ul>
+<li>Resolución SPECT típica: <b>FWHM ≈ 10–15 mm</b> (el "borroneo" del sistema)</li>
+<li>Grosor de pared miocárdica: <b>≈ 10–14 mm</b></li>
+</ul>
+<p>Al ser comparables, parte de las cuentas que emite el miocardio se difumina hacia afuera de la
+pared: el corazón <b>parece menos caliente de lo que realmente está</b>. En amiloidosis con PYP esto
+importa porque el HMR medido queda artificialmente bajo y un positivo débil puede caer en zona equívoca.</p>
+
+<h3 style="color:#f59e0b;">¿Qué hace el modo "CT anatómica / PVE"?</h3>
+<ol>
+<li><b>Segmenta el miocardio en la CT</b> (que sí tiene resolución para verlo): umbral HU adaptativo,
+morfología 3D y crecimiento radial desde el ancla A.</li>
+<li><b>Mide el grosor de la pared</b> por segmento (6 direcciones tipo AHA con distance transform).</li>
+<li>Calcula el <b>Coeficiente de Recuperación (RC)</b> con un modelo gaussiano de la PSF (Hoffman):</li>
+</ol>
+<div style="background:#1e293b; padding:12px; border-radius:6px; text-align:center;
+font-size:16px; font-weight:bold; margin:8px 0;">
+RC = erf( d / (2√2 · σ) ) &nbsp;&nbsp;&nbsp; σ = FWHM / 2.355
+</div>
+<ul>
+<li>Pared <b>gruesa</b> respecto de la resolución → RC → 1.0 (casi no pierde cuentas)</li>
+<li>Pared <b>fina</b> → RC bajo (ej: RC = 0.7 ⇒ solo se mide el 70% de las cuentas reales)</li>
+</ul>
+
+<h3 style="color:#f59e0b;">El valor corregido por PVE</h3>
+<div style="background:#1e293b; padding:12px; border-radius:6px; text-align:center;
+font-size:16px; font-weight:bold; margin:8px 0;">
+HMR<sub>corr</sub> = HMR<sub>original</sub> × (1 / RC)
+</div>
+<p><b>Ejemplo:</b> HMR medido = 1.45 (equívoco) con RC = 0.75 → corregido = 1.45 / 0.75 ≈
+<b style="color:#ef4444;">1.93 (positivo claro)</b>.</p>
+<p>La corrección se aplica <b>solo al numerador</b> (corazón): el mediastino es una región grande
+donde RC ≈ 1 y no sufre PVE apreciable.</p>
+
+<h3 style="color:#ef4444;">⚠ Advertencias importantes</h3>
+<ul>
+<li>El corregido es <b>siempre ≥ el original</b> (nunca corrige hacia abajo).</li>
+<li>Los cutoffs clínicos (≥1.6 positivo, 1.5–1.6 equívoco, &lt;1.5 negativo) fueron validados con
+valores <b>SIN corregir</b>: el corregido <b>no es directamente comparable</b> contra esos cortes.</li>
+<li>El modelo es analítico simplificado (gaussiana + grosor medio); depende de que la segmentación
+CT y el FWHM asumido (12 mm por defecto) sean razonables.</li>
+<li>Una segmentación CT incorrecta (grosor mal medido) produce un RC erróneo: revisar siempre la
+máscara en las vistas antes de confiar en el valor corregido.</li>
+</ul>
+
+<h3 style="color:#22c55e;">Uso recomendado</h3>
+<p>Usar el <b>HMR original</b> para la clasificación clínica estándar, y el <b>corregido como dato
+de apoyo</b> — sobre todo en casos equívocos con pared fina, donde indica que el valor real
+probablemente es más alto. Por eso el módulo lo marca como <i>experimental</i>.</p>
+
+<h3 style="color:#f59e0b;">Referencias</h3>
+<ul>
+<li>Hoffman EJ et al. <i>Quantitation in positron emission computed tomography: 1. Effect of
+object size.</i> J Comput Assist Tomogr 1979.</li>
+<li>Erlandsson K et al. <i>A review of partial volume correction techniques for emission
+tomography.</i> Phys Med Biol 2012.</li>
+</ul>
+""")
+        layout.addWidget(browser)
+        btn_close = QPushButton("Cerrar")
+        btn_close.clicked.connect(dlg.accept)
+        layout.addWidget(btn_close)
+        dlg.exec()
 
     def _show_svd_info_dialog(self) -> None:
         """Abre un diálogo con la guía completa de interpretación del ratio S/VD."""
