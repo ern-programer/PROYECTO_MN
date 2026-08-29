@@ -2214,8 +2214,8 @@ class AmyloidSpectPanel(QDialog):
         self._btn_toggle_controls = QPushButton()
         self._btn_toggle_controls.setCheckable(True)
         self._btn_toggle_controls.setStyleSheet(
-            "font-size:10px; padding:2px 8px; background:#1e293b; color:#94a3b8; "
-            "border:1px solid #334155; border-radius:3px; text-align:left;"
+            "font-size:10px; padding:2px 8px; background:#4E86B7; color:white; "
+            "border:1px solid #3b6d99; border-radius:3px; text-align:left;"
         )
         self._btn_toggle_controls.toggled.connect(self._toggle_controls_block)
         controls_open = str(self._settings.value("global/controls_block_open", "false")).lower() == "true"
@@ -2230,10 +2230,6 @@ class AmyloidSpectPanel(QDialog):
         # --- COLUMNA DERECHA: Controles + MIP ---
         right_col = QVBoxLayout()
         right_col.setSpacing(6)
-
-        # ═══ FILA SUPERIOR: Ventana/Color (izq) + Overlay/QC/Cortes (der) ═══
-        top_right_row = QHBoxLayout()
-        top_right_row.setSpacing(6)
 
         # --- Grupo: Rango y Color SPECT ---
         window_group = QGroupBox("Ventana / Color")
@@ -2380,13 +2376,28 @@ class AmyloidSpectPanel(QDialog):
         trial_grid_row.addWidget(self._ct_info_btn)
         window_vbox.addLayout(trial_grid_row)
 
-        top_right_row.addWidget(window_group, 1)   # Ventana/Color: 1 parte
-        
-        # Overlay / QC / Cortes (al lado de Ventana/Color)
-        top_right_row.addWidget(overlay_qc_group, 1)  # Overlay/QC: 1 parte
+        # ═══ Bloque colapsable: Ventana/Color + Overlay/QC/Cortes ═══
+        right_controls_container = QWidget()
+        right_controls_layout = QHBoxLayout(right_controls_container)
+        right_controls_layout.setContentsMargins(0, 0, 0, 0)
+        right_controls_layout.setSpacing(6)
+        right_controls_layout.addWidget(window_group, 1)
+        right_controls_layout.addWidget(overlay_qc_group, 1)
+        self._right_controls_container = right_controls_container
 
-        right_col.addLayout(top_right_row)  # Fila con ambos grupos lado a lado
-        
+        self._btn_toggle_right_controls = QPushButton()
+        self._btn_toggle_right_controls.setCheckable(True)
+        self._btn_toggle_right_controls.setStyleSheet(
+            "font-size:10px; padding:2px 8px; background:#4E86B7; color:white; "
+            "border:1px solid #3b6d99; border-radius:3px; text-align:left;"
+        )
+        self._btn_toggle_right_controls.toggled.connect(self._toggle_right_controls_block)
+        right_controls_open = str(self._settings.value("global/right_controls_open", "true")).lower() == "true"
+        self._btn_toggle_right_controls.setChecked(right_controls_open)
+        self._toggle_right_controls_block(right_controls_open)
+        right_col.addWidget(self._btn_toggle_right_controls)
+        right_col.addWidget(right_controls_container)
+
         # ═══ MIP 360° (debajo, ocupa todo el ancho) ═══
         right_col.addWidget(mip_group, 1)
         
@@ -2407,8 +2418,8 @@ class AmyloidSpectPanel(QDialog):
         self._btn_toggle_console.setChecked(False)  # OCULTA por defecto
         self._btn_toggle_console.setToolTip("Ocultar / Mostrar consola de métricas")
         self._btn_toggle_console.setStyleSheet(
-            "font-size:10px; padding:2px 8px; background:#1e293b; color:#94a3b8; "
-            "border:1px solid #334155; border-radius:3px;"
+            "font-size:10px; padding:2px 8px; background:#4E86B7; color:white; "
+            "border:1px solid #3b6d99; border-radius:3px;"
         )
         self._btn_toggle_console.toggled.connect(self._toggle_console)
 
@@ -2966,6 +2977,14 @@ class AmyloidSpectPanel(QDialog):
             ("▼ " if visible else "▶ ") + "Controles: HMR-SPECT · Máscara CT · Orientación · Zoom · Ajuste"
         )
         self._settings.setValue("global/controls_block_open", bool(visible))
+
+    def _toggle_right_controls_block(self, visible: bool):
+        """Muestra/oculta Ventana/Color + Overlay/QC/Cortes; colapsado el MIP toma todo el alto."""
+        self._right_controls_container.setVisible(visible)
+        self._btn_toggle_right_controls.setText(
+            ("▼ " if visible else "▶ ") + "Ventana / Color · Overlay / QC / Cortes"
+        )
+        self._settings.setValue("global/right_controls_open", bool(visible))
 
     def _check_startup_auto_continue(self):
         """Al abrir el panel: si el último estudio tiene estado guardado, ofrecer retomarlo."""
