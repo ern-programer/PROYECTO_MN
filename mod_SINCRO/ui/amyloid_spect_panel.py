@@ -1733,7 +1733,26 @@ class AmyloidSpectPanel(QDialog):
             "Activado: prueba segmentación CT, edición de máscara y corrección PVE."
         )
         self._ct_anatomical_check.toggled.connect(self._on_ct_anatomical_mode_toggled)
-        hmr_layout.addWidget(self._ct_anatomical_check)
+        anat_row = QHBoxLayout()
+        anat_row.addWidget(self._ct_anatomical_check)
+        anat_row.addStretch(1)
+        anat_row.addWidget(QLabel("Tope VOI (mL):"))
+        self._voi_target_ml_spin = QSpinBox()
+        self._voi_target_ml_spin.setRange(0, 600)
+        self._voi_target_ml_spin.setSingleStep(25)
+        self._voi_target_ml_spin.setSpecialValueText("Sin tope")
+        self._voi_target_ml_spin.setValue(int(self._settings.value("amylo/voi_target_ml", 250) or 250))
+        self._voi_target_ml_spin.setToolTip(
+            "Volumen máximo de la VOI anatómica automática (mL).\n"
+            "Si la segmentación CT supera este valor, se recorta radialmente\n"
+            "desde el ancla A conservando los voxels más cercanos.\n"
+            "0 = sin tope. Recalcular HMR (sin 'Preservar máscara') para aplicar."
+        )
+        self._voi_target_ml_spin.valueChanged.connect(
+            lambda v: self._settings.setValue("amylo/voi_target_ml", int(v))
+        )
+        anat_row.addWidget(self._voi_target_ml_spin)
+        hmr_layout.addLayout(anat_row)
 
         # === Botones de persistencia CT (guardar/cargar/reiniciar) ===
         ct_persist_row = QHBoxLayout()
@@ -4399,6 +4418,14 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             )
         self._render_selected_view()
 
+    def _voi_target_volume_ml(self) -> float | None:
+        """Tope de volumen (mL) para la VOI anatómica automática; None = sin tope."""
+        spin = getattr(self, "_voi_target_ml_spin", None)
+        if spin is None:
+            return None
+        v = int(spin.value())
+        return float(v) if v > 0 else None
+
     def _calculate_hmr_spect(self) -> None:
         """Calcula HMR-SPECT usando VOIs esféricas desde puntos de localización."""
         try:
@@ -4524,6 +4551,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                             ct_spacing_used,
                             seed_zyx=anchor,
                             seed_radius_mm=max(heart_radius * 1.5, 50.0),
+                            target_volume_ml=self._voi_target_volume_ml(),
                         )
                         
                     self._ct_segmentation = ct_seg
@@ -4657,6 +4685,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                         self._ct_spacing_zyx,
                         seed_zyx=anchor,
                         seed_radius_mm=max(heart_radius * 1.5, 50.0),
+                        target_volume_ml=self._voi_target_volume_ml(),
                     )
                     self._ct_segmentation = ct_seg
                     # Habilitar F2.4 también desde bloque PVE

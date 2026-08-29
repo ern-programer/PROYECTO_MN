@@ -2118,6 +2118,7 @@ def segment_myocardium_from_ct(
     max_volume_mm3: float = 500000.0,
     dilation_mm: float = 3.0,
     erosion_mm: float = 2.0,
+    target_volume_ml: float | None = None,
 ) -> MyocardialSegmentationResult:
     """Segmenta el miocardio del ventrículo izquierdo desde un volumen CT.
 
@@ -2142,6 +2143,10 @@ def segment_myocardium_from_ct(
         min/max_volume_mm3: Filtros de volumen plausible para VI
         dilation_mm: Dilatación morfológica previa (cierra huecos)
         erosion_mm: Erosión morfológica posterior (separa de otras estructuras)
+        target_volume_ml: Tope de volumen (mL). Si la máscara lo supera, se
+            recorta radialmente desde la semilla conservando los voxels más
+            cercanos hasta alcanzar el objetivo (útil en CT no diagnóstica
+            donde la silueta incluye aurículas/vasos/pool).
 
     Returns:
         MyocardialSegmentationResult con máscara y métricas
@@ -2341,7 +2346,42 @@ def segment_myocardium_from_ct(
             notes.append("Shaping radial: sin voxels internos. Usando forma cruda.")
     except Exception as shaping_exc:
         notes.append(f"Shaping anatómico falló: {shaping_exc}. Usando forma cruda.")
-    
+
+    # Tope de volumen: recorte radial anisotrópico desde la semilla.
+    # En CT de 4 cortes sin contraste la silueta cardíaca incluye
+    # aurículas/vasos/pool y puede superar 400-500 mL.
+    if target_volume_ml is not None and target_volume_ml > 0 and np.any(refined_crop):
+        vox_mm3 = sz * sy * sx
+        cur_ml = float(refined_crop.sum()) * vox_mm3 / 1000.0
+        if cur_ml > float(target_volume_ml):
+            try:
+                if seed_zyx is not None and bbox is not None:
+                    z0b, _, y0b, _, x0b, _ = bbox
+                    seed_c = (float(seed_zyx[0]) - z0b,
+                              float(seed_zyx[1]) - y0b,
+                              float(seed_zyx[2]) - x0b)
+                else:
+                    seed_c = tuple(np.argwhere(refined_crop).mean(axis=0))
+                zz, yy, xx = np.mgrid[0:ct_crop.shape[0], 0:ct_crop.shape[1], 0:ct_crop.shape[2]]
+                dmm = np.sqrt(((zz - seed_c[0]) * sz) ** 2
+                              + ((yy - seed_c[1]) * sy) ** 2
+                              + ((xx - seed_c[2]) * sx) ** 2)
+                dists_in = np.sort(dmm[refined_crop])
+                target_vox = max(1, int(round(float(target_volume_ml) * 1000.0 / vox_mm3)))
+                if target_vox < dists_in.size:
+                    r_cut = float(dists_in[target_vox - 1])
+                    from scipy.ndimage import binary_fill_holes as _bfh
+                    trimmed = _bfh(refined_crop & (dmm <= r_cut))
+                    if trimmed.sum() > 0:
+                        refined_crop = trimmed
+                        new_ml = float(refined_crop.sum()) * vox_mm3 / 1000.0
+                        notes.append(
+                            f"Tope de volumen: {cur_ml:.0f}→{new_ml:.0f} mL "
+                            f"(objetivo {target_volume_ml:.0f} mL, r={r_cut:.0f}mm desde semilla)"
+                        )
+            except Exception as trim_exc:
+                notes.append(f"Tope de volumen falló: {trim_exc}. Usando máscara completa.")
+
     # Mapear la máscara recortada de vuelta al volumen completo
     refined = np.zeros(ct.shape, dtype=bool)
     if bbox is not None:

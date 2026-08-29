@@ -104,3 +104,22 @@ def test_anatomical_mask_voi_resamples_to_volume_shape():
     assert resampled.shape == (40, 40, 40)
     assert bool(resampled[19, 19, 19])
     assert not bool(resampled[5, 5, 5])
+
+
+def test_segmentation_target_volume_trims_radially_from_seed():
+    from core.amyloid_spect import segment_myocardium_from_ct
+
+    # "Corazón" sintético: bloque de tejido blando (~60 HU) en aire
+    ct = np.full((40, 60, 60), -1000.0)
+    ct[10:30, 15:45, 15:45] = 60.0  # 20*30*30 voxels * 8 mm³ = 144 mL
+    seed = (20.0, 30.0, 30.0)
+
+    free = segment_myocardium_from_ct(ct, SPACING, seed_zyx=seed, seed_radius_mm=80.0)
+    capped = segment_myocardium_from_ct(
+        ct, SPACING, seed_zyx=seed, seed_radius_mm=80.0, target_volume_ml=50.0
+    )
+
+    assert capped.volume_mm3 < free.volume_mm3
+    assert capped.volume_mm3 <= 50_000 * 1.10  # tolerancia por fill_holes
+    # El recorte conserva el centro (semilla) y descarta la periferia
+    assert bool(capped.mask_3d[20, 30, 30])
