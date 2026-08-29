@@ -1459,8 +1459,20 @@ class AmyloidSpectPanel(QDialog):
         grid.addWidget(self._sag_lbl, 0, 2)
         vistas_layout.addLayout(grid)
 
-        # Botones de localización (pie derecho dentro del box de imágenes)
+        # Botones de localización (resultados a la izq, botones a la der)
         loc_btns_row = QHBoxLayout()
+        # Label de volumen visible SIEMPRE (no solo en consola oculta)
+        self._lbl_volume_display = QLabel("❤️ -- mL")
+        self._lbl_volume_display.setStyleSheet(
+            "font-size:12px; font-weight:600; color:#60a5fa; background:#111827; padding:4px 8px;"
+        )
+        self._lbl_volume_display.setMinimumWidth(120)
+        loc_btns_row.addWidget(self._lbl_volume_display)
+        self._lbl_hmr_result = QLabel("HMR-SPECT = N/D")
+        self._lbl_hmr_result.setStyleSheet(
+            "font-size:16px; font-weight:700; color:#ffffff; background:#000000; padding:6px 12px;"
+        )
+        loc_btns_row.addWidget(self._lbl_hmr_result)
         loc_btns_row.addStretch(1)
         self._btn_triangulation_cross = QPushButton("Cruz triangulación")
         self._btn_triangulation_cross.setCheckable(True)
@@ -1748,7 +1760,7 @@ class AmyloidSpectPanel(QDialog):
         radius_row.addWidget(self._mediastinum_radius_spin)
         hmr_layout.addLayout(radius_row)
         
-        # Fila 3: preservar máscara, volumen y resultado (Calcular vive en la fila de localización)
+        # Fila 3: preservar máscara (volumen y HMR viven en la fila de localización)
         calc_row = QHBoxLayout()
 
         # Checkbox para preservar máscara manual al recalcular
@@ -1761,20 +1773,6 @@ class AmyloidSpectPanel(QDialog):
             "- Útil cuando mueves el mediastino pero quieres mantener tu máscara cardíaca"
         )
         calc_row.addWidget(self._preserve_mask_check)
-
-        # Label de volumen visible SIEMPRE (no solo en consola oculta)
-        self._lbl_volume_display = QLabel("❤️ -- mL")
-        self._lbl_volume_display.setStyleSheet(
-            "font-size:12px; font-weight:600; color:#60a5fa; background:#111827; padding:4px 8px;"
-        )
-        self._lbl_volume_display.setMinimumWidth(120)
-        calc_row.addWidget(self._lbl_volume_display)
-
-        self._lbl_hmr_result = QLabel("HMR-SPECT = N/D")
-        self._lbl_hmr_result.setStyleSheet(
-            "font-size:16px; font-weight:700; color:#ffffff; background:#000000; padding:6px 12px;"
-        )
-        calc_row.addWidget(self._lbl_hmr_result)
         calc_row.addStretch(1)
         hmr_layout.addLayout(calc_row)
         
@@ -1793,10 +1791,10 @@ class AmyloidSpectPanel(QDialog):
         # La vía estable mantiene las VOIs esféricas exactamente en los
         # puntos A/B. La segmentación CT queda aislada como opción beta.
         self._ct_anatomical_check = QCheckBox("CT anatómica / PVE (experimental)")
-        self._ct_anatomical_check.setChecked(False)
+        self._ct_anatomical_check.setChecked(True)
         self._ct_anatomical_check.setToolTip(
-            "Desactivado (recomendado): usa VOIs manuales esféricas ancladas en A/B.\n"
-            "Activado: prueba segmentación CT, edición de máscara y corrección PVE."
+            "Activado (default): segmentación CT, edición de máscara y corrección PVE.\n"
+            "Desactivado: usa VOIs manuales esféricas ancladas en A/B."
         )
         self._ct_anatomical_check.toggled.connect(self._on_ct_anatomical_mode_toggled)
         anat_row = QHBoxLayout()
@@ -6421,8 +6419,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             if self._mask_edit_original is None:
                 self._mask_edit_original = ct_seg.mask_3d.copy()
             
-            # Cambiar cursor
-            self._axial_lbl.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+            # Cambiar cursor a cruz en las tres vistas MPR
+            for _lbl in (self._axial_lbl, self._cor_lbl, self._sag_lbl):
+                _lbl.setCursor(QCursor(Qt.CursorShape.CrossCursor))
             self._btn_toggle_mask_edit.setText("✏️ Editando...")
             self._btn_toggle_mask_edit.setStyleSheet(
                 "background-color:#7c3aed; color:white; font-weight:bold; padding:6px 12px;"
@@ -6441,8 +6440,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._mask_edit_status.setStyleSheet("color:#a78bfa; font-style:normal; font-weight:600;")
             self._status.setText("✏️ F2.4: Modo edición activo. Izq=pintar, Der=borrar en CUALQUIER vista MPR.")
         else:
-            # Restaurar cursor
-            self._axial_lbl.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            # Restaurar cursor en las tres vistas
+            for _lbl in (self._axial_lbl, self._cor_lbl, self._sag_lbl):
+                _lbl.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
             self._btn_toggle_mask_edit.setText("✏️ Editar Máscara")
             self._btn_toggle_mask_edit.setStyleSheet("")
             self._mask_edit_status.setText("Modo edición: INACTIVO")
