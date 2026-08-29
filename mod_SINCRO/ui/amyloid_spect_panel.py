@@ -1094,7 +1094,40 @@ class AmyloidSpectPanel(QDialog):
         flow.setHorizontalSpacing(8)
         flow.setVerticalSpacing(4)
 
-        # --- Fila de auto-continue (solo visible si hay estado previo guardado) ---\n        self._auto_continue_bar = QWidget()\n        self._auto_continue_bar.setVisible(False)\n        ac_layout = QHBoxLayout(self._auto_continue_bar)\n        ac_layout.setContentsMargins(0, 4, 0, 4)\n        ac_layout.setSpacing(8)\n        self._lbl_prev_state = QLabel(\"⏳ Estudio previo detectado:\")\n        self._lbl_prev_state.setStyleSheet(\"font-weight: bold; color: #2563eb;\")\n        ac_layout.addWidget(self._lbl_prev_state)\n        self._btn_continue = QPushButton(\"▶ Continuar\")\n        self._btn_continue.setToolTip(\"Reanuda el pipeline desde la última etapa guardada.\")\n        self._btn_continue.setStyleSheet(\n            \"background-color: #16a34a; color: white; font-weight: bold; padding: 6px 14px; border-radius: 4px;\"\n        )\n        self._btn_continue.clicked.connect(self._on_continue_pipeline)\n        ac_layout.addWidget(self._btn_continue)\n        self._btn_view_result = QPushButton(\"👁 Ver resultado\")\n        self._btn_view_result.setToolTip(\"Restaura visualmente el último estado sin re-procesar.\")\n        self._btn_view_result.setStyleSheet(\n            \"background-color: #2563eb; color: white; font-weight: bold; padding: 6px 14px; border-radius: 4px;\"\n        )\n        self._btn_view_result.clicked.connect(self._on_view_result)\n        ac_layout.addWidget(self._btn_view_result)\n        self._btn_reprocess = QPushButton(\"🔄 Reprocesar desde cero\")\n        self._btn_reprocess.setToolTip(\"Borra el estado guardado y empieza de nuevo.\")\n        self._btn_reprocess.setStyleSheet(\n            \"background-color: #dc2626; color: white; font-weight: bold; padding: 6px 14px; border-radius: 4px;\"\n        )\n        self._btn_reprocess.clicked.connect(self._on_reprocess_from_start)\n        ac_layout.addWidget(self._btn_reprocess)\n        ac_layout.addStretch()\n        flow.addWidget(self._auto_continue_bar, 0, 0, 1, 9)\n\n        self._btn_load = QPushButton("1. Cargar SPECT")
+        # --- Fila de auto-continue (solo visible si hay estado previo guardado) ---
+        self._auto_continue_bar = QWidget()
+        self._auto_continue_bar.setVisible(False)
+        ac_layout = QHBoxLayout(self._auto_continue_bar)
+        ac_layout.setContentsMargins(0, 4, 0, 4)
+        ac_layout.setSpacing(8)
+        self._lbl_prev_state = QLabel("⏳ Estudio previo detectado:")
+        self._lbl_prev_state.setStyleSheet("font-weight: bold; color: #2563eb;")
+        ac_layout.addWidget(self._lbl_prev_state)
+        self._btn_continue = QPushButton("▶ Continuar")
+        self._btn_continue.setToolTip("Reanuda el pipeline desde la última etapa guardada.")
+        self._btn_continue.setStyleSheet(
+            "background-color: #16a34a; color: white; font-weight: bold; padding: 6px 14px; border-radius: 4px;"
+        )
+        self._btn_continue.clicked.connect(self._on_continue_pipeline)
+        ac_layout.addWidget(self._btn_continue)
+        self._btn_view_result = QPushButton("👁 Ver resultado")
+        self._btn_view_result.setToolTip("Restaura visualmente el último estado sin re-procesar.")
+        self._btn_view_result.setStyleSheet(
+            "background-color: #2563eb; color: white; font-weight: bold; padding: 6px 14px; border-radius: 4px;"
+        )
+        self._btn_view_result.clicked.connect(self._on_view_result)
+        ac_layout.addWidget(self._btn_view_result)
+        self._btn_reprocess = QPushButton("🔄 Reprocesar desde cero")
+        self._btn_reprocess.setToolTip("Borra el estado guardado y empieza de nuevo.")
+        self._btn_reprocess.setStyleSheet(
+            "background-color: #dc2626; color: white; font-weight: bold; padding: 6px 14px; border-radius: 4px;"
+        )
+        self._btn_reprocess.clicked.connect(self._on_reprocess_from_start)
+        ac_layout.addWidget(self._btn_reprocess)
+        ac_layout.addStretch()
+        flow.addWidget(self._auto_continue_bar, 0, 0, 1, 9)
+
+        self._btn_load = QPushButton("1. Cargar SPECT")
         self._btn_load.clicked.connect(self._load_spect)
         self._btn_load.setToolTip("Carga el DICOM SPECT AMYLO. Puede ser crudo o reconstruido; no requiere gating.")
         flow.addWidget(self._btn_load, 1, 0)
@@ -2708,22 +2741,22 @@ class AmyloidSpectPanel(QDialog):
         try:
             if saved >= self._STAGE_SPECT_LOADED:
                 # SPECT ya cargado — verificar que existe
-                if not self._current_volume:
+                if self._current_volume is None:
                     self._metrics.append("⚠ El volumen SPECT no está en memoria. Recargando...")
                     self._load_spect()
                     return
             if saved >= self._STAGE_RECONSTRUCTED:
-                if not self._recon_bundle:
+                if self._recon_bundle is None:
                     self._metrics.append("→ Reconstruyendo...")
                     self._reconstruct_with_perf_pipeline()
                     return
-            if saved >= self._CT_LOADED:
+            if saved >= self._STAGE_CT_LOADED:
                 ct_path = str(self._settings.value(
                     f"{self._study_settings_prefix()}/ct_path", ""
                 ) or "")
-                if ct_path and os.path.isfile(ct_path) and not self._ct_volume:
-                    self._metrics.append("→ Cargando CT...")
-                    self._load_ct()
+                if ct_path and os.path.exists(ct_path) and self._ct_volume is None:
+                    self._metrics.append("→ Cargando CT desde ruta guardada...")
+                    self._load_ct_path(ct_path)
                     return
             if saved >= self._STAGE_REGISTERED:
                 if not getattr(self, "_ct_auto_registered", False):
@@ -2731,7 +2764,7 @@ class AmyloidSpectPanel(QDialog):
                     self._register_ct_to_spect()
                     return
             if saved >= self._STAGE_BONE_SUPPRESSED:
-                if not self._bone_mask:
+                if self._bone_mask is None:
                     self._metrics.append("→ Aplicando sustracción ósea...")
                     self._apply_bone_suppression()
                     return
@@ -2767,7 +2800,7 @@ class AmyloidSpectPanel(QDialog):
         prefix = self._study_settings_prefix()
         # Borrar todas las keys del estudio
         for key in list(self._settings.allKeys()):
-            if key.startswith(prefix.removeprefix("studies/")) or key.startswith(prefix):
+            if key.startswith(prefix):
                 self._settings.remove(key)
         self._settings.sync()
         # Resetear estado en memoria
@@ -2977,6 +3010,8 @@ class AmyloidSpectPanel(QDialog):
             self._preset_combo,
             str(self._settings.value(f"{prefix}/preset", self._preset_combo.currentData()) or "amylo360_std128"),
         )
+        # Aplicar defaults del preset ANTES de restaurar params individuales (para que los guardados ganen)
+        self._on_preset_changed()
         self._set_combo_by_data(
             self._cuts_mode_combo,
             str(self._settings.value(f"{prefix}/cuts_mode", self._cuts_mode_combo.currentData()) or "mixed"),
@@ -3045,9 +3080,9 @@ class AmyloidSpectPanel(QDialog):
         # --- Paths CT / atenuación ---
         ct_saved = str(self._settings.value(f"{prefix}/ct_path", "") or "")
         att_saved = str(self._settings.value(f"{prefix}/att_path", "") or "")
-        if ct_saved and os.path.isfile(ct_saved):
+        if ct_saved and os.path.exists(ct_saved):
             self._ct_path = ct_saved
-        if att_saved and os.path.isfile(att_saved):
+        if att_saved and os.path.exists(att_saved):
             self._att_path = att_saved
         # --- Ventana CT manual ---
         ct_wl = self._settings.value(f"{prefix}/ct_wl")
@@ -3064,7 +3099,6 @@ class AmyloidSpectPanel(QDialog):
         if saved_stage > self._STAGE_NONE:
             stage_name = self._STAGE_NAMES.get(saved_stage, f"etapa {saved_stage}")
             self._metrics.append(f"\n--- Estado previo del estudio ---\n- última etapa: {stage_name}")
-        self._on_preset_changed()
 
     def _on_preset_changed(self):
         preset = str(self._preset_combo.currentData() or "manual")
