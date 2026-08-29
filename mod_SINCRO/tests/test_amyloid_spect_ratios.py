@@ -24,6 +24,21 @@ def test_hmr_uses_voxel_means_for_different_voi_sizes():
     assert result.heart_counts != pytest.approx(result.mediastinum_counts)
 
 
+def test_hmr_peak_uses_top_quartile_of_heart():
+    volume = np.full((41, 41, 41), 5.0)
+    # Foco caliente pequeño dentro de la VOI cardíaca grande: la media global
+    # se diluye pero el HMR pico (top-25%) debe capturarlo.
+    volume[18:23, 18:23, 18:23] = 50.0
+    heart = VOISphere(20, 20, 20, 12.0)
+    mediastinum = VOISphere(20, 20, 34, 5.0)
+
+    result = compute_hmr_spect(volume, SPACING, heart, mediastinum)
+
+    assert result.hmr_peak is not None
+    assert result.hmr_peak > result.hmr
+    assert result.heart_mean_top25 > result.heart_mean
+
+
 def test_hmr_slice_rejects_voi_that_does_not_intersect_slice():
     volume = np.full((41, 41, 41), 5.0)
     heart = VOISphere(20, 20, 20, 12.0)

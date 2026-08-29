@@ -1917,6 +1917,10 @@ class HmrSpectResult:
     mediastinum_pixels: int = 0  # Número de píxeles en VOI mediastino
     heart_mean: float = 0.0  # Cuentas promedio por píxel
     mediastinum_mean: float = 0.0  # Cuentas promedio por píxel
+    # Media del cuartil superior del corazón: sigue la percepción visual del
+    # pico y no se diluye con VOIs anatómicas grandes (cavidades, mediastino).
+    heart_mean_top25: float = 0.0
+    hmr_peak: float | None = None  # top-25% corazón / media mediastino
     heart_volume_ml: float = 0.0
     mediastinum_volume_ml: float = 0.0
     voi_heart: VOISphere | None = None
@@ -1985,7 +1989,8 @@ def compute_hmr_spect(
         mask_h = voi_heart.mask_3d(vol.shape, spacing_zyx)
         mask_m = voi_mediastinum.mask_3d(vol.shape, spacing_zyx)
         
-        heart_counts = float(vol[mask_h].sum())
+        heart_values = vol[mask_h]
+        heart_counts = float(heart_values.sum())
         mediastinum_counts = float(vol[mask_m].sum())
         
         heart_counts_raw = float(vol_raw[mask_h].sum()) if vol_raw is not None else 0.0
@@ -2005,7 +2010,8 @@ def compute_hmr_spect(
         mask_h = voi_heart.mask_3d(vol.shape, spacing_zyx)[slice_idx]
         mask_m = voi_mediastinum.mask_3d(vol.shape, spacing_zyx)[slice_idx]
         
-        heart_counts = float(slice_2d[mask_h].sum())
+        heart_values = slice_2d[mask_h]
+        heart_counts = float(heart_values.sum())
         mediastinum_counts = float(slice_2d[mask_m].sum())
         
         if vol_raw is not None:
@@ -2046,7 +2052,15 @@ def compute_hmr_spect(
         raw_floor = max(float(np.nanmax(np.abs(vol_raw))) * 1e-4, 1e-8)
         if np.isfinite(mediastinum_mean_raw) and mediastinum_mean_raw > raw_floor:
             hmr_raw = heart_mean_raw / mediastinum_mean_raw
-    
+
+    # HMR pico: media del cuartil superior del corazón. Con VOIs anatómicas
+    # grandes (cavidades + estructuras vecinas) la media global se diluye y un
+    # positivo visual puede cuantificar falso negativo; el top-25% sigue al ojo.
+    k = max(1, heart_pixels // 4)
+    top_vals = np.partition(np.asarray(heart_values, dtype=np.float64), -k)[-k:]
+    heart_mean_top25 = float(top_vals.mean())
+    hmr_peak = heart_mean_top25 / mediastinum_mean
+
     return HmrSpectResult(
         hmr=hmr,
         hmr_raw=hmr_raw,
@@ -2058,6 +2072,8 @@ def compute_hmr_spect(
         mediastinum_pixels=mediastinum_pixels,
         heart_mean=heart_mean,
         mediastinum_mean=mediastinum_mean,
+        heart_mean_top25=heart_mean_top25,
+        hmr_peak=hmr_peak,
         heart_volume_ml=voi_heart.volume_ml(),
         mediastinum_volume_ml=voi_mediastinum.volume_ml(),
         voi_heart=voi_heart,

@@ -4075,7 +4075,11 @@ class AmyloidSpectPanel(QDialog):
 
             vol_raw = getattr(self, "_unfiltered_volume", None)
 
-            analysis_volume = self._spect_display_volume(self._current_volume)
+            # La sustracción ósea es visual: cuantificar siempre el volumen sin retocar.
+            base_vol = self._current_volume
+            if self._bone_mask is not None and self._pre_bone_volume is not None:
+                base_vol = self._pre_bone_volume
+            analysis_volume = self._spect_display_volume(base_vol)
             analysis_volume_raw = self._spect_display_volume(vol_raw) if vol_raw is not None else None
             result = compute_spect_ratio(
                 volume=analysis_volume,
@@ -4605,7 +4609,14 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 volume_raw = None
             
             # Calcular HMR-SPECT
-            analysis_volume = self._spect_display_volume(self._current_volume)
+            # La sustracción ósea es visual: cuantificar siempre el volumen sin retocar.
+            base_vol = self._current_volume
+            bone_subtraction_active = (
+                self._bone_mask is not None and self._pre_bone_volume is not None
+            )
+            if bone_subtraction_active:
+                base_vol = self._pre_bone_volume
+            analysis_volume = self._spect_display_volume(base_vol)
             analysis_volume_raw = self._spect_display_volume(volume_raw) if volume_raw is not None else None
             result = compute_hmr_spect(
                 volume=analysis_volume,
@@ -4727,7 +4738,11 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 details += f"HMR (filtrado): {result.hmr:.2f}\n"
             else:
                 details += f"HMR: {result.hmr:.2f}\n"
+            if result.hmr_peak is not None:
+                details += f"HMR pico (top-25% corazón): {result.hmr_peak:.2f}\n"
             details += f"Clasificación: {classification}\n\n"
+            if bone_subtraction_active:
+                details += "ℹ️ Sustracción ósea activa: HMR calculado\nsobre el volumen SIN sustracción.\n\n"
             details += f"Método: {result.method}\n"
             details += f"Tipo VOI: {voi_type_used}\n"
             details += f"A usado (Z/Y/X): {anchor[0]+1}/{anchor[1]+1}/{anchor[2]+1}\n"
@@ -4765,6 +4780,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             details += f"Píxeles corazón: {result.heart_pixels}\n"
             details += f"Píxeles mediastino: {result.mediastinum_pixels}\n"
             details += f"Ratio de medias usado: {result.hmr:.2f}"
+            if result.hmr_peak is not None:
+                details += f"\nMedia top-25% corazón: {result.heart_mean_top25:.2f} cts/píxel"
+                details += f"\nHMR pico (top-25%/mediastino): {result.hmr_peak:.2f}"
             
             # Advertencia si el mediastino tiene muy pocas cuentas
             if result.mediastinum_mean < 1.0:

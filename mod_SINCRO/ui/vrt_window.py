@@ -95,7 +95,7 @@ class VrtWindow(QDialog):
         self._sp_base = 20.0     # % del máximo SPECT: por debajo no se muestra (quita fondo)
         self._sp_top = 100.0
         self._fusion_mix = 0.65
-        self._brightness = 1.35
+        self._brightness = 1.60
         self._cine_speed = 3.0   # grados por frame
         self._fast_mode = False
         self._drag_pos = None
@@ -205,7 +205,7 @@ class VrtWindow(QDialog):
         self._bri_slider.setToolTip("Brillo global del render (ganancia sobre el color final).")
         self._bri_slider.valueChanged.connect(self._on_params_changed)
         row2.addWidget(self._bri_slider, 1)
-        self._bri_lbl = QLabel("135%")
+        self._bri_lbl = QLabel("160%")
         self._bri_lbl.setFixedWidth(40)
         row2.addWidget(self._bri_lbl)
         layout.addLayout(row2)
@@ -445,7 +445,7 @@ class VrtWindow(QDialog):
                 g = np.gradient(ndi.gaussian_filter(rot, 1.0) if not self._fast_mode else rot)
                 gnorm = np.sqrt(g[0] ** 2 + g[1] ** 2 + g[2] ** 2) + 1e-3
                 ndotl = np.clip(-g[1] / gnorm, 0.0, 1.0)
-                shade = 0.30 + 0.62 * ndotl + 0.22 * ndotl ** 8  # ambiente + difuso + brillo
+                shade = 0.48 + 0.52 * ndotl + 0.25 * ndotl ** 8  # ambiente alto + difuso + brillo
                 dens = np.clip((rot - thr) / 1100.0, 0.0, 1.0)
 
             sp_w = sp_alpha = None
