@@ -1429,7 +1429,7 @@ class AmyloidSpectPanel(QDialog):
         self._btn_console.clicked.connect(self._open_console_window)
         status_row.addWidget(self._btn_console)
         self._status = QLabel("Cargar un DICOM SPECT para iniciar.")
-        self._status.setStyleSheet("color:#93c5fd; font-size:11px;")
+        self._status.setStyleSheet("color:#1d4ed8; font-size:11px;")
         status_row.addWidget(self._status, 1)
         root.addLayout(status_row)
 
