@@ -974,11 +974,13 @@ class AmyloidSpectPanel(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("SINCRO — AMYLO SPECT 3D (experimental)")
+        # Qt.Window (no Dialog): entrada propia en la barra de tareas para
+        # poder minimizar/restaurar independiente de la ventana principal.
         self.setWindowFlags(
-            self.windowFlags()
-            | Qt.WindowType.WindowMaximizeButtonHint
+            Qt.WindowType.Window
             | Qt.WindowType.WindowMinimizeButtonHint
-            | Qt.WindowType.WindowMinMaxButtonsHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
         )
         self.resize(1060, 700)
         self.setMinimumSize(920, 580)

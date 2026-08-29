@@ -1914,7 +1914,10 @@ class AmyloidWindow(QDialog):
     def _open_amyloid_spect_3d(self):
         """Abre panel AMYLO SPECT 3D (fase 2, experimental)."""
         dlg = AmyloidSpectPanel(self)
-        dlg.exec()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        self._amyloid_spect_panel = dlg
 
     def _load_time_images(self, time_label: str):
         """Carga 1 a 3 planares y asigna AP/OAI/LAT de forma flexible."""
