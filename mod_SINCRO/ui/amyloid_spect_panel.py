@@ -1094,12 +1094,12 @@ class AmyloidSpectPanel(QDialog):
         flow.setHorizontalSpacing(8)
         flow.setVerticalSpacing(4)
 
-        self._btn_load = QPushButton("1. Cargar SPECT")
+        # --- Fila de auto-continue (solo visible si hay estado previo guardado) ---\n        self._auto_continue_bar = QWidget()\n        self._auto_continue_bar.setVisible(False)\n        ac_layout = QHBoxLayout(self._auto_continue_bar)\n        ac_layout.setContentsMargins(0, 4, 0, 4)\n        ac_layout.setSpacing(8)\n        self._lbl_prev_state = QLabel(\"⏳ Estudio previo detectado:\")\n        self._lbl_prev_state.setStyleSheet(\"font-weight: bold; color: #2563eb;\")\n        ac_layout.addWidget(self._lbl_prev_state)\n        self._btn_continue = QPushButton(\"▶ Continuar\")\n        self._btn_continue.setToolTip(\"Reanuda el pipeline desde la última etapa guardada.\")\n        self._btn_continue.setStyleSheet(\n            \"background-color: #16a34a; color: white; font-weight: bold; padding: 6px 14px; border-radius: 4px;\"\n        )\n        self._btn_continue.clicked.connect(self._on_continue_pipeline)\n        ac_layout.addWidget(self._btn_continue)\n        self._btn_view_result = QPushButton(\"👁 Ver resultado\")\n        self._btn_view_result.setToolTip(\"Restaura visualmente el último estado sin re-procesar.\")\n        self._btn_view_result.setStyleSheet(\n            \"background-color: #2563eb; color: white; font-weight: bold; padding: 6px 14px; border-radius: 4px;\"\n        )\n        self._btn_view_result.clicked.connect(self._on_view_result)\n        ac_layout.addWidget(self._btn_view_result)\n        self._btn_reprocess = QPushButton(\"🔄 Reprocesar desde cero\")\n        self._btn_reprocess.setToolTip(\"Borra el estado guardado y empieza de nuevo.\")\n        self._btn_reprocess.setStyleSheet(\n            \"background-color: #dc2626; color: white; font-weight: bold; padding: 6px 14px; border-radius: 4px;\"\n        )\n        self._btn_reprocess.clicked.connect(self._on_reprocess_from_start)\n        ac_layout.addWidget(self._btn_reprocess)\n        ac_layout.addStretch()\n        flow.addWidget(self._auto_continue_bar, 0, 0, 1, 9)\n\n        self._btn_load = QPushButton("1. Cargar SPECT")
         self._btn_load.clicked.connect(self._load_spect)
         self._btn_load.setToolTip("Carga el DICOM SPECT AMYLO. Puede ser crudo o reconstruido; no requiere gating.")
-        flow.addWidget(self._btn_load, 0, 0)
+        flow.addWidget(self._btn_load, 1, 0)
 
-        flow.addWidget(QLabel("Preset:"), 0, 1)
+        flow.addWidget(QLabel("Preset:"), 1, 1)
         self._preset_combo = QComboBox()
         self._preset_combo.addItem("Manual", "manual")
         self._preset_combo.addItem("AMYLO 360 estándar 128", "amylo360_std128")
@@ -1111,24 +1111,24 @@ class AmyloidSpectPanel(QDialog):
             "si el DICOM trae otra matriz, se reconstruye en la matriz adquirida."
         )
         self._preset_combo.currentIndexChanged.connect(self._on_preset_changed)
-        flow.addWidget(self._preset_combo, 0, 2)
+        flow.addWidget(self._preset_combo, 1, 2)
 
-        flow.addWidget(QLabel("Recon:"), 0, 3)
+        flow.addWidget(QLabel("Recon:"), 1, 3)
         self._recon_combo = QComboBox()
         self._recon_combo.addItem("FBP", "fbp")
         self._recon_combo.addItem("OSEM", "osem")
         self._recon_combo.addItem("MLEM", "mlem")
         self._recon_combo.currentIndexChanged.connect(self._on_top_recon_changed)
-        flow.addWidget(self._recon_combo, 0, 4)
+        flow.addWidget(self._recon_combo, 1, 4)
 
-        flow.addWidget(QLabel("Cortes:"), 0, 5)
+        flow.addWidget(QLabel("Cortes:"), 1, 5)
         self._cuts_mode_combo = QComboBox()
         self._cuts_mode_combo.addItem("Mixto", "mixed")
         self._cuts_mode_combo.addItem("Tomográficos", "tomo")
         self._cuts_mode_combo.addItem("Cardíacos", "cardiac")
         self._cuts_mode_combo.setToolTip("Selecciona qué familia de cortes generar en recon AMYLO.")
         self._cuts_mode_combo.currentIndexChanged.connect(self._persist_ui_state)
-        flow.addWidget(self._cuts_mode_combo, 0, 6)
+        flow.addWidget(self._cuts_mode_combo, 1, 6)
 
         self._btn_recon_pipeline = QPushButton("2. Reconstruir + cortes")
         self._btn_recon_pipeline.clicked.connect(self._reconstruct_with_perf_pipeline)
@@ -1137,7 +1137,7 @@ class AmyloidSpectPanel(QDialog):
         self._btn_recon_pipeline.setStyleSheet(
             "background-color: #16a34a; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px;"
         )
-        flow.addWidget(self._btn_recon_pipeline, 0, 7)
+        flow.addWidget(self._btn_recon_pipeline, 1, 7)
 
         self._btn_cancel_recon = QPushButton("Cancelar")
         self._btn_cancel_recon.clicked.connect(self._cancel_reconstruction)
@@ -1145,7 +1145,7 @@ class AmyloidSpectPanel(QDialog):
         self._btn_cancel_recon.setStyleSheet(
             "background-color: #dc2626; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px;"
         )
-        flow.addWidget(self._btn_cancel_recon, 0, 8)
+        flow.addWidget(self._btn_cancel_recon, 1, 8)
 
         self._ct_check = QCheckBox("Usar CT para sustracción ósea (si hay)")
         self._ct_check.setChecked(True)
@@ -1153,55 +1153,55 @@ class AmyloidSpectPanel(QDialog):
             "Si hay CT cargado/registrado, usa el CT para definir la máscara ósea (HU >= 200).\n"
             "Sin CT cae a la heurística SPECT por percentil, que puede suprimir el corazón en positivos."
         )
-        flow.addWidget(self._ct_check, 1, 0, 1, 2)
+        flow.addWidget(self._ct_check, 2, 0, 1, 2)
 
         self._btn_load_ct = QPushButton("3a. Cargar CT")
         self._btn_load_ct.clicked.connect(self._load_ct)
         self._btn_load_ct.setEnabled(False)
-        flow.addWidget(self._btn_load_ct, 1, 2)
+        flow.addWidget(self._btn_load_ct, 2, 2)
 
         self._btn_load_ct_dir = QPushButton("3b. CT carpeta")
         self._btn_load_ct_dir.clicked.connect(self._load_ct_dir)
         self._btn_load_ct_dir.setEnabled(False)
-        flow.addWidget(self._btn_load_ct_dir, 1, 3)
+        flow.addWidget(self._btn_load_ct_dir, 2, 3)
 
         self._btn_register = QPushButton("4. Registrar CT↔SPECT")
         self._btn_register.clicked.connect(self._register_ct_to_spect)
         self._btn_register.setEnabled(False)
-        flow.addWidget(self._btn_register, 1, 4, 1, 2)
+        flow.addWidget(self._btn_register, 2, 4, 1, 2)
 
         self._btn_save_cam_preset = QPushButton("4a. Guardar preset cámara")
         self._btn_save_cam_preset.clicked.connect(self._save_camera_profile_preset)
         self._btn_save_cam_preset.setEnabled(False)
         self._btn_save_cam_preset.setToolTip("Guarda flips/rotaciones/offsets para esta cámara+protocolo en flujo perfusión SPECT/CT.")
-        flow.addWidget(self._btn_save_cam_preset, 2, 4)
+        flow.addWidget(self._btn_save_cam_preset, 3, 4)
 
         self._btn_apply_cam_preset = QPushButton("4a'. Aplicar preset cámara")
         self._btn_apply_cam_preset.clicked.connect(lambda: self._apply_camera_profile_preset(auto=False))
         self._btn_apply_cam_preset.setEnabled(False)
         self._btn_apply_cam_preset.setToolTip("Aplica preset guardado para esta cámara+protocolo (si existe).")
-        flow.addWidget(self._btn_apply_cam_preset, 2, 5)
+        flow.addWidget(self._btn_apply_cam_preset, 3, 5)
 
         self._btn_load_att = QPushButton("4b. Cargar ATT MAP")
         self._btn_load_att.clicked.connect(self._load_att_map)
         self._btn_load_att.setEnabled(False)
-        flow.addWidget(self._btn_load_att, 2, 0, 1, 2)
+        flow.addWidget(self._btn_load_att, 3, 0, 1, 2)
 
         self._btn_apply_ac = QPushButton("4c. Aplicar AC (Chang)")
         self._btn_apply_ac.clicked.connect(self._apply_ac_prototype)
         self._btn_apply_ac.setEnabled(False)
         self._btn_apply_ac.setToolTip("Aplica corrección por atenuación tipo Chang (slice-wise) usando ATT MAP remuestreado a grilla SPECT.")
-        flow.addWidget(self._btn_apply_ac, 2, 2, 1, 2)
+        flow.addWidget(self._btn_apply_ac, 3, 2, 1, 2)
 
         self._btn_bone = QPushButton("5. Sustracción ósea visual")
         self._btn_bone.clicked.connect(self._apply_bone_suppression)
         self._btn_bone.setEnabled(False)
-        flow.addWidget(self._btn_bone, 1, 6, 1, 2)
+        flow.addWidget(self._btn_bone, 2, 6, 1, 2)
 
         self._btn_export_axes_dcm = QPushButton("6. Exportar ejes DICOM")
         self._btn_export_axes_dcm.clicked.connect(self._export_axes_dicom)
         self._btn_export_axes_dcm.setEnabled(False)
-        flow.addWidget(self._btn_export_axes_dcm, 1, 8)
+        flow.addWidget(self._btn_export_axes_dcm, 2, 8)
 
         self._btn_vrt = QPushButton("🦴 VRT 3D")
         self._btn_vrt.clicked.connect(self._open_vrt_window)
@@ -1211,13 +1211,13 @@ class AmyloidSpectPanel(QDialog):
             "Con SPECT registrado superpone los focos calientes en violeta.\n"
             "Quita la camilla automáticamente."
         )
-        flow.addWidget(self._btn_vrt, 2, 6, 1, 2)
+        flow.addWidget(self._btn_vrt, 3, 6, 1, 2)
 
         self._btn_fusion_layout = QPushButton("6b. Vista informe fusión")
         self._btn_fusion_layout.clicked.connect(self._show_fusion_report_layout)
         self._btn_fusion_layout.setEnabled(False)
         self._btn_fusion_layout.setToolTip("Muestra tiras SPECT y panel 3x3 (SPECT/CT/Fusión) con referencias de corte.")
-        flow.addWidget(self._btn_fusion_layout, 2, 8)
+        flow.addWidget(self._btn_fusion_layout, 3, 8)
         flow.setColumnStretch(9, 1)
 
         # ═══════════════════════════════════════════════════════════════════
@@ -2639,6 +2639,151 @@ class AmyloidSpectPanel(QDialog):
         if idx >= 0:
             combo.setCurrentIndex(idx)
 
+    # Etapas del pipeline para persistencia/auto-continue
+    _STAGE_NONE = 0
+    _STAGE_SPECT_LOADED = 1
+    _STAGE_RECONSTRUCTED = 2
+    _STAGE_CT_LOADED = 3
+    _STAGE_REGISTERED = 4
+    _STAGE_BONE_SUPPRESSED = 5
+    _STAGE_EXPORTED = 6
+    _STAGE_NAMES = {
+        0: "Sin iniciar", 1: "SPECT cargado", 2: "Reconstruido",
+        3: "CT cargada", 4: "CT registrada", 5: "Sustracción ósea",
+        6: "Exportado",
+    }
+
+    def _get_pipeline_stage(self) -> int:
+        """Detecta hasta dónde llegó el pipeline según estado actual."""
+        stage = self._STAGE_NONE
+        if self._current_volume is not None:
+            stage = max(stage, self._STAGE_SPECT_LOADED)
+        if self._recon_bundle is not None:
+            stage = max(stage, self._STAGE_RECONSTRUCTED)
+        if self._ct_volume is not None:
+            stage = max(stage, self._STAGE_CT_LOADED)
+        if self._ct_auto_registered is not None:
+            stage = max(stage, self._STAGE_REGISTERED)
+        if self._bone_mask is not None:
+            stage = max(stage, self._STAGE_BONE_SUPPRESSED)
+        return stage
+
+    def _save_pipeline_stage(self):
+        """Guarda etapa actual en settings del estudio."""
+        if not self._current_spect_path:
+            return
+        prefix = self._study_settings_prefix()
+        self._settings.setValue(f"{prefix}/pipeline_stage", self._get_pipeline_stage())
+
+    # --- Auto-continue system ---
+
+    def _check_auto_continue_bar(self):
+        """Muestra/oculta la barra de auto-continue según si hay estado previo guardado."""
+        if not self._current_spect_path:
+            self._auto_continue_bar.setVisible(False)
+            return
+        prefix = self._study_settings_prefix()
+        saved_stage = int(self._settings.value(f"{prefix}/pipeline_stage", 0) or 0)
+        if saved_stage > self._STAGE_NONE:
+            stage_name = self._STAGE_NAMES.get(saved_stage, f"etapa {saved_stage}")
+            self._lbl_prev_state.setText(f"⏳ Estudio previo detectado — última etapa: {stage_name}")
+            self._auto_continue_bar.setVisible(True)
+        else:
+            self._auto_continue_bar.setVisible(False)
+
+    def _on_continue_pipeline(self):
+        """▶ Continuar: reanuda el pipeline desde la etapa guardada."""
+        saved = int(self._settings.value(
+            f"{self._study_settings_prefix()}/pipeline_stage", 0
+        ) or 0)
+        if saved <= self._STAGE_NONE:
+            QMessageBox.information(self, "Sin estado previo",
+                "No hay estado guardado para este estudio. Cargue el SPECT y procese normalmente.")
+            return
+        # Restaurar todo primero
+        self._restore_study_ui_state()
+        stage_name = self._STAGE_NAMES.get(saved, "?")
+        self._metrics.append(f"\n▶ Continuando desde etapa {saved} ({stage_name})...")
+        # Auto-ejecutar pasos pendientes según la etapa
+        try:
+            if saved >= self._STAGE_SPECT_LOADED:
+                # SPECT ya cargado — verificar que existe
+                if not self._current_volume:
+                    self._metrics.append("⚠ El volumen SPECT no está en memoria. Recargando...")
+                    self._load_spect()
+                    return
+            if saved >= self._STAGE_RECONSTRUCTED:
+                if not self._recon_bundle:
+                    self._metrics.append("→ Reconstruyendo...")
+                    self._reconstruct_with_perf_pipeline()
+                    return
+            if saved >= self._CT_LOADED:
+                ct_path = str(self._settings.value(
+                    f"{self._study_settings_prefix()}/ct_path", ""
+                ) or "")
+                if ct_path and os.path.isfile(ct_path) and not self._ct_volume:
+                    self._metrics.append("→ Cargando CT...")
+                    self._load_ct()
+                    return
+            if saved >= self._STAGE_REGISTERED:
+                if not getattr(self, "_ct_auto_registered", False):
+                    self._metrics.append("→ Registrando CT↔SPECT...")
+                    self._register_ct_to_spect()
+                    return
+            if saved >= self._STAGE_BONE_SUPPRESSED:
+                if not self._bone_mask:
+                    self._metrics.append("→ Aplicando sustracción ósea...")
+                    self._apply_bone_suppression()
+                    return
+            self._metrics.append("✅ Pipeline continuado hasta la última etapa guardada.")
+        except Exception as e:
+            self._metrics.append(f"❌ Error al continuar pipeline: {e}")
+
+    def _on_view_result(self):
+        """👁 Ver resultado: restaura estado visual sin re-procesar."""
+        self._restore_study_ui_state()
+        saved = int(self._settings.value(
+            f"{self._study_settings_prefix()}/pipeline_stage", 0
+        ) or 0)
+        stage_name = self._STAGE_NAMES.get(saved, "?")
+        self._metrics.append(
+            f"\n👁 Estado visual restaurado (etapa previa: {stage_name}).\n"
+            "Los parámetros y ajustes se recuperaron del guardado.\n"
+            "Use los botones del flujo para re-procesar si es necesario."
+        )
+        self._auto_continue_bar.setVisible(False)
+
+    def _on_reprocess_from_start(self):
+        """🔄 Reprocesar desde cero: borra estado guardado y resetea."""
+        reply = QMessageBox.question(
+            self, "Reprocesar desde cero",
+            "¿Borrar todo el estado guardado de este estudio y empezar de nuevo?\n"
+            "Esto no borra archivos en disco, solo la configuración guardada.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        prefix = self._study_settings_prefix()
+        # Borrar todas las keys del estudio
+        for key in list(self._settings.allKeys()):
+            if key.startswith(prefix.removeprefix("studies/")) or key.startswith(prefix):
+                self._settings.remove(key)
+        self._settings.sync()
+        # Resetear estado en memoria
+        self._current_volume = None
+        self._recon_bundle = None
+        self._ct_volume = None
+        self._bone_mask = None
+        self._ct_auto_registered = False
+        self._ct_path = ""
+        self._att_path = ""
+        self._metrics.clear()
+        self._metrics.append("🔄 Estado borrado. Cargue el SPECT para empezar de nuevo.")
+        self._auto_continue_bar.setVisible(False)
+        # Re-habilitar botón de carga
+        self._btn_load.setEnabled(True)
+
     def _persist_ui_state(self):
         if not hasattr(self, "_settings"):
             return
@@ -2685,14 +2830,59 @@ class AmyloidSpectPanel(QDialog):
             self._settings.setValue("global/spect_display_sigma", float(self._spect_smooth_spin.value()))
         if self._current_spect_path:
             prefix = self._study_settings_prefix()
+            # --- Parámetros completos de reconstrucción ---
             self._settings.setValue(f"{prefix}/preset", preset)
             self._settings.setValue(f"{prefix}/cuts_mode", cuts_mode)
             self._settings.setValue(f"{prefix}/qc_mode", qc_mode)
             self._settings.setValue(f"{prefix}/split_pct", split)
             self._settings.setValue(f"{prefix}/overlay_pct", overlay)
             self._settings.setValue(f"{prefix}/fusion_pct", fusion)
+            self._settings.setValue(f"{prefix}/recon_method", str(self._recon_combo.currentData() or "fbp"))
+            self._settings.setValue(f"{prefix}/ung_method", str(self._ung_method_combo.currentData() or "fbp"))
+            self._settings.setValue(f"{prefix}/gated_method", str(self._gated_method_combo.currentData() or "fbp"))
+            self._settings.setValue(f"{prefix}/ung_filter", str(self._ung_filter_combo.currentData() or "butterworth"))
+            self._settings.setValue(f"{prefix}/ung_cutoff", float(self._ung_cutoff_spin.value()))
+            self._settings.setValue(f"{prefix}/ung_order", int(self._ung_order_spin.value()))
+            self._settings.setValue(f"{prefix}/gated_filter", str(self._gated_filter_combo.currentData() or "butterworth"))
+            self._settings.setValue(f"{prefix}/gated_cutoff", float(self._gated_cutoff_spin.value()))
+            self._settings.setValue(f"{prefix}/gated_order", int(self._gated_order_spin.value()))
+            self._settings.setValue(f"{prefix}/iter", int(self._iter_spin.value()))
+            self._settings.setValue(f"{prefix}/subsets", int(self._subsets_spin.value()))
+            self._settings.setValue(f"{prefix}/background_subtract", bool(self._bg_check.isChecked()))
+            self._settings.setValue(f"{prefix}/scatter_subtract", bool(self._scatter_check.isChecked()))
+            self._settings.setValue(f"{prefix}/scatter_k", float(self._scatter_k_spin.value()))
+            self._settings.setValue(f"{prefix}/post_filter", bool(self._post_check.isChecked()))
+            self._settings.setValue(f"{prefix}/post_sigma", float(self._post_sigma_spin.value()))
+            self._settings.setValue(f"{prefix}/denoise_plus", bool(self._denoise_plus_check.isChecked()))
+            self._settings.setValue(f"{prefix}/denoise_plus_k", float(self._denoise_plus_k_spin.value()))
+            self._settings.setValue(f"{prefix}/ac_iter", bool(self._ac_iter_check.isChecked()))
+            self._settings.setValue(f"{prefix}/ac_mu_scale", float(self._ac_mu_scale_spin.value()))
+            # --- Nudges y rotaciones CT ---
+            if hasattr(self, "_nudge_z"):
+                self._settings.setValue(f"{prefix}/ct_nudge_z", float(self._nudge_z.value()))
+                self._settings.setValue(f"{prefix}/ct_nudge_y", float(self._nudge_y.value()))
+                self._settings.setValue(f"{prefix}/ct_nudge_x", float(self._nudge_x.value()))
+                self._settings.setValue(f"{prefix}/ct_rot_z", float(self._rot_z.value()))
+                self._settings.setValue(f"{prefix}/ct_rot_y", float(self._rot_y.value()))
+                self._settings.setValue(f"{prefix}/ct_rot_x", float(self._rot_x.value()))
+            # --- Paths CT / atenuación ---
             if self._ct_path:
                 self._settings.setValue(f"{prefix}/ct_path", self._ct_path)
+            if self._att_path:
+                self._settings.setValue(f"{prefix}/att_path", self._att_path)
+            # --- Orientación SPECT/CT ---
+            self._settings.setValue(f"{prefix}/spect_flip_x", bool(getattr(self, "_spect_flip_x_test", False)))
+            self._settings.setValue(f"{prefix}/spect_flip_y", bool(getattr(self, "_spect_flip_y_test", False)))
+            self._settings.setValue(f"{prefix}/spect_flip_z", bool(getattr(self, "_spect_flip_z_test", False)))
+            self._settings.setValue(f"{prefix}/ct_flip_x", bool(getattr(self, "_ct_flip_x_test", False)))
+            self._settings.setValue(f"{prefix}/ct_flip_y", bool(getattr(self, "_ct_flip_y_test", False)))
+            self._settings.setValue(f"{prefix}/ct_flip_z", bool(getattr(self, "_ct_flip_z_test", False)))
+            # --- Ventana CT manual ---
+            self._settings.setValue(f"{prefix}/ct_wl", float(getattr(self, "_ct_wl", 300.0)))
+            self._settings.setValue(f"{prefix}/ct_ww", float(getattr(self, "_ct_ww", 1500.0)))
+            self._settings.setValue(f"{prefix}/ct_window", str(self._ct_window or "bone"))
+            # --- Etapa del pipeline ---
+            self._save_pipeline_stage()
         self._persist_report_bridge_state()
 
     def _toggle_console(self, visible: bool):
@@ -2782,6 +2972,7 @@ class AmyloidSpectPanel(QDialog):
         if not self._current_spect_path:
             return
         prefix = self._study_settings_prefix()
+        # --- Preset y modo ---
         self._set_combo_by_data(
             self._preset_combo,
             str(self._settings.value(f"{prefix}/preset", self._preset_combo.currentData()) or "amylo360_std128"),
@@ -2794,12 +2985,85 @@ class AmyloidSpectPanel(QDialog):
             self._qc_mode,
             str(self._settings.value(f"{prefix}/qc_mode", self._qc_mode.currentData()) or "off"),
         )
+        # --- Sliders de fusión/overlay ---
         self._qc_split_slider.setValue(int(self._settings.value(f"{prefix}/split_pct", self._qc_split_slider.value()) or 50))
         self._blend_slider.setValue(int(self._settings.value(f"{prefix}/overlay_pct", self._blend_slider.value()) or 35))
         fusion = int(self._settings.value(f"{prefix}/fusion_pct", self._fusion_slider.value()) or 55)
         self._fusion_slider.setValue(fusion)
         self._fusion_pct = fusion
-        self._ct_path = str(self._settings.value(f"{prefix}/ct_path", "") or "")
+        # --- Parámetros completos de reconstrucción (si existen) ---
+        for combo, key in (
+            (self._recon_combo, "recon_method"),
+            (self._ung_method_combo, "ung_method"),
+            (self._gated_method_combo, "gated_method"),
+            (self._ung_filter_combo, "ung_filter"),
+            (self._gated_filter_combo, "gated_filter"),
+        ):
+            val = self._settings.value(f"{prefix}/{key}")
+            if val:
+                self._set_combo_by_data(combo, str(val))
+        for spin, key, cast in (
+            (self._ung_cutoff_spin, "ung_cutoff", float),
+            (self._ung_order_spin, "ung_order", int),
+            (self._gated_cutoff_spin, "gated_cutoff", float),
+            (self._gated_order_spin, "gated_order", int),
+            (self._iter_spin, "iter", int),
+            (self._subsets_spin, "subsets", int),
+            (self._scatter_k_spin, "scatter_k", float),
+            (self._post_sigma_spin, "post_sigma", float),
+            (self._denoise_plus_k_spin, "denoise_plus_k", float),
+            (self._ac_mu_scale_spin, "ac_mu_scale", float),
+        ):
+            val = self._settings.value(f"{prefix}/{key}")
+            if val is not None:
+                spin.blockSignals(True)
+                spin.setValue(cast(val))
+                spin.blockSignals(False)
+        for check, key in (
+            (self._bg_check, "background_subtract"),
+            (self._scatter_check, "scatter_subtract"),
+            (self._post_check, "post_filter"),
+            (self._denoise_plus_check, "denoise_plus"),
+            (self._ac_iter_check, "ac_iter"),
+        ):
+            val = self._settings.value(f"{prefix}/{key}")
+            if val is not None:
+                check.blockSignals(True)
+                check.setChecked(str(val).lower() == "true")
+                check.blockSignals(False)
+        # --- Nudges y rotaciones CT ---
+        if hasattr(self, "_nudge_z"):
+            for spin, key in (
+                (self._nudge_z, "ct_nudge_z"), (self._nudge_y, "ct_nudge_y"), (self._nudge_x, "ct_nudge_x"),
+                (self._rot_z, "ct_rot_z"), (self._rot_y, "ct_rot_y"), (self._rot_x, "ct_rot_x"),
+            ):
+                val = self._settings.value(f"{prefix}/{key}")
+                if val is not None:
+                    spin.blockSignals(True)
+                    spin.setValue(float(val))
+                    spin.blockSignals(False)
+        # --- Paths CT / atenuación ---
+        ct_saved = str(self._settings.value(f"{prefix}/ct_path", "") or "")
+        att_saved = str(self._settings.value(f"{prefix}/att_path", "") or "")
+        if ct_saved and os.path.isfile(ct_saved):
+            self._ct_path = ct_saved
+        if att_saved and os.path.isfile(att_saved):
+            self._att_path = att_saved
+        # --- Ventana CT manual ---
+        ct_wl = self._settings.value(f"{prefix}/ct_wl")
+        ct_ww = self._settings.value(f"{prefix}/ct_ww")
+        ct_win = self._settings.value(f"{prefix}/ct_window")
+        if ct_wl is not None:
+            self._ct_wl = float(ct_wl)
+        if ct_ww is not None:
+            self._ct_ww = max(1.0, float(ct_ww))
+        if ct_win:
+            self._ct_window = str(ct_win)
+        # --- Etapa previa del pipeline ---
+        saved_stage = int(self._settings.value(f"{prefix}/pipeline_stage", 0) or 0)
+        if saved_stage > self._STAGE_NONE:
+            stage_name = self._STAGE_NAMES.get(saved_stage, f"etapa {saved_stage}")
+            self._metrics.append(f"\n--- Estado previo del estudio ---\n- última etapa: {stage_name}")
         self._on_preset_changed()
 
     def _on_preset_changed(self):
@@ -6925,6 +7189,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._spect_affine_ijk_to_lps = getattr(self._analysis, "affine_ijk_to_lps", None)
             self._current_spect_path = path
             self._restore_study_ui_state()
+            self._check_auto_continue_bar()
             self._current_volume = np.asarray(self._analysis.volume, dtype=np.float64)
             self._base_spect_volume = np.asarray(self._analysis.volume, dtype=np.float64)
             self._bone_mask = None
