@@ -1473,6 +1473,30 @@ class AmyloidSpectPanel(QDialog):
             "font-size:16px; font-weight:700; color:#ffffff; background:#000000; padding:6px 12px;"
         )
         loc_btns_row.addWidget(self._lbl_hmr_result)
+        # Referencia de escala clínica
+        hmr_scale_lbl = QLabel(
+            "<span style='color:#ef4444; font-weight:600;'>≥1.6 POSITIVO</span> · "
+            "<span style='color:#f59e0b; font-weight:600;'>1.5-1.6 EQUIVOCO</span> · "
+            "<span style='color:#22c55e; font-weight:600;'>&lt;1.5 NEGATIVO</span>"
+        )
+        hmr_scale_lbl.setStyleSheet("font-size:11px; background:transparent;")
+        loc_btns_row.addWidget(hmr_scale_lbl)
+        # Preservar máscara: botón toggle (activado = reutiliza la máscara editada)
+        self._preserve_mask_check = QPushButton("🔒 Preservar máscara")
+        self._preserve_mask_check.setCheckable(True)
+        self._preserve_mask_check.setChecked(False)
+        self._preserve_mask_check.setToolTip(
+            "Cuando está activado:\n"
+            "- Si editaste la máscara manualmente, se REUTILIZA tal cual\n"
+            "- Solo se recalculan las VOIs con la nueva posición del punto B\n"
+            "- Útil cuando mueves el mediastino pero quieres mantener tu máscara cardíaca"
+        )
+        self._preserve_mask_check.setStyleSheet(
+            "QPushButton { font-size:11px; padding:4px 10px; border:1px solid #64748b; border-radius:4px; "
+            "background:#f1f5f9; color:#334155; }"
+            "QPushButton:checked { background:#7c3aed; color:white; font-weight:bold; border-color:#6d28d9; }"
+        )
+        loc_btns_row.addWidget(self._preserve_mask_check)
         loc_btns_row.addStretch(1)
         self._btn_triangulation_cross = QPushButton("Cruz triangulación")
         self._btn_triangulation_cross.setCheckable(True)
@@ -1759,34 +1783,8 @@ class AmyloidSpectPanel(QDialog):
         self._mediastinum_radius_spin.setSingleStep(5.0)
         radius_row.addWidget(self._mediastinum_radius_spin)
         hmr_layout.addLayout(radius_row)
-        
-        # Fila 3: preservar máscara (volumen y HMR viven en la fila de localización)
-        calc_row = QHBoxLayout()
 
-        # Checkbox para preservar máscara manual al recalcular
-        self._preserve_mask_check = QCheckBox("🔒 Preservar máscara")
-        self._preserve_mask_check.setChecked(False)
-        self._preserve_mask_check.setToolTip(
-            "Cuando está activado:\n"
-            "- Si editaste la máscara manualmente, se REUTILIZA tal cual\n"
-            "- Solo se recalculan las VOIs con la nueva posición del punto B\n"
-            "- Útil cuando mueves el mediastino pero quieres mantener tu máscara cardíaca"
-        )
-        calc_row.addWidget(self._preserve_mask_check)
-        calc_row.addStretch(1)
-        hmr_layout.addLayout(calc_row)
-        
-        # Fila 4: Referencia de escala clínica
-        scale_row = QHBoxLayout()
-        scale_lbl = QLabel(
-            "<span style='color:#ef4444; font-weight:600;'>≥1.6 POSITIVO</span> · "
-            "<span style='color:#f59e0b; font-weight:600;'>1.5-1.6 EQUIVOCO</span> · "
-            "<span style='color:#22c55e; font-weight:600;'>&lt;1.5 NEGATIVO</span>"
-        )
-        scale_lbl.setStyleSheet("font-size:11px; background:transparent;")
-        scale_row.addWidget(scale_lbl)
-        scale_row.addStretch(1)
-        hmr_layout.addLayout(scale_row)
+        # (Preservar máscara, volumen, HMR y referencias viven en la fila bajo las imágenes)
 
         # La vía estable mantiene las VOIs esféricas exactamente en los
         # puntos A/B. La segmentación CT queda aislada como opción beta.
