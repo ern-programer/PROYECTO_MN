@@ -4089,7 +4089,8 @@ class MainWindow(QMainWindow):
 	def open_amyloid_spect_window(self):
 		"""Abre directamente el flujo AMYLO SPECT / SPECT-CT."""
 		from ui.amyloid_spect_panel import AmyloidSpectPanel
-		dlg = AmyloidSpectPanel(self)
+		# Sin parent: ventana top-level con entrada propia en la barra de tareas
+		dlg = AmyloidSpectPanel(None)
 		dlg.show()
 		dlg.raise_()
 		dlg.activateWindow()

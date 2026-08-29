@@ -1913,7 +1913,8 @@ class AmyloidWindow(QDialog):
 
     def _open_amyloid_spect_3d(self):
         """Abre panel AMYLO SPECT 3D (fase 2, experimental)."""
-        dlg = AmyloidSpectPanel(self)
+        # Sin parent: ventana top-level con entrada propia en la barra de tareas
+        dlg = AmyloidSpectPanel(None)
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
