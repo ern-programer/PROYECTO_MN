@@ -7,7 +7,7 @@ import base64
 import json
 import numpy as np
 
-from PyQt6.QtCore import QObject, Qt, QSettings, QThread, pyqtSignal, QPointF, QEvent
+from PyQt6.QtCore import QObject, Qt, QSettings, QThread, pyqtSignal, QPointF
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QPdfWriter, QPageSize, QPen, QColor, QFont, QTransform, QPolygonF, QCursor
 from PyQt6.QtWidgets import (
     QApplication,
@@ -1517,9 +1517,9 @@ class AmyloidSpectPanel(QDialog):
         blend_row.addWidget(self._blend_lbl)
         overlay_qc_layout.addLayout(blend_row)
 
-        # QC registro / Split / Fusión
-        qc_row = QHBoxLayout()
-        qc_row.addWidget(QLabel("QC registro:"))
+        # QC registro (fila propia, debajo de overlay óseo)
+        qc_sel_row = QHBoxLayout()
+        qc_sel_row.addWidget(QLabel("QC registro:"))
         self._qc_mode = QComboBox()
         self._qc_mode.addItem("Off", "off")
         self._qc_mode.addItem("Fusión", "fusion")
@@ -1529,7 +1529,11 @@ class AmyloidSpectPanel(QDialog):
         self._qc_mode.addItem("Contornos CT", "contours")
         self._qc_mode.currentIndexChanged.connect(self._on_visual_controls_changed)
         self._qc_mode.setEnabled(False)
-        qc_row.addWidget(self._qc_mode)
+        qc_sel_row.addWidget(self._qc_mode, 1)
+        overlay_qc_layout.addLayout(qc_sel_row)
+
+        # Split / Fusión / CT (verticales, más cortos)
+        qc_row = QHBoxLayout()
         # Split % (vertical para más recorrido)
         split_col = QVBoxLayout()
         split_col.addWidget(QLabel("Split %:"))
@@ -1538,7 +1542,8 @@ class AmyloidSpectPanel(QDialog):
         self._qc_split_slider.setValue(50)
         self._qc_split_slider.valueChanged.connect(self._on_visual_controls_changed)
         self._qc_split_slider.setEnabled(False)
-        self._qc_split_slider.setMinimumHeight(120)
+        self._qc_split_slider.setMinimumHeight(70)
+        self._qc_split_slider.setMaximumHeight(90)
         split_col.addWidget(self._qc_split_slider, 1)
         self._qc_split_lbl = QLabel("50%")
         self._qc_split_lbl.setStyleSheet("color:#94a3b8; font-size:10px;")
@@ -1555,7 +1560,8 @@ class AmyloidSpectPanel(QDialog):
         self._fusion_slider.setToolTip("0% CT solamente · 100% SPECT coloreado. Ajusta la mezcla de la fusión.")
         self._fusion_slider.valueChanged.connect(self._on_fusion_slider_changed)
         self._fusion_slider.setEnabled(False)
-        self._fusion_slider.setMinimumHeight(120)
+        self._fusion_slider.setMinimumHeight(70)
+        self._fusion_slider.setMaximumHeight(90)
         fusion_col.addWidget(self._fusion_slider, 1)
         self._fusion_lbl = QLabel("55%")
         self._fusion_lbl.setStyleSheet("color:#94a3b8; font-size:10px;")
@@ -1576,7 +1582,8 @@ class AmyloidSpectPanel(QDialog):
         )
         self._ct_opacity_slider.valueChanged.connect(self._on_ct_opacity_changed)
         self._ct_opacity_slider.setEnabled(False)
-        self._ct_opacity_slider.setMinimumHeight(120)
+        self._ct_opacity_slider.setMinimumHeight(70)
+        self._ct_opacity_slider.setMaximumHeight(90)
         ct_op_col.addWidget(self._ct_opacity_slider, 1)
         self._ct_opacity_lbl = QLabel("100%")
         self._ct_opacity_lbl.setStyleSheet("color:#94a3b8; font-size:10px;")
@@ -1585,26 +1592,29 @@ class AmyloidSpectPanel(QDialog):
         qc_row.addLayout(ct_op_col, 1)
         overlay_qc_layout.addLayout(qc_row)
 
-        # Sliders de corte z/y/x
-        slice_row = QHBoxLayout()
-        slice_row.addWidget(QLabel("Cortes z/y/x:"))
+        # Cortes z/y/x: título + tres sliders apilados
+        cortes_title = QLabel("Cortes z/y/x")
+        cortes_title.setStyleSheet("font-weight:600; margin-top:4px;")
+        overlay_qc_layout.addWidget(cortes_title)
         self._slice_z = QSlider(Qt.Orientation.Horizontal)
         self._slice_y = QSlider(Qt.Orientation.Horizontal)
         self._slice_x = QSlider(Qt.Orientation.Horizontal)
         self._slice_z_lbl = QLabel("z -")
         self._slice_y_lbl = QLabel("y -")
         self._slice_x_lbl = QLabel("x -")
-        for slider in (self._slice_z, self._slice_y, self._slice_x):
+        for slider, lbl in ((self._slice_z, self._slice_z_lbl),
+                            (self._slice_y, self._slice_y_lbl),
+                            (self._slice_x, self._slice_x_lbl)):
             slider.setRange(0, 0)
             slider.setEnabled(False)
             slider.valueChanged.connect(self._on_slice_slider_changed)
-        slice_row.addWidget(self._slice_z_lbl)
-        slice_row.addWidget(self._slice_z, 1)
-        slice_row.addWidget(self._slice_y_lbl)
-        slice_row.addWidget(self._slice_y, 1)
-        slice_row.addWidget(self._slice_x_lbl)
-        slice_row.addWidget(self._slice_x, 1)
-        overlay_qc_layout.addLayout(slice_row)
+            lbl.setMinimumWidth(46)
+            lbl.setStyleSheet("color:#94a3b8; font-size:10px;")
+            axis_row = QHBoxLayout()
+            axis_row.setSpacing(4)
+            axis_row.addWidget(lbl)
+            axis_row.addWidget(slider, 1)
+            overlay_qc_layout.addLayout(axis_row)
         
         # === Toggles de visibilidad de overlays en vistas MPR ===
         vis_row = QHBoxLayout()
@@ -2202,16 +2212,19 @@ class AmyloidSpectPanel(QDialog):
 
         main_controls_layout.addWidget(right_side_widget, 5)  # Columna derecha: 5/10
 
-        # Boxes colapsables: click en el título expande/colapsa (estado persistido)
-        for _grp, _key in (
-            (hmr_group, "hmr"),
-            (edit_group, "f24_mask"),
-            (flip_group, "orientacion"),
-            (zoom_group, "zoom"),
-            (ajuste_group, "ajuste"),
-        ):
-            self._make_collapsible(_grp, _key)
-
+        # Bloque completo de controles colapsable con un solo toggle
+        self._controls_container = controls_container
+        self._btn_toggle_controls = QPushButton()
+        self._btn_toggle_controls.setCheckable(True)
+        self._btn_toggle_controls.setStyleSheet(
+            "font-size:10px; padding:2px 8px; background:#1e293b; color:#94a3b8; "
+            "border:1px solid #334155; border-radius:3px; text-align:left;"
+        )
+        self._btn_toggle_controls.toggled.connect(self._toggle_controls_block)
+        controls_open = str(self._settings.value("global/controls_block_open", "false")).lower() == "true"
+        self._btn_toggle_controls.setChecked(controls_open)
+        self._toggle_controls_block(controls_open)
+        left_col.addWidget(self._btn_toggle_controls)
         left_col.addWidget(controls_container)
         # ────────────────────────────────────────────────────────────────────────────
 
@@ -2950,38 +2963,13 @@ class AmyloidSpectPanel(QDialog):
             self._settings.setValue("global/last_spect_path", self._current_spect_path)
         self._persist_report_bridge_state()
 
-    def _make_collapsible(self, group: QGroupBox, key: str, default_open: bool = False):
-        """Convierte un QGroupBox en colapsable: click en el título expande/colapsa."""
-        base_title = group.title()
-        settings_key = f"global/box_open_{key}"
-
-        def _apply(open_: bool):
-            for child in group.findChildren(QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly):
-                child.setVisible(open_)
-            group.setTitle(("▼ " if open_ else "▶ ") + base_title)
-            group.setMaximumHeight(16777215 if open_ else 30)
-            group.setProperty("_box_open", bool(open_))
-            self._settings.setValue(settings_key, bool(open_))
-
-        class _TitleClickFilter(QObject):
-            def eventFilter(self_f, obj, ev):
-                if ev.type() == QEvent.Type.MouseButtonPress:
-                    try:
-                        pos = ev.position().toPoint()
-                    except AttributeError:
-                        pos = ev.pos()
-                    is_open = bool(group.property("_box_open"))
-                    # Zona título: hasta 28px (boxes con margin-top en stylesheet dibujan el título más abajo)
-                    on_title = pos.y() <= 28 and group.childAt(pos) is None
-                    if on_title or not is_open:
-                        _apply(not is_open)
-                        return True
-                return False
-
-        filt = _TitleClickFilter(group)
-        group.installEventFilter(filt)
-        saved = str(self._settings.value(settings_key, "true" if default_open else "false")).lower() == "true"
-        _apply(saved)
+    def _toggle_controls_block(self, visible: bool):
+        """Muestra/oculta el bloque completo HMR + F2.4 + Orientación/Zoom/Ajuste."""
+        self._controls_container.setVisible(visible)
+        self._btn_toggle_controls.setText(
+            ("▼ " if visible else "▶ ") + "Controles: HMR-SPECT · Máscara CT · Orientación · Zoom · Ajuste"
+        )
+        self._settings.setValue("global/controls_block_open", bool(visible))
 
     def _check_startup_auto_continue(self):
         """Al abrir el panel: si el último estudio tiene estado guardado, ofrecer retomarlo."""
