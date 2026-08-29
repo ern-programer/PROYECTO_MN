@@ -20,13 +20,14 @@ class MipRotatorWidget(QWidget):
     
     angle_changed = pyqtSignal(float, float)  # azimuth, elevation
     
-    # Posiciones predefinidas (azimut, elevación) — calibradas vs vista real
+    # Posiciones predefinidas (azimut, elevación) — corregidas según verificación
+    # clínica del usuario: az=0 muestra la vista AP con la grilla display estándar.
     POSITIONS = {
-        "PA": (0.0, 0.0),         # Posterior-Anterior (vista dorsal) — referencia 0°
-        "AP": (180.0, 0.0),       # Anterior-Posterior (vista frontal)
-        "LD": (90.0, 0.0),        # Lateral Derecho
-        "LI": (270.0, 0.0),       # Lateral Izquierdo
-        "OAI": (235.0, 0.0),      # Oblicuo Anterior Izquierdo
+        "AP": (0.0, 0.0),         # Anterior-Posterior (vista frontal)
+        "PA": (180.0, 0.0),       # Posterior-Anterior (vista dorsal)
+        "LI": (90.0, 0.0),        # Lateral Izquierdo
+        "LD": (270.0, 0.0),       # Lateral Derecho
+        "OAI": (55.0, 0.0),       # Oblicuo Anterior Izquierdo
     }
     
     def __init__(self, parent=None):
@@ -487,8 +488,8 @@ class MipRotatorWidget(QWidget):
         self._schedule_render()
     
     def reset_view(self):
-        """Reset a vista PA sin zoom."""
-        self._azimuth_deg = 0.0     # PA
+        """Reset a vista AP sin zoom."""
+        self._azimuth_deg = 0.0     # AP
         self._elevation_deg = 0.0
         self._zoom_factor = 1.0
         self._update_angle_label()

@@ -22,11 +22,11 @@ class VrtWindow(QDialog):
     """Render volumétrico 3D interactivo de CT (hueso) + focos SPECT."""
 
     POSITIONS = {
-        "PA": (0.0, 0.0),
-        "AP": (180.0, 0.0),
-        "LD": (90.0, 0.0),
-        "LI": (270.0, 0.0),
-        "OAI": (235.0, 0.0),
+        "AP": (0.0, 0.0),
+        "PA": (180.0, 0.0),
+        "LI": (90.0, 0.0),
+        "LD": (270.0, 0.0),
+        "OAI": (55.0, 0.0),
     }
 
     #: lado máximo del volumen de render (interactividad CPU)
@@ -69,13 +69,17 @@ class VrtWindow(QDialog):
         # Percentil de focos SPECT (sobre el volumen sin rotar, una sola vez)
         self._sp_p100 = float(np.max(self._sp_hq)) if self._sp_hq is not None else 0.0
 
-        self._azimuth = 180.0   # AP
+        self._azimuth = 0.0   # AP
         self._elevation = 0.0
         self._zoom = 1.0
         self._hu_threshold = 150.0
         self._density = 0.55
-        self._fusion_on = sp is not None
-        self._fusion_pct = 96.0
+        self._view_mode = "fusion" if sp is not None else "bone"
+        self._cmap_name = "hot"
+        self._sp_base = 20.0     # % del máximo SPECT: por debajo no se muestra (quita fondo)
+        self._sp_top = 100.0
+        self._fusion_mix = 0.65
+        self._cine_speed = 3.0   # grados por frame
         self._fast_mode = False
         self._drag_pos = None
 
@@ -122,12 +126,14 @@ class VrtWindow(QDialog):
         self._lbl.wheelEvent = self._on_wheel
         layout.addWidget(self._lbl, 1)
 
-        self._angle_lbl = QLabel("Az: 180.0°  El: +0.0°")
+        self._angle_lbl = QLabel("Az: 0.0°  El: +0.0°")
         self._angle_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._angle_lbl.setStyleSheet("color:#94a3b8; font-size:11px; font-family:Consolas,monospace;")
         layout.addWidget(self._angle_lbl)
 
-        # Fila 1: posiciones + cine + guardar
+        has_sp = self._sp_hq is not None
+
+        # Fila 1: posiciones + cine + velocidad + guardar
         row1 = QHBoxLayout()
         for name in ("AP", "PA", "LI", "LD", "OAI"):
             btn = QPushButton(name)
@@ -138,6 +144,17 @@ class VrtWindow(QDialog):
         self._btn_cine.setCheckable(True)
         self._btn_cine.toggled.connect(self._on_cine_toggled)
         row1.addWidget(self._btn_cine)
+        row1.addWidget(QLabel("Vel:"))
+        self._speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self._speed_slider.setRange(5, 100)   # 0.5 .. 10 °/frame
+        self._speed_slider.setValue(int(self._cine_speed * 10))
+        self._speed_slider.setFixedWidth(90)
+        self._speed_slider.setToolTip("Velocidad del cine (grados por cuadro)")
+        self._speed_slider.valueChanged.connect(self._on_speed_changed)
+        row1.addWidget(self._speed_slider)
+        self._speed_lbl = QLabel("3.0°")
+        self._speed_lbl.setFixedWidth(34)
+        row1.addWidget(self._speed_lbl)
         row1.addStretch()
         btn_png = QPushButton("Guardar PNG")
         btn_png.clicked.connect(self._save_png)
@@ -166,7 +183,7 @@ class VrtWindow(QDialog):
         row2.addWidget(self._den_lbl)
         layout.addLayout(row2)
 
-        # Fila 3: fusión SPECT + camilla
+        # Fila 3: camilla + modo de vista + colormap SPECT
         row3 = QHBoxLayout()
         self._chk_table = QCheckBox("Quitar camilla")
         self._chk_table.setChecked(True)
@@ -176,22 +193,69 @@ class VrtWindow(QDialog):
         )
         self._chk_table.toggled.connect(self._on_params_changed)
         row3.addWidget(self._chk_table)
-        self._chk_fusion = QCheckBox("Fusión SPECT (focos)")
-        self._chk_fusion.setChecked(self._fusion_on)
-        self._chk_fusion.setEnabled(self._sp_hq is not None)
-        self._chk_fusion.toggled.connect(self._on_params_changed)
-        row3.addWidget(self._chk_fusion)
-        row3.addWidget(QLabel("Umbral focos (percentil):"))
-        self._pct_slider = QSlider(Qt.Orientation.Horizontal)
-        self._pct_slider.setRange(80, 99)
-        self._pct_slider.setValue(int(self._fusion_pct))
-        self._pct_slider.setEnabled(self._sp_hq is not None)
-        self._pct_slider.valueChanged.connect(self._on_params_changed)
-        row3.addWidget(self._pct_slider, 1)
-        self._pct_lbl = QLabel("96")
-        self._pct_lbl.setFixedWidth(28)
-        row3.addWidget(self._pct_lbl)
+        row3.addSpacing(12)
+        row3.addWidget(QLabel("Ver:"))
+        self._view_combo = QComboBox()
+        self._view_combo.addItem("Fusión", "fusion")
+        self._view_combo.addItem("Solo hueso (CT)", "bone")
+        self._view_combo.addItem("Solo SPECT", "spect")
+        if not has_sp:
+            self._view_combo.setCurrentIndex(1)
+            self._view_combo.setEnabled(False)
+        self._view_combo.currentIndexChanged.connect(self._on_params_changed)
+        row3.addWidget(self._view_combo)
+        row3.addSpacing(12)
+        row3.addWidget(QLabel("Color SPECT:"))
+        self._cmap_combo = QComboBox()
+        for name in self._available_cmaps():
+            self._cmap_combo.addItem(name)
+        if self._cmap_combo.findText("hot") >= 0:
+            self._cmap_combo.setCurrentText("hot")
+        self._cmap_combo.setEnabled(has_sp)
+        self._cmap_combo.currentIndexChanged.connect(self._on_params_changed)
+        row3.addWidget(self._cmap_combo)
+        row3.addStretch()
         layout.addLayout(row3)
+
+        # Fila 4: ventana SPECT (base/top) + % fusión
+        row4 = QHBoxLayout()
+        row4.addWidget(QLabel("SPECT fondo:"))
+        self._sp_base_slider = QSlider(Qt.Orientation.Horizontal)
+        self._sp_base_slider.setRange(0, 95)
+        self._sp_base_slider.setValue(int(self._sp_base))
+        self._sp_base_slider.setToolTip(
+            "Base de la ventana SPECT (% del máximo). Subirla elimina fondo y\n"
+            "deja solo los focos calientes (I-131, paratiroides, etc.)."
+        )
+        self._sp_base_slider.setEnabled(has_sp)
+        self._sp_base_slider.valueChanged.connect(self._on_params_changed)
+        row4.addWidget(self._sp_base_slider, 1)
+        self._sp_base_lbl = QLabel("20%")
+        self._sp_base_lbl.setFixedWidth(34)
+        row4.addWidget(self._sp_base_lbl)
+        row4.addWidget(QLabel("Top:"))
+        self._sp_top_slider = QSlider(Qt.Orientation.Horizontal)
+        self._sp_top_slider.setRange(10, 100)
+        self._sp_top_slider.setValue(int(self._sp_top))
+        self._sp_top_slider.setToolTip("Tope de la ventana SPECT (% del máximo): saturación del colormap.")
+        self._sp_top_slider.setEnabled(has_sp)
+        self._sp_top_slider.valueChanged.connect(self._on_params_changed)
+        row4.addWidget(self._sp_top_slider, 1)
+        self._sp_top_lbl = QLabel("100%")
+        self._sp_top_lbl.setFixedWidth(38)
+        row4.addWidget(self._sp_top_lbl)
+        row4.addWidget(QLabel("Fusión:"))
+        self._mix_slider = QSlider(Qt.Orientation.Horizontal)
+        self._mix_slider.setRange(0, 100)
+        self._mix_slider.setValue(int(self._fusion_mix * 100))
+        self._mix_slider.setToolTip("Peso del SPECT sobre el hueso en modo Fusión.")
+        self._mix_slider.setEnabled(has_sp)
+        self._mix_slider.valueChanged.connect(self._on_params_changed)
+        row4.addWidget(self._mix_slider, 1)
+        self._mix_lbl = QLabel("65%")
+        self._mix_lbl.setFixedWidth(34)
+        row4.addWidget(self._mix_lbl)
+        layout.addLayout(row4)
 
         hint = QLabel("Arrastrar: rotar · Rueda: zoom · Doble clic: vista AP")
         hint.setStyleSheet("color:#64748b; font-size:10px;")
@@ -229,7 +293,7 @@ class VrtWindow(QDialog):
         self._goto("AP")
 
     def _goto(self, name: str):
-        self._azimuth, self._elevation = self.POSITIONS.get(name, (180.0, 0.0))
+        self._azimuth, self._elevation = self.POSITIONS.get(name, (0.0, 0.0))
         self._update_angle_lbl()
         self._schedule(fast=False)
 
@@ -241,22 +305,51 @@ class VrtWindow(QDialog):
             self._cine_timer.stop()
             self._hq_timer.start(220)
 
+    def _on_speed_changed(self, value: int):
+        self._cine_speed = float(value) / 10.0
+        self._speed_lbl.setText(f"{self._cine_speed:.1f}°")
+
     def _cine_step(self):
-        self._azimuth = (self._azimuth + 3.0) % 360.0
+        self._azimuth = (self._azimuth + self._cine_speed) % 360.0
         self._update_angle_lbl()
         self._schedule(fast=True)
 
     def _on_params_changed(self):
         self._hu_threshold = float(self._thr_slider.value())
         self._density = float(self._den_slider.value()) / 100.0
-        self._fusion_on = bool(self._chk_fusion.isChecked())
-        self._fusion_pct = float(self._pct_slider.value())
         self._remove_table = bool(self._chk_table.isChecked())
+        self._view_mode = str(self._view_combo.currentData() or "bone")
+        self._cmap_name = str(self._cmap_combo.currentText() or "hot")
+        self._sp_base = float(self._sp_base_slider.value())
+        self._sp_top = max(float(self._sp_top_slider.value()), self._sp_base + 2.0)
+        self._fusion_mix = float(self._mix_slider.value()) / 100.0
         self._thr_lbl.setText(f"{int(self._hu_threshold)}")
         self._den_lbl.setText(f"{int(self._density * 100)}%")
-        self._pct_lbl.setText(f"{int(self._fusion_pct)}")
+        self._sp_base_lbl.setText(f"{int(self._sp_base)}%")
+        self._sp_top_lbl.setText(f"{int(self._sp_top)}%")
+        self._mix_lbl.setText(f"{int(self._fusion_mix * 100)}%")
         self._schedule(fast=True)
         self._hq_timer.start(350)
+
+    @staticmethod
+    def _available_cmaps() -> list[str]:
+        base = ["hot", "gist_heat", "afmhot", "turbo", "jet", "plasma", "viridis", "gray"]
+        try:
+            from viz.colormaps import available_colormaps, register_all_colormaps
+            register_all_colormaps()
+            extra = [n for n in available_colormaps() if n not in base]
+            return base + extra
+        except Exception:
+            return base
+
+    def _apply_spect_cmap(self, arr01: np.ndarray) -> np.ndarray:
+        try:
+            import matplotlib as mpl
+            cm = mpl.colormaps[self._cmap_name]
+            return np.asarray(cm(np.clip(arr01, 0.0, 1.0))[..., :3], dtype=np.float32)
+        except Exception:
+            a = np.clip(arr01, 0.0, 1.0).astype(np.float32)
+            return np.stack([a, a * 0.5, np.zeros_like(a)], axis=-1)
 
     def _update_angle_lbl(self):
         self._angle_lbl.setText(f"Az: {self._azimuth:6.1f}°  El: {self._elevation:+5.1f}°")
@@ -283,69 +376,77 @@ class VrtWindow(QDialog):
 
     def _render(self):
         try:
-            if self._remove_table:
-                ct = self._ct_fast_clean if self._fast_mode else self._ct_hq_clean
-            else:
-                ct = self._ct_fast_raw if self._fast_mode else self._ct_hq_raw
+            mode = str(self._view_mode or "bone")
             sp = self._sp_fast if self._fast_mode else self._sp_hq
+            use_ct = mode in ("fusion", "bone")
+            use_sp = mode in ("fusion", "spect") and sp is not None
+            if not use_ct and not use_sp:
+                use_ct = True
 
-            rot = ct
-            if abs(self._azimuth) > 0.25:
-                rot = ndi.rotate(rot, self._azimuth, axes=(2, 1), reshape=False,
-                                 order=1, cval=-1000.0, mode="constant", prefilter=False)
-            if abs(self._elevation) > 0.5:
-                rot = ndi.rotate(rot, self._elevation, axes=(0, 1), reshape=False,
-                                 order=1, cval=-1000.0, mode="constant", prefilter=False)
-
-            sp_rot = None
-            if self._fusion_on and sp is not None:
-                sp_rot = sp
+            def _rot3d(v: np.ndarray, cval: float) -> np.ndarray:
+                out = v
                 if abs(self._azimuth) > 0.25:
-                    sp_rot = ndi.rotate(sp_rot, self._azimuth, axes=(2, 1), reshape=False,
-                                        order=1, cval=0.0, mode="constant", prefilter=False)
+                    out = ndi.rotate(out, self._azimuth, axes=(2, 1), reshape=False,
+                                     order=1, cval=cval, mode="constant", prefilter=False)
                 if abs(self._elevation) > 0.5:
-                    sp_rot = ndi.rotate(sp_rot, self._elevation, axes=(0, 1), reshape=False,
-                                        order=1, cval=0.0, mode="constant", prefilter=False)
+                    out = ndi.rotate(out, self._elevation, axes=(0, 1), reshape=False,
+                                     order=1, cval=cval, mode="constant", prefilter=False)
+                return out
 
-            thr = self._hu_threshold
-            # Opacidad por voxel: rampa desde el umbral (300 HU de transición)
-            alpha_vox = np.clip((rot - thr) / 300.0, 0.0, 1.0) ** 1.4
-            alpha_vox *= self._density * 0.28
+            alpha_vox = shade = dens = None
+            rot = None
+            if use_ct:
+                if self._remove_table:
+                    ct = self._ct_fast_clean if self._fast_mode else self._ct_hq_clean
+                else:
+                    ct = self._ct_fast_raw if self._fast_mode else self._ct_hq_raw
+                rot = _rot3d(ct, -1000.0)
+                thr = self._hu_threshold
+                # Opacidad por voxel: rampa desde el umbral (300 HU de transición)
+                alpha_vox = np.clip((rot - thr) / 300.0, 0.0, 1.0) ** 1.4
+                alpha_vox *= self._density * 0.28
+                # Shading difuso: normal desde el gradiente (luz frontal desde cámara)
+                g = np.gradient(ndi.gaussian_filter(rot, 1.0) if not self._fast_mode else rot)
+                gnorm = np.sqrt(g[0] ** 2 + g[1] ** 2 + g[2] ** 2) + 1e-3
+                ndotl = np.clip(-g[1] / gnorm, 0.0, 1.0)
+                shade = 0.30 + 0.62 * ndotl + 0.22 * ndotl ** 8  # ambiente + difuso + brillo
+                dens = np.clip((rot - thr) / 1100.0, 0.0, 1.0)
 
-            # Shading difuso: normal desde el gradiente (luz frontal desde cámara)
-            g = np.gradient(ndi.gaussian_filter(rot, 1.0) if not self._fast_mode else rot)
-            gnorm = np.sqrt(g[0] ** 2 + g[1] ** 2 + g[2] ** 2) + 1e-3
-            ndotl = np.clip(-g[1] / gnorm, 0.0, 1.0)
-            shade = 0.30 + 0.62 * ndotl + 0.22 * ndotl ** 8  # ambiente + difuso + brillo
+            sp_w = sp_alpha = None
+            if use_sp:
+                sp_rot = _rot3d(sp, 0.0)
+                ref = self._sp_p100 if self._sp_p100 > 0 else float(np.max(sp))
+                base = self._sp_base / 100.0
+                top = max(self._sp_top / 100.0, base + 0.02)
+                sp_n = sp_rot / max(ref, 1e-6)
+                sp_w = np.clip((sp_n - base) / (top - base), 0.0, 1.0)
+                strength = self._fusion_mix if mode == "fusion" else self._density
+                sp_alpha = (sp_w ** 1.3) * 0.40 * max(strength, 0.02)
 
-            dens = np.clip((rot - thr) / 1100.0, 0.0, 1.0)
-
-            sp_alpha = None
-            if sp_rot is not None and self._sp_p100 > 0:
-                sp_thr = np.percentile(sp, self._fusion_pct)
-                rng = max(self._sp_p100 - sp_thr, 1e-6)
-                sp_alpha = np.clip((sp_rot - sp_thr) / rng, 0.0, 1.0) * 0.55
-
-            nz, ny, nx = rot.shape
+            shape = rot.shape if rot is not None else sp_w.shape
+            nz, ny, nx = shape
             color_acc = np.zeros((nz, nx, 3), dtype=np.float32)
             trans = np.ones((nz, nx), dtype=np.float32)
-            sp_color = np.array([0.80, 0.42, 0.98], dtype=np.float32)  # violeta GE-like
 
             for j in range(ny):
-                a_ct = alpha_vox[:, j, :]
-                if sp_alpha is not None:
-                    a_sp = sp_alpha[:, j, :]
-                else:
-                    a_sp = None
-                if not a_ct.any() and (a_sp is None or not a_sp.any()):
+                a_ct = alpha_vox[:, j, :] if alpha_vox is not None else None
+                a_sp = sp_alpha[:, j, :] if sp_alpha is not None else None
+                has_ct = a_ct is not None and a_ct.any()
+                has_sp = a_sp is not None and a_sp.any()
+                if not has_ct and not has_sp:
                     continue
-                col = self._bone_rgb(dens[:, j, :]).astype(np.float32) * shade[:, j, :, None]
-                a = a_ct
-                if a_sp is not None and a_sp.any():
-                    a_tot = np.clip(a_ct + a_sp, 0.0, 1.0)
-                    w_sp = np.divide(a_sp, a_tot, out=np.zeros_like(a_sp), where=a_tot > 1e-6)[..., None]
-                    col = col * (1.0 - w_sp) + sp_color * w_sp
-                    a = a_tot
+                if has_ct:
+                    col = self._bone_rgb(dens[:, j, :]).astype(np.float32) * shade[:, j, :, None]
+                    a = a_ct
+                    if has_sp:
+                        col_sp = self._apply_spect_cmap(sp_w[:, j, :])
+                        a_tot = np.clip(a_ct + a_sp, 0.0, 1.0)
+                        w_sp = np.divide(a_sp, a_tot, out=np.zeros_like(a_sp), where=a_tot > 1e-6)[..., None]
+                        col = col * (1.0 - w_sp) + col_sp * w_sp
+                        a = a_tot
+                else:
+                    col = self._apply_spect_cmap(sp_w[:, j, :])
+                    a = a_sp
                 contrib = (trans * a)[..., None]
                 color_acc += contrib * col
                 trans *= (1.0 - a)
