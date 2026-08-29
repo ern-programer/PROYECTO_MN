@@ -511,25 +511,27 @@ class VrtWindow(QDialog):
             qimg = QImage(img.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
             pix = QPixmap.fromImage(qimg)
 
-            # Overlays: wireframe de máscaras + círculos VOI (misma rotación analítica)
-            if self._show_overlays and (self._vois or self._masks):
-                factor = self._factor_fast if self._fast_mode else self._factor_hq
-                painter = QPainter(pix)
-                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                self._draw_mask_wireframes(painter, shape, factor)
-                self._draw_vois(painter, shape, factor)
-                painter.end()
-
             vw = max(64, self._lbl.width() - 8)
             vh = max(64, self._lbl.height() - 8)
             side = int(min(vw, vh) * self._zoom)
             pix = pix.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatio,
                              Qt.TransformationMode.SmoothTransformation)
+
+            # Overlays: dibujados DESPUÉS del escalado para que el wireframe sea 1px real
+            if self._show_overlays and (self._vois or self._masks):
+                factor = self._factor_fast if self._fast_mode else self._factor_hq
+                disp_scale = pix.width() / float(w) if w else 1.0
+                painter = QPainter(pix)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                self._draw_mask_wireframes(painter, shape, factor, disp_scale)
+                self._draw_vois(painter, shape, factor, disp_scale)
+                painter.end()
             self._lbl.setPixmap(pix)
         except Exception as exc:  # nunca dejar que una excepción mate la app (slot Qt)
             self._lbl.setText(f"VRT error:\n{exc}")
 
-    def _draw_mask_wireframes(self, painter: QPainter, shape: tuple, factor: float):
+    def _draw_mask_wireframes(self, painter: QPainter, shape: tuple, factor: float,
+                              disp_scale: float = 1.0):
         """Malla de puntos de superficie proyectada analíticamente (sin rotar volúmenes)."""
         if not self._masks:
             return
@@ -549,15 +551,16 @@ class VrtWindow(QDialog):
             rx = pts[:, 2] * factor - cx0
             ry1 = ry * cos_a - rx * sin_a
             rx1 = ry * sin_a + rx * cos_a
-            rows = rz * cos_e - ry1 * sin_e + cz0
-            cols = rx1 + cx0
+            rows = (rz * cos_e - ry1 * sin_e + cz0) * disp_scale
+            cols = (rx1 + cx0) * disp_scale
             color = QColor(*mk["rgb"])
             color.setAlpha(190)
             painter.setPen(QPen(color, 1))
             poly = QPolygonF([QPointF(float(c), float(r)) for r, c in zip(rows, cols)])
             painter.drawPoints(poly)
 
-    def _draw_vois(self, painter: QPainter, shape: tuple, factor: float):
+    def _draw_vois(self, painter: QPainter, shape: tuple, factor: float,
+                   disp_scale: float = 1.0):
         """Proyecta cada VOI (esfera) con la rotación actual (misma convención que ndi.rotate)."""
         nz, ny, nx = shape
         cz0, cy0, cx0 = (nz - 1) * 0.5, (ny - 1) * 0.5, (nx - 1) * 0.5
@@ -573,9 +576,9 @@ class VrtWindow(QDialog):
                 rz1 = rz
                 rz2 = rz1 * np.cos(el) - ry1 * np.sin(el)
                 rx2 = rx1
-                row = rz2 + cz0
-                col = rx2 + cx0
-                r_px = max(2.0, float(voi.get("radius_vox", 4.0)) * factor)
+                row = (rz2 + cz0) * disp_scale
+                col = (rx2 + cx0) * disp_scale
+                r_px = max(2.0, float(voi.get("radius_vox", 4.0)) * factor * disp_scale)
                 color = QColor(*voi.get("rgb", (239, 68, 68)))
                 painter.setPen(QPen(color, 2))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
