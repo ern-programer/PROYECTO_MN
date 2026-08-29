@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer, QPointF
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont, QPolygonF
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
     QPushButton, QSizePolicy, QSlider, QVBoxLayout,
@@ -31,7 +31,7 @@ class VrtWindow(QDialog):
 
     #: lado máximo del volumen de render (interactividad CPU)
     MAX_SIDE_HQ = 176
-    MAX_SIDE_FAST = 112
+    MAX_SIDE_FAST = 96
 
     def __init__(self, parent=None, *, ct_volume: np.ndarray,
                  spect_volume: np.ndarray | None = None,
@@ -74,17 +74,20 @@ class VrtWindow(QDialog):
         self._factor_hq = min(1.0, float(self.MAX_SIDE_HQ) / float(max(ct.shape)))
         self._factor_fast = min(1.0, float(self.MAX_SIDE_FAST) / float(max(ct.shape)))
         self._vois = list(vois) if vois else []
-        # Máscaras volumétricas: CT segmentada (turquesa) y VOI de cuantificación (rojo)
+        # Máscaras como wireframe: puntos de superficie precomputados una sola
+        # vez (rotar volúmenes de máscara por frame mataba la fluidez).
         self._masks: list[dict] = []
         for m_src, rgb in ((mask_3d, (64, 224, 208)), (voi_mask_3d, (248, 113, 113))):
             if m_src is None or not np.any(m_src):
                 continue
-            m = np.asarray(m_src, dtype=np.float32)
-            m_hq = ndi.zoom(m, self._factor_hq, order=0, prefilter=False) if self._factor_hq < 0.999 else m
-            m_fast = ndi.zoom(m, self._factor_fast, order=0, prefilter=False) if self._factor_fast < 0.999 else m
-            self._masks.append({"hq": np.ascontiguousarray(m_hq > 0.5),
-                                "fast": np.ascontiguousarray(m_fast > 0.5),
-                                "rgb": rgb})
+            mb = np.asarray(m_src) > 0.5
+            surf = mb ^ ndi.binary_erosion(mb, iterations=1)
+            pts = np.argwhere(surf).astype(np.float32)
+            if pts.shape[0] > 3500:
+                sel = np.linspace(0, pts.shape[0] - 1, 3500).astype(np.int64)
+                pts = pts[sel]
+            if pts.size:
+                self._masks.append({"pts": pts, "rgb": rgb})
         self._show_overlays = bool(self._vois or self._masks)
 
         # Percentil de focos SPECT (sobre el volumen sin rotar, una sola vez)
@@ -229,8 +232,8 @@ class VrtWindow(QDialog):
         self._chk_overlays.setChecked(self._show_overlays)
         self._chk_overlays.setEnabled(bool(self._vois or self._masks))
         self._chk_overlays.setToolTip(
-            "Proyectar VOIs (círculos), máscara CT (turquesa)\n"
-            "y VOI de cuantificación HMR (rojo) sobre el 3D."
+            "Proyectar VOIs (círculos), máscara CT (malla turquesa)\n"
+            "y VOI de cuantificación HMR (malla roja) sobre el 3D."
         )
         self._chk_overlays.toggled.connect(self._on_params_changed)
         row3.addWidget(self._chk_overlays)
@@ -472,7 +475,9 @@ class VrtWindow(QDialog):
             color_acc = np.zeros((nz, nx, 3), dtype=np.float32)
             trans = np.ones((nz, nx), dtype=np.float32)
 
-            for j in range(ny):
+            # En modo rápido el rayo salta de a 2 voxels (opacidad compuesta)
+            step = 2 if self._fast_mode else 1
+            for j in range(0, ny, step):
                 a_ct = alpha_vox[:, j, :] if alpha_vox is not None else None
                 a_sp = sp_alpha[:, j, :] if sp_alpha is not None else None
                 has_ct = a_ct is not None and a_ct.any()
@@ -491,6 +496,8 @@ class VrtWindow(QDialog):
                 else:
                     col = self._apply_spect_cmap(sp_w[:, j, :])
                     a = a_sp
+                if step == 2:
+                    a = a * (2.0 - a)  # 1-(1-a)^2: dos voxels por paso
                 contrib = (trans * a)[..., None]
                 color_acc += contrib * col
                 trans *= (1.0 - a)
@@ -500,36 +507,16 @@ class VrtWindow(QDialog):
             img = np.clip(color_acc * self._brightness * 255.0, 0, 255).astype(np.uint8)
             img = np.ascontiguousarray(img)
 
-            # Overlay: contorno de cada máscara proyectada (rotada igual que el volumen)
-            if self._show_overlays and self._masks:
-                for mk in self._masks:
-                    mask = mk["fast"] if self._fast_mode else mk["hq"]
-                    if mask is None or mask.shape != shape:
-                        continue
-                    m = mask.astype(np.float32)
-                    if abs(self._azimuth) > 0.25:
-                        m = ndi.rotate(m, self._azimuth, axes=(2, 1), reshape=False,
-                                       order=0, cval=0.0, mode="constant", prefilter=False)
-                    if abs(self._elevation) > 0.5:
-                        m = ndi.rotate(m, self._elevation, axes=(0, 1), reshape=False,
-                                       order=0, cval=0.0, mode="constant", prefilter=False)
-                    m2d = np.max(m, axis=1) > 0.5
-                    if m2d.any():
-                        edge = m2d ^ ndi.binary_erosion(m2d, iterations=1)
-                        rgb = np.array(mk["rgb"], dtype=np.float32)
-                        img[m2d] = (img[m2d].astype(np.float32) * 0.82
-                                    + rgb * 0.18).clip(0, 255).astype(np.uint8)
-                        img[edge] = tuple(int(c) for c in mk["rgb"])
-
             h, w = img.shape[:2]
             qimg = QImage(img.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
             pix = QPixmap.fromImage(qimg)
 
-            # Overlay: círculos VOI proyectados con la misma rotación del volumen
-            if self._show_overlays and self._vois:
+            # Overlays: wireframe de máscaras + círculos VOI (misma rotación analítica)
+            if self._show_overlays and (self._vois or self._masks):
                 factor = self._factor_fast if self._fast_mode else self._factor_hq
                 painter = QPainter(pix)
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                self._draw_mask_wireframes(painter, shape, factor)
                 self._draw_vois(painter, shape, factor)
                 painter.end()
 
@@ -541,6 +528,34 @@ class VrtWindow(QDialog):
             self._lbl.setPixmap(pix)
         except Exception as exc:  # nunca dejar que una excepción mate la app (slot Qt)
             self._lbl.setText(f"VRT error:\n{exc}")
+
+    def _draw_mask_wireframes(self, painter: QPainter, shape: tuple, factor: float):
+        """Malla de puntos de superficie proyectada analíticamente (sin rotar volúmenes)."""
+        if not self._masks:
+            return
+        nz, ny, nx = shape
+        cz0, cy0, cx0 = (nz - 1) * 0.5, (ny - 1) * 0.5, (nx - 1) * 0.5
+        az = np.radians(self._azimuth)
+        el = np.radians(self._elevation)
+        cos_a, sin_a = float(np.cos(az)), float(np.sin(az))
+        cos_e, sin_e = float(np.cos(el)), float(np.sin(el))
+        stride = 3 if self._fast_mode else 1
+        for mk in self._masks:
+            pts = mk["pts"][::stride]
+            if pts.size == 0:
+                continue
+            rz = pts[:, 0] * factor - cz0
+            ry = pts[:, 1] * factor - cy0
+            rx = pts[:, 2] * factor - cx0
+            ry1 = ry * cos_a - rx * sin_a
+            rx1 = ry * sin_a + rx * cos_a
+            rows = rz * cos_e - ry1 * sin_e + cz0
+            cols = rx1 + cx0
+            color = QColor(*mk["rgb"])
+            color.setAlpha(190)
+            painter.setPen(QPen(color, 1))
+            poly = QPolygonF([QPointF(float(c), float(r)) for r, c in zip(rows, cols)])
+            painter.drawPoints(poly)
 
     def _draw_vois(self, painter: QPainter, shape: tuple, factor: float):
         """Proyecta cada VOI (esfera) con la rotación actual (misma convención que ndi.rotate)."""
