@@ -1062,6 +1062,7 @@ class AmyloidSpectPanel(QDialog):
         self._localization_cross_enabled = False
         self._localization_point_zyx = None
         self._localization_anchor_zyx = None
+        self._localization_point_b_zyx = None
         self._hmr_result = None
         # VOIs temporales para visualización en vivo
         self._temp_voi_heart = None
@@ -1483,13 +1484,31 @@ class AmyloidSpectPanel(QDialog):
         self._btn_localization_cross.toggled.connect(self._on_localization_cross_toggled)
         loc_btns_row.addWidget(self._btn_localization_cross)
         self._btn_loc_anchor = QPushButton("Fijar ancla A")
-        self._btn_loc_anchor.setToolTip("Guarda la posición actual como punto A (corazón) para HMR-SPECT.")
+        self._btn_loc_anchor.setToolTip("Guarda la posición actual como punto A (corazón) para HMR-SPECT. Re-fijar corrige el punto.")
         self._btn_loc_anchor.clicked.connect(self._on_set_localization_anchor)
         loc_btns_row.addWidget(self._btn_loc_anchor)
-        self._btn_loc_clear = QPushButton("Limpiar ancla")
-        self._btn_loc_clear.setToolTip("Borra el punto A.")
+        self._btn_loc_point_b = QPushButton("Fijar punto B")
+        self._btn_loc_point_b.setToolTip(
+            "Guarda la posición actual como punto B (mediastino) para HMR-SPECT.\n"
+            "Una vez fijado, navegar entre cortes NO lo mueve. Re-fijar corrige el punto."
+        )
+        self._btn_loc_point_b.clicked.connect(self._on_set_localization_point_b)
+        loc_btns_row.addWidget(self._btn_loc_point_b)
+        self._btn_loc_clear = QPushButton("Limpiar A/B")
+        self._btn_loc_clear.setToolTip("Borra los puntos A y B fijados.")
         self._btn_loc_clear.clicked.connect(self._on_clear_localization_anchor)
         loc_btns_row.addWidget(self._btn_loc_clear)
+        self._btn_calc_hmr = QPushButton("Calcular HMR-SPECT")
+        self._btn_calc_hmr.clicked.connect(self._calculate_hmr_spect)
+        self._btn_calc_hmr.setToolTip(
+            "Usa los puntos fijados:\n"
+            "- Ancla A = centro VOI corazón\n"
+            "- Punto B = centro VOI mediastino"
+        )
+        self._btn_calc_hmr.setStyleSheet(
+            "background-color:#ea8a1a; color:white; font-weight:bold; padding:4px 12px; border-radius:4px;"
+        )
+        loc_btns_row.addWidget(self._btn_calc_hmr)
         vistas_layout.addLayout(loc_btns_row)
 
         left_col.addWidget(vistas_group, 1)
@@ -1729,16 +1748,8 @@ class AmyloidSpectPanel(QDialog):
         radius_row.addWidget(self._mediastinum_radius_spin)
         hmr_layout.addLayout(radius_row)
         
-        # Fila 3: Botón calcular, preservar máscara, volumen y resultado
+        # Fila 3: preservar máscara, volumen y resultado (Calcular vive en la fila de localización)
         calc_row = QHBoxLayout()
-        self._btn_calc_hmr = QPushButton("Calcular HMR-SPECT")
-        self._btn_calc_hmr.clicked.connect(self._calculate_hmr_spect)
-        self._btn_calc_hmr.setToolTip(
-            "Usa los puntos de localización:\n"
-            "- Ancla A = centro VOI corazón\n"
-            "- Cruz actual = centro VOI mediastino"
-        )
-        calc_row.addWidget(self._btn_calc_hmr)
 
         # Checkbox para preservar máscara manual al recalcular
         self._preserve_mask_check = QCheckBox("🔒 Preservar máscara")
@@ -4413,9 +4424,9 @@ class AmyloidSpectPanel(QDialog):
         return (6.8, 6.8, 6.8)
 
     def _localization_distance_mm(self) -> float | None:
-        """Distancia euclídea 3D en mm entre el ancla y el punto actual."""
+        """Distancia euclídea 3D en mm entre el ancla y el punto B (fijo o cruz actual)."""
         a = getattr(self, "_localization_anchor_zyx", None)
-        b = getattr(self, "_localization_point_zyx", None)
+        b = getattr(self, "_localization_point_b_zyx", None) or getattr(self, "_localization_point_zyx", None)
         if a is None or b is None:
             return None
         sz, sy, sx = self._spect_spacing_or_default()
@@ -4429,7 +4440,7 @@ class AmyloidSpectPanel(QDialog):
         if dist is None:
             return
         a = self._localization_anchor_zyx
-        b = self._localization_point_zyx
+        b = self._localization_point_b_zyx or self._localization_point_zyx
         self._status.setText(
             f"Distancia LOC: {dist:.1f} mm · "
             f"A(Z/Y/X)={a[0] + 1}/{a[1] + 1}/{a[2] + 1} → "
@@ -4469,18 +4480,38 @@ class AmyloidSpectPanel(QDialog):
         )
         self._render_selected_view()  # Redibujar para mostrar VOI
 
+    def _on_set_localization_point_b(self) -> None:
+        """Fija el punto actual como B (mediastino). Una vez fijado, navegar no lo mueve."""
+        pt = getattr(self, "_localization_point_zyx", None)
+        if pt is None:
+            self._status.setText("Primero depositá una cruz de localización (Ctrl/Shift+clic).")
+            return
+        self._localization_point_b_zyx = (int(pt[0]), int(pt[1]), int(pt[2]))
+        med_radius = float(self._mediastinum_radius_spin.value()) if hasattr(self, "_mediastinum_radius_spin") else 25.0
+        self._temp_voi_mediastinum = VOISphere(
+            cz=int(pt[0]), cy=int(pt[1]), cx=int(pt[2]),
+            radius_mm=med_radius,
+        )
+        self._status.setText(
+            f"Punto B fijado en Z/Y/X = {pt[0] + 1}/{pt[1] + 1}/{pt[2] + 1}. "
+            "Navegar cortes no lo mueve; re-fijar para corregir."
+        )
+        self._update_localization_distance()
+        self._render_selected_view()
+
     def _on_clear_localization_anchor(self) -> None:
         self._localization_anchor_zyx = None
+        self._localization_point_b_zyx = None
         self._temp_voi_heart = None
         self._temp_voi_mediastinum = None
-        self._status.setText("Ancla de medición limpiada.")
+        self._status.setText("Puntos A y B limpiados.")
         self._render_selected_view()
 
     def get_localization_points(self) -> list[dict]:
         """Exporta ancla y punto de localización para informes."""
         out: list[dict] = []
         a = getattr(self, "_localization_anchor_zyx", None)
-        b = getattr(self, "_localization_point_zyx", None)
+        b = getattr(self, "_localization_point_b_zyx", None) or getattr(self, "_localization_point_zyx", None)
         if a is not None:
             out.append({"label": "A (ancla)", "zyx": [int(v) + 1 for v in a]})
         if b is not None:
@@ -4934,7 +4965,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 self._mask_edit_status.setText("Modo manual estable: VOIs esféricas ancladas en A/B")
             
             anchor = getattr(self, "_localization_anchor_zyx", None)
-            point = getattr(self, "_localization_point_zyx", None)
+            point = getattr(self, "_localization_point_b_zyx", None) or getattr(self, "_localization_point_zyx", None)
             if anchor is not None:
                 self._temp_voi_heart = VOISphere(
                     cz=int(anchor[0]), cy=int(anchor[1]), cx=int(anchor[2]),
@@ -5005,11 +5036,13 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             # Verificar puntos de localización
             anchor = getattr(self, "_localization_anchor_zyx", None)
             point = getattr(self, "_localization_point_zyx", None)
-            # B estable: usar el centro del círculo azul dibujado (fijado en el
-            # momento del clic). La cruz viva navega con los cortes y deriva,
-            # lo que muestreaba el mediastino en otra posición.
+            # B estable: prioridad al punto B fijado explícitamente; después el
+            # centro del círculo azul (VOI temporal); último recurso la cruz viva.
+            point_b_fixed = getattr(self, "_localization_point_b_zyx", None)
             tv_med = getattr(self, "_temp_voi_mediastinum", None)
-            if tv_med is not None:
+            if point_b_fixed is not None:
+                point = tuple(int(v) for v in point_b_fixed)
+            elif tv_med is not None:
                 point = (int(round(tv_med.cz)), int(round(tv_med.cy)), int(round(tv_med.cx)))
             
             if anchor is None:
@@ -6322,10 +6355,10 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             return False
         z, y, x = zyx
         self._localization_point_zyx = (int(z), int(y), int(x))
-        
-        # Crear VOI mediastino temporal si ya existe el ancla (corazón)
+
+        # VOI mediastino temporal solo si aún no hay punto B fijado (B fijo no se toca)
         anchor = getattr(self, "_localization_anchor_zyx", None)
-        if anchor is not None:
+        if anchor is not None and getattr(self, "_localization_point_b_zyx", None) is None:
             # Usar valor del spin si existe, sino default 25mm
             mediastinum_radius = 25.0
             if hasattr(self, "_mediastinum_radius_spin"):
