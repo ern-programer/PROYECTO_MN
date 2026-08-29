@@ -706,6 +706,77 @@ class FusionReportLayoutDialog(QDialog):
             fx_lbl.setPixmap(self._to_pix(fx_rgb).scaled(grid_w, grid_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
             self._grid.addWidget(fx_lbl, 3, c + 1)
 
+    def render_modality_strip_images(self, n_tiles: int = 10) -> dict[str, np.ndarray]:
+        """Tiras por modalidad para el informe: ct/spect/fusion → RGB uint8.
+
+        Cada imagen apila verticalmente las tiras axial/coronal/sagital de esa
+        modalidad (mismo muestreo de cortes en las tres).
+        """
+        sp_vol = self._spect_vol
+        ct_vol = self._ct_vol
+        axis_dim = {"axial": 0, "coronal": 1, "sagittal": 2}
+
+        def axis_view(vol: np.ndarray, axis: str, frac: float) -> np.ndarray:
+            n = int(vol.shape[axis_dim[axis]])
+            i = int(round(frac * max(0, n - 1)))
+            if axis == "axial":
+                return vol[i]
+            if axis == "coronal":
+                return vol[:, i, :]
+            return vol[:, :, i]
+
+        def strip_for(kind: str, axis: str) -> np.ndarray | None:
+            tiles: list[np.ndarray] = []
+            for k in range(max(2, int(n_tiles))):
+                frac = k / max(1, n_tiles - 1)
+                if kind == "spect":
+                    s2 = self._apply_aspect_2d_for_axis(self._spect_window_fn(axis_view(sp_vol, axis, frac)), axis)
+                    rgb = self._cmap_fn(np.clip(s2, 0.0, 1.0))
+                elif kind == "ct":
+                    if ct_vol is None:
+                        return None
+                    c2 = self._apply_aspect_2d_for_axis(self._ct_window_fn(axis_view(ct_vol, axis, frac)), axis)
+                    rgb = np.stack([c2, c2, c2], axis=-1)
+                else:  # fusion
+                    if ct_vol is None:
+                        return None
+                    c2 = self._apply_aspect_2d_for_axis(self._ct_window_fn(axis_view(ct_vol, axis, frac)), axis)
+                    s2 = self._apply_aspect_2d_for_axis(self._spect_window_fn(axis_view(sp_vol, axis, frac)), axis)
+                    if s2.shape != c2.shape:
+                        s2 = self._fit_2d_to_shape(s2, c2.shape, order=1)
+                    rgb = self._make_fusion_rgb(s2, c2)
+                tiles.append((np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8))
+            h = max(t.shape[0] for t in tiles)
+            w = max(t.shape[1] for t in tiles)
+            canvas = np.zeros((h, w * len(tiles), 3), dtype=np.uint8)
+            for k, t in enumerate(tiles):
+                y0 = (h - t.shape[0]) // 2
+                x0 = k * w + (w - t.shape[1]) // 2
+                canvas[y0:y0 + t.shape[0], x0:x0 + t.shape[1]] = t
+            return canvas
+
+        out: dict[str, np.ndarray] = {}
+        for kind in ("ct", "spect", "fusion"):
+            rows: list[np.ndarray] = []
+            for axis in ("axial", "coronal", "sagittal"):
+                s = strip_for(kind, axis)
+                if s is None:
+                    rows = []
+                    break
+                rows.append(s)
+            if not rows:
+                continue
+            gap = 8
+            w = max(r.shape[1] for r in rows)
+            total_h = sum(r.shape[0] for r in rows) + gap * (len(rows) - 1)
+            canvas = np.zeros((total_h, w, 3), dtype=np.uint8)
+            y = 0
+            for r in rows:
+                canvas[y:y + r.shape[0], :r.shape[1]] = r
+                y += r.shape[0] + gap
+            out[kind] = canvas
+        return out
+
     def _render_body_to_pixmap(self) -> QPixmap:
         self._body.adjustSize()
         size = self._body.sizeHint()
@@ -7365,87 +7436,124 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             return
         try:
             self._task_progress_start("Preparando volúmenes VRT...")
-            ct_vol = None
-            sp_vol = None
-            # Preferir el caché CT nativa 2x: resuelve orientación, registro y
-            # deja CT y SPECT en la MISMA grilla isotrópica de alta resolución.
-            if self._current_volume is not None and self._ensure_ct_grid_trial_cache():
-                ct_vol = np.asarray(self._trial_ct_native, dtype=np.float32)
-                sp_vol = np.asarray(self._trial_spect_on_ct, dtype=np.float32)
-            elif self._ct_registered is not None:
-                ct_vol = self._ct_registered_visual_transform(
-                    np.asarray(self._ct_registered, dtype=np.float64)
-                ).astype(np.float32)
-                if self._current_volume is not None:
-                    sp_vol = self._spect_display_volume(
-                        np.asarray(self._current_volume, dtype=np.float64)
-                    ).astype(np.float32)
-            else:
-                ct_vol = self._ct_transform_3d(np.asarray(self._ct_volume, dtype=np.float64)).astype(np.float32)
-
-            # VOIs y máscara: escalar de la grilla display SPECT a la grilla VRT.
-            vois = []
-            mask_vrt = None
-            if self._current_volume is not None and ct_vol is not None:
-                sp_shape = np.asarray(self._current_volume).shape[:3]
-                scale = float(ct_vol.shape[0]) / max(1.0, float(sp_shape[0]))
-                spacing = self._spect_spacing_or_default()
-                vx_mm = max(1e-6, float(spacing[2]) / scale)  # mm por voxel en grilla VRT
-                voi_defs = []
-                hmr = getattr(self, "_hmr_result", None)
-                if hmr is not None:
-                    voi_defs = [(getattr(hmr, "voi_heart", None), (239, 68, 68), "Corazón"),
-                                (getattr(hmr, "voi_mediastinum", None), (59, 130, 246), "Med")]
-                else:
-                    voi_defs = [(getattr(self, "_temp_voi_heart", None), (239, 68, 68), "Corazón"),
-                                (getattr(self, "_temp_voi_mediastinum", None), (59, 130, 246), "Med")]
-                for voi, rgb, label in voi_defs:
-                    if voi is None:
-                        continue
-                    r_mm = getattr(voi, "radius_mm", None)
-                    if r_mm is None:
-                        continue
-                    vois.append({
-                        "cz": float(voi.cz) * scale,
-                        "cy": float(voi.cy) * scale,
-                        "cx": float(voi.cx) * scale,
-                        "radius_vox": float(r_mm) / vx_mm,
-                        "rgb": rgb,
-                        "label": label,
-                    })
-                ct_seg = getattr(self, "_ct_segmentation", None)
-                if ct_seg is not None and getattr(ct_seg, "mask_3d", None) is not None:
-                    m = np.asarray(ct_seg.mask_3d, dtype=np.float32)
-                    if m.shape != ct_vol.shape:
-                        zf = tuple(ct_vol.shape[i] / max(1, m.shape[i]) for i in range(3))
-                        m = ndi.zoom(m, zf, order=0, prefilter=False)
-                    mask_vrt = m > 0.5
-
-            # VOI de cuantificación HMR (anatómica): la máscara real usada en el
-            # cálculo (la que reporta el volumen en mL), en grilla display SPECT.
-            voi_mask_vrt = None
-            if ct_vol is not None:
-                hmr_res = getattr(self, "_hmr_result", None)
-                voi_h = getattr(hmr_res, "voi_heart", None) if hmr_res is not None else None
-                vm_src = getattr(voi_h, "mask_3d_data", None) if voi_h is not None else None
-                if vm_src is not None:
-                    vm = np.asarray(vm_src, dtype=np.float32)
-                    if vm.ndim == 3 and vm.any():
-                        if vm.shape != ct_vol.shape:
-                            zf = tuple(ct_vol.shape[i] / max(1, vm.shape[i]) for i in range(3))
-                            vm = ndi.zoom(vm, zf, order=0, prefilter=False)
-                        voi_mask_vrt = vm > 0.5
-
-            self._task_progress_step(60, "Abriendo ventana VRT (quita camilla)...")
-            from ui.vrt_window import VrtWindow
-            dlg = VrtWindow(self, ct_volume=ct_vol, spect_volume=sp_vol,
-                            spacing_zyx=getattr(self, "_trial_ct_native_spacing", None),
-                            vois=vois, mask_3d=mask_vrt, voi_mask_3d=voi_mask_vrt)
+            dlg = self._build_vrt_window()
+            if dlg is None:
+                self._task_progress_done("VRT no disponible")
+                return
             self._task_progress_done("VRT 3D listo")
             dlg.show()
         except Exception as exc:
             self._progress.setFormat("Error")
             self._status.setText(f"Error abriendo VRT 3D: {exc}")
+
+    def _build_vrt_window(self):
+        """Construye la ventana VRT (sin mostrarla) para uso interactivo o captura."""
+        if self._ct_volume is None:
+            return None
+        ct_vol = None
+        sp_vol = None
+        # Preferir el caché CT nativa 2x: resuelve orientación, registro y
+        # deja CT y SPECT en la MISMA grilla isotrópica de alta resolución.
+        if self._current_volume is not None and self._ensure_ct_grid_trial_cache():
+            ct_vol = np.asarray(self._trial_ct_native, dtype=np.float32)
+            sp_vol = np.asarray(self._trial_spect_on_ct, dtype=np.float32)
+        elif self._ct_registered is not None:
+            ct_vol = self._ct_registered_visual_transform(
+                np.asarray(self._ct_registered, dtype=np.float64)
+            ).astype(np.float32)
+            if self._current_volume is not None:
+                sp_vol = self._spect_display_volume(
+                    np.asarray(self._current_volume, dtype=np.float64)
+                ).astype(np.float32)
+        else:
+            ct_vol = self._ct_transform_3d(np.asarray(self._ct_volume, dtype=np.float64)).astype(np.float32)
+
+        # VOIs y máscara: escalar de la grilla display SPECT a la grilla VRT.
+        vois = []
+        mask_vrt = None
+        if self._current_volume is not None and ct_vol is not None:
+            sp_shape = np.asarray(self._current_volume).shape[:3]
+            scale = float(ct_vol.shape[0]) / max(1.0, float(sp_shape[0]))
+            spacing = self._spect_spacing_or_default()
+            vx_mm = max(1e-6, float(spacing[2]) / scale)  # mm por voxel en grilla VRT
+            voi_defs = []
+            hmr = getattr(self, "_hmr_result", None)
+            if hmr is not None:
+                voi_defs = [(getattr(hmr, "voi_heart", None), (239, 68, 68), "Corazón"),
+                            (getattr(hmr, "voi_mediastinum", None), (59, 130, 246), "Med")]
+            else:
+                voi_defs = [(getattr(self, "_temp_voi_heart", None), (239, 68, 68), "Corazón"),
+                            (getattr(self, "_temp_voi_mediastinum", None), (59, 130, 246), "Med")]
+            for voi, rgb, label in voi_defs:
+                if voi is None:
+                    continue
+                r_mm = getattr(voi, "radius_mm", None)
+                if r_mm is None:
+                    continue
+                vois.append({
+                    "cz": float(voi.cz) * scale,
+                    "cy": float(voi.cy) * scale,
+                    "cx": float(voi.cx) * scale,
+                    "radius_vox": float(r_mm) / vx_mm,
+                    "rgb": rgb,
+                    "label": label,
+                })
+            ct_seg = getattr(self, "_ct_segmentation", None)
+            if ct_seg is not None and getattr(ct_seg, "mask_3d", None) is not None:
+                m = np.asarray(ct_seg.mask_3d, dtype=np.float32)
+                if m.shape != ct_vol.shape:
+                    zf = tuple(ct_vol.shape[i] / max(1, m.shape[i]) for i in range(3))
+                    m = ndi.zoom(m, zf, order=0, prefilter=False)
+                mask_vrt = m > 0.5
+
+        # VOI de cuantificación HMR (anatómica): la máscara real usada en el
+        # cálculo (la que reporta el volumen en mL), en grilla display SPECT.
+        voi_mask_vrt = None
+        if ct_vol is not None:
+            hmr_res = getattr(self, "_hmr_result", None)
+            voi_h = getattr(hmr_res, "voi_heart", None) if hmr_res is not None else None
+            vm_src = getattr(voi_h, "mask_3d_data", None) if voi_h is not None else None
+            if vm_src is not None:
+                vm = np.asarray(vm_src, dtype=np.float32)
+                if vm.ndim == 3 and vm.any():
+                    if vm.shape != ct_vol.shape:
+                        zf = tuple(ct_vol.shape[i] / max(1, vm.shape[i]) for i in range(3))
+                        vm = ndi.zoom(vm, zf, order=0, prefilter=False)
+                    voi_mask_vrt = vm > 0.5
+
+        from ui.vrt_window import VrtWindow
+        return VrtWindow(self, ct_volume=ct_vol, spect_volume=sp_vol,
+                         spacing_zyx=getattr(self, "_trial_ct_native_spacing", None),
+                         vois=vois, mask_3d=mask_vrt, voi_mask_3d=voi_mask_vrt)
+
+    def _capture_vrt_rotation_frames(self, n_frames: int = 18) -> list:
+        """Frames PIL del VRT girando 360° (render offscreen en modo rápido)."""
+        if self._ct_volume is None:
+            return []
+        dlg = None
+        frames = []
+        try:
+            dlg = self._build_vrt_window()
+            if dlg is None:
+                return []
+            dlg.resize(560, 640)
+            dlg._lbl.resize(480, 480)
+            dlg._fast_mode = True
+            for i in range(max(4, int(n_frames))):
+                dlg._azimuth = (360.0 * i / n_frames) % 360.0
+                dlg._render()
+                pm = dlg._lbl.pixmap()
+                if pm is not None and not pm.isNull():
+                    frames.append(self._qpixmap_to_pil(pm))
+        except Exception:
+            return []
+        finally:
+            if dlg is not None:
+                dlg.deleteLater()
+        if len(frames) >= 2:
+            base = frames[0].size
+            frames = [f if f.size == base else f.resize(base) for f in frames]
+        return frames
 
     def _build_fusion_report_dialog(self) -> "FusionReportLayoutDialog | None":
         """Construye el diálogo de composición fusión (para mostrar o capturar)."""
@@ -7512,14 +7620,18 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         arr = np.frombuffer(ptr, dtype=np.uint8).reshape((h, qimg.bytesPerLine()))[:, : w * 3].reshape((h, w, 3))
         return Image.fromarray(arr.copy())
 
-    def _capture_mip_rotation_frames(self, n_frames: int = 24) -> list:
-        """Frames PIL del MIP rotando 360° (restaura el ángulo al final)."""
+    def _capture_mip_rotation_frames(self, n_frames: int = 24, source: str = "spect") -> list:
+        """Frames PIL del MIP rotando 360° en la fuente indicada (spect/ct/fusion)."""
         w = self._mip_widget
         if getattr(w, "_volume", None) is None:
             return []
+        if source in ("ct", "fusion") and getattr(w, "_ct_volume", None) is None:
+            return []
         orig_az = float(getattr(w, "_azimuth_deg", 0.0))
+        orig_source = str(getattr(w, "_mip_source", "spect"))
         frames = []
         try:
+            w._mip_source = str(source)
             for i in range(max(4, int(n_frames))):
                 w._azimuth_deg = (360.0 * i / n_frames) % 360.0
                 w._render_mip()
@@ -7527,6 +7639,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 if pm is not None and not pm.isNull():
                     frames.append(self._qpixmap_to_pil(pm))
         finally:
+            w._mip_source = orig_source
             w._azimuth_deg = orig_az
             w._render_mip()
         if len(frames) >= 2:
@@ -7563,48 +7676,55 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         images: list[tuple[str, str]] = []
         gifs: list[tuple[str, str]] = []
 
-        def _save_label(lbl, name, title):
-            pm = lbl.pixmap()
-            if pm is not None and not pm.isNull():
-                path = os.path.join(out_dir, name)
-                pm.save(path, "PNG")
-                images.append((title, path))
-
-        _save_label(self._axial_lbl, "mpr_axial.png", "Corte axial (vista actual)")
-        _save_label(self._cor_lbl, "mpr_coronal.png", "Corte coronal (vista actual)")
-        _save_label(self._sag_lbl, "mpr_sagital.png", "Corte sagital (vista actual)")
-        mip_lbl = getattr(self._mip_widget, "_lbl", None)
-        if mip_lbl is not None:
-            _save_label(mip_lbl, "mip_3d.png", "MIP 3D (vista actual)")
-
-        # Composición fusión (tiras + grilla 3x3) capturada offscreen
+        # Cascada de cortes por modalidad: CT → SPECT → Fusión
         try:
             dlg = self._build_fusion_report_dialog()
             if dlg is not None:
-                pm = dlg._body.grab()
-                if not pm.isNull():
-                    path = os.path.join(out_dir, "fusion_composite.png")
-                    pm.save(path, "PNG")
-                    images.append(("Composición fusión (tiras SPECT + 3x3 SPECT/CT/Fusión)", path))
+                strips = dlg.render_modality_strip_images()
+                titles = {
+                    "ct": "Cortes CT (axial / coronal / sagital)",
+                    "spect": "Cortes SPECT (axial / coronal / sagital)",
+                    "fusion": "Cortes Fusión SPECT/CT (axial / coronal / sagital)",
+                }
+                for kind in ("ct", "spect", "fusion"):
+                    arr = strips.get(kind)
+                    if arr is None:
+                        continue
+                    from PIL import Image
+                    path = os.path.join(out_dir, f"cortes_{kind}.png")
+                    Image.fromarray(arr).save(path, "PNG")
+                    images.append((titles[kind], path))
                 dlg.deleteLater()
         except Exception:
             pass
 
+        def _save_gif(frames: list, name: str, title: str, duration: int = 120):
+            if len(frames) >= 4:
+                path = os.path.join(out_dir, name)
+                frames[0].save(path, save_all=True, append_images=frames[1:], duration=duration, loop=0)
+                gifs.append((title, path))
+
         if include_gifs:
+            # MIP rotando: SPECT, CT y fusión lado a lado
+            for source, name, title in (
+                ("spect", "mip_spect.gif", "MIP SPECT 360°"),
+                ("ct", "mip_ct.gif", "MIP CT 360°"),
+                ("fusion", "mip_fusion.gif", "MIP Fusión 360°"),
+            ):
+                try:
+                    _save_gif(self._capture_mip_rotation_frames(n_frames=gif_frames, source=source), name, title)
+                except Exception:
+                    pass
+            # VRT girando (debajo de los MIP en el HTML)
             try:
-                frames = self._capture_mip_rotation_frames(n_frames=gif_frames)
-                if len(frames) >= 4:
-                    path = os.path.join(out_dir, "mip_rotatorio.gif")
-                    frames[0].save(path, save_all=True, append_images=frames[1:], duration=120, loop=0)
-                    gifs.append(("MIP 360° rotatorio", path))
+                _save_gif(self._capture_vrt_rotation_frames(n_frames=max(8, gif_frames // 2)),
+                          "vrt_rotatorio.gif", "VRT 3D esquelético 360°", duration=160)
             except Exception:
                 pass
+            # Barrido axial (estado de vista actual)
             try:
-                frames = self._capture_axial_sweep_frames(max_frames=gif_frames)
-                if len(frames) >= 4:
-                    path = os.path.join(out_dir, "barrido_axial.gif")
-                    frames[0].save(path, save_all=True, append_images=frames[1:], duration=150, loop=0)
-                    gifs.append(("Barrido axial (estado de vista actual)", path))
+                _save_gif(self._capture_axial_sweep_frames(max_frames=gif_frames),
+                          "barrido_axial.gif", "Barrido axial (vista actual)", duration=150)
             except Exception:
                 pass
         return images, gifs
