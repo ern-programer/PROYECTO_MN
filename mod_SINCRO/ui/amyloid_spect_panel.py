@@ -1416,9 +1416,22 @@ class AmyloidSpectPanel(QDialog):
         
         root.addLayout(top_row)
 
+        status_row = QHBoxLayout()
+        status_row.setSpacing(6)
+        self._btn_console = QPushButton("🖥")
+        self._btn_console.setFixedSize(24, 20)
+        self._btn_console.setToolTip("Consola: métricas del proceso + comandos de diagnóstico (help)")
+        self._btn_console.setStyleSheet(
+            "font-size:11px; padding:0; background:#4E86B7; color:white; "
+            "border:1px solid #3b6d99; border-radius:3px;"
+        )
+        self._btn_console.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_console.clicked.connect(self._open_console_window)
+        status_row.addWidget(self._btn_console)
         self._status = QLabel("Cargar un DICOM SPECT para iniciar.")
         self._status.setStyleSheet("color:#93c5fd; font-size:11px;")
-        root.addWidget(self._status)
+        status_row.addWidget(self._status, 1)
+        root.addLayout(status_row)
 
         # ═══════════════════════════════════════════════════════════════════
         # LAYOUT PRINCIPAL: Imágenes (izq) + Controles laterales (der)
@@ -2411,16 +2424,6 @@ class AmyloidSpectPanel(QDialog):
         self._metrics.setReadOnly(True)
         self._metrics.setStyleSheet("background:#0f172a; color:#e2e8f0; border:1px solid #334155;")
         self._console_dialog = None
-
-        # Botón que abre la consola en ventana propia
-        self._btn_console = QPushButton("🖥 Consola")
-        self._btn_console.setToolTip("Abre la consola: métricas del proceso + comandos de diagnóstico (help)")
-        self._btn_console.setStyleSheet(
-            "font-size:10px; padding:2px 8px; background:#4E86B7; color:white; "
-            "border:1px solid #3b6d99; border-radius:3px;"
-        )
-        self._btn_console.clicked.connect(self._open_console_window)
-        root.addWidget(self._btn_console)
 
         footer = QLabel(
             "Módulo experimental fase 2: métricas 3D proxy y sustracción ósea visual de apoyo. "
