@@ -136,6 +136,20 @@ def _b64_file(path: str) -> str:
         return base64.b64encode(fh.read()).decode("ascii")
 
 
+def _gif_poster_b64(path: str) -> str:
+    """Primer frame del GIF como PNG base64 (para pausar el cine en HTML)."""
+    try:
+        import io
+        from PIL import Image
+        with Image.open(path) as im:
+            im.seek(0)
+            buf = io.BytesIO()
+            im.convert("RGB").save(buf, "PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # HTML
 # ---------------------------------------------------------------------------
@@ -205,7 +219,11 @@ details {{ background:var(--card); border:1px solid var(--border); border-radius
 summary {{ cursor:pointer; font-weight:700; color:var(--accent); }}
 footer {{ margin-top:36px; border-top:1px solid var(--border); padding-top:12px;
   font-size:11px; color:var(--muted); }}
-@media print {{ .card:hover {{ transform:none; box-shadow:none; }} body {{ background:#fff; color:#000; }} }}
+#cinebtn {{ position:fixed; bottom:18px; right:18px; z-index:99; padding:10px 16px;
+  border:none; border-radius:999px; background:var(--accent); color:#fff; font-weight:700;
+  font-size:13px; cursor:pointer; box-shadow:0 4px 14px rgba(0,0,0,.35); }}
+#cinebtn:hover {{ filter:brightness(1.12); }}
+@media print {{ .card:hover {{ transform:none; box-shadow:none; }} body {{ background:#fff; color:#000; }} #cinebtn {{ display:none; }} }}
 </style></head><body><div class="wrap">
 <header>
   <div>
@@ -320,8 +338,10 @@ footer {{ margin-top:36px; border-top:1px solid var(--border); padding-top:12px;
 
     # --- Orden visual: VRT 3D → cortes por modalidad → MIPs rotatorios ---
     def _gif_fig(title: str, path: str) -> str:
-        return (f'<figure><img src="data:image/gif;base64,{_b64_file(path)}" alt="{title}">'
-                f'<figcaption>▶ {title}</figcaption></figure>')
+        poster = _gif_poster_b64(path)
+        poster_attr = f' data-poster="data:image/png;base64,{poster}"' if poster else ""
+        return (f'<figure><img class="cine" src="data:image/gif;base64,{_b64_file(path)}"{poster_attr} '
+                f'alt="{title}"><figcaption>▶ {title}</figcaption></figure>')
 
     mip_figs, other_figs = [], []
     if sec("gifs"):
@@ -356,7 +376,24 @@ footer {{ margin-top:36px; border-top:1px solid var(--border); padding-top:12px;
 
     html.append(f"""<footer>SINCRO — módulo AMYLO SPECT/CT experimental. Este informe es de apoyo técnico y
 no constituye interpretación diagnóstica automática. Plantilla «{data.template_name}».</footer>
-</div></body></html>""")
+</div>""")
+
+    if data.gifs:
+        html.append("""<button id="cinebtn" onclick="toggleCine()">⏸ Pausar cine</button>
+<script>
+var cineOn = true;
+document.querySelectorAll('img.cine').forEach(function (im) { im.dataset.gif = im.src; });
+function toggleCine() {
+  cineOn = !cineOn;
+  document.querySelectorAll('img.cine').forEach(function (im) {
+    if (cineOn) { im.src = im.dataset.gif; }
+    else if (im.dataset.poster) { im.src = im.dataset.poster; }
+  });
+  document.getElementById('cinebtn').textContent = cineOn ? '⏸ Pausar cine' : '▶ Reproducir cine';
+}
+</script>""")
+
+    html.append("</body></html>")
 
     text = "".join(html)
     os.makedirs(os.path.dirname(output_html) or ".", exist_ok=True)
