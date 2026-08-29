@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QInputDialog,
     QSizePolicy,
+    QLineEdit,
 )
 
 from pydicom.dataset import Dataset
@@ -2409,22 +2410,17 @@ class AmyloidSpectPanel(QDialog):
         self._metrics = QTextEdit()
         self._metrics.setReadOnly(True)
         self._metrics.setStyleSheet("background:#0f172a; color:#e2e8f0; border:1px solid #334155;")
-        self._metrics.setMaximumHeight(0)  # OCULTA por defecto
-        self._metrics.setVisible(False)  # Oculta al inicio
+        self._console_dialog = None
 
-        # Botón toggle para ocultar/mostrar consola
-        self._btn_toggle_console = QPushButton("▶ Consola")
-        self._btn_toggle_console.setCheckable(True)
-        self._btn_toggle_console.setChecked(False)  # OCULTA por defecto
-        self._btn_toggle_console.setToolTip("Ocultar / Mostrar consola de métricas")
-        self._btn_toggle_console.setStyleSheet(
+        # Botón que abre la consola en ventana propia
+        self._btn_console = QPushButton("🖥 Consola")
+        self._btn_console.setToolTip("Abre la consola: métricas del proceso + comandos de diagnóstico (help)")
+        self._btn_console.setStyleSheet(
             "font-size:10px; padding:2px 8px; background:#4E86B7; color:white; "
             "border:1px solid #3b6d99; border-radius:3px;"
         )
-        self._btn_toggle_console.toggled.connect(self._toggle_console)
-
-        root.addWidget(self._btn_toggle_console)
-        root.addWidget(self._metrics, 1)
+        self._btn_console.clicked.connect(self._open_console_window)
+        root.addWidget(self._btn_console)
 
         footer = QLabel(
             "Módulo experimental fase 2: métricas 3D proxy y sustracción ósea visual de apoyo. "
@@ -3008,15 +3004,118 @@ class AmyloidSpectPanel(QDialog):
             self._load_spect_path(startup)
         return bool(self._current_spect_path)
 
-    def _toggle_console(self, visible: bool):
-        """Oculta o muestra la consola de métricas para dar más espacio a las imágenes."""
-        self._metrics.setVisible(visible)
-        if visible:
-            self._btn_toggle_console.setText("▼ Consola")
-            self._metrics.setMaximumHeight(120)
+    def _open_console_window(self):
+        """Abre la consola en ventana propia (métricas + comandos de diagnóstico)."""
+        if self._console_dialog is None:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("🖥 Consola SINCRO — métricas y diagnóstico")
+            dlg.resize(780, 540)
+            lay = QVBoxLayout(dlg)
+            lay.addWidget(self._metrics, 1)
+            cmd_row = QHBoxLayout()
+            prompt = QLabel(">")
+            prompt.setStyleSheet("font-family:Consolas,monospace; font-weight:bold; color:#4E86B7;")
+            cmd_row.addWidget(prompt)
+            self._console_input = QLineEdit()
+            self._console_input.setPlaceholderText("Comando… escribí 'help' para ver la lista")
+            self._console_input.setStyleSheet(
+                "font-family:Consolas,monospace; background:#1e293b; color:#e2e8f0; "
+                "border:1px solid #334155; border-radius:3px; padding:4px 6px;"
+            )
+            self._console_input.returnPressed.connect(self._on_console_command_entered)
+            cmd_row.addWidget(self._console_input, 1)
+            btn_run = QPushButton("Ejecutar")
+            btn_run.clicked.connect(self._on_console_command_entered)
+            cmd_row.addWidget(btn_run)
+            lay.addLayout(cmd_row)
+            self._console_dialog = dlg
+        self._console_dialog.show()
+        self._console_dialog.raise_()
+        self._console_dialog.activateWindow()
+        self._console_input.setFocus()
+
+    def _on_console_command_entered(self):
+        cmd = self._console_input.text().strip()
+        if not cmd:
+            return
+        self._console_input.clear()
+        self._metrics.append(f"\n> {cmd}")
+        try:
+            self._run_console_command(cmd.lower())
+        except Exception as exc:
+            self._metrics.append(f"Error ejecutando '{cmd}': {exc}")
+
+    def _run_console_command(self, cmd: str):
+        """Intérprete mínimo de comandos de diagnóstico."""
+        from version import __version__ as _ver
+        if cmd in ("help", "ayuda", "?"):
+            self._metrics.append(
+                "Comandos disponibles:\n"
+                "  help / ayuda      esta lista\n"
+                "  estado            resumen del estudio y etapa del pipeline\n"
+                "  estudios          estudios con estado guardado (settings)\n"
+                "  config            configuración global guardada\n"
+                "  version           versión del módulo\n"
+                "  guardar           exporta el texto de la consola a .txt\n"
+                "  limpiar / clear   borra la consola"
+            )
+        elif cmd in ("estado", "status"):
+            stage = self._get_pipeline_stage()
+            lines = [
+                f"SINCRO v{_ver}",
+                f"Estudio: {self._current_spect_path or '(ninguno)'}",
+                f"Etapa pipeline: {stage} ({self._STAGE_NAMES.get(stage, '?')})",
+                f"SPECT en memoria: {getattr(self._current_volume, 'shape', None)}",
+                f"Recon bundle: {'sí' if self._recon_bundle is not None else 'no'}",
+                f"CT cargada: {getattr(self._ct_volume, 'shape', None)}",
+                f"CT registrada: {'sí' if getattr(self, '_ct_auto_registered', None) is not None else 'no'}",
+                f"Máscara ósea: {'sí' if self._bone_mask is not None else 'no'}",
+                f"Segmentación CT: {'sí' if getattr(self, '_ct_segmentation', None) is not None else 'no'}",
+                f"HMR: {getattr(getattr(self, '_hmr_result', None), 'hmr', None)}",
+                f"Gatillado: {'sí' if getattr(self, '_study_is_gated', False) else 'no'}",
+            ]
+            self._metrics.append("\n".join(lines))
+        elif cmd == "estudios":
+            seen: dict[str, int] = {}
+            for key in self._settings.allKeys():
+                if key.startswith("studies/"):
+                    sid = key.split("/")[1]
+                    seen[sid] = seen.get(sid, 0) + 1
+            if not seen:
+                self._metrics.append("No hay estudios guardados en settings.")
+                return
+            self._metrics.append(f"{len(seen)} estudio(s) con estado guardado:")
+            for sid, nkeys in sorted(seen.items()):
+                try:
+                    pad = sid + "=" * (-len(sid) % 4)
+                    path = base64.urlsafe_b64decode(pad.encode("ascii")).decode("utf-8", errors="replace")
+                except Exception:
+                    path = f"(id no decodificable: {sid[:24]}…)"
+                stage = int(self._settings.value(f"studies/{sid}/pipeline_stage", 0) or 0)
+                exists = "" if os.path.exists(path) else " [ARCHIVO NO ENCONTRADO]"
+                self._metrics.append(
+                    f"  · {path}{exists}\n"
+                    f"    etapa: {self._STAGE_NAMES.get(stage, '?')} · {nkeys} claves guardadas"
+                )
+        elif cmd in ("config", "configuracion", "configuración"):
+            self._metrics.append("Configuración global (settings):")
+            for key in sorted(self._settings.allKeys()):
+                if key.startswith("global/") or key.startswith("amylo/"):
+                    self._metrics.append(f"  {key} = {self._settings.value(key)}")
+        elif cmd in ("version", "versión", "v"):
+            self._metrics.append(f"SINCRO — AMYLO SPECT v{_ver}")
+        elif cmd in ("guardar", "export", "exportar"):
+            path, _ = QFileDialog.getSaveFileName(
+                self._console_dialog or self, "Guardar consola", "consola_sincro.txt", "Texto (*.txt)"
+            )
+            if path:
+                with open(path, "wb") as fh:
+                    fh.write(self._metrics.toPlainText().encode("utf-8"))
+                self._metrics.append(f"Consola exportada a: {path}")
+        elif cmd in ("limpiar", "clear", "cls"):
+            self._metrics.clear()
         else:
-            self._btn_toggle_console.setText("▶ Consola")
-            self._metrics.setMaximumHeight(0)
+            self._metrics.append(f"Comando desconocido: '{cmd}'. Escribí 'help' para la lista.")
 
     def _restore_global_ui_state(self):
         self._set_combo_by_data(self._preset_combo, str(self._settings.value("global/preset", "amylo360_std128") or "amylo360_std128"))
