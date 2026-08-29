@@ -499,6 +499,11 @@ class MipRotatorWidget(QWidget):
         """Programar renderizado con debounce."""
         self._render_timer.start(50)  # 50ms debounce
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._volume is not None:
+            self._schedule_render()
+
     def _update_angle_label(self):
         """Actualizar label de ángulo en vivo."""
         self._angle_lbl.setText(

@@ -7,7 +7,7 @@ import base64
 import json
 import numpy as np
 
-from PyQt6.QtCore import QObject, Qt, QSettings, QThread, pyqtSignal, QPointF
+from PyQt6.QtCore import QObject, Qt, QSettings, QThread, pyqtSignal, QPointF, QEvent
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QPdfWriter, QPageSize, QPen, QColor, QFont, QTransform, QPolygonF, QCursor
 from PyQt6.QtWidgets import (
     QApplication,
@@ -1004,6 +1004,7 @@ class AmyloidSpectPanel(QDialog):
         self._spect_affine_ijk_to_lps = None
         self._ct_affine_ijk_to_lps = None
         self._current_spect_path = ""
+        self._startup_resume_path = ""
         self._ct_path = ""
         self._bone_mask = None
         self._settings = QSettings("GAMMASYS", "SINCRO_AMYLO_SPECT")
@@ -1477,7 +1478,7 @@ class AmyloidSpectPanel(QDialog):
         loc_btns_row.addWidget(self._btn_loc_clear)
         vistas_layout.addLayout(loc_btns_row)
 
-        left_col.addWidget(vistas_group)
+        left_col.addWidget(vistas_group, 1)
 
         # ═══════════════════════════════════════════════════════════════════
         # PANEL MIP (rotación 360° con mouse)
@@ -2191,6 +2192,16 @@ class AmyloidSpectPanel(QDialog):
 
         main_controls_layout.addWidget(right_side_widget, 5)  # Columna derecha: 5/10
 
+        # Boxes colapsables: click en el título expande/colapsa (estado persistido)
+        for _grp, _key in (
+            (hmr_group, "hmr"),
+            (edit_group, "f24_mask"),
+            (flip_group, "orientacion"),
+            (zoom_group, "zoom"),
+            (ajuste_group, "ajuste"),
+        ):
+            self._make_collapsible(_grp, _key)
+
         left_col.addWidget(controls_container)
         # ────────────────────────────────────────────────────────────────────────────
 
@@ -2358,7 +2369,7 @@ class AmyloidSpectPanel(QDialog):
         right_col.addLayout(top_right_row)  # Fila con ambos grupos lado a lado
         
         # ═══ MIP 360° (debajo, ocupa todo el ancho) ═══
-        right_col.addWidget(mip_group)
+        right_col.addWidget(mip_group, 1)
         
         # Sin addStretch: el MIP se expande para ocupar todo el espacio disponible
 
@@ -2393,6 +2404,7 @@ class AmyloidSpectPanel(QDialog):
         footer.setStyleSheet("color:#94a3b8; font-size:10px;")
         root.addWidget(footer)
         self._restore_global_ui_state()
+        self._check_startup_auto_continue()
 
     @staticmethod
     def _mk_filter_combo() -> QComboBox:
@@ -2726,6 +2738,10 @@ class AmyloidSpectPanel(QDialog):
 
     def _on_continue_pipeline(self):
         """▶ Continuar: reanuda el pipeline desde la etapa guardada."""
+        if not self._resume_startup_study_if_needed():
+            QMessageBox.information(self, "Sin estado previo",
+                "No hay estado guardado para este estudio. Cargue el SPECT y procese normalmente.")
+            return
         saved = int(self._settings.value(
             f"{self._study_settings_prefix()}/pipeline_stage", 0
         ) or 0)
@@ -2774,6 +2790,8 @@ class AmyloidSpectPanel(QDialog):
 
     def _on_view_result(self):
         """👁 Ver resultado: restaura estado visual sin re-procesar."""
+        if not self._resume_startup_study_if_needed():
+            return
         self._restore_study_ui_state()
         saved = int(self._settings.value(
             f"{self._study_settings_prefix()}/pipeline_stage", 0
@@ -2797,7 +2815,10 @@ class AmyloidSpectPanel(QDialog):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        prefix = self._study_settings_prefix()
+        path = self._current_spect_path or getattr(self, "_startup_resume_path", "")
+        if not path:
+            return
+        prefix = f"studies/{self._settings_id(path)}"
         # Borrar todas las keys del estudio
         for key in list(self._settings.allKeys()):
             if key.startswith(prefix):
@@ -2916,7 +2937,61 @@ class AmyloidSpectPanel(QDialog):
             self._settings.setValue(f"{prefix}/ct_window", str(self._ct_window or "bone"))
             # --- Etapa del pipeline ---
             self._save_pipeline_stage()
+            self._settings.setValue("global/last_spect_path", self._current_spect_path)
         self._persist_report_bridge_state()
+
+    def _make_collapsible(self, group: QGroupBox, key: str, default_open: bool = False):
+        """Convierte un QGroupBox en colapsable: click en el título expande/colapsa."""
+        base_title = group.title()
+        settings_key = f"global/box_open_{key}"
+
+        def _apply(open_: bool):
+            for child in group.findChildren(QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly):
+                child.setVisible(open_)
+            group.setTitle(("▼ " if open_ else "▶ ") + base_title)
+            group.setMaximumHeight(16777215 if open_ else 22)
+            group.setProperty("_box_open", bool(open_))
+            self._settings.setValue(settings_key, bool(open_))
+
+        class _TitleClickFilter(QObject):
+            def eventFilter(self_f, obj, ev):
+                if ev.type() == QEvent.Type.MouseButtonPress:
+                    try:
+                        y = ev.position().y()
+                    except AttributeError:
+                        y = ev.pos().y()
+                    is_open = bool(group.property("_box_open"))
+                    if y <= 22 or not is_open:
+                        _apply(not is_open)
+                        return True
+                return False
+
+        filt = _TitleClickFilter(group)
+        group.installEventFilter(filt)
+        saved = str(self._settings.value(settings_key, "true" if default_open else "false")).lower() == "true"
+        _apply(saved)
+
+    def _check_startup_auto_continue(self):
+        """Al abrir el panel: si el último estudio tiene estado guardado, ofrecer retomarlo."""
+        last = str(self._settings.value("global/last_spect_path", "") or "")
+        if not last or not os.path.isfile(last):
+            return
+        stage = int(self._settings.value(f"studies/{self._settings_id(last)}/pipeline_stage", 0) or 0)
+        if stage <= self._STAGE_NONE:
+            return
+        self._startup_resume_path = last
+        stage_name = self._STAGE_NAMES.get(stage, f"etapa {stage}")
+        self._lbl_prev_state.setText(f"⏳ Último estudio: {os.path.basename(last)} — {stage_name}")
+        self._auto_continue_bar.setVisible(True)
+
+    def _resume_startup_study_if_needed(self) -> bool:
+        """Carga el último estudio guardado si aún no hay SPECT en memoria."""
+        if self._current_spect_path:
+            return True
+        startup = getattr(self, "_startup_resume_path", "")
+        if startup and os.path.isfile(startup):
+            self._load_spect_path(startup)
+        return bool(self._current_spect_path)
 
     def _toggle_console(self, visible: bool):
         """Oculta o muestra la consola de métricas para dar más espacio a las imágenes."""
@@ -7208,7 +7283,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         if not path:
             return
         self._remember_path(path)
+        self._load_spect_path(path)
 
+    def _load_spect_path(self, path: str):
         try:
             self._task_progress_start("Cargando SPECT...")
             # Carga inicial siempre rápida en FBP para feedback inmediato en UI.
