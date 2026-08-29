@@ -3221,6 +3221,47 @@ class AmyloidWindow(QDialog):
 
         dlg.exec()
 
+    def _publish_planar_bridge(self) -> None:
+        """Publica métricas planares para el informe unificado del panel SPECT."""
+        try:
+            import json as _json
+            from PyQt6.QtCore import QSettings as _QSettings
+
+            hmr = None
+            hmr_raw = None
+            washout = None
+            source = ""
+            if self._washout_data:
+                for t in ("3h", "1h"):
+                    d = self._washout_data.get(t) or {}
+                    if hmr is None and d.get("hmr") is not None:
+                        hmr = float(d["hmr"])
+                        hmr_raw = d.get("hmr_raw")
+                        source = f"planar {t}"
+                w = self._washout_data.get("washout") or {}
+                if isinstance(w, dict) and w.get("washout_pct") is not None:
+                    washout = float(w["washout_pct"])
+            perugini = None
+            if hasattr(self, "_perugini_combo"):
+                try:
+                    perugini = int(self._perugini_combo.currentData())
+                except Exception:
+                    perugini = None
+            if hmr is None:
+                return
+            payload = {
+                "hmr": hmr,
+                "hmr_raw": float(hmr_raw) if hmr_raw is not None else None,
+                "perugini": perugini,
+                "washout_pct": washout,
+                "source": source or "planar",
+            }
+            bridge = _QSettings("GAMMASYS", "SINCRO_AMYLO_BRIDGE")
+            bridge.setValue("planar_metrics_json", _json.dumps(payload, ensure_ascii=False))
+            bridge.sync()
+        except Exception:
+            pass
+
     def _build_report_context(self) -> dict:
         """Resume la cobertura de datos para elegir plantilla de informe."""
         has_planar_loaded = any(
@@ -3354,6 +3395,7 @@ class AmyloidWindow(QDialog):
 
     def _generate_report(self):
         """Genera el informe PDF + HTML de amiloidosis."""
+        self._publish_planar_bridge()
         report_ctx = self._build_report_context()
         has_planar_metrics = bool(report_ctx.get("has_planar_metrics"))
         has_spect = bool(report_ctx.get("has_spect"))

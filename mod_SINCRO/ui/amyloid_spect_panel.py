@@ -1251,10 +1251,16 @@ class AmyloidSpectPanel(QDialog):
         )
         flow.addWidget(self._btn_vrt, 3, 6, 1, 2)
 
-        self._btn_fusion_layout = QPushButton("6b. Vista informe fusión")
-        self._btn_fusion_layout.clicked.connect(self._show_fusion_report_layout)
+        self._btn_fusion_layout = QPushButton("7. 📄 Informe AMYLO")
+        self._btn_fusion_layout.clicked.connect(self._open_amylo_report_dialog)
         self._btn_fusion_layout.setEnabled(False)
-        self._btn_fusion_layout.setToolTip("Muestra tiras SPECT y panel 3x3 (SPECT/CT/Fusión) con referencias de corte.")
+        self._btn_fusion_layout.setToolTip(
+            "Informe unificado HTML/PDF con plantillas: métricas SPECT (+planar si hay),\n"
+            "imágenes 3D/cortes/fusión, GIFs animados, limitaciones y comparativa."
+        )
+        self._btn_fusion_layout.setStyleSheet(
+            "background-color:#0e7490; color:white; font-weight:bold; padding:6px 12px; border-radius:4px;"
+        )
         flow.addWidget(self._btn_fusion_layout, 3, 8)
         flow.setColumnStretch(9, 1)
 
@@ -7441,55 +7447,271 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._progress.setFormat("Error")
             self._status.setText(f"Error abriendo VRT 3D: {exc}")
 
+    def _build_fusion_report_dialog(self) -> "FusionReportLayoutDialog | None":
+        """Construye el diálogo de composición fusión (para mostrar o capturar)."""
+        if self._base_spect_volume is None and self._current_volume is None:
+            return None
+        spect_vol = np.asarray(
+            self._base_spect_volume if self._base_spect_volume is not None else self._current_volume,
+            dtype=np.float64,
+        )
+        spect_vol = self._spect_transform_3d(spect_vol)
+        if spect_vol.ndim != 3:
+            raise ValueError(f"SPECT inválido para informe: {spect_vol.shape}")
+
+        ct_vol = None
+        # Informe final: priorizar resolución nativa de CT (no CT degradada a grilla SPECT).
+        if self._ct_volume is not None:
+            tmp = self._ct_transform_3d(np.asarray(self._ct_volume, dtype=np.float64))
+            ct_vol = tmp if tmp.ndim == 3 else None
+        elif self._ct_registered is not None:
+            ct_vol = self._ct_transform_3d(np.asarray(self._ct_registered, dtype=np.float64))
+
+        loc_points = self.get_localization_points()
+        return FusionReportLayoutDialog(
+            self,
+            spect_vol=spect_vol,
+            ct_vol=ct_vol,
+            fusion_pct=int(self._fusion_slider.value()) if hasattr(self, "_fusion_slider") else int(getattr(self, "_fusion_pct", 55)),
+            spect_window_fn=self._window_spect,
+            ct_window_fn=self._window_ct,
+            cmap_fn=self._apply_cmap,
+            slice_idx=dict(self._slice_idx),
+            localization_points=loc_points,
+            display_spacing_zyx=(
+                tuple(self._ct_spacing_zyx)
+                if (ct_vol is not None and self._ct_spacing_zyx is not None and len(self._ct_spacing_zyx) == 3)
+                else (tuple(self._spect_spacing_zyx) if (self._spect_spacing_zyx is not None and len(self._spect_spacing_zyx) == 3) else None)
+            ),
+            hmr_result=getattr(self, "_hmr_result", None),
+            svd_result=getattr(self, "_svd_result", None),
+        )
+
     def _show_fusion_report_layout(self):
         try:
-            if self._base_spect_volume is None and self._current_volume is None:
+            dlg = self._build_fusion_report_dialog()
+            if dlg is None:
                 self._status.setText("Cargar primero un SPECT.")
                 return
-            spect_vol = np.asarray(
-                self._base_spect_volume if self._base_spect_volume is not None else self._current_volume,
-                dtype=np.float64,
-            )
-            spect_vol = self._spect_transform_3d(spect_vol)
-            if spect_vol.ndim != 3:
-                raise ValueError(f"SPECT inválido para informe: {spect_vol.shape}")
-
-            ct_vol = None
-            # Informe final: priorizar resolución nativa de CT (no CT degradada a grilla SPECT).
-            if self._ct_volume is not None:
-                tmp = self._ct_transform_3d(np.asarray(self._ct_volume, dtype=np.float64))
-                ct_vol = tmp if tmp.ndim == 3 else None
-            elif self._ct_registered is not None:
-                ct_vol = self._ct_transform_3d(np.asarray(self._ct_registered, dtype=np.float64))
-
-            loc_points = self.get_localization_points()
-            dlg = FusionReportLayoutDialog(
-                self,
-                spect_vol=spect_vol,
-                ct_vol=ct_vol,
-                fusion_pct=int(self._fusion_slider.value()) if hasattr(self, "_fusion_slider") else int(getattr(self, "_fusion_pct", 55)),
-                spect_window_fn=self._window_spect,
-                ct_window_fn=self._window_ct,
-                cmap_fn=self._apply_cmap,
-                slice_idx=dict(self._slice_idx),
-                localization_points=loc_points,
-                display_spacing_zyx=(
-                    tuple(self._ct_spacing_zyx)
-                    if (ct_vol is not None and self._ct_spacing_zyx is not None and len(self._ct_spacing_zyx) == 3)
-                    else (tuple(self._spect_spacing_zyx) if (self._spect_spacing_zyx is not None and len(self._spect_spacing_zyx) == 3) else None)
-                ),
-                hmr_result=getattr(self, "_hmr_result", None),
-                svd_result=getattr(self, "_svd_result", None),
-            )
-            if hasattr(self, "_metrics") and ct_vol is not None:
-                self._metrics.append(
-                    "[Informe fusión] CT en resolución nativa para salida final "
-                    f"(shape={tuple(int(v) for v in np.asarray(ct_vol).shape)})."
-                )
             dlg.exec()
         except Exception as exc:
             self._status.setText(f"Error abriendo vista informe fusión: {exc}")
             QMessageBox.critical(self, "SINCRO", f"No se pudo abrir la vista informe fusión:\n{exc}")
+
+    # ------------------------------------------------------------------
+    # Informe AMYLO unificado (HTML + PDF, plantillas)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _qpixmap_to_pil(pm):
+        from PIL import Image
+        qimg = pm.toImage().convertToFormat(QImage.Format.Format_RGB888)
+        w, h = qimg.width(), qimg.height()
+        ptr = qimg.constBits()
+        ptr.setsize(qimg.sizeInBytes())
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((h, qimg.bytesPerLine()))[:, : w * 3].reshape((h, w, 3))
+        return Image.fromarray(arr.copy())
+
+    def _capture_mip_rotation_frames(self, n_frames: int = 24) -> list:
+        """Frames PIL del MIP rotando 360° (restaura el ángulo al final)."""
+        w = self._mip_widget
+        if getattr(w, "_volume", None) is None:
+            return []
+        orig_az = float(getattr(w, "_azimuth_deg", 0.0))
+        frames = []
+        try:
+            for i in range(max(4, int(n_frames))):
+                w._azimuth_deg = (360.0 * i / n_frames) % 360.0
+                w._render_mip()
+                pm = w._lbl.pixmap()
+                if pm is not None and not pm.isNull():
+                    frames.append(self._qpixmap_to_pil(pm))
+        finally:
+            w._azimuth_deg = orig_az
+            w._render_mip()
+        if len(frames) >= 2:
+            base = frames[0].size
+            frames = [f if f.size == base else f.resize(base) for f in frames]
+        return frames
+
+    def _capture_axial_sweep_frames(self, max_frames: int = 24) -> list:
+        """Frames PIL barriendo cortes axiales (restaura el corte al final)."""
+        if self._current_volume is None:
+            return []
+        nz = int(np.asarray(self._current_volume).shape[0])
+        orig = int(self._slice_idx.get("axial", nz // 2))
+        idxs = np.linspace(0, nz - 1, min(int(max_frames), nz)).astype(int)
+        frames = []
+        try:
+            for z in idxs:
+                self._slice_idx["axial"] = int(z)
+                self._render_current_with_overlay()
+                pm = self._axial_lbl.pixmap()
+                if pm is not None and not pm.isNull():
+                    frames.append(self._qpixmap_to_pil(pm))
+        finally:
+            self._slice_idx["axial"] = orig
+            self._render_current_with_overlay()
+        if len(frames) >= 2:
+            base = frames[0].size
+            frames = [f if f.size == base else f.resize(base) for f in frames]
+        return frames
+
+    def _collect_report_assets(self, out_dir: str, *, include_gifs: bool = True, gif_frames: int = 24):
+        """Captura PNGs y GIFs del estado actual para el informe. Devuelve (images, gifs)."""
+        os.makedirs(out_dir, exist_ok=True)
+        images: list[tuple[str, str]] = []
+        gifs: list[tuple[str, str]] = []
+
+        def _save_label(lbl, name, title):
+            pm = lbl.pixmap()
+            if pm is not None and not pm.isNull():
+                path = os.path.join(out_dir, name)
+                pm.save(path, "PNG")
+                images.append((title, path))
+
+        _save_label(self._axial_lbl, "mpr_axial.png", "Corte axial (vista actual)")
+        _save_label(self._cor_lbl, "mpr_coronal.png", "Corte coronal (vista actual)")
+        _save_label(self._sag_lbl, "mpr_sagital.png", "Corte sagital (vista actual)")
+        mip_lbl = getattr(self._mip_widget, "_lbl", None)
+        if mip_lbl is not None:
+            _save_label(mip_lbl, "mip_3d.png", "MIP 3D (vista actual)")
+
+        # Composición fusión (tiras + grilla 3x3) capturada offscreen
+        try:
+            dlg = self._build_fusion_report_dialog()
+            if dlg is not None:
+                pm = dlg._body.grab()
+                if not pm.isNull():
+                    path = os.path.join(out_dir, "fusion_composite.png")
+                    pm.save(path, "PNG")
+                    images.append(("Composición fusión (tiras SPECT + 3x3 SPECT/CT/Fusión)", path))
+                dlg.deleteLater()
+        except Exception:
+            pass
+
+        if include_gifs:
+            try:
+                frames = self._capture_mip_rotation_frames(n_frames=gif_frames)
+                if len(frames) >= 4:
+                    path = os.path.join(out_dir, "mip_rotatorio.gif")
+                    frames[0].save(path, save_all=True, append_images=frames[1:], duration=120, loop=0)
+                    gifs.append(("MIP 360° rotatorio", path))
+            except Exception:
+                pass
+            try:
+                frames = self._capture_axial_sweep_frames(max_frames=gif_frames)
+                if len(frames) >= 4:
+                    path = os.path.join(out_dir, "barrido_axial.gif")
+                    frames[0].save(path, save_all=True, append_images=frames[1:], duration=150, loop=0)
+                    gifs.append(("Barrido axial (estado de vista actual)", path))
+            except Exception:
+                pass
+        return images, gifs
+
+    @staticmethod
+    def _read_planar_bridge() -> dict | None:
+        """Métricas planares publicadas por el módulo Amyloidosis Planar (si existen)."""
+        try:
+            bridge = QSettings("GAMMASYS", "SINCRO_AMYLO_BRIDGE")
+            raw = str(bridge.value("planar_metrics_json", "") or "")
+            if not raw:
+                return None
+            data = json.loads(raw)
+            return data if isinstance(data, dict) and data.get("hmr") is not None else None
+        except Exception:
+            return None
+
+    def _build_amylo_report_data(self):
+        """Arma el AmyloReportData con métricas, paciente, parámetros y advertencias."""
+        from report.amylo_spect_report import AmyloReportData
+
+        info = self._dicom_profile_info or {}
+        sd = str(info.get("study_date", "") or "")
+        if len(sd) == 8 and sd.isdigit():
+            sd = f"{sd[6:8]}/{sd[4:6]}/{sd[0:4]}"
+        patient = {
+            "name": str(info.get("patient_name", "") or "N/D"),
+            "id": str(info.get("patient_id", "") or "N/D"),
+            "sex": "N/D",
+            "study_date": sd or "N/D",
+            "description": str(info.get("study_description", "") or info.get("series_description", "") or "N/D"),
+            "camera": " ".join(filter(None, [str(info.get("manufacturer", "")), str(info.get("model", ""))])) or "N/D",
+        }
+
+        m: dict = {}
+        hr = getattr(self, "_hmr_result", None)
+        if hr is not None:
+            hmr_clin = hr.hmr_raw if getattr(hr, "hmr_raw", None) is not None else hr.hmr
+            m = {
+                "hmr": float(hmr_clin),
+                "classification": str(hr.classification),
+                "heart_counts": float(getattr(hr, "heart_mean", 0.0)),
+                "mediastinum_counts": float(getattr(hr, "mediastinum_mean", 0.0)),
+                "volume_ml": float(getattr(hr, "heart_volume_ml", 0.0)) or None,
+                "method": str(getattr(hr, "method", "") or "N/D"),
+            }
+        pv = getattr(self, "_pve_result", None)
+        if pv is not None:
+            m["pve"] = {
+                "hmr_pve_corrected": float(getattr(pv, "hmr_pve_corrected", 0.0)),
+                "pve_factor": float(getattr(pv, "pve_factor", 0.0)),
+                "rc_heart": float(getattr(pv, "rc_heart", 0.0)),
+                "wall_thickness_mm": float(getattr(pv, "wall_thickness_mm", 0.0)),
+                "fwhm_mm": float(getattr(pv, "fwhm_mm", 0.0)),
+            }
+        sv = getattr(self, "_svd_result", None)
+        if sv is not None:
+            m["svd"] = {"ratio": float(getattr(sv, "s_vd", 0.0)), "classification": str(getattr(sv, "classification", "N/D"))}
+
+        params = {
+            "Preset": str(self._preset_combo.currentText()),
+            "Método recon": str(self._recon_combo.currentText()),
+            "Filtro ungated": f"{self._ung_filter_combo.currentText()} (cutoff {self._ung_cutoff_spin.value():.2f}, orden {self._ung_order_spin.value()})",
+            "Iteraciones/Subsets": f"{self._iter_spin.value()} / {self._subsets_spin.value()}",
+            "AC iterativa": "sí" if self._ac_iter_check.isChecked() else "no",
+            "Desc. scatter": "sí" if self._scatter_check.isChecked() else "no",
+            "Fusión %": f"{int(self._fusion_slider.value())}%",
+            "SPECT": str(getattr(np.asarray(self._current_volume), "shape", "N/D")) if self._current_volume is not None else "N/D",
+            "CT": str(tuple(np.asarray(self._ct_volume).shape)) if self._ct_volume is not None else "sin CT",
+            "Registro Δ(z,y,x) px": str(tuple(round(float(v), 1) for v in getattr(self, "_ct_total_shift_zyx", (0, 0, 0)))),
+        }
+
+        warnings: list[str] = []
+        if pv is not None:
+            warnings.append(
+                "Se aplicó corrección PVE (modelo analítico experimental): el HMR corregido siempre es "
+                "mayor al medido y NO es comparable contra los cutoffs planares validados."
+            )
+        if self._ct_volume is None:
+            warnings.append("Estudio sin CT: cuantificación sobre SPECT solo, con VOIs esféricas manuales.")
+        if getattr(self, "_mask_was_manually_edited", False):
+            warnings.append("La máscara CT fue editada manualmente por el operador (F2.4).")
+        nudges = [float(self._nudge_z.value()), float(self._nudge_y.value()), float(self._nudge_x.value())] if hasattr(self, "_nudge_z") else [0, 0, 0]
+        rots = [float(self._rot_z.value()), float(self._rot_y.value()), float(self._rot_x.value())] if hasattr(self, "_rot_z") else [0, 0, 0]
+        if any(abs(v) > 1e-6 for v in nudges + rots):
+            warnings.append(
+                f"Registro CT↔SPECT ajustado manualmente: Δ(z,y,x)={tuple(nudges)} px · rot(z,y,x)={tuple(rots)}°."
+            )
+
+        return AmyloReportData(
+            patient=patient,
+            spect_metrics=m,
+            planar=self._read_planar_bridge(),
+            params=params,
+            warnings=warnings,
+        )
+
+    def _open_amylo_report_dialog(self):
+        if self._current_volume is None:
+            self._status.setText("Cargar primero un SPECT para generar el informe.")
+            return
+        try:
+            from ui.amylo_report_dialog import AmyloReportDialog
+            dlg = AmyloReportDialog(self)
+            dlg.exec()
+        except Exception as exc:
+            QMessageBox.critical(self, "SINCRO", f"No se pudo abrir el diálogo de informe:\n{exc}")
 
     def _clear_bone_overlay(self):
         self._bone_mask = None
@@ -7542,6 +7764,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._render_preview(self._current_volume)
             self._btn_bone.setEnabled(True)
             self._btn_recon_pipeline.setEnabled(True)
+            self._btn_fusion_layout.setEnabled(True)
             self._btn_load_ct.setEnabled(True)
             self._btn_load_ct_dir.setEnabled(True)
             self._btn_load_att.setEnabled(True)
