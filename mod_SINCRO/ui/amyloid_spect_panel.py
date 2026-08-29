@@ -2949,7 +2949,7 @@ class AmyloidSpectPanel(QDialog):
             for child in group.findChildren(QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly):
                 child.setVisible(open_)
             group.setTitle(("▼ " if open_ else "▶ ") + base_title)
-            group.setMaximumHeight(16777215 if open_ else 22)
+            group.setMaximumHeight(16777215 if open_ else 30)
             group.setProperty("_box_open", bool(open_))
             self._settings.setValue(settings_key, bool(open_))
 
@@ -2957,11 +2957,13 @@ class AmyloidSpectPanel(QDialog):
             def eventFilter(self_f, obj, ev):
                 if ev.type() == QEvent.Type.MouseButtonPress:
                     try:
-                        y = ev.position().y()
+                        pos = ev.position().toPoint()
                     except AttributeError:
-                        y = ev.pos().y()
+                        pos = ev.pos()
                     is_open = bool(group.property("_box_open"))
-                    if y <= 22 or not is_open:
+                    # Zona título: hasta 28px (boxes con margin-top en stylesheet dibujan el título más abajo)
+                    on_title = pos.y() <= 28 and group.childAt(pos) is None
+                    if on_title or not is_open:
                         _apply(not is_open)
                         return True
                 return False
