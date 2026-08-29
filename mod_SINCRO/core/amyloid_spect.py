@@ -958,11 +958,12 @@ def apply_visual_bone_suppression(
     ct_volume: np.ndarray | None = None,
     ct_hu_threshold: float = 200.0,
     spect_bone_percentile: float = 92.0,
-    suppression_factor: float = 0.45,
+    suppression_factor: float = 0.65,
 ) -> BoneSuppressionResult:
     """Sustracción ósea visual inicial (experimental).
 
-    - Con CT: máscara ósea por umbral HU.
+    - Con CT: máscara ósea por umbral HU, dilatada 1 voxel para cubrir el
+      derrame del hueso por la resolución SPECT (PVE).
     - Sin CT: máscara probable ósea por percentil alto de actividad SPECT.
     """
     vol = np.asarray(spect_volume, dtype=np.float64)
@@ -976,8 +977,9 @@ def apply_visual_bone_suppression(
         ct = np.asarray(ct_volume, dtype=np.float64)
         if ct.shape == vol.shape:
             bone_mask = ct >= float(ct_hu_threshold)
+            bone_mask = ndi.binary_dilation(bone_mask, iterations=1)
             method = "ct_threshold"
-            notes.append(f"Máscara ósea por CT (HU >= {ct_hu_threshold:.0f}).")
+            notes.append(f"Máscara ósea por CT (HU >= {ct_hu_threshold:.0f}, dilatada 1 voxel).")
         else:
             bone_mask = vol >= np.percentile(vol, float(spect_bone_percentile))
             notes.append(
@@ -1011,15 +1013,21 @@ def _auto_flip_ct_to_spect(ct_rs: np.ndarray, spect: np.ndarray) -> tuple[np.nda
     también el NCC ganador para poder comparar candidatos de remuestreo.
     """
     sp = np.asarray(spect, dtype=np.float64)
-    sp_s = ndi.gaussian_filter(sp, 2.0)
+    base = np.asarray(ct_rs, dtype=np.float64)
+    # La decisión de flips no necesita resolución completa: decimar acelera
+    # ~8x en grillas 2x (modo CT nativa) sin cambiar el ganador.
+    step = max(1, int(round(max(sp.shape) / 64.0)))
+    sp_d = sp[::step, ::step, ::step]
+    base_d = base[::step, ::step, ::step]
+    sp_s = ndi.gaussian_filter(sp_d, 2.0)
     sp_n = sp_s - sp_s.mean()
     sp_norm = float(np.sqrt((sp_n ** 2).sum())) or 1.0
-    base = np.asarray(ct_rs, dtype=np.float64)
-    best = (None, -2.0, (False, False, False))
+    best_score = -2.0
+    best_flips = (False, False, False)
     for fz in (False, True):
         for fy in (False, True):
             for fx in (False, True):
-                cand = base
+                cand = base_d
                 if fz:
                     cand = np.flip(cand, axis=0)
                 if fy:
@@ -1030,14 +1038,22 @@ def _auto_flip_ct_to_spect(ct_rs: np.ndarray, spect: np.ndarray) -> tuple[np.nda
                 c_n = c_s - c_s.mean()
                 denom = float(np.sqrt((c_n ** 2).sum())) or 1.0
                 score = float((c_n * sp_n).sum()) / (denom * sp_norm)
-                if score > best[1]:
-                    best = (np.ascontiguousarray(cand), score, (fz, fy, fx))
-    flips = best[2]
+                if score > best_score:
+                    best_score = score
+                    best_flips = (fz, fy, fx)
+    flips = best_flips
+    out = base
+    if flips[0]:
+        out = np.flip(out, axis=0)
+    if flips[1]:
+        out = np.flip(out, axis=1)
+    if flips[2]:
+        out = np.flip(out, axis=2)
     note = (
         f"Orientación CT auto-resuelta por correlación con SPECT: flips z/y/x = "
-        f"{flips[0]}/{flips[1]}/{flips[2]} (NCC={best[1]:.3f})."
+        f"{flips[0]}/{flips[1]}/{flips[2]} (NCC={best_score:.3f})."
     )
-    return best[0] if best[0] is not None else base, note, float(best[1])
+    return np.ascontiguousarray(out), note, float(best_score)
 
 
 def register_ct_to_spect_rigid(

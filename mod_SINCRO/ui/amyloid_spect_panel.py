@@ -8,7 +8,7 @@ import json
 import numpy as np
 
 from PyQt6.QtCore import QObject, Qt, QSettings, QThread, pyqtSignal, QPointF
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QPdfWriter, QPageSize, QPen, QColor, QFont, QTransform, QPolygonF
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPdfWriter, QPageSize, QPen, QColor, QFont, QTransform, QPolygonF, QCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -1036,6 +1036,12 @@ class AmyloidSpectPanel(QDialog):
         self._ct_flip_y_test = False
         self._ct_flip_z_test = False
         self._ct_window = "bone"
+        # Ventana CT manual (WL/WW en HU) — se sincroniza con presets y con
+        # el ventaneo interactivo por botón del medio.
+        self._ct_wl = 300.0
+        self._ct_ww = 1500.0
+        # Opacidad del CT de fondo en la fusión (100 = CT pleno, 0 = invisible).
+        self._ct_opacity_pct = 100
         self._ct_visual_trial_mode = True
         self._ct_grid_trial_mode = False
         self._trial_cache_signature = None
@@ -1140,7 +1146,11 @@ class AmyloidSpectPanel(QDialog):
         flow.addWidget(self._btn_cancel_recon, 0, 8)
 
         self._ct_check = QCheckBox("Usar CT para sustracción ósea (si hay)")
-        self._ct_check.setToolTip("Si hay CT cargado/registrado, usa el CT para definir máscara ósea visual.")
+        self._ct_check.setChecked(True)
+        self._ct_check.setToolTip(
+            "Si hay CT cargado/registrado, usa el CT para definir la máscara ósea (HU >= 200).\n"
+            "Sin CT cae a la heurística SPECT por percentil, que puede suprimir el corazón en positivos."
+        )
         flow.addWidget(self._ct_check, 1, 0, 1, 2)
 
         self._btn_load_ct = QPushButton("3a. Cargar CT")
@@ -1506,6 +1516,27 @@ class AmyloidSpectPanel(QDialog):
         self._fusion_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         fusion_col.addWidget(self._fusion_lbl)
         qc_row.addLayout(fusion_col, 1)
+
+        # Opacidad CT (vertical): funde el CT de fondo a negro sin tocar el SPECT.
+        ct_op_col = QVBoxLayout()
+        ct_op_col.addWidget(QLabel("CT %:"))
+        self._ct_opacity_slider = QSlider(Qt.Orientation.Vertical)
+        self._ct_opacity_slider.setRange(0, 100)
+        self._ct_opacity_slider.setValue(100)
+        self._ct_opacity_slider.setToolTip(
+            "Opacidad del CT de fondo en la fusión:\n"
+            "100% CT pleno · 0% CT invisible (queda solo el SPECT).\n"
+            "No modifica la intensidad del SPECT."
+        )
+        self._ct_opacity_slider.valueChanged.connect(self._on_ct_opacity_changed)
+        self._ct_opacity_slider.setEnabled(False)
+        self._ct_opacity_slider.setMinimumHeight(120)
+        ct_op_col.addWidget(self._ct_opacity_slider, 1)
+        self._ct_opacity_lbl = QLabel("100%")
+        self._ct_opacity_lbl.setStyleSheet("color:#94a3b8; font-size:10px;")
+        self._ct_opacity_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ct_op_col.addWidget(self._ct_opacity_lbl)
+        qc_row.addLayout(ct_op_col, 1)
         overlay_qc_layout.addLayout(qc_row)
 
         # Sliders de corte z/y/x
@@ -2189,13 +2220,25 @@ class AmyloidSpectPanel(QDialog):
         ct_win_row.addWidget(QLabel("Ventana CT:"))
         self._ct_window_combo = QComboBox()
         self._ct_window_combo.addItem("Ósea", "bone")
+        self._ct_window_combo.addItem("Ósea dura", "bone_hard")
         self._ct_window_combo.addItem("Partes blandas", "soft")
         self._ct_window_combo.addItem("Pulmón", "lung")
+        self._ct_window_combo.addItem("Hígado", "liver")
+        self._ct_window_combo.addItem("Cerebro", "brain")
         self._ct_window_combo.addItem("Completa", "full")
+        self._ct_window_combo.addItem("Manual", "manual")
+        self._ct_window_combo.setToolTip(
+            "Preset de ventana CT (WL/WW en HU).\n"
+            "Botón del medio + arrastre sobre una vista: ventaneo manual\n"
+            "(X = contraste/WW · Y = brillo/WL)."
+        )
         self._ct_window_combo.currentIndexChanged.connect(self._on_ct_window_changed)
-        self._ct_window_combo.setFixedWidth(90)
+        self._ct_window_combo.setFixedWidth(95)
         self._ct_window_combo.setStyleSheet("font-size:10px; padding:1px 4px;")
         ct_win_row.addWidget(self._ct_window_combo)
+        self._ct_wl_ww_lbl = QLabel("WL 300 / WW 1500")
+        self._ct_wl_ww_lbl.setStyleSheet("color:#94a3b8; font-size:9px;")
+        ct_win_row.addWidget(self._ct_wl_ww_lbl)
         window_vbox.addLayout(ct_win_row)
 
         trial_row = QHBoxLayout()
@@ -2567,6 +2610,10 @@ class AmyloidSpectPanel(QDialog):
         self._settings.setValue("global/split_pct", split)
         self._settings.setValue("global/overlay_pct", overlay)
         self._settings.setValue("global/fusion_pct", fusion)
+        self._settings.setValue("global/ct_opacity_pct", int(self._ct_opacity_slider.value()) if hasattr(self, "_ct_opacity_slider") else int(getattr(self, "_ct_opacity_pct", 100)))
+        self._settings.setValue("global/ct_window", str(self._ct_window or "bone"))
+        self._settings.setValue("global/ct_wl", float(getattr(self, "_ct_wl", 300.0)))
+        self._settings.setValue("global/ct_ww", float(getattr(self, "_ct_ww", 1500.0)))
         self._settings.setValue("global/triangulation_cross", bool(getattr(self, "_triangulation_cross_enabled", False)))
         self._settings.setValue("global/localization_cross", bool(getattr(self, "_localization_cross_enabled", False)))
         self._settings.setValue("global/ung_filter", str(self._ung_filter_combo.currentData() or "butterworth"))
@@ -2650,6 +2697,20 @@ class AmyloidSpectPanel(QDialog):
         fusion = int(self._settings.value("global/fusion_pct", 55) or 55)
         self._fusion_slider.setValue(fusion)
         self._fusion_pct = fusion
+        ct_op = int(self._settings.value("global/ct_opacity_pct", 100) or 100)
+        self._ct_opacity_slider.setValue(ct_op)
+        self._ct_opacity_pct = ct_op
+        # Ventana CT: restaurar WL/WW manuales antes del preset para que
+        # el modo "manual" conserve el último ventaneo del usuario.
+        self._ct_wl = float(self._settings.value("global/ct_wl", 300.0) or 300.0)
+        self._ct_ww = max(1.0, float(self._settings.value("global/ct_ww", 1500.0) or 1500.0))
+        ct_win = str(self._settings.value("global/ct_window", "bone") or "bone")
+        self._ct_window = ct_win
+        if hasattr(self, "_ct_window_combo"):
+            self._ct_window_combo.blockSignals(True)
+            self._set_combo_by_data(self._ct_window_combo, ct_win)
+            self._ct_window_combo.blockSignals(False)
+        self._update_ct_wl_ww_label()
         triang = str(self._settings.value("global/triangulation_cross", "false")).lower() == "true"
         self._triangulation_cross_enabled = bool(triang)
         if hasattr(self, "_btn_triangulation_cross"):
@@ -2964,6 +3025,12 @@ class AmyloidSpectPanel(QDialog):
         self._persist_ui_state()
         self._render_current_with_overlay()
 
+    def _on_ct_opacity_changed(self, value: int):
+        self._ct_opacity_pct = int(value)
+        self._ct_opacity_lbl.setText(f"{int(value)}%")
+        self._persist_ui_state()
+        self._render_current_with_overlay()
+
     def _on_spect_orientation_test_toggled(self, checked: bool):
         self._spect_flip_x_test = bool(self._spect_flipx_check.isChecked())
         self._spect_flip_y_test = bool(self._spect_flipy_check.isChecked())
@@ -3110,17 +3177,32 @@ class AmyloidSpectPanel(QDialog):
             hi = lo + 0.01
         return np.clip((a - lo) / (hi - lo), 0.0, 1.0)
 
+    # Presets clínicos de ventana CT: (WL, WW) en HU.
+    _CT_WINDOW_PRESETS: dict[str, tuple[float, float]] = {
+        "bone": (300.0, 1500.0),       # Ósea estándar
+        "bone_hard": (500.0, 2500.0),  # Ósea dura (columna / alta densidad)
+        "soft": (40.0, 400.0),         # Partes blandas / mediastino
+        "lung": (-600.0, 1500.0),      # Pulmón
+        "liver": (60.0, 160.0),        # Hígado
+        "brain": (40.0, 80.0),         # Cerebro
+    }
+
+    def _ct_window_wl_ww(self) -> tuple[float, float]:
+        """WL/WW efectivos según preset activo o modo manual."""
+        mode = str(self._ct_window or "bone")
+        if mode == "manual":
+            return float(self._ct_wl), max(1.0, float(self._ct_ww))
+        wl, ww = self._CT_WINDOW_PRESETS.get(mode, self._CT_WINDOW_PRESETS["bone"])
+        return float(wl), float(ww)
+
     def _window_ct(self, arr: np.ndarray) -> np.ndarray:
         a = np.asarray(arr, dtype=np.float64)
         mode = str(self._ct_window or "bone")
-        if mode == "soft":
-            lo, hi = -160.0, 240.0
-        elif mode == "lung":
-            lo, hi = -1000.0, 200.0
-        elif mode == "full":
+        if mode == "full":
             lo, hi = float(np.percentile(a, 1.0)), float(np.percentile(a, 99.0))
         else:
-            lo, hi = -200.0, 1000.0
+            wl, ww = self._ct_window_wl_ww()
+            lo, hi = wl - ww / 2.0, wl + ww / 2.0
         if hi <= lo:
             hi = lo + 1.0
         return np.clip((a - lo) / (hi - lo), 0.0, 1.0)
@@ -3206,7 +3288,7 @@ class AmyloidSpectPanel(QDialog):
         rgb = np.stack([g, g, g], axis=-1)
         if mask2d is None:
             return np.clip(rgb * 255.0, 0, 255).astype(np.uint8)
-        m = np.asarray(mask2d, dtype=bool)
+        m = cls._mask_to_shape(mask2d, (rgb.shape[0], rgb.shape[1]))
         a = float(np.clip(alpha, 0.0, 1.0))
         if np.any(m) and a > 0.0:
             rgb[m, 0] = (1.0 - a) * rgb[m, 0] + a * 1.0
@@ -3223,10 +3305,12 @@ class AmyloidSpectPanel(QDialog):
 
         if mode == "fusion":
             mix = float(np.clip(getattr(self, "_fusion_pct", 55), 0, 100)) / 100.0
+            # Opacidad CT: funde el fondo CT a negro sin alterar el SPECT.
+            ct_op = float(np.clip(getattr(self, "_ct_opacity_pct", 100), 0, 100)) / 100.0
             # Alpha espacial: el porcentaje de fusión define cuánto pesa el SPECT,
             # pero la señal baja queda translúcida para no tapar CT de fondo.
             alpha = np.clip(sp * 1.35, 0.0, 1.0)[..., None] * mix
-            out = (1.0 - alpha) * rgb_ct + alpha * rgb_sp
+            out = (1.0 - alpha) * (rgb_ct * ct_op) + alpha * rgb_sp
             return np.clip(out * 255.0, 0, 255).astype(np.uint8)
 
         if mode == "edges":
@@ -4689,13 +4773,29 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             QMessageBox.critical(self, "SINCRO", f"Error calculando HMR-SPECT:\n{exc}")
 
     @staticmethod
+    def _mask_to_shape(mask2d: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
+        """Adapta una máscara 2D a otra grilla (modo CT nativa usa grilla 2x)."""
+        m = np.asarray(mask2d, dtype=bool)
+        th, tw = int(target_hw[0]), int(target_hw[1])
+        if m.shape == (th, tw):
+            return m
+        zy = th / max(1, m.shape[0])
+        zx = tw / max(1, m.shape[1])
+        scaled = ndi.zoom(m.astype(np.float32), (zy, zx), order=0) > 0.5
+        out = np.zeros((th, tw), dtype=bool)
+        sh = min(th, scaled.shape[0])
+        sw = min(tw, scaled.shape[1])
+        out[:sh, :sw] = scaled[:sh, :sw]
+        return out
+
+    @staticmethod
     def _blend_mask_over_rgb(rgb: np.ndarray, mask2d: np.ndarray | None, alpha: float) -> np.ndarray:
         arr = np.asarray(rgb, dtype=np.float64)
         if arr.ndim != 3 or arr.shape[2] != 3:
             raise ValueError("RGB inválido para blend de máscara")
         if mask2d is None:
             return np.clip(arr, 0, 255).astype(np.uint8)
-        m = np.asarray(mask2d, dtype=bool)
+        m = AmyloidSpectPanel._mask_to_shape(mask2d, (arr.shape[0], arr.shape[1]))
         a = float(np.clip(alpha, 0.0, 1.0))
         if np.any(m) and a > 0.0:
             arr[m, 0] = (1.0 - a) * arr[m, 0] + a * 255.0
@@ -4811,7 +4911,23 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
 
     def _on_ct_window_changed(self):
         self._ct_window = str(self._ct_window_combo.currentData() or "bone")
+        # Sincronizar WL/WW con el preset (el modo manual conserva los valores
+        # ajustados con botón del medio; "full" usa percentiles y no aplica).
+        if self._ct_window in self._CT_WINDOW_PRESETS:
+            wl, ww = self._CT_WINDOW_PRESETS[self._ct_window]
+            self._ct_wl, self._ct_ww = float(wl), float(ww)
+        self._update_ct_wl_ww_label()
+        self._persist_ui_state()
         self._render_current_with_overlay()
+
+    def _update_ct_wl_ww_label(self):
+        if not hasattr(self, "_ct_wl_ww_lbl"):
+            return
+        if str(self._ct_window or "") == "full":
+            self._ct_wl_ww_lbl.setText("percentil 1-99")
+        else:
+            wl, ww = self._ct_window_wl_ww()
+            self._ct_wl_ww_lbl.setText(f"WL {wl:.0f} / WW {ww:.0f}")
 
     def _on_spect_display_smooth_changed(self, value: float):
         self._spect_display_sigma = max(0.0, float(value))
@@ -5328,6 +5444,51 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             x = int(self._slice_idx.get("sagittal", x))
         self._localization_point_zyx = (z, y, x)
 
+    def _ct_window_cursor(self, kind: str) -> QCursor:
+        """Cursor de ventaneo: sol (brillo) o círculo mitad lleno (contraste)."""
+        cache = getattr(self, "_ct_window_cursors", None)
+        if cache is None:
+            cache = {}
+            self._ct_window_cursors = cache
+        if kind in cache:
+            return cache[kind]
+        size = 26
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx = cy = size // 2
+        if kind == "brightness":
+            # Sol: núcleo lleno + 8 rayos.
+            import math as _math
+            p.setPen(QPen(QColor(15, 15, 15), 4))
+            for ang in range(0, 360, 45):
+                r = _math.radians(ang)
+                p.drawLine(int(cx + 7 * _math.cos(r)), int(cy + 7 * _math.sin(r)),
+                           int(cx + 12 * _math.cos(r)), int(cy + 12 * _math.sin(r)))
+            p.setPen(QPen(QColor(255, 255, 255), 2))
+            for ang in range(0, 360, 45):
+                r = _math.radians(ang)
+                p.drawLine(int(cx + 7 * _math.cos(r)), int(cy + 7 * _math.sin(r)),
+                           int(cx + 12 * _math.cos(r)), int(cy + 12 * _math.sin(r)))
+            p.setPen(QPen(QColor(15, 15, 15), 2))
+            p.setBrush(QColor(255, 255, 255))
+            p.drawEllipse(cx - 4, cy - 4, 8, 8)
+        else:
+            # Contraste: círculo con mitad llena y mitad vacía.
+            p.setPen(QPen(QColor(15, 15, 15), 4))
+            p.drawEllipse(cx - 9, cy - 9, 18, 18)
+            p.setPen(QPen(QColor(255, 255, 255), 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(cx - 9, cy - 9, 18, 18)
+            p.setBrush(QColor(255, 255, 255))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawPie(cx - 9, cy - 9, 18, 18, 90 * 16, 180 * 16)
+        p.end()
+        cursor = QCursor(pm, cx, cy)
+        cache[kind] = cursor
+        return cursor
+
     def _on_image_mouse_press(self, event, axis: str):
         # === F2.4: Si modo edición activo, interceptar click en CUALQUIER plano ===
         if self._mask_edit_active:
@@ -5344,6 +5505,24 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 event.accept()
                 return
         
+        if event.button() == Qt.MouseButton.MiddleButton:
+            # Ventaneo interactivo CT: X = contraste (WW) · Y = brillo (WL).
+            if self._ct_volume is not None or self._ct_registered is not None:
+                wl0, ww0 = self._ct_window_wl_ww()
+                self._drag_state = {
+                    "axis": axis,
+                    "target": "ct_window",
+                    "pos": event.position().toPoint(),
+                    "last_pos": event.position().toPoint(),
+                    "wl0": float(wl0),
+                    "ww0": float(ww0),
+                    "moved": False,
+                    "cursor_kind": "contrast",
+                }
+                self._axis_label(axis).setCursor(self._ct_window_cursor("contrast"))
+                event.accept()
+            return
+
         if event.button() != Qt.MouseButton.LeftButton:
             return
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
@@ -5373,6 +5552,44 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 return
         
         if not self._drag_state or self._drag_state.get("axis") != axis:
+            return
+        if self._drag_state.get("target") == "ct_window":
+            # Ventaneo CT con botón del medio: delta absoluto desde el anclaje.
+            pos = event.position().toPoint()
+            p0 = self._drag_state["pos"]
+            dx = int(pos.x() - p0.x())
+            dy = int(pos.y() - p0.y())
+            if dx == 0 and dy == 0:
+                return
+            self._drag_state["moved"] = True
+            # Cursor según dirección dominante del último movimiento.
+            last = self._drag_state.get("last_pos", p0)
+            sdx = abs(int(pos.x() - last.x()))
+            sdy = abs(int(pos.y() - last.y()))
+            self._drag_state["last_pos"] = pos
+            if sdx != sdy:
+                kind = "contrast" if sdx > sdy else "brightness"
+                if self._drag_state.get("cursor_kind") != kind:
+                    self._drag_state["cursor_kind"] = kind
+                    self._axis_label(axis).setCursor(self._ct_window_cursor(kind))
+            ww0 = float(self._drag_state["ww0"])
+            wl0 = float(self._drag_state["wl0"])
+            # Sensibilidad adaptativa: proporcional a la ventana de partida.
+            sens_ww = max(2.0, ww0 / 200.0)
+            sens_wl = max(1.0, ww0 / 400.0)
+            self._ct_ww = max(1.0, ww0 + dx * sens_ww)   # derecha = más ancho (menos contraste)
+            self._ct_wl = wl0 - dy * sens_wl             # arriba = más brillo (WL baja)
+            if str(self._ct_window or "") != "manual":
+                self._ct_window = "manual"
+                self._ct_window_combo.blockSignals(True)
+                self._set_combo_by_data(self._ct_window_combo, "manual")
+                self._ct_window_combo.blockSignals(False)
+            self._update_ct_wl_ww_label()
+            self._status.setText(
+                f"Ventaneo CT (botón medio): WL {self._ct_wl:.0f} · WW {self._ct_ww:.0f} HU"
+            )
+            self._render_current_with_overlay()
+            event.accept()
             return
         pos = event.position().toPoint()
         old = self._drag_state["pos"]
@@ -5483,7 +5700,11 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         if self._drag_state and self._drag_state.get("axis") == axis:
             moved = bool(self._drag_state.get("moved", False))
             target = str(self._drag_state.get("target") or "spect")
-            if (not moved) and bool(getattr(self, "_localization_cross_enabled", False)):
+            if target == "ct_window":
+                self._axis_label(axis).unsetCursor()
+                if moved:
+                    self._persist_ui_state()
+            elif (not moved) and bool(getattr(self, "_localization_cross_enabled", False)):
                 self._localize_from_view_click(event, axis, target=target)
         self._drag_state = None
         event.accept()
@@ -6528,6 +6749,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._qc_mode.setEnabled(False)
             self._qc_split_slider.setEnabled(False)
             self._fusion_slider.setEnabled(False)
+            self._ct_opacity_slider.setEnabled(False)
             self._update_slice_controls()
             self._render_preview(self._current_volume)
             self._btn_bone.setEnabled(True)
@@ -6849,6 +7071,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._qc_mode.setEnabled(False)
             self._qc_split_slider.setEnabled(False)
             self._fusion_slider.setEnabled(False)
+            self._ct_opacity_slider.setEnabled(False)
             self._btn_register.setEnabled(self._base_spect_volume is not None)
             self._status.setText(f"CT cargado · {ct.series_description} · shape {self._ct_volume.shape}")
             self._metrics.append("\n--- CT cargado ---")
@@ -6991,6 +7214,13 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 bool(self._ct_flip_y_test),
                 bool(self._ct_flip_z_test),
             )
+            # Flips SPECT vigentes al registrar: definen la grilla display en la
+            # que quedó alineada la CT (necesarios para volverla a grilla base).
+            self._spect_registered_flip_signature = (
+                bool(self._spect_flip_x_test),
+                bool(self._spect_flip_y_test),
+                bool(self._spect_flip_z_test),
+            )
             # Guardar shift total de registro (en píxeles de grilla SPECT)
             self._ct_registration_shift_zyx = (
                 float(shift_zyx[0]) + float(fine_shift_zyx[0]),
@@ -7010,6 +7240,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._qc_mode.setEnabled(True)
             self._qc_split_slider.setEnabled(True)
             self._fusion_slider.setEnabled(True)
+            self._ct_opacity_slider.setEnabled(True)
             self._set_combo_by_data(self._qc_mode, "fusion")
             self._status.setText(
                 "Registro CT↔SPECT listo "
@@ -7106,7 +7337,28 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._pre_bone_volume = np.asarray(self._current_volume, dtype=np.float64)
             ct_vol = None
             if self._ct_check.isChecked():
-                ct_vol = self._ct_registered if self._ct_registered is not None else self._ct_volume
+                if self._ct_registered is not None:
+                    # _ct_registered vive en la grilla display, definida por los
+                    # flips SPECT vigentes al registrar. El volumen a suprimir es
+                    # el BASE: deshacer esos flips (involutivos) para que la
+                    # máscara ósea caiga sobre el hueso real y no sobre su espejo.
+                    ct_vol = np.asarray(self._ct_registered, dtype=np.float64)
+                    sig = getattr(self, "_spect_registered_flip_signature", None)
+                    if sig is None:
+                        sig = (
+                            bool(self._spect_flip_x_test),
+                            bool(self._spect_flip_y_test),
+                            bool(self._spect_flip_z_test),
+                        )
+                    if sig[0]:
+                        ct_vol = np.flip(ct_vol, axis=2)
+                    if sig[1]:
+                        ct_vol = np.flip(ct_vol, axis=1)
+                    if sig[2]:
+                        ct_vol = np.flip(ct_vol, axis=0)
+                    ct_vol = np.ascontiguousarray(ct_vol)
+                elif self._ct_volume is not None:
+                    ct_vol = np.asarray(self._ct_volume, dtype=np.float64)
             res = apply_visual_bone_suppression(
                 self._base_spect_volume if self._base_spect_volume is not None else self._current_volume,
                 ct_volume=ct_vol,
