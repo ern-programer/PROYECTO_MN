@@ -6656,6 +6656,13 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._mip_widget.set_mask_3d(None)
             self._mip_widget.set_auto_cube_bbox(None)
 
+        # CT registrada en grilla display para MIP CT/fusión (misma grilla que vol_tx).
+        if self._ct_registered is not None:
+            ct_mip = self._ct_registered_visual_transform(np.asarray(self._ct_registered, dtype=np.float64))
+            self._mip_widget.set_ct_volume(ct_mip)
+        else:
+            self._mip_widget.set_ct_volume(None)
+
     def _show_fusion_report_layout(self):
         try:
             if self._base_spect_volume is None and self._current_volume is None:

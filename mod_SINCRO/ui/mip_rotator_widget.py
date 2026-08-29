@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer, QPointF, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont, QTransform
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QScrollArea, QScrollBar, QCheckBox, QSlider, QFrame
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QScrollArea, QScrollBar, QCheckBox, QSlider, QFrame, QComboBox
 
 
 class MipRotatorWidget(QWidget):
@@ -50,6 +50,9 @@ class MipRotatorWidget(QWidget):
         self._volume = None
         # Volumen sin post-filtro gaussiano (para toggle)
         self._volume_unfiltered = None
+        # CT registrada (misma grilla que el SPECT) para MIP CT/fusión
+        self._ct_volume = None
+        self._mip_source = "spect"
         self._spacing_mm = (4.0, 4.0, 4.0)
         self._cmap_fn = None
         self._voi_heart = None
@@ -165,7 +168,28 @@ class MipRotatorWidget(QWidget):
             "QCheckBox::indicator:hover { border-color:#64748b; }"
         )
         self._filter_toggle.stateChanged.connect(self._on_filter_toggled)
-        layout.addWidget(self._filter_toggle)
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(6)
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.addWidget(self._filter_toggle)
+        filter_row.addStretch()
+        lbl_src = QLabel("Fuente:")
+        lbl_src.setStyleSheet("color:#64748b; font-size:10px;")
+        filter_row.addWidget(lbl_src)
+        self._source_combo = QComboBox()
+        self._source_combo.addItem("SPECT", "spect")
+        self._source_combo.addItem("CT", "ct")
+        self._source_combo.addItem("Fusión", "fusion")
+        self._source_combo.setToolTip("Fuente del MIP: SPECT, CT registrada (proyección ósea) o fusión de ambas.")
+        self._source_combo.setFixedWidth(72)
+        self._source_combo.setStyleSheet(
+            "QComboBox { background:#1e293b; color:#94a3b8; font-size:10px; "
+            "border:1px solid #475569; border-radius:3px; padding:1px 4px; }"
+        )
+        self._source_combo.setEnabled(False)  # se habilita al recibir CT
+        self._source_combo.currentIndexChanged.connect(self._on_source_changed)
+        filter_row.addWidget(self._source_combo)
+        layout.addLayout(filter_row)
         
         # === Fila de controles de overlay ===
         overlay_row = QHBoxLayout()
@@ -394,6 +418,29 @@ class MipRotatorWidget(QWidget):
             self._filter_toggle.setEnabled(False)
         else:
             self._filter_toggle.setEnabled(True)
+
+    def set_ct_volume(self, volume: np.ndarray | None):
+        """CT registrada en la misma grilla que el SPECT (para MIP CT/fusión)."""
+        new = np.asarray(volume, dtype=np.float64) if volume is not None else None
+        changed = (new is None) != (self._ct_volume is None)
+        self._ct_volume = new
+        if new is None:
+            if str(self._mip_source) != "spect":
+                self._mip_source = "spect"
+                self._source_combo.blockSignals(True)
+                self._source_combo.setCurrentIndex(0)
+                self._source_combo.blockSignals(False)
+            self._source_combo.setEnabled(False)
+        else:
+            self._source_combo.setEnabled(True)
+        if changed or str(self._mip_source) in ("ct", "fusion"):
+            self._schedule_render()
+
+    def _on_source_changed(self):
+        self._mip_source = str(self._source_combo.currentData() or "spect")
+        # El toggle de filtro solo aplica a la fuente SPECT
+        self._filter_toggle.setEnabled(self._mip_source != "ct" and self._volume_unfiltered is not None)
+        self._schedule_render()
             
     def _on_filter_toggled(self, state):
         """Alternar entre volumen filtrado y sin filtro."""
@@ -473,59 +520,77 @@ class MipRotatorWidget(QWidget):
             return
             
         try:
+            source = str(self._mip_source or "spect")
+            if source in ("ct", "fusion") and self._ct_volume is None:
+                source = "spect"
+
             # Elegir volumen según toggle de filtro
             if self._filter_toggle.isChecked() or self._volume_unfiltered is None:
                 vol = self._volume
             else:
                 vol = self._volume_unfiltered
             from scipy import ndimage
-            
-            # Paso 1: Rotación azimutal alrededor de eje Z (superior-inferior)
-            # en el plano XY (axes=(2,1)); así AP/PA/LI/LD/OAI cambian
-            # como vistas alrededor del paciente, no como rotación 2D del MIP.
-            if abs(self._azimuth_deg) > 0.5:
-                vol_rot = ndimage.rotate(
-                    vol,
-                    self._azimuth_deg,
-                    axes=(2, 1),   # rotar en plano XY (alrededor de Z)
-                    reshape=False,
-                    order=1,
-                    cval=0.0,
-                    mode='constant'
-                )
-            else:
-                vol_rot = vol.copy()
-            
-            # Paso 2: Elevación (inclinación craneal/caudal)
-            # Rotamos en plano ZY (alrededor de X) después del azimut.
-            if abs(self._elevation_deg) > 1.0:
-                vol_rot = ndimage.rotate(
-                    vol_rot,
-                    self._elevation_deg,
-                    axes=(0, 1),   # rotar en plano ZY (alrededor de X)
-                    reshape=False,
-                    order=1,
-                    cval=0.0,
-                    mode='constant'
-                )
-            
-            # Paso 3: MIP proyectando sobre eje Y (AP profundidad)
-            # Esto mantiene AP correcta y PA/LI/LD salen de la rotación 3D real.
-            mip = np.max(vol_rot, axis=1)  # Proyección sobre Y → plano XZ
-            
-            # Normalizar
-            mmin, mmax = np.percentile(mip, [1, 99.5])
-            if mmax <= mmin:
-                mmax = mmin + 1
-            mip_norm = np.clip((mip - mmin) / (mmax - mmin), 0.0, 1.0)
-            
-            # Paso 4: Aplicar colormap
-            if self._cmap_fn is not None:
+
+            def _rotate_3d(v: np.ndarray, cval: float = 0.0) -> np.ndarray:
+                out = v
+                if abs(self._azimuth_deg) > 0.5:
+                    out = ndimage.rotate(
+                        out, self._azimuth_deg, axes=(2, 1),
+                        reshape=False, order=1, cval=cval, mode='constant',
+                    )
+                else:
+                    out = out.copy()
+                if abs(self._elevation_deg) > 1.0:
+                    out = ndimage.rotate(
+                        out, self._elevation_deg, axes=(0, 1),
+                        reshape=False, order=1, cval=cval, mode='constant',
+                    )
+                return out
+
+            def _norm_mip(m: np.ndarray, lo_p: float = 1.0, hi_p: float = 99.5) -> np.ndarray:
+                lo, hi = np.percentile(m, [lo_p, hi_p])
+                if hi <= lo:
+                    hi = lo + 1
+                return np.clip((m - lo) / (hi - lo), 0.0, 1.0)
+
+            vol_rot = None
+            if source in ("spect", "fusion"):
+                vol_rot = _rotate_3d(vol)
+                mip = np.max(vol_rot, axis=1)  # Proyección sobre Y → plano XZ
+                mip_norm = _norm_mip(mip)
+
+            ct_norm = None
+            if source in ("ct", "fusion"):
+                # Ventana ósea previa a la proyección: el hueso domina el MIP
+                # (proyección tipo radiografía rotatoria).
+                ct_prep = np.clip(np.asarray(self._ct_volume, dtype=np.float64), -200.0, 1600.0)
+                ct_rot = _rotate_3d(ct_prep, cval=-200.0)
+                ct_mip = np.max(ct_rot, axis=1)
+                ct_norm = _norm_mip(ct_mip, 1.0, 99.8)
+                if source == "ct":
+                    vol_rot = ct_rot
+                    mip = ct_mip
+                    mip_norm = ct_norm
+
+            # Paso 4: componer RGB según fuente
+            if source == "ct":
+                gray = (ct_norm * 255.0).astype(np.uint8)
+                mip_rgb = np.stack([gray, gray, gray], axis=-1)
+            elif source == "fusion":
+                if self._cmap_fn is not None:
+                    sp_rgb = np.asarray(self._cmap_fn(mip_norm), dtype=np.float64)
+                else:
+                    sp_rgb = np.stack([mip_norm, np.clip(mip_norm * 0.75, 0, 1), np.zeros_like(mip_norm)], axis=-1)
+                ct_rgb = np.stack([ct_norm, ct_norm, ct_norm], axis=-1)
+                alpha = np.clip(mip_norm * 1.35, 0.0, 1.0)[..., None] * 0.6
+                mip_rgb = (np.clip((1.0 - alpha) * ct_rgb + alpha * sp_rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
+            elif self._cmap_fn is not None:
                 mip_rgb = (self._cmap_fn(mip_norm) * 255.0).astype(np.uint8)
             else:
                 # Fallback: escala de grises
                 mip_gray = (mip_norm * 255.0).astype(np.uint8)
                 mip_rgb = np.stack([mip_gray, mip_gray, mip_gray], axis=-1)
+            mip_rgb = np.ascontiguousarray(mip_rgb)
             
             h, w = mip_rgb.shape[:2]
             
