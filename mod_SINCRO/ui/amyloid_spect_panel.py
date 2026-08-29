@@ -706,77 +706,6 @@ class FusionReportLayoutDialog(QDialog):
             fx_lbl.setPixmap(self._to_pix(fx_rgb).scaled(grid_w, grid_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
             self._grid.addWidget(fx_lbl, 3, c + 1)
 
-    def render_modality_strip_images(self, n_tiles: int = 10) -> dict[str, np.ndarray]:
-        """Tiras por modalidad para el informe: ct/spect/fusion → RGB uint8.
-
-        Cada imagen apila verticalmente las tiras axial/coronal/sagital de esa
-        modalidad (mismo muestreo de cortes en las tres).
-        """
-        sp_vol = self._spect_vol
-        ct_vol = self._ct_vol
-        axis_dim = {"axial": 0, "coronal": 1, "sagittal": 2}
-
-        def axis_view(vol: np.ndarray, axis: str, frac: float) -> np.ndarray:
-            n = int(vol.shape[axis_dim[axis]])
-            i = int(round(frac * max(0, n - 1)))
-            if axis == "axial":
-                return vol[i]
-            if axis == "coronal":
-                return vol[:, i, :]
-            return vol[:, :, i]
-
-        def strip_for(kind: str, axis: str) -> np.ndarray | None:
-            tiles: list[np.ndarray] = []
-            for k in range(max(2, int(n_tiles))):
-                frac = k / max(1, n_tiles - 1)
-                if kind == "spect":
-                    s2 = self._apply_aspect_2d_for_axis(self._spect_window_fn(axis_view(sp_vol, axis, frac)), axis)
-                    rgb = self._cmap_fn(np.clip(s2, 0.0, 1.0))
-                elif kind == "ct":
-                    if ct_vol is None:
-                        return None
-                    c2 = self._apply_aspect_2d_for_axis(self._ct_window_fn(axis_view(ct_vol, axis, frac)), axis)
-                    rgb = np.stack([c2, c2, c2], axis=-1)
-                else:  # fusion
-                    if ct_vol is None:
-                        return None
-                    c2 = self._apply_aspect_2d_for_axis(self._ct_window_fn(axis_view(ct_vol, axis, frac)), axis)
-                    s2 = self._apply_aspect_2d_for_axis(self._spect_window_fn(axis_view(sp_vol, axis, frac)), axis)
-                    if s2.shape != c2.shape:
-                        s2 = self._fit_2d_to_shape(s2, c2.shape, order=1)
-                    rgb = self._make_fusion_rgb(s2, c2)
-                tiles.append((np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8))
-            h = max(t.shape[0] for t in tiles)
-            w = max(t.shape[1] for t in tiles)
-            canvas = np.zeros((h, w * len(tiles), 3), dtype=np.uint8)
-            for k, t in enumerate(tiles):
-                y0 = (h - t.shape[0]) // 2
-                x0 = k * w + (w - t.shape[1]) // 2
-                canvas[y0:y0 + t.shape[0], x0:x0 + t.shape[1]] = t
-            return canvas
-
-        out: dict[str, np.ndarray] = {}
-        for kind in ("ct", "spect", "fusion"):
-            rows: list[np.ndarray] = []
-            for axis in ("axial", "coronal", "sagittal"):
-                s = strip_for(kind, axis)
-                if s is None:
-                    rows = []
-                    break
-                rows.append(s)
-            if not rows:
-                continue
-            gap = 8
-            w = max(r.shape[1] for r in rows)
-            total_h = sum(r.shape[0] for r in rows) + gap * (len(rows) - 1)
-            canvas = np.zeros((total_h, w, 3), dtype=np.uint8)
-            y = 0
-            for r in rows:
-                canvas[y:y + r.shape[0], :r.shape[1]] = r
-                y += r.shape[0] + gap
-            out[kind] = canvas
-        return out
-
     def _render_body_to_pixmap(self) -> QPixmap:
         self._body.adjustSize()
         size = self._body.sizeHint()
@@ -7647,28 +7576,124 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             frames = [f if f.size == base else f.resize(base) for f in frames]
         return frames
 
-    def _capture_axial_sweep_frames(self, max_frames: int = 24) -> list:
-        """Frames PIL barriendo cortes axiales (restaura el corte al final)."""
+    def _heart_center_in_grid(self, sp: np.ndarray) -> tuple[int, int, int]:
+        """Centro del corazón en la grilla de `sp` (máscara CT > VOI > ancla A > foco caliente)."""
+        tgt = tuple(int(v) for v in np.asarray(sp).shape[:3])
+        src = tuple(int(v) for v in np.asarray(self._current_volume).shape[:3]) if self._current_volume is not None else tgt
+        scale = [tgt[i] / max(1, src[i]) for i in range(3)]
+
+        def _scaled(pt) -> tuple[int, int, int]:
+            return tuple(int(np.clip(round(float(pt[i]) * scale[i]), 0, tgt[i] - 1)) for i in range(3))
+
+        ct_seg = getattr(self, "_ct_segmentation", None)
+        mask = getattr(ct_seg, "mask_3d", None) if ct_seg is not None else None
+        if mask is not None and np.any(mask):
+            c = np.argwhere(np.asarray(mask, dtype=bool)).mean(axis=0)
+            return _scaled(c)
+        hr = getattr(self, "_hmr_result", None)
+        voi = getattr(hr, "voi_heart", None) if hr is not None else None
+        if voi is None:
+            voi = getattr(self, "_temp_voi_heart", None)
+        if voi is not None:
+            return _scaled((voi.cz, voi.cy, voi.cx))
+        a = getattr(self, "_localization_anchor_zyx", None)
+        if a is not None:
+            return _scaled(a)
+        v = ndi.gaussian_filter(np.asarray(sp, dtype=np.float64), 2.0)
+        thr = np.percentile(v, 97.0)
+        pts = np.argwhere(v >= thr)
+        if pts.size:
+            c = pts.mean(axis=0)
+            return tuple(int(np.clip(round(c[i]), 0, tgt[i] - 1)) for i in range(3))
+        return tuple(s // 2 for s in tgt)
+
+    @staticmethod
+    def _compose_report_row(rgbs: list[np.ndarray], gap: int = 10, target_h: int = 340) -> np.ndarray:
+        """Une vistas RGB en fila, escaladas a la misma altura."""
+        scaled = []
+        for r in rgbs:
+            h, w = r.shape[:2]
+            z = target_h / max(1, h)
+            scaled.append(np.clip(ndi.zoom(r.astype(np.float64), (z, z, 1.0), order=1), 0, 255).astype(np.uint8))
+        h = max(r.shape[0] for r in scaled)
+        w_total = sum(r.shape[1] for r in scaled) + gap * (len(scaled) - 1)
+        canvas = np.zeros((h, w_total, 3), dtype=np.uint8)
+        x = 0
+        for r in scaled:
+            y0 = (h - r.shape[0]) // 2
+            canvas[y0:y0 + r.shape[0], x:x + r.shape[1]] = r
+            x += r.shape[1] + gap
+        return canvas
+
+    def _render_report_cut_images(self, out_dir: str) -> list[tuple[str, str]]:
+        """3 cortes por modalidad (axial/coronal/sagital) a nivel del corazón, en grilla alineada."""
+        from PIL import Image
+        images: list[tuple[str, str]] = []
         if self._current_volume is None:
-            return []
-        nz = int(np.asarray(self._current_volume).shape[0])
-        orig = int(self._slice_idx.get("axial", nz // 2))
-        idxs = np.linspace(0, nz - 1, min(int(max_frames), nz)).astype(int)
-        frames = []
-        try:
-            for z in idxs:
-                self._slice_idx["axial"] = int(z)
-                self._render_current_with_overlay()
-                pm = self._axial_lbl.pixmap()
-                if pm is not None and not pm.isNull():
-                    frames.append(self._qpixmap_to_pil(pm))
-        finally:
-            self._slice_idx["axial"] = orig
-            self._render_current_with_overlay()
-        if len(frames) >= 2:
-            base = frames[0].size
-            frames = [f if f.size == base else f.resize(base) for f in frames]
-        return frames
+            return images
+
+        sp = None
+        ct = None
+        spacing = self._spect_spacing_or_default()
+        # Prioridad: grilla alineada CT nativa 2x (misma que VRT) → CT registrada → SPECT solo
+        if self._ct_volume is not None and self._ensure_ct_grid_trial_cache():
+            ct = np.asarray(self._trial_ct_native, dtype=np.float64)
+            sp = np.asarray(self._trial_spect_on_ct, dtype=np.float64)
+            if getattr(self, "_trial_ct_native_spacing", None):
+                spacing = tuple(float(v) for v in self._trial_ct_native_spacing)
+        elif self._ct_registered is not None:
+            ct = self._ct_registered_visual_transform(np.asarray(self._ct_registered, dtype=np.float64))
+            sp = self._spect_display_volume(np.asarray(self._current_volume, dtype=np.float64))
+        else:
+            sp = self._spect_transform_3d(np.asarray(self._current_volume, dtype=np.float64))
+        if sp is None or sp.ndim != 3:
+            return images
+
+        cz, cy, cx = self._heart_center_in_grid(sp)
+
+        def _views(vol: np.ndarray) -> list[np.ndarray]:
+            return [vol[cz], vol[:, cy, :], vol[:, :, cx]]
+
+        def _aspect(img: np.ndarray, axis: str) -> np.ndarray:
+            z_mm, y_mm, x_mm = (max(1e-6, float(v)) for v in spacing)
+            ratio = 1.0
+            if axis == "coronal":
+                ratio = z_mm / x_mm
+            elif axis == "sagittal":
+                ratio = z_mm / y_mm
+            if abs(ratio - 1.0) > 1e-3:
+                return ndi.zoom(img, (ratio, 1.0), order=1)
+            return img
+
+        axes = ("axial", "coronal", "sagittal")
+        mix = float(self._fusion_slider.value()) / 100.0 if hasattr(self, "_fusion_slider") else 0.55
+
+        sp_views = [np.clip(_aspect(self._window_spect(v), ax), 0.0, 1.0) for v, ax in zip(_views(sp), axes)]
+        sp_rgb = [(np.clip(self._apply_cmap(v), 0.0, 1.0) * 255.0).astype(np.uint8) for v in sp_views]
+
+        ct_rgb = None
+        fx_rgb = None
+        if ct is not None and ct.shape == sp.shape:
+            ct_views = [np.clip(_aspect(self._window_ct(v), ax), 0.0, 1.0) for v, ax in zip(_views(ct), axes)]
+            ct_rgb = [(np.stack([v, v, v], axis=-1) * 255.0).astype(np.uint8) for v in ct_views]
+            fx_rgb = []
+            for s01, c01 in zip(sp_views, ct_views):
+                alpha = np.clip(s01 * 1.35, 0.0, 1.0)[..., None] * mix
+                rgb = (1.0 - alpha) * np.stack([c01, c01, c01], axis=-1) + alpha * np.clip(self._apply_cmap(s01), 0.0, 1.0)
+                fx_rgb.append((np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8))
+
+        loc = f"corte por corazón Z/Y/X = {cz + 1}/{cy + 1}/{cx + 1}"
+        outputs = []
+        if ct_rgb is not None:
+            outputs.append(("ct", ct_rgb, f"CT — axial / coronal / sagital ({loc})"))
+        outputs.append(("spect", sp_rgb, f"SPECT — axial / coronal / sagital ({loc})"))
+        if fx_rgb is not None:
+            outputs.append(("fusion", fx_rgb, f"Fusión SPECT/CT — axial / coronal / sagital ({loc})"))
+        for kind, rgbs, title in outputs:
+            path = os.path.join(out_dir, f"cortes_{kind}.png")
+            Image.fromarray(self._compose_report_row(rgbs)).save(path, "PNG")
+            images.append((title, path))
+        return images
 
     def _collect_report_assets(self, out_dir: str, *, include_gifs: bool = True, gif_frames: int = 24):
         """Captura PNGs y GIFs del estado actual para el informe. Devuelve (images, gifs)."""
@@ -7676,25 +7701,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         images: list[tuple[str, str]] = []
         gifs: list[tuple[str, str]] = []
 
-        # Cascada de cortes por modalidad: CT → SPECT → Fusión
+        # 3 cortes por modalidad a nivel del corazón (CT → SPECT → Fusión)
         try:
-            dlg = self._build_fusion_report_dialog()
-            if dlg is not None:
-                strips = dlg.render_modality_strip_images()
-                titles = {
-                    "ct": "Cortes CT (axial / coronal / sagital)",
-                    "spect": "Cortes SPECT (axial / coronal / sagital)",
-                    "fusion": "Cortes Fusión SPECT/CT (axial / coronal / sagital)",
-                }
-                for kind in ("ct", "spect", "fusion"):
-                    arr = strips.get(kind)
-                    if arr is None:
-                        continue
-                    from PIL import Image
-                    path = os.path.join(out_dir, f"cortes_{kind}.png")
-                    Image.fromarray(arr).save(path, "PNG")
-                    images.append((titles[kind], path))
-                dlg.deleteLater()
+            images.extend(self._render_report_cut_images(out_dir))
         except Exception:
             pass
 
@@ -7705,6 +7714,12 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 gifs.append((title, path))
 
         if include_gifs:
+            # VRT girando (va arriba de los cortes en el HTML)
+            try:
+                _save_gif(self._capture_vrt_rotation_frames(n_frames=max(8, gif_frames // 2)),
+                          "vrt_rotatorio.gif", "VRT 3D esquelético 360°", duration=160)
+            except Exception:
+                pass
             # MIP rotando: SPECT, CT y fusión lado a lado
             for source, name, title in (
                 ("spect", "mip_spect.gif", "MIP SPECT 360°"),
@@ -7715,18 +7730,6 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                     _save_gif(self._capture_mip_rotation_frames(n_frames=gif_frames, source=source), name, title)
                 except Exception:
                     pass
-            # VRT girando (debajo de los MIP en el HTML)
-            try:
-                _save_gif(self._capture_vrt_rotation_frames(n_frames=max(8, gif_frames // 2)),
-                          "vrt_rotatorio.gif", "VRT 3D esquelético 360°", duration=160)
-            except Exception:
-                pass
-            # Barrido axial (estado de vista actual)
-            try:
-                _save_gif(self._capture_axial_sweep_frames(max_frames=gif_frames),
-                          "barrido_axial.gif", "Barrido axial (vista actual)", duration=150)
-            except Exception:
-                pass
         return images, gifs
 
     @staticmethod

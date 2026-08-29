@@ -272,36 +272,6 @@ footer {{ margin-top:36px; border-top:1px solid var(--border); padding-top:12px;
             rows.append(f"<tr><th>S/√(V·D)</th><td>{_fmt(svd.get('ratio'))} — {svd.get('classification', 'N/D')}</td></tr>")
         html.append(f'<section><h2>Métricas SPECT</h2><table>{"".join(rows)}</table></section>')
 
-    # --- Imágenes (cascada: CT → SPECT → Fusión, ancho completo) ---
-    if sec("imagenes") and data.images:
-        figs = []
-        for title, path in data.images:
-            if path and os.path.isfile(path):
-                figs.append(f'<figure><img src="data:image/png;base64,{_b64_file(path)}" alt="{title}">'
-                            f'<figcaption>{title}</figcaption></figure>')
-        if figs:
-            html.append(f'<section><h2>Cortes por modalidad</h2><div class="imgs-cascade">{"".join(figs)}</div></section>')
-
-    # --- GIFs: MIP SPECT/CT/Fusión lado a lado; VRT y barridos debajo a ancho completo ---
-    if sec("gifs") and data.gifs:
-        def _fig(title: str, path: str) -> str:
-            return (f'<figure><img src="data:image/gif;base64,{_b64_file(path)}" alt="{title}">'
-                    f'<figcaption>▶ {title}</figcaption></figure>')
-
-        mip_figs, rest_figs = [], []
-        for title, path in data.gifs:
-            if not (path and os.path.isfile(path)):
-                continue
-            (mip_figs if str(title).upper().startswith("MIP") else rest_figs).append(_fig(title, path))
-        if mip_figs or rest_figs:
-            parts = ['<section><h2>Animaciones</h2>']
-            if mip_figs:
-                parts.append(f'<div class="imgs-row">{"".join(mip_figs)}</div>')
-            if rest_figs:
-                parts.append(f'<div class="imgs-cascade">{"".join(rest_figs)}</div>')
-            parts.append('<div class="note">Las animaciones solo son visibles en la versión HTML del informe.</div></section>')
-            html.append("".join(parts))
-
     # --- Bloque planar ---
     if sec("planar") and planar:
         rows = [
@@ -347,6 +317,36 @@ footer {{ margin-top:36px; border-top:1px solid var(--border); padding-top:12px;
         for w in data.warnings:
             blocks.append(f'<div class="warn">{w}</div>')
         html.append(f'<section><h2>Limitaciones y advertencias</h2>{"".join(blocks)}</section>')
+
+    # --- Orden visual: VRT 3D → cortes por modalidad → MIPs rotatorios ---
+    def _gif_fig(title: str, path: str) -> str:
+        return (f'<figure><img src="data:image/gif;base64,{_b64_file(path)}" alt="{title}">'
+                f'<figcaption>▶ {title}</figcaption></figure>')
+
+    mip_figs, other_figs = [], []
+    if sec("gifs"):
+        for title, path in data.gifs:
+            if not (path and os.path.isfile(path)):
+                continue
+            (mip_figs if str(title).upper().startswith("MIP") else other_figs).append(_gif_fig(title, path))
+
+    if other_figs:
+        html.append(f'<section><h2>Volumen 3D (VRT)</h2><div class="imgs-cascade">{"".join(other_figs)}</div>'
+                    '<div class="note">Animación visible solo en la versión HTML.</div></section>')
+
+    if sec("imagenes") and data.images:
+        figs = []
+        for title, path in data.images:
+            if path and os.path.isfile(path):
+                figs.append(f'<figure><img src="data:image/png;base64,{_b64_file(path)}" alt="{title}">'
+                            f'<figcaption>{title}</figcaption></figure>')
+        if figs:
+            html.append(f'<section><h2>Cortes por modalidad (a nivel del corazón)</h2>'
+                        f'<div class="imgs-cascade">{"".join(figs)}</div></section>')
+
+    if mip_figs:
+        html.append(f'<section><h2>MIP rotatorio 360°</h2><div class="imgs-row">{"".join(mip_figs)}</div>'
+                    '<div class="note">Animaciones visibles solo en la versión HTML.</div></section>')
 
     # --- Parámetros ---
     if sec("parametros") and data.params:
