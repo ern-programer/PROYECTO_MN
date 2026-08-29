@@ -9,8 +9,8 @@ por lo que quedan parcialmente ocluidos por el hueso delantero (efecto GE-like).
 from __future__ import annotations
 
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtCore import Qt, QTimer, QPointF
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
     QPushButton, QSizePolicy, QSlider, QVBoxLayout,
@@ -35,7 +35,9 @@ class VrtWindow(QDialog):
 
     def __init__(self, parent=None, *, ct_volume: np.ndarray,
                  spect_volume: np.ndarray | None = None,
-                 spacing_zyx: tuple | None = None):
+                 spacing_zyx: tuple | None = None,
+                 vois: list[dict] | None = None,
+                 mask_3d: np.ndarray | None = None):
         super().__init__(parent)
         self.setWindowTitle("VRT 3D — Render volumétrico óseo (experimental)")
         self.setWindowFlags(
@@ -66,6 +68,20 @@ class VrtWindow(QDialog):
         self._ct_hq_clean, _ = self._prepare(ct_clean, None, self.MAX_SIDE_HQ)
         self._ct_fast_clean, _ = self._prepare(ct_clean, None, self.MAX_SIDE_FAST)
 
+        # Overlays 3D: VOIs (coords y radio en voxels de la grilla ct_volume) y
+        # máscara segmentada; se decimen con el mismo factor que los volúmenes.
+        self._factor_hq = min(1.0, float(self.MAX_SIDE_HQ) / float(max(ct.shape)))
+        self._factor_fast = min(1.0, float(self.MAX_SIDE_FAST) / float(max(ct.shape)))
+        self._vois = list(vois) if vois else []
+        self._mask_hq = self._mask_fast = None
+        if mask_3d is not None and np.any(mask_3d):
+            m = np.asarray(mask_3d, dtype=np.float32)
+            m_hq = ndi.zoom(m, self._factor_hq, order=0, prefilter=False) if self._factor_hq < 0.999 else m
+            m_fast = ndi.zoom(m, self._factor_fast, order=0, prefilter=False) if self._factor_fast < 0.999 else m
+            self._mask_hq = np.ascontiguousarray(m_hq > 0.5)
+            self._mask_fast = np.ascontiguousarray(m_fast > 0.5)
+        self._show_overlays = bool(self._vois or self._mask_hq is not None)
+
         # Percentil de focos SPECT (sobre el volumen sin rotar, una sola vez)
         self._sp_p100 = float(np.max(self._sp_hq)) if self._sp_hq is not None else 0.0
 
@@ -79,6 +95,7 @@ class VrtWindow(QDialog):
         self._sp_base = 20.0     # % del máximo SPECT: por debajo no se muestra (quita fondo)
         self._sp_top = 100.0
         self._fusion_mix = 0.65
+        self._brightness = 1.35
         self._cine_speed = 3.0   # grados por frame
         self._fast_mode = False
         self._drag_pos = None
@@ -181,6 +198,16 @@ class VrtWindow(QDialog):
         self._den_lbl = QLabel("55%")
         self._den_lbl.setFixedWidth(34)
         row2.addWidget(self._den_lbl)
+        row2.addWidget(QLabel("Brillo:"))
+        self._bri_slider = QSlider(Qt.Orientation.Horizontal)
+        self._bri_slider.setRange(50, 300)
+        self._bri_slider.setValue(int(self._brightness * 100))
+        self._bri_slider.setToolTip("Brillo global del render (ganancia sobre el color final).")
+        self._bri_slider.valueChanged.connect(self._on_params_changed)
+        row2.addWidget(self._bri_slider, 1)
+        self._bri_lbl = QLabel("135%")
+        self._bri_lbl.setFixedWidth(40)
+        row2.addWidget(self._bri_lbl)
         layout.addLayout(row2)
 
         # Fila 3: camilla + modo de vista + colormap SPECT
@@ -193,6 +220,12 @@ class VrtWindow(QDialog):
         )
         self._chk_table.toggled.connect(self._on_params_changed)
         row3.addWidget(self._chk_table)
+        self._chk_overlays = QCheckBox("VOIs/Máscara")
+        self._chk_overlays.setChecked(self._show_overlays)
+        self._chk_overlays.setEnabled(bool(self._vois or self._mask_hq is not None))
+        self._chk_overlays.setToolTip("Proyectar VOIs (círculos) y contorno de la máscara CT sobre el 3D.")
+        self._chk_overlays.toggled.connect(self._on_params_changed)
+        row3.addWidget(self._chk_overlays)
         row3.addSpacing(12)
         row3.addWidget(QLabel("Ver:"))
         self._view_combo = QComboBox()
@@ -317,7 +350,9 @@ class VrtWindow(QDialog):
     def _on_params_changed(self):
         self._hu_threshold = float(self._thr_slider.value())
         self._density = float(self._den_slider.value()) / 100.0
+        self._brightness = float(self._bri_slider.value()) / 100.0
         self._remove_table = bool(self._chk_table.isChecked())
+        self._show_overlays = bool(self._chk_overlays.isChecked())
         self._view_mode = str(self._view_combo.currentData() or "bone")
         self._cmap_name = str(self._cmap_combo.currentText() or "hot")
         self._sp_base = float(self._sp_base_slider.value())
@@ -325,6 +360,7 @@ class VrtWindow(QDialog):
         self._fusion_mix = float(self._mix_slider.value()) / 100.0
         self._thr_lbl.setText(f"{int(self._hu_threshold)}")
         self._den_lbl.setText(f"{int(self._density * 100)}%")
+        self._bri_lbl.setText(f"{int(self._brightness * 100)}%")
         self._sp_base_lbl.setText(f"{int(self._sp_base)}%")
         self._sp_top_lbl.setText(f"{int(self._sp_top)}%")
         self._mix_lbl.setText(f"{int(self._fusion_mix * 100)}%")
@@ -453,11 +489,38 @@ class VrtWindow(QDialog):
                 if float(trans.max()) < 0.02:
                     break
 
-            img = np.clip(color_acc * 255.0, 0, 255).astype(np.uint8)
+            img = np.clip(color_acc * self._brightness * 255.0, 0, 255).astype(np.uint8)
             img = np.ascontiguousarray(img)
+
+            # Overlay: contorno de la máscara CT proyectada (rotada igual que el volumen)
+            if self._show_overlays:
+                mask = self._mask_fast if self._fast_mode else self._mask_hq
+                if mask is not None and mask.shape == shape:
+                    m = mask.astype(np.float32)
+                    if abs(self._azimuth) > 0.25:
+                        m = ndi.rotate(m, self._azimuth, axes=(2, 1), reshape=False,
+                                       order=0, cval=0.0, mode="constant", prefilter=False)
+                    if abs(self._elevation) > 0.5:
+                        m = ndi.rotate(m, self._elevation, axes=(0, 1), reshape=False,
+                                       order=0, cval=0.0, mode="constant", prefilter=False)
+                    m2d = np.max(m, axis=1) > 0.5
+                    if m2d.any():
+                        edge = m2d ^ ndi.binary_erosion(m2d, iterations=1)
+                        img[m2d] = (img[m2d].astype(np.float32) * 0.82
+                                    + np.array([0, 46, 46], dtype=np.float32)).clip(0, 255).astype(np.uint8)
+                        img[edge] = (64, 224, 208)  # contorno turquesa
+
             h, w = img.shape[:2]
             qimg = QImage(img.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
             pix = QPixmap.fromImage(qimg)
+
+            # Overlay: círculos VOI proyectados con la misma rotación del volumen
+            if self._show_overlays and self._vois:
+                factor = self._factor_fast if self._fast_mode else self._factor_hq
+                painter = QPainter(pix)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                self._draw_vois(painter, shape, factor)
+                painter.end()
 
             vw = max(64, self._lbl.width() - 8)
             vh = max(64, self._lbl.height() - 8)
@@ -467,6 +530,39 @@ class VrtWindow(QDialog):
             self._lbl.setPixmap(pix)
         except Exception as exc:  # nunca dejar que una excepción mate la app (slot Qt)
             self._lbl.setText(f"VRT error:\n{exc}")
+
+    def _draw_vois(self, painter: QPainter, shape: tuple, factor: float):
+        """Proyecta cada VOI (esfera) con la rotación actual (misma convención que ndi.rotate)."""
+        nz, ny, nx = shape
+        cz0, cy0, cx0 = (nz - 1) * 0.5, (ny - 1) * 0.5, (nx - 1) * 0.5
+        az = np.radians(self._azimuth)
+        el = np.radians(self._elevation)
+        for voi in self._vois:
+            try:
+                rz = float(voi["cz"]) * factor - cz0
+                ry = float(voi["cy"]) * factor - cy0
+                rx = float(voi["cx"]) * factor - cx0
+                ry1 = ry * np.cos(az) - rx * np.sin(az)
+                rx1 = ry * np.sin(az) + rx * np.cos(az)
+                rz1 = rz
+                rz2 = rz1 * np.cos(el) - ry1 * np.sin(el)
+                rx2 = rx1
+                row = rz2 + cz0
+                col = rx2 + cx0
+                r_px = max(2.0, float(voi.get("radius_vox", 4.0)) * factor)
+                color = QColor(*voi.get("rgb", (239, 68, 68)))
+                painter.setPen(QPen(color, 2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(QPointF(col, row), r_px, r_px)
+                label = str(voi.get("label", ""))
+                if label:
+                    painter.setFont(QFont("Arial", 8))
+                    painter.setPen(QPen(QColor(0, 0, 0, 180), 1))
+                    painter.drawText(QPointF(col + r_px + 3, row + 3), label)
+                    painter.setPen(QPen(color, 1))
+                    painter.drawText(QPointF(col + r_px + 2, row + 2), label)
+            except Exception:
+                continue
 
     def _save_png(self):
         pm = self._lbl.pixmap()

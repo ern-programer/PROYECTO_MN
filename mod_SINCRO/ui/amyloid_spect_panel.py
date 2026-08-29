@@ -6697,10 +6697,50 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                     ).astype(np.float32)
             else:
                 ct_vol = self._ct_transform_3d(np.asarray(self._ct_volume, dtype=np.float64)).astype(np.float32)
+
+            # VOIs y máscara: escalar de la grilla display SPECT a la grilla VRT.
+            vois = []
+            mask_vrt = None
+            if self._current_volume is not None and ct_vol is not None:
+                sp_shape = np.asarray(self._current_volume).shape[:3]
+                scale = float(ct_vol.shape[0]) / max(1.0, float(sp_shape[0]))
+                spacing = self._spect_spacing_or_default()
+                vx_mm = max(1e-6, float(spacing[2]) / scale)  # mm por voxel en grilla VRT
+                voi_defs = []
+                hmr = getattr(self, "_hmr_result", None)
+                if hmr is not None:
+                    voi_defs = [(getattr(hmr, "voi_heart", None), (239, 68, 68), "Corazón"),
+                                (getattr(hmr, "voi_mediastinum", None), (59, 130, 246), "Med")]
+                else:
+                    voi_defs = [(getattr(self, "_temp_voi_heart", None), (239, 68, 68), "Corazón"),
+                                (getattr(self, "_temp_voi_mediastinum", None), (59, 130, 246), "Med")]
+                for voi, rgb, label in voi_defs:
+                    if voi is None:
+                        continue
+                    r_mm = getattr(voi, "radius_mm", None)
+                    if r_mm is None:
+                        continue
+                    vois.append({
+                        "cz": float(voi.cz) * scale,
+                        "cy": float(voi.cy) * scale,
+                        "cx": float(voi.cx) * scale,
+                        "radius_vox": float(r_mm) / vx_mm,
+                        "rgb": rgb,
+                        "label": label,
+                    })
+                ct_seg = getattr(self, "_ct_segmentation", None)
+                if ct_seg is not None and getattr(ct_seg, "mask_3d", None) is not None:
+                    m = np.asarray(ct_seg.mask_3d, dtype=np.float32)
+                    if m.shape != ct_vol.shape:
+                        zf = tuple(ct_vol.shape[i] / max(1, m.shape[i]) for i in range(3))
+                        m = ndi.zoom(m, zf, order=0, prefilter=False)
+                    mask_vrt = m > 0.5
+
             self._task_progress_step(60, "Abriendo ventana VRT (quita camilla)...")
             from ui.vrt_window import VrtWindow
             dlg = VrtWindow(self, ct_volume=ct_vol, spect_volume=sp_vol,
-                            spacing_zyx=getattr(self, "_trial_ct_native_spacing", None))
+                            spacing_zyx=getattr(self, "_trial_ct_native_spacing", None),
+                            vois=vois, mask_3d=mask_vrt)
             self._task_progress_done("VRT 3D listo")
             dlg.show()
         except Exception as exc:
