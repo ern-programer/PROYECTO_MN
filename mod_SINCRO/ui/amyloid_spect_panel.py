@@ -1040,6 +1040,8 @@ class AmyloidSpectPanel(QDialog):
         # el ventaneo interactivo por botón del medio.
         self._ct_wl = 300.0
         self._ct_ww = 1500.0
+        # Ganancia de brillo de la CT en el visor MPR (1.0 = sin cambio).
+        self._ct_gain = 1.0
         # Opacidad del CT de fondo en la fusión (100 = CT pleno, 0 = invisible).
         self._ct_opacity_pct = 100
         self._ct_visual_trial_mode = True
@@ -2251,6 +2253,21 @@ class AmyloidSpectPanel(QDialog):
         ct_win_row.addWidget(self._ct_wl_ww_lbl)
         window_vbox.addLayout(ct_win_row)
 
+        # Brillo CT del visor (ganancia sobre la imagen ventaneada)
+        ct_gain_row = QHBoxLayout()
+        ct_gain_row.addWidget(QLabel("Brillo CT:"))
+        self._ct_gain_slider = QSlider(Qt.Orientation.Horizontal)
+        self._ct_gain_slider.setRange(50, 250)
+        self._ct_gain_slider.setValue(100)
+        self._ct_gain_slider.setToolTip("Ganancia de brillo de la CT en las vistas MPR (no afecta cuantificación).")
+        self._ct_gain_slider.valueChanged.connect(self._on_ct_gain_changed)
+        ct_gain_row.addWidget(self._ct_gain_slider, 1)
+        self._ct_gain_lbl = QLabel("100%")
+        self._ct_gain_lbl.setStyleSheet("color:#94a3b8; font-size:9px;")
+        self._ct_gain_lbl.setFixedWidth(34)
+        ct_gain_row.addWidget(self._ct_gain_lbl)
+        window_vbox.addLayout(ct_gain_row)
+
         trial_row = QHBoxLayout()
         self._ct_trial_check = QCheckBox("CT nítida")
         self._ct_trial_check.setChecked(True)
@@ -2714,6 +2731,13 @@ class AmyloidSpectPanel(QDialog):
         # el modo "manual" conserve el último ventaneo del usuario.
         self._ct_wl = float(self._settings.value("global/ct_wl", 300.0) or 300.0)
         self._ct_ww = max(1.0, float(self._settings.value("global/ct_ww", 1500.0) or 1500.0))
+        gain = float(self._settings.value("global/ct_gain", 1.0) or 1.0)
+        self._ct_gain = gain
+        if hasattr(self, "_ct_gain_slider"):
+            self._ct_gain_slider.blockSignals(True)
+            self._ct_gain_slider.setValue(int(gain * 100))
+            self._ct_gain_slider.blockSignals(False)
+            self._ct_gain_lbl.setText(f"{int(gain * 100)}%")
         ct_win = str(self._settings.value("global/ct_window", "bone") or "bone")
         self._ct_window = ct_win
         if hasattr(self, "_ct_window_combo"):
@@ -3215,7 +3239,14 @@ class AmyloidSpectPanel(QDialog):
             lo, hi = wl - ww / 2.0, wl + ww / 2.0
         if hi <= lo:
             hi = lo + 1.0
-        return np.clip((a - lo) / (hi - lo), 0.0, 1.0)
+        return np.clip(((a - lo) / (hi - lo)) * float(getattr(self, "_ct_gain", 1.0)), 0.0, 1.0)
+
+    def _on_ct_gain_changed(self, value: int):
+        self._ct_gain = float(value) / 100.0
+        self._ct_gain_lbl.setText(f"{int(value)}%")
+        if hasattr(self, "_settings"):
+            self._settings.setValue("global/ct_gain", self._ct_gain)
+        self._render_current_with_overlay()
 
     @staticmethod
     def _enhance_ct_trial(img01: np.ndarray) -> np.ndarray:
