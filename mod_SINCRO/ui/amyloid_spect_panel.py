@@ -2243,25 +2243,30 @@ class AmyloidSpectPanel(QDialog):
         window_vbox.setAlignment(Qt.AlignmentFlag.AlignRight)
         window_vbox.setSpacing(4)
         
-        # Botón Top (arriba) - angosto
-        top_btn_row = QHBoxLayout()
-        self._btn_range_top = QPushButton("Top")
-        self._btn_range_top.clicked.connect(lambda: self._set_spect_range(self._spect_win_low, 100))
-        self._btn_range_top.setToolTip("Fija el límite superior al 100%")
-        self._btn_range_top.setFixedSize(70, 28)
-        self._btn_range_top.setStyleSheet("font-size:10px; padding:2px 6px;")
-        top_btn_row.addWidget(self._btn_range_top)
-        window_vbox.addLayout(top_btn_row)
-
-        # Fila central: RangeSlider + Brillo CT vertical + selectores apilados
+        # Fila central: [Top+RangeSlider+Base] + Brillo CT vertical + selectores apilados
         middle_row = QHBoxLayout()
         middle_row.setSpacing(8)
 
+        range_col = QVBoxLayout()
+        range_col.setSpacing(4)
+        self._btn_range_top = QPushButton("Top")
+        self._btn_range_top.clicked.connect(lambda: self._set_spect_range(self._spect_win_low, 100))
+        self._btn_range_top.setToolTip("Fija el límite superior al 100%")
+        self._btn_range_top.setFixedSize(56, 26)
+        self._btn_range_top.setStyleSheet("font-size:10px; padding:2px 6px;")
+        range_col.addWidget(self._btn_range_top, 0, Qt.AlignmentFlag.AlignHCenter)
         self._spect_range_slider = RangeSlider()
         self._spect_range_slider.setMinimumHeight(280)
         self._spect_range_slider.setFixedWidth(50)
         self._spect_range_slider.valuesChanged.connect(self._on_spect_range_changed)
-        middle_row.addWidget(self._spect_range_slider)
+        range_col.addWidget(self._spect_range_slider, 1, Qt.AlignmentFlag.AlignHCenter)
+        self._btn_range_base = QPushButton("Base")
+        self._btn_range_base.clicked.connect(lambda: self._set_spect_range(0, self._spect_win_high))
+        self._btn_range_base.setToolTip("Fija el límite inferior al 0%")
+        self._btn_range_base.setFixedSize(56, 26)
+        self._btn_range_base.setStyleSheet("font-size:10px; padding:2px 6px;")
+        range_col.addWidget(self._btn_range_base, 0, Qt.AlignmentFlag.AlignHCenter)
+        middle_row.addLayout(range_col)
 
         # Brillo CT vertical (ganancia sobre la imagen ventaneada)
         ct_gain_col = QVBoxLayout()
@@ -2345,16 +2350,6 @@ class AmyloidSpectPanel(QDialog):
         self._spect_range_lbl.setStyleSheet("color:#94a3b8; font-size:11px;")
         window_vbox.addWidget(self._spect_range_lbl)
 
-        # Botón Base (abajo) - angosto
-        base_btn_row = QHBoxLayout()
-        self._btn_range_base = QPushButton("Base")
-        self._btn_range_base.clicked.connect(lambda: self._set_spect_range(0, self._spect_win_high))
-        self._btn_range_base.setToolTip("Fija el límite inferior al 0%")
-        self._btn_range_base.setFixedSize(70, 28)
-        self._btn_range_base.setStyleSheet("font-size:10px; padding:2px 6px;")
-        base_btn_row.addWidget(self._btn_range_base)
-        window_vbox.addLayout(base_btn_row)
-
         trial_row = QHBoxLayout()
         self._ct_trial_check = QCheckBox("CT nítida")
         self._ct_trial_check.setChecked(True)
@@ -2365,9 +2360,9 @@ class AmyloidSpectPanel(QDialog):
         window_vbox.addLayout(trial_row)
 
         trial_grid_row = QHBoxLayout()
-        self._ct_grid_trial_check = QCheckBox("PRUEBA CT nativa + SPECT escalado (BETA)")
+        self._ct_grid_trial_check = QCheckBox("CT nativa")
         self._ct_grid_trial_check.setChecked(False)
-        self._ct_grid_trial_check.setToolTip("Modo de prueba reversible: mantiene resolución CT nativa y remuestrea SPECT a grilla CT.")
+        self._ct_grid_trial_check.setToolTip("Mantiene resolución CT nativa y remuestrea SPECT a grilla CT (modo reversible).")
         self._ct_grid_trial_check.setStyleSheet("font-size:10px; color:#f59e0b; font-weight:600;")
         self._ct_grid_trial_check.toggled.connect(self._on_ct_grid_trial_toggled)
         trial_grid_row.addWidget(self._ct_grid_trial_check)
