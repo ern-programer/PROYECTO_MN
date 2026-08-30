@@ -225,6 +225,140 @@ class ROIDragWidget(QWidget):
         return min(ww / max(1, w), wh / max(1, h)) * self._zoom
 
 
+class PlanarCropBandWidget(QWidget):
+    """Imagen de cuerpo entero con banda cuadrada arrastrable para elegir el sector torácico."""
+
+    bandMoved = pyqtSignal(int)
+
+    def __init__(self, image: np.ndarray, y0: int):
+        super().__init__()
+        self._image = np.asarray(image, dtype=np.float64)
+        h, w = self._image.shape
+        self._y0 = int(np.clip(y0, 0, h - w))
+        self._dragging = False
+        self.setMinimumSize(280, 520)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+
+    def y0(self) -> int:
+        return self._y0
+
+    def set_y0(self, y0: int):
+        h, w = self._image.shape
+        new_y = int(np.clip(y0, 0, h - w))
+        if new_y != self._y0:
+            self._y0 = new_y
+            self.bandMoved.emit(new_y)
+            self.update()
+
+    def _geometry(self) -> tuple[float, int, int]:
+        h, w = self._image.shape
+        scale = min(self.width() / max(1, w), self.height() / max(1, h))
+        ox = (self.width() - int(w * scale)) // 2
+        oy = (self.height() - int(h * scale)) // 2
+        return scale, ox, oy
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#0b1220"))
+        h, w = self._image.shape
+        scale, ox, oy = self._geometry()
+        img_w, img_h = int(w * scale), int(h * scale)
+
+        norm = self._image / max(float(self._image.max()), 1e-8) if self._image.size else self._image
+        rgb = np.zeros((h, w, 3), dtype=np.uint8)
+        rgb[..., 0] = np.clip(norm * 255, 0, 255).astype(np.uint8)
+        rgb[..., 1] = rgb[..., 0]
+        rgb[..., 2] = rgb[..., 0]
+        qimg = QImage(rgb.tobytes(), w, h, rgb.strides[0], QImage.Format.Format_RGB888)
+        painter.drawPixmap(ox, oy, img_w, img_h, QPixmap.fromImage(qimg))
+
+        band_top = oy + int(self._y0 * scale)
+        band_h = int(w * scale)
+        # Oscurecer lo excluido para resaltar el sector elegido.
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 150)))
+        painter.drawRect(ox, oy, img_w, band_top - oy)
+        painter.drawRect(ox, band_top + band_h, img_w, oy + img_h - band_top - band_h)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor("#facc15"), 2.0, Qt.PenStyle.SolidLine))
+        painter.drawRect(ox, band_top, img_w, band_h)
+        painter.setPen(QPen(QColor("#facc15"), 1.2))
+        painter.drawText(ox + 6, max(band_top - 6, oy + 14), f"Sector y={self._y0}:{self._y0 + w}")
+
+    def _move_to_cursor(self, event: QMouseEvent):
+        h, w = self._image.shape
+        scale, _, oy = self._geometry()
+        img_y = (event.position().y() - oy) / max(scale, 1e-8)
+        self.set_y0(int(round(img_y - w / 2.0)))
+
+    def mousePressEvent(self, event: QMouseEvent):
+        self._dragging = True
+        self._move_to_cursor(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self._dragging:
+            self._move_to_cursor(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        self._dragging = False
+
+    def wheelEvent(self, event):
+        step = -4 if event.angleDelta().y() > 0 else 4
+        self.set_y0(self._y0 + step)
+
+
+class PlanarCropDialog(QDialog):
+    """Diálogo para elegir visualmente el sector torácico en una planar de cuerpo entero."""
+
+    def __init__(self, image: np.ndarray, y0: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("SINCRO — Seleccionar sector torácico")
+        self.setStyleSheet("background:#0f172a; color:#e2e8f0;")
+        image = np.asarray(image, dtype=np.float64)
+        h, w = image.shape
+        lay = QVBoxLayout(self)
+        hint = QLabel(
+            "Imagen de cuerpo entero detectada. Arrastrá el recuadro (o usá la rueda) hasta el tórax.\n"
+            "La cuantificación HMR se hará solo sobre ese sector, en píxeles nativos."
+        )
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        self._band = PlanarCropBandWidget(image, y0)
+        lay.addWidget(self._band, 1)
+        self._pos_lbl = QLabel("")
+        lay.addWidget(self._pos_lbl)
+        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setRange(0, h - w)
+        self._slider.setValue(self._band.y0())
+        lay.addWidget(self._slider)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.clicked.connect(self.reject)
+        btn_ok = QPushButton("Usar este sector")
+        btn_ok.setStyleSheet("background:#16a34a; color:white; font-weight:bold; padding:6px 14px;")
+        btn_ok.clicked.connect(self.accept)
+        row.addWidget(btn_cancel)
+        row.addWidget(btn_ok)
+        lay.addLayout(row)
+
+        self._slider.valueChanged.connect(self._band.set_y0)
+        self._band.bandMoved.connect(self._on_band_moved)
+        self._on_band_moved(self._band.y0())
+        self.resize(420, 720)
+
+    def _on_band_moved(self, y0: int):
+        self._slider.blockSignals(True)
+        self._slider.setValue(int(y0))
+        self._slider.blockSignals(False)
+        w = self._band._image.shape[1]
+        self._pos_lbl.setText(f"Sector seleccionado: filas {y0}–{y0 + w} · matriz {w}×{w}")
+
+    def selected_y0(self) -> int:
+        return self._band.y0()
+
+
 class AmyloidWindow(QDialog):
     """Ventana de amiloidosis: visor de cuadrantes + análisis ROI + HMR + Perugini."""
 
@@ -563,6 +697,11 @@ class AmyloidWindow(QDialog):
         self._planar_crop_slider.setToolTip("Selecciona verticalmente la banda cuadrada del tórax. Se usan píxeles nativos, sin interpolación.")
         self._planar_crop_slider.valueChanged.connect(self._on_planar_crop_changed)
         crop_row.addWidget(self._planar_crop_slider, 1)
+        self._planar_crop_btn = QPushButton("Sector…")
+        self._planar_crop_btn.setToolTip("Elegir visualmente el sector torácico sobre la imagen de cuerpo entero.")
+        self._planar_crop_btn.setVisible(False)
+        self._planar_crop_btn.clicked.connect(self._open_planar_crop_dialog)
+        crop_row.addWidget(self._planar_crop_btn)
         analysis_layout.addLayout(crop_row)
 
         self._lbl_hmr = QLabel("HMR = N/D")
@@ -2452,14 +2591,48 @@ class AmyloidWindow(QDialog):
         return source[y0:y0 + width, :width].copy(), {"used": True, "y0": y0, "size": width, "source_height": height, "source_width": width}
 
     def _set_planar_analysis_image(self, image: np.ndarray, time_label: str, view_role: str, reset_rois: bool = True):
+        key = self._planar_crop_key(time_label, view_role)
+        first_time = self._is_full_body_planar(image) and key not in self._planar_crop_y
+        if first_time:
+            self._ask_planar_crop(image, time_label, view_role)
         cropped, crop = self._crop_planar_image(image, time_label, view_role)
         self._image = cropped.copy()
         self._original_image = cropped.copy()
         self._active_time = time_label
         self._active_view_role = view_role
         self._refresh_planar_crop_control(image, crop)
-        if reset_rois and hasattr(self, "_roi_widget"):
+        if (reset_rois or first_time) and hasattr(self, "_roi_widget"):
             self._reset_rois()
+
+    def _ask_planar_crop(self, image: np.ndarray, time_label: str, view_role: str) -> bool:
+        """Abre el selector visual de sector; devuelve True si el usuario confirmó."""
+        source = np.asarray(image, dtype=np.float64)
+        height, width = source.shape
+        key = self._planar_crop_key(time_label, view_role)
+        y0 = int(np.clip(self._planar_crop_y.get(key, (height - width) // 2), 0, height - width))
+        dlg = PlanarCropDialog(source, y0, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._planar_crop_y[key] = int(dlg.selected_y0())
+            self._persist_user_state()
+            return True
+        self._planar_crop_y.setdefault(key, y0)
+        return False
+
+    def _open_planar_crop_dialog(self):
+        if self._active_time not in ("1h", "3h"):
+            return
+        source = self._time_images.get(self._active_time, {}).get(self._active_view_role) or {}
+        image = source.get("image")
+        if image is None or not self._is_full_body_planar(image):
+            return
+        if self._ask_planar_crop(image, self._active_time, self._active_view_role):
+            self._processed_images[self._active_time].pop("roi", None)
+            self._processed_images[self._active_time].pop("corr", None)
+            self._processed_images[self._active_time].pop("corr_meta", None)
+            self._washout_data.pop(self._active_time, None)
+            self._set_planar_analysis_image(image, self._active_time, self._active_view_role, reset_rois=True)
+            self._update_roi_display_image()
+            self._update_hmr(0, 0, 0, 0)
 
     def _refresh_planar_crop_control(self, source_image: np.ndarray | None = None, crop: dict | None = None):
         if not hasattr(self, "_planar_crop_slider"):
@@ -2467,6 +2640,8 @@ class AmyloidWindow(QDialog):
         source = np.asarray(source_image if source_image is not None else self._original_image)
         if not self._is_full_body_planar(source):
             self._planar_crop_slider.setVisible(False)
+            if hasattr(self, "_planar_crop_btn"):
+                self._planar_crop_btn.setVisible(False)
             self._planar_crop_label.setText("Recorte torácico: no requerido")
             return
         height, width = source.shape
@@ -2478,6 +2653,8 @@ class AmyloidWindow(QDialog):
         self._planar_crop_slider.setValue(y0)
         self._planar_crop_slider.blockSignals(False)
         self._planar_crop_slider.setVisible(True)
+        if hasattr(self, "_planar_crop_btn"):
+            self._planar_crop_btn.setVisible(True)
         self._planar_crop_label.setText(f"Recorte torácico: y={y0}:{y0 + width} · matriz {width}×{width}")
 
     def _on_planar_crop_changed(self, y0: int):
@@ -2559,6 +2736,8 @@ class AmyloidWindow(QDialog):
             return
         try:
             img = np.asarray(entry["image"], dtype=np.float64)
+            if self._is_full_body_planar(img) and self._planar_crop_key(self._active_time, role) not in self._planar_crop_y:
+                self._ask_planar_crop(img, self._active_time, role)
             cropped, crop = self._crop_planar_image(img, self._active_time, role)
             self._image = cropped.copy()
             self._original_image = cropped.copy()
