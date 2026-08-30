@@ -50,6 +50,7 @@ from core.amyloid_spect import (
     apply_visual_bone_suppression,
     central_slices_preview,
     load_ct_volume_from_path,
+    list_ct_series_in_path,
     load_attenuation_map_from_path,
     apply_attenuation_correction_prototype,
     apply_attenuation_correction_chang,
@@ -8190,9 +8191,17 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         self._load_ct_path(path)
 
     def _load_ct_path(self, path: str):
+        series_uid = None
+        try:
+            if os.path.isdir(path):
+                series_uid = self._pick_ct_series_uid(path)
+                if series_uid == "":
+                    return  # usuario canceló el selector
+        except Exception:
+            series_uid = None
         try:
             self._task_progress_start("Cargando CT...")
-            ct = load_ct_volume_from_path(path)
+            ct = load_ct_volume_from_path(path, series_uid=series_uid)
             self._task_progress_step(60, "Remapeando CT y actualizando estado...")
             self._ct_volume = np.asarray(ct.volume, dtype=np.float64)
             self._ct_spacing_zyx = getattr(ct, "spacing_zyx", None)
@@ -8219,6 +8228,30 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         except Exception as exc:
             self._progress.setFormat("Error")
             self._status.setText(f"Error cargando CT: {exc}")
+
+    def _pick_ct_series_uid(self, dir_path: str) -> str | None:
+        """Si hay varias series CT en la carpeta, pregunta cuál cargar.
+
+        Devuelve el UID elegido, None si hay 0-1 series (auto), o "" si cancela.
+        """
+        series = list_ct_series_in_path(dir_path)
+        if len(series) <= 1:
+            return None
+        labels = [
+            f"{s['description']} · {s['n_slices']} cortes"
+            for s in series
+        ]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Seleccionar serie CT",
+            f"La carpeta contiene {len(series)} series CT:",
+            labels,
+            0,
+            False,
+        )
+        if not ok:
+            return ""
+        return str(series[labels.index(choice)]["uid"])
 
     def _load_att_map(self):
         path, _ = QFileDialog.getOpenFileName(

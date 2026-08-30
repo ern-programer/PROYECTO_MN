@@ -15,6 +15,34 @@ from version import __version__
 def main(argv: list[str]) -> int:
     enable_utf8()
 
+    # Capturar excepciones no manejadas en slots Qt (PyQt6 aborta el proceso):
+    # deja el traceback en crash_error.txt junto a main.py antes del abort.
+    import os
+    import traceback
+    _crash_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crash_error.txt")
+    _prev_hook = sys.excepthook
+
+    # Crash duro (access violation / illegal instruction): faulthandler deja
+    # el stack nativo-python en crash_native.txt.
+    import faulthandler
+    try:
+        _fh_file = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "crash_native.txt"), "a", encoding="utf-8")
+        faulthandler.enable(file=_fh_file)
+    except Exception:
+        pass
+
+    def _crash_hook(exc_type, exc_value, exc_tb):
+        try:
+            with open(_crash_path, "a", encoding="utf-8") as fh:
+                from datetime import datetime
+                fh.write(f"\n=== {datetime.now().isoformat()} ===\n")
+                fh.write("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+        except Exception:
+            pass
+        _prev_hook(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _crash_hook
+
     file_path = argv[1] if len(argv) > 1 and not argv[1].startswith("-") else None
 
     try:

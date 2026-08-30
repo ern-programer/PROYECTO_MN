@@ -2082,21 +2082,142 @@ class AmyloidWindow(QDialog):
         dlg.activateWindow()
         self._amyloid_spect_panel = dlg
 
+    def _planar_start_dir(self) -> str:
+        settings = QSettings("GAMMASYS", "SINCRO_AMYLO")
+        last = str(settings.value("last_planar_dir", "") or "")
+        if last and os.path.isdir(last):
+            return last
+        if self._study:
+            sp = getattr(self._study, "_source_path", "") or ""
+            if sp:
+                return os.path.dirname(sp) if os.path.isfile(sp) else sp
+        return os.path.expanduser("~")
+
+    def _dicom_preview_pixmap(self, path: str, max_side: int = 220) -> tuple[QPixmap | None, str]:
+        """Miniatura + resumen de UN DICOM (no escanea carpetas)."""
+        import pydicom
+        try:
+            ds = pydicom.dcmread(path, force=True)
+            arr = np.asarray(ds.pixel_array, dtype=np.float64)
+            if arr.ndim == 3:
+                arr = arr[0]
+            if arr.ndim != 2:
+                return None, "Sin imagen 2D"
+            vmax = float(arr.max())
+            norm = (arr / vmax * 255.0).astype(np.uint8) if vmax > 0 else np.zeros(arr.shape, dtype=np.uint8)
+            h, w = norm.shape
+            rgb = np.repeat(norm[:, :, np.newaxis], 3, axis=2).copy()
+            qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format.Format_RGB888).copy()
+            pix = QPixmap.fromImage(qimg).scaled(
+                max_side, max_side,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            desc = str(getattr(ds, "SeriesDescription", "") or "sin descripción")
+            view = str(getattr(ds, "ViewPosition", "") or "N/D")
+            date = str(getattr(ds, "StudyDate", "") or "")
+            t = str(getattr(ds, "AcquisitionTime", "") or getattr(ds, "SeriesTime", "") or "")
+            hhmm = f"{t[:2]}:{t[2:4]}" if len(t) >= 4 else "N/D"
+            info = f"{desc}\nVista: {view} · {date} {hhmm}\nMatriz: {h}×{w}"
+            return pix, info
+        except Exception:
+            return None, "No legible como imagen DICOM"
+
+    def _pick_planar_dicoms(self, title: str) -> list[str]:
+        """Diálogo común de archivos con preview DICOM y confirmación de orden."""
+        dlg = QFileDialog(self, title, self._planar_start_dir(), "DICOM (*.dcm *.DCM);;Todos (*)")
+        dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dlg.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        dlg.setViewMode(QFileDialog.ViewMode.Detail)
+
+        preview_img = QLabel("Resaltá un archivo\npara ver la vista previa")
+        preview_img.setFixedSize(240, 240)
+        preview_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_img.setStyleSheet("background:#0b1220; color:#94a3b8; border:1px solid #334155;")
+        preview_info = QLabel("")
+        preview_info.setWordWrap(True)
+        preview_info.setFixedWidth(240)
+        box = QFrame()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(6, 0, 0, 0)
+        v.addWidget(preview_img)
+        v.addWidget(preview_info)
+        v.addStretch(1)
+        grid = dlg.layout()
+        try:
+            grid.addWidget(box, 0, grid.columnCount(), grid.rowCount(), 1)
+        except Exception:
+            pass
+
+        def _on_current(path: str):
+            if not path or not os.path.isfile(path):
+                return
+            pix, info = self._dicom_preview_pixmap(path)
+            if pix is not None:
+                preview_img.setPixmap(pix)
+            else:
+                preview_img.setPixmap(QPixmap())
+                preview_img.setText("Sin vista previa")
+            preview_info.setText(info)
+
+        dlg.currentChanged.connect(_on_current)
+        dlg.resize(1000, 560)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return []
+        paths = [p for p in dlg.selectedFiles() if os.path.isfile(p)]
+        if paths:
+            QSettings("GAMMASYS", "SINCRO_AMYLO").setValue("last_planar_dir", os.path.dirname(paths[0]))
+        if len(paths) > 1:
+            paths = self._order_planar_dialog(paths)
+        return paths
+
+    def _order_planar_dialog(self, paths: list[str]) -> list[str]:
+        """Confirma el orden de los elegidos (fallback de asignación: 1º AP · 2º OAI · 3º LAT)."""
+        from PyQt6.QtWidgets import QListWidget, QListWidgetItem, QAbstractItemView
+        from PyQt6.QtGui import QIcon
+        from PyQt6.QtCore import QSize
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("SINCRO — Orden de las vistas")
+        lay = QVBoxLayout(dlg)
+        hint = QLabel(
+            "Arrastrá para reordenar. Si la metadata DICOM no alcanza para clasificar, "
+            "el orden define la asignación: 1º AP · 2º OAI · 3º LAT."
+        )
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        lw = QListWidget()
+        lw.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        lw.setIconSize(QSize(96, 96))
+        for p in paths:
+            pix, info = self._dicom_preview_pixmap(p, max_side=96)
+            item = QListWidgetItem(f"{os.path.basename(p)}\n{info.splitlines()[0]}")
+            if pix is not None:
+                item.setIcon(QIcon(pix))
+            item.setData(Qt.ItemDataRole.UserRole, p)
+            lw.addItem(item)
+        lay.addWidget(lw, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_ok = QPushButton("Confirmar orden")
+        btn_ok.setStyleSheet("background:#16a34a; color:white; font-weight:bold;")
+        btn_ok.clicked.connect(dlg.accept)
+        row.addWidget(btn_cancel)
+        row.addWidget(btn_ok)
+        lay.addLayout(row)
+        dlg.resize(480, 400)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return paths
+        return [str(lw.item(i).data(Qt.ItemDataRole.UserRole)) for i in range(lw.count())]
+
     def _load_time_images(self, time_label: str):
         """Carga 1 a 3 planares y asigna AP/OAI/LAT de forma flexible."""
-        from ui.dicom_browser import DicomBrowserDialog
-        # Determinar directorio inicial.
-        start_dir = ""
-        if self._study:
-            # Intentar obtener la ruta del estudio actual.
-            start_dir = getattr(self._study, "_source_path", "") or ""
-            if start_dir and os.path.isfile(start_dir):
-                start_dir = os.path.dirname(start_dir)
-        if not start_dir:
-            start_dir = os.path.expanduser("~")
-        browser = DicomBrowserDialog(self, start_dir=start_dir)
-        if browser.exec() == QDialog.DialogCode.Accepted:
-            paths = browser.selected_paths()
+        paths = self._pick_planar_dicoms(
+            f"Seleccionar 1 a 3 planares para {time_label} (AP/OAI/LAT)"
+        )
+        if paths:
             if len(paths) < 1 or len(paths) > 3:
                 QMessageBox.information(
                     self, "SINCRO — Amyloidosis",
@@ -2151,20 +2272,11 @@ class AmyloidWindow(QDialog):
 
     def _load_washout_auto(self):
         """Carga planares (4 a 6) y asigna 1h/3h automáticamente por metadata temporal."""
-        from ui.dicom_browser import DicomBrowserDialog
-
-        start_dir = ""
-        if self._study:
-            start_dir = getattr(self._study, "_source_path", "") or ""
-            if start_dir and os.path.isfile(start_dir):
-                start_dir = os.path.dirname(start_dir)
-        if not start_dir:
-            start_dir = os.path.expanduser("~")
-
-        browser = DicomBrowserDialog(self, start_dir=start_dir)
-        if browser.exec() != QDialog.DialogCode.Accepted:
+        paths = self._pick_planar_dicoms(
+            "Seleccionar 4 a 6 planares (ideal: 3 de ~1h y 3 de ~3h)"
+        )
+        if not paths:
             return
-        paths = browser.selected_paths()
         if len(paths) < 4 or len(paths) > 6:
             QMessageBox.information(
                 self,

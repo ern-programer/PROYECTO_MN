@@ -334,31 +334,10 @@ def resample_volume_to_spect_grid(
     return rs, notes
 
 
-def load_ct_volume_from_path(path: str) -> CTVolumeResult:
-    """Carga CT desde un DICOM o desde la serie completa del archivo elegido.
-
-    Si ``path`` es archivo, usa su ``SeriesInstanceUID`` y busca los cortes hermanos
-    en la misma carpeta. Si ``path`` es carpeta, elige la serie CT con más cortes.
-    """
+def _scan_ct_series(search_dir: str, selected_uid: str = "") -> dict[str, list[tuple[str, Any]]]:
+    """Agrupa DICOM CT bajo ``search_dir`` por SeriesInstanceUID (headers only)."""
     import pydicom
     import os
-
-    if not path:
-        raise ValueError("Ruta CT vacía")
-    root = os.path.abspath(path)
-    notes: list[str] = []
-
-    selected_uid = ""
-    search_dir = root
-    if os.path.isfile(root):
-        ds0 = pydicom.dcmread(root, stop_before_pixels=True, force=True)
-        selected_uid = str(getattr(ds0, "SeriesInstanceUID", "") or "")
-        search_dir = os.path.dirname(root)
-        notes.append("Archivo CT elegido: se intenta cargar la serie completa de la misma carpeta.")
-    elif os.path.isdir(root):
-        notes.append("Carpeta CT elegida: se selecciona la serie CT con más cortes.")
-    else:
-        raise FileNotFoundError(root)
 
     series: dict[str, list[tuple[str, Any]]] = {}
     if os.path.isdir(search_dir):
@@ -375,6 +354,66 @@ def load_ct_volume_from_path(path: str) -> CTVolumeResult:
                     series.setdefault(uid, []).append((fpath, ds))
                 except Exception:
                     continue
+    return series
+
+
+def list_ct_series_in_path(path: str) -> list[dict[str, Any]]:
+    """Lista las series CT disponibles bajo una ruta (archivo o carpeta).
+
+    Devuelve dicts con ``uid``, ``description``, ``n_slices`` ordenados por
+    cantidad de cortes descendente, para poblar un selector de serie.
+    """
+    import os
+
+    if not path:
+        return []
+    root = os.path.abspath(path)
+    search_dir = os.path.dirname(root) if os.path.isfile(root) else root
+    series = _scan_ct_series(search_dir)
+    out: list[dict[str, Any]] = []
+    for uid, items in series.items():
+        first_ds = sorted(items, key=lambda item: _dicom_sort_key(item[1]))[0][1]
+        out.append({
+            "uid": uid,
+            "description": str(getattr(first_ds, "SeriesDescription", "") or "CT"),
+            "n_slices": len(items),
+        })
+    out.sort(key=lambda d: -int(d["n_slices"]))
+    return out
+
+
+def load_ct_volume_from_path(path: str, series_uid: str | None = None) -> CTVolumeResult:
+    """Carga CT desde un DICOM o desde la serie completa del archivo elegido.
+
+    Si ``path`` es archivo, usa su ``SeriesInstanceUID`` y busca los cortes hermanos
+    en la misma carpeta. Si ``path`` es carpeta, elige la serie CT con más cortes
+    (o la serie indicada en ``series_uid`` si se pasa explícitamente).
+    """
+    import pydicom
+    import os
+
+    if not path:
+        raise ValueError("Ruta CT vacía")
+    root = os.path.abspath(path)
+    notes: list[str] = []
+
+    selected_uid = str(series_uid or "")
+    search_dir = root
+    if os.path.isfile(root):
+        if not selected_uid:
+            ds0 = pydicom.dcmread(root, stop_before_pixels=True, force=True)
+            selected_uid = str(getattr(ds0, "SeriesInstanceUID", "") or "")
+        search_dir = os.path.dirname(root)
+        notes.append("Archivo CT elegido: se intenta cargar la serie completa de la misma carpeta.")
+    elif os.path.isdir(root):
+        if selected_uid:
+            notes.append("Carpeta CT elegida: se carga la serie seleccionada por el usuario.")
+        else:
+            notes.append("Carpeta CT elegida: se selecciona la serie CT con más cortes.")
+    else:
+        raise FileNotFoundError(root)
+
+    series = _scan_ct_series(search_dir, selected_uid)
 
     if not series and os.path.isfile(root):
         ds = pydicom.dcmread(root, force=True)
@@ -1541,6 +1580,125 @@ def refine_ct_to_spect_translation(
         f"(radio z/y/x={rz}/{ry}/{rx}, Δ=({best_shift[0]:.1f},{best_shift[1]:.1f},{best_shift[2]:.1f}), score={best_score:.4f})."
     )
     return ct_refined, best_shift, notes
+
+
+def refine_ct_to_spect_rotation(
+    ct_volume: np.ndarray,
+    spect_volume: np.ndarray,
+    *,
+    max_angle_deg: float = 6.0,
+    coarse_step_deg: float = 2.0,
+    fine_step_deg: float = 0.5,
+    ct_bone_hu_threshold: float = 200.0,
+    spect_focus_percentile: float = 85.0,
+    min_gain: float = 0.002,
+) -> tuple[np.ndarray, tuple[float, float, float], list[str]]:
+    """Refina rotación rígida CT→SPECT (rot z/y/x) por NCC sobre componente ósea.
+
+    Búsqueda secuencial por eje coarse→fine sobre features (hueso CT vs foco
+    SPECT), en la misma convención de ejes que el ajuste manual del panel
+    (z: axial in-plane, y: coronal, x: sagital). Si la ganancia de NCC no
+    supera ``min_gain`` devuelve el CT sin rotar (evita blur de interpolación
+    gratuito). Devuelve (ct_rotado, (rot_z, rot_y, rot_x) en grados, notas).
+    """
+    ct = np.asarray(ct_volume, dtype=np.float64)
+    sp = np.asarray(spect_volume, dtype=np.float64)
+    if ct.ndim != 3 or sp.ndim != 3:
+        raise ValueError(f"CT y SPECT deben ser 3D. CT={ct.shape}, SPECT={sp.shape}")
+    if ct.shape != sp.shape:
+        raise ValueError(f"CT y SPECT deben tener misma grilla. CT={ct.shape}, SPECT={sp.shape}")
+
+    notes: list[str] = []
+    max_a = abs(float(max_angle_deg))
+    if max_a < 1e-6:
+        return ct.copy(), (0.0, 0.0, 0.0), notes
+
+    sp_thr = float(np.percentile(sp, max(70.0, float(spect_focus_percentile) - 10.0)))
+    sp_feat = _safe_norm(np.clip(sp - sp_thr, 0.0, None))
+    roi_mask = sp_feat > 0.05
+    if not np.any(roi_mask):
+        roi_mask = sp > np.percentile(sp, 75.0)
+
+    ct_feat = _safe_norm(np.clip(ct - float(ct_bone_hu_threshold), 0.0, None))
+    if float(np.max(ct_feat)) <= 0.0:
+        ct_feat = _safe_norm(np.clip(ct - float(np.percentile(ct, 80.0)), 0.0, None))
+
+    def _ncc(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> float:
+        m = np.asarray(mask, dtype=bool)
+        if np.count_nonzero(m) < 64:
+            return -1.0
+        av = np.asarray(a[m], dtype=np.float64)
+        bv = np.asarray(b[m], dtype=np.float64)
+        av = av - float(np.mean(av))
+        bv = bv - float(np.mean(bv))
+        den = float(np.linalg.norm(av) * np.linalg.norm(bv))
+        if den < 1e-12:
+            return -1.0
+        return float(np.dot(av, bv) / den)
+
+    # Misma convención que el nudge manual del panel: z→(1,2), y→(0,2), x→(0,1).
+    _AXES = ((1, 2), (0, 2), (0, 1))
+
+    def _apply_angles(vol: np.ndarray, angles: list[float]) -> np.ndarray:
+        out = vol
+        for ang, axes in zip(angles, _AXES):
+            if abs(ang) > 1e-6:
+                out = ndi.rotate(out, angle=ang, axes=axes, reshape=False, order=1, mode="nearest")
+        return out
+
+    base_score = _ncc(ct_feat, sp_feat, roi_mask)
+    if base_score <= -0.999:
+        # NCC base degenerada (feature constante o ROI insuficiente): no se
+        # puede medir mejora real, cualquier candidato ganaría espuriamente.
+        notes.append(
+            "Refinamiento rotacional CT↔SPECT omitido: NCC base no computable "
+            "(feature ósea constante o ROI insuficiente)."
+        )
+        return ct.copy(), (0.0, 0.0, 0.0), notes
+    best_angles = [0.0, 0.0, 0.0]
+    best_score = base_score
+
+    for axis in range(3):
+        # coarse
+        cand_best = best_angles[axis]
+        a = -max_a
+        while a <= max_a + 1e-9:
+            trial = list(best_angles)
+            trial[axis] = a
+            sc = _ncc(_apply_angles(ct_feat, trial), sp_feat, roi_mask)
+            if sc > best_score:
+                best_score = sc
+                cand_best = a
+            a += abs(float(coarse_step_deg)) or 1.0
+        best_angles[axis] = cand_best
+        # fine alrededor del mejor coarse
+        fine = abs(float(fine_step_deg)) or 0.5
+        a = cand_best - abs(float(coarse_step_deg))
+        stop = cand_best + abs(float(coarse_step_deg))
+        while a <= stop + 1e-9:
+            trial = list(best_angles)
+            trial[axis] = float(np.clip(a, -max_a, max_a))
+            sc = _ncc(_apply_angles(ct_feat, trial), sp_feat, roi_mask)
+            if sc > best_score:
+                best_score = sc
+                best_angles[axis] = trial[axis]
+            a += fine
+
+    gain = best_score - base_score
+    if gain < float(min_gain) or all(abs(v) < 1e-6 for v in best_angles):
+        notes.append(
+            "Refinamiento rotacional CT↔SPECT sin mejora significativa "
+            f"(ganancia NCC={gain:.4f} < {float(min_gain):.4f}); se conserva rotación 0."
+        )
+        return ct.copy(), (0.0, 0.0, 0.0), notes
+
+    ct_rot = _apply_angles(ct, best_angles)
+    notes.append(
+        "Refinamiento rotacional CT↔SPECT aplicado "
+        f"rot(z,y,x)=({best_angles[0]:.1f},{best_angles[1]:.1f},{best_angles[2]:.1f})° "
+        f"(NCC {base_score:.4f} -> {best_score:.4f}, máx ±{max_a:.0f}°)."
+    )
+    return ct_rot, (best_angles[0], best_angles[1], best_angles[2]), notes
 
 
 def central_slices_preview(volume: np.ndarray) -> dict[str, np.ndarray]:
