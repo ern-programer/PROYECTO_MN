@@ -272,6 +272,7 @@ class AmyloidWindow(QDialog):
         self._processed_images: dict[str, dict[str, np.ndarray]] = {"1h": {}, "3h": {}}
         self._roi_state: dict[str, list[dict] | None] = {"1h": None, "3h": None}
         self._roi_state_oai: dict[str, list[dict] | None] = {"1h": None, "3h": None}
+        self._planar_crop_y: dict[str, int] = {}
         self._perugini_by_time: dict[str, int] = {}
         self._perugini_confirmed_by_time: dict[str, bool] = {}
         self._qbone_mode_by_time: dict[str, str] = {"1h": "auto", "3h": "auto"}
@@ -551,6 +552,18 @@ class AmyloidWindow(QDialog):
         self._roi_widget = ROIDragWidget(image if image is not None else np.zeros((64, 64)))
         self._roi_widget.roiChanged.connect(self._update_hmr)
         analysis_layout.addWidget(self._roi_widget, 1)
+
+        crop_row = QHBoxLayout()
+        self._planar_crop_label = QLabel("Recorte torácico: no requerido")
+        self._planar_crop_label.setStyleSheet("font-size:11px; color:#000000;")
+        crop_row.addWidget(self._planar_crop_label)
+        self._planar_crop_slider = QSlider(Qt.Orientation.Horizontal)
+        self._planar_crop_slider.setRange(0, 0)
+        self._planar_crop_slider.setVisible(False)
+        self._planar_crop_slider.setToolTip("Selecciona verticalmente la banda cuadrada del tórax. Se usan píxeles nativos, sin interpolación.")
+        self._planar_crop_slider.valueChanged.connect(self._on_planar_crop_changed)
+        crop_row.addWidget(self._planar_crop_slider, 1)
+        analysis_layout.addLayout(crop_row)
 
         self._lbl_hmr = QLabel("HMR = N/D")
         self._lbl_hmr.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -962,6 +975,7 @@ class AmyloidWindow(QDialog):
                 "scatter_planar_k": float(self._scatter_k_spin.value()),
                 "show_mirror_roi_preview": bool(getattr(self, "_show_mirror_roi_chk", None) and self._show_mirror_roi_chk.isChecked()),
                 "result_view_mode": str(self._result_view_combo.currentData() or "original"),
+                "planar_crop_y": {key: int(value) for key, value in self._planar_crop_y.items()},
             }
             settings.setValue("state_json", json.dumps(payload, ensure_ascii=False))
             settings.endGroup()
@@ -1076,6 +1090,13 @@ class AmyloidWindow(QDialog):
                 self._result_view_combo.setCurrentIndex(idx_view_mode)
                 self._result_view_combo.blockSignals(False)
                 self._result_view_mode = saved_view_mode
+
+            crop_y = payload.get("planar_crop_y", {}) or {}
+            self._planar_crop_y = {
+                str(key): max(0, int(value))
+                for key, value in crop_y.items()
+                if str(key) and str(value).lstrip("-").isdigit()
+            }
 
             self._sync_qbone_mode_ui()
         except Exception:
@@ -1647,6 +1668,8 @@ class AmyloidWindow(QDialog):
         # 1) Scatter planar (si está disponible y habilitado)
         if self._use_scatter_planar:
             sc = source_ap.get("scatter_image")
+            if isinstance(sc, np.ndarray) and sc.shape != img.shape and self._is_full_body_planar(sc):
+                sc, _ = self._crop_planar_image(sc, time_label, "ap")
             if isinstance(sc, np.ndarray) and sc.shape == img.shape:
                 k = float(self._scatter_planar_k)
                 img = np.clip(img - k * np.asarray(sc, dtype=np.float64), 0.0, None)
@@ -2341,10 +2364,9 @@ class AmyloidWindow(QDialog):
             QMessageBox.information(self, "SINCRO — Amyloidosis", f"No hay vista {view_role.upper()} cargada para {time_label}.")
             return
         img = np.asarray(entry["image"], dtype=np.float64)
-        self._image = img  # imagen actual para display/render
-        self._original_image = img.copy()  # original 2D para análisis
         self._active_time = time_label
         self._active_view_role = view_role
+        self._set_planar_analysis_image(img, time_label, view_role, reset_rois=False)
         self._time_combo.setCurrentText(time_label)
         idx_role = self._view_role_combo.findData(view_role)
         if idx_role >= 0:
@@ -2352,7 +2374,7 @@ class AmyloidWindow(QDialog):
             self._view_role_combo.setCurrentIndex(idx_role)
             self._view_role_combo.blockSignals(False)
         self._qbone_mode_by_time[time_label] = self._qbone_mode_by_time.get(time_label, "auto")
-        self._roi_widget = ROIDragWidget(img)
+        self._roi_widget = ROIDragWidget(self._original_image)
         self._ensure_aux_rois()
         saved_rois = self._roi_state_oai.get(time_label) if view_role == "oai" else self._roi_state.get(time_label)
         if saved_rois:
@@ -2404,6 +2426,75 @@ class AmyloidWindow(QDialog):
         self._update_roi_display_image()
         self._update_filter_summary()
         self._toggle_mode()
+        self._update_hmr(0, 0, 0, 0)
+
+    @staticmethod
+    def _is_full_body_planar(image: np.ndarray) -> bool:
+        """Detecta una matriz vertical cuyo ancho permite un recorte cuadrado."""
+        arr = np.asarray(image)
+        if arr.ndim != 2:
+            return False
+        height, width = arr.shape
+        return height >= max(width + 16, int(round(width * 1.35)))
+
+    def _planar_crop_key(self, time_label: str | None = None, view_role: str | None = None) -> str:
+        return f"{time_label or self._active_time or '1h'}:{view_role or self._active_view_role or 'ap'}"
+
+    def _crop_planar_image(self, image: np.ndarray, time_label: str, view_role: str) -> tuple[np.ndarray, dict]:
+        source = np.asarray(image, dtype=np.float64)
+        if not self._is_full_body_planar(source):
+            return source.copy(), {"used": False, "y0": 0, "size": int(source.shape[1]) if source.ndim == 2 else 0}
+        height, width = source.shape
+        max_y = height - width
+        key = self._planar_crop_key(time_label, view_role)
+        y0 = int(np.clip(self._planar_crop_y.get(key, max_y // 2), 0, max_y))
+        self._planar_crop_y[key] = y0
+        return source[y0:y0 + width, :width].copy(), {"used": True, "y0": y0, "size": width, "source_height": height, "source_width": width}
+
+    def _set_planar_analysis_image(self, image: np.ndarray, time_label: str, view_role: str, reset_rois: bool = True):
+        cropped, crop = self._crop_planar_image(image, time_label, view_role)
+        self._image = cropped.copy()
+        self._original_image = cropped.copy()
+        self._active_time = time_label
+        self._active_view_role = view_role
+        self._refresh_planar_crop_control(image, crop)
+        if reset_rois and hasattr(self, "_roi_widget"):
+            self._reset_rois()
+
+    def _refresh_planar_crop_control(self, source_image: np.ndarray | None = None, crop: dict | None = None):
+        if not hasattr(self, "_planar_crop_slider"):
+            return
+        source = np.asarray(source_image if source_image is not None else self._original_image)
+        if not self._is_full_body_planar(source):
+            self._planar_crop_slider.setVisible(False)
+            self._planar_crop_label.setText("Recorte torácico: no requerido")
+            return
+        height, width = source.shape
+        key = self._planar_crop_key()
+        y0 = int(np.clip(self._planar_crop_y.get(key, (height - width) // 2), 0, height - width))
+        self._planar_crop_y[key] = y0
+        self._planar_crop_slider.blockSignals(True)
+        self._planar_crop_slider.setRange(0, height - width)
+        self._planar_crop_slider.setValue(y0)
+        self._planar_crop_slider.blockSignals(False)
+        self._planar_crop_slider.setVisible(True)
+        self._planar_crop_label.setText(f"Recorte torácico: y={y0}:{y0 + width} · matriz {width}×{width}")
+
+    def _on_planar_crop_changed(self, y0: int):
+        if self._active_time not in ("1h", "3h") or not hasattr(self, "_roi_widget"):
+            return
+        source = self._time_images.get(self._active_time, {}).get(self._active_view_role) or {}
+        image = source.get("image")
+        if image is None or not self._is_full_body_planar(image):
+            return
+        self._planar_crop_y[self._planar_crop_key()] = int(y0)
+        self._processed_images[self._active_time].pop("roi", None)
+        self._processed_images[self._active_time].pop("corr", None)
+        self._processed_images[self._active_time].pop("corr_meta", None)
+        self._washout_data.pop(self._active_time, None)
+        self._set_planar_analysis_image(image, self._active_time, self._active_view_role, reset_rois=True)
+        self._update_roi_display_image()
+        self._persist_user_state()
         self._update_hmr(0, 0, 0, 0)
 
     def _roi_slot_index(self, time_label: str) -> int:
@@ -2468,9 +2559,11 @@ class AmyloidWindow(QDialog):
             return
         try:
             img = np.asarray(entry["image"], dtype=np.float64)
-            self._image = img
-            self._original_image = img.copy()
-            self._roi_widget = ROIDragWidget(img)
+            cropped, crop = self._crop_planar_image(img, self._active_time, role)
+            self._image = cropped.copy()
+            self._original_image = cropped.copy()
+            self._roi_widget = ROIDragWidget(cropped)
+            self._refresh_planar_crop_control(img, crop)
             self._ensure_aux_rois()
             if role == "oai":
                 saved_rois = self._roi_state_oai.get(self._active_time)
@@ -2617,6 +2710,9 @@ class AmyloidWindow(QDialog):
             "q_bone": q_bone_val,
             "q_bone_mode": self._qbone_mode_by_time.get(time_label, "auto"),
             "exclude_bone": dict(corr_meta),
+            "planar_crop": self._crop_planar_image(
+                self._time_images[time_label]["ap"]["image"], time_label, "ap"
+            )[1] if self._time_images.get(time_label, {}).get("ap") else {"used": False},
         }
         self._perugini_by_time[time_label] = int(self._perugini_combo.currentData())
         self._perugini_confirmed_by_time[time_label] = bool(self._perugini_confirm_chk.isChecked())
@@ -3256,6 +3352,9 @@ class AmyloidWindow(QDialog):
                 "washout_pct": washout,
                 "source": source or "planar",
             }
+            crop_data = self._washout_data.get(source.split()[-1], {}).get("planar_crop", {})
+            if crop_data.get("used"):
+                payload["planar_crop"] = dict(crop_data)
             bridge = _QSettings("GAMMASYS", "SINCRO_AMYLO_BRIDGE")
             bridge.setValue("planar_metrics_json", _json.dumps(payload, ensure_ascii=False))
             bridge.sync()
