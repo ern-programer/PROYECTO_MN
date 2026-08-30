@@ -97,6 +97,7 @@ from viz.polar_map import (
 	save_polar_map,
 )
 
+from core.dual_stage import DualSession
 from ui.cine_widget import CineWidget, RangeSlider, VerticalColorStrip
 from ui.collapsible import CollapsibleSection, slugify_section_key
 from ui.floating_toolbar import FloatingToolbar
@@ -117,6 +118,35 @@ LOW_CONFIDENCE_TAIL_DEG = 120.0
 LOW_CONFIDENCE_TAIL_WARN_PCT = 5.0
 
 
+def _stage_prop(stage_key: str, field: str) -> property:
+	"""Property que delega un atributo legacy en la etapa fija de la DualSession."""
+	def fget(self):
+		return getattr(self._dual_session().stage(stage_key), field)
+
+	def fset(self, value):
+		setattr(self._dual_session().stage(stage_key), field, value)
+
+	return property(fget, fset)
+
+
+def _recon_stage_prop(field: str) -> property:
+	"""Property que delega en la etapa del slot de recon (`_cine_crudo_recon_stage`).
+
+	Conserva la semántica actual (un solo juego de atributos que sigue a la etapa
+	reconstruida) pero con almacenamiento POR ETAPA: reconstruir la segunda etapa
+	ya no pisa los resultados de la primera.
+	"""
+	def fget(self):
+		stage = getattr(self, "_cine_crudo_recon_stage", "stress")
+		return getattr(self._dual_session().stage(stage), field)
+
+	def fset(self, value):
+		stage = getattr(self, "_cine_crudo_recon_stage", "stress")
+		setattr(self._dual_session().stage(stage), field, value)
+
+	return property(fget, fset)
+
+
 class MainWindow(QMainWindow):
 	# Registro de layouts de presentación del montaje SA/VLA/HLA.
 	# per_strip = cortes visibles por tira/eje (None = todos). panel_in = pulgadas por panel.
@@ -128,6 +158,54 @@ class MainWindow(QMainWindow):
 		"nueve": {"label": "9 cortes", "per_strip": 9, "panel_in": 1.7},
 		"ocho": {"label": "8 cortes", "per_strip": 8, "panel_in": 1.7},
 	}
+
+	# ── Plan C (PERFU_RyE): atributos legacy delegados en DualSession ──────────
+	# Los handlers existentes siguen leyendo/escribiendo los mismos nombres; el
+	# almacenamiento real es por etapa (core/dual_stage.StageState), así que
+	# reconstruir la segunda etapa ya NO pisa los resultados de la primera.
+	# Etapa fija — esfuerzo (primario del cine crudo):
+	cine_crudo_motion_result = _stage_prop("stress", "motion_result")
+	cine_crudo_corrected_projections = _stage_prop("stress", "corrected_projections")
+	cine_crudo_ref_index = _stage_prop("stress", "ref_index")
+	# Etapa fija — reposo (secundario "compare"):
+	cine_crudo_motion_result_compare = _stage_prop("rest", "motion_result")
+	cine_crudo_corrected_projections_compare = _stage_prop("rest", "corrected_projections")
+	cine_crudo_ref_index_compare = _stage_prop("rest", "ref_index")
+	compare_raw_study = _stage_prop("rest", "raw_study")
+	compare_raw_path = _stage_prop("rest", "source_path")
+	# Siguen al slot de recon (_cine_crudo_recon_stage), como hasta ahora:
+	cine_crudo_recon_result = _recon_stage_prop("recon_result")
+	cine_crudo_recon_result_phase = _recon_stage_prop("recon_result_phase")
+	cine_crudo_recon_study = _recon_stage_prop("recon_study")
+	cine_crudo_raw_study_for_recon = _recon_stage_prop("raw_study_for_recon")
+	cine_crudo_cut_study = _recon_stage_prop("cut_study")
+	cine_crudo_cut_source_label = _recon_stage_prop("cut_source_label")
+	cine_crudo_reoriented_ungated = _recon_stage_prop("reoriented_ungated")
+	cine_crudo_reoriented_gated = _recon_stage_prop("reoriented_gated")
+	cine_crudo_reoriented_gated_phase = _recon_stage_prop("reoriented_phase")
+	cine_crudo_reoriented_mf = _recon_stage_prop("reoriented_mf")
+	cine_crudo_axes_for_export = _recon_stage_prop("axes")
+	cine_crudo_axes_for_export_ungated = _recon_stage_prop("axes_ungated")
+	cine_crudo_axes_for_export_mf = _recon_stage_prop("axes_mf")
+	cine_crudo_cut_thickness_mm = _recon_stage_prop("cut_thickness_mm")
+	# Slots del montaje por etapa (ahora vistas del MISMO almacenamiento por etapa;
+	# la copia stress/rest del flujo actual pasa a ser idempotente):
+	cine_crudo_axes_for_export_stress = _stage_prop("stress", "axes")
+	cine_crudo_axes_for_export_rest = _stage_prop("rest", "axes")
+	cine_crudo_axes_for_export_ungated_stress = _stage_prop("stress", "axes_ungated")
+	cine_crudo_axes_for_export_ungated_rest = _stage_prop("rest", "axes_ungated")
+	cine_crudo_axes_for_export_mf_stress = _stage_prop("stress", "axes_mf")
+	cine_crudo_axes_for_export_mf_rest = _stage_prop("rest", "axes_mf")
+	cine_crudo_cut_thickness_mm_rest = _stage_prop("rest", "cut_thickness_mm")
+	cine_crudo_rest_source_label = _stage_prop("rest", "cut_source_label")
+
+	def _dual_session(self) -> DualSession:
+		"""Sesión dual de perfusión; se crea perezosa para tolerar accesos tempranos."""
+		s = getattr(self, "_session", None)
+		if s is None:
+			s = DualSession()
+			self._session = s
+		return s
 
 	def __init__(self, initial_path: str | None = None):
 		super().__init__()
@@ -6630,6 +6708,9 @@ class MainWindow(QMainWindow):
 		QSettings)."""
 		self._stop_all_session_timers()
 		self._clear_compare_state()
+		# Sesión dual: limpiar AMBAS etapas (los `= None` legacy de abajo solo
+		# alcanzan la etapa del slot activo vía properties).
+		self._dual_session().clear()
 
 		# --- Estudio principal y derivados de fase/segmentación ---
 		self.study = None
