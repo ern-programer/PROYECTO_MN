@@ -314,6 +314,11 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_seed_mode = False
 		# Etapa que reciben las herramientas del crudo en modo dual: "stress" (primario) | "rest" (secundario).
 		self._cine_crudo_active_stage = "stress"
+		# Con dos etapas cargadas, el pipeline debe ser dual por defecto sin que el
+		# operador recuerde seleccionar "Ambas". Un cambio manual del selector es
+		# un override temporal y permite procesar una etapa aislada.
+		self._dual_pipeline_auto_enabled = True
+		self._dual_pipeline_manual_stage_override: str | None = None
 		self.cine_crudo_band_upper: float | None = None
 		self.cine_crudo_band_lower: float | None = None
 		self.cine_crudo_compare_line_y: float | None = None
@@ -400,6 +405,12 @@ class MainWindow(QMainWindow):
 		# Ventanas por tira/eje (1-based): inicio y cantidad visible.
 		self.cine_crudo_stripe_start = {"SA": 1, "VLA": 1, "HLA": 1}
 		self.cine_crudo_stripe_count = {"SA": 999, "VLA": 999, "HLA": 999}
+		# Navegación independiente por fila del montaje dual. El dict histórico
+		# anterior se conserva como fallback para sesiones de una sola etapa.
+		self.cine_crudo_stripe_start_by_stage = {
+			"ESFUERZO": {"SA": 1, "VLA": 1, "HLA": 1},
+			"REPOSO": {"SA": 1, "VLA": 1, "HLA": 1},
+		}
 		# Offsets de alineación de reposo respecto de esfuerzo (px de corte).
 		self.cine_crudo_rest_offset = {"SA": 0, "VLA": 0, "HLA": 0}
 		# Rango de frames/gates para visualizar cada corte en el montaje (1-based).
@@ -410,11 +421,17 @@ class MainWindow(QMainWindow):
 		self._montage_drag_start_x: float | None = None
 		self._montage_drag_start_off: int = 0
 		self._montage_drag_start_gate: int = 1
+		self._montage_drag_selection_key: str | None = None
+		# Foco persistente de rueda/teclado: a diferencia de la selección múltiple,
+		# siempre hay UNA tira que recibe navegación.
+		self._montage_focus_selection_key: str = "ESFUERZO:SA"
+		self.cine_crudo_focused_stripe: str = "ESFUERZO:SA"
 		self._montage_render_meta: dict = {}
 		# Identificadores independientes por fila: "ESFUERZO:SA", "REPOSO:SA".
 		# La selección histórica simple se conserva como foco de teclado.
 		self.cine_crudo_selected_stripe: str = "SA"
 		self.cine_crudo_selected_stripes: set[str] = {"ESFUERZO:SA"}
+		self.cine_crudo_focused_stripe: str = "ESFUERZO:SA"
 		self._montage_refresh_timer = QTimer(self)
 		self._montage_refresh_timer.setSingleShot(True)
 		self._montage_refresh_timer.timeout.connect(self._show_cine_crudo_sa_montage)
@@ -2358,10 +2375,16 @@ class MainWindow(QMainWindow):
 				toolbar6_r3.addWidget(self.cine_crudo_save_axes_dcm_btn)
 				self.cine_crudo_process_recon_btn = QToolButton()
 				self.cine_crudo_process_recon_btn.setText("Procesar recon")
-				self.cine_crudo_process_recon_btn.setToolTip("Usa los cortes SA generados como estudio activo y corre fase/FEVI. Requiere Generar cortes primero.")
+				self.cine_crudo_process_recon_btn.setToolTip("Procesa fase/FEVI desde cortes SA. Con Esfuerzo+Reposo generados, procesa automáticamente AMBAS etapas y arma la comparación.")
 				self.cine_crudo_process_recon_btn.clicked.connect(self._process_cine_crudo_reconstruction)
 				self.cine_crudo_process_recon_btn.setEnabled(False)
 				toolbar6_r3.addWidget(self.cine_crudo_process_recon_btn)
+				self.cine_crudo_copy_rois_to_rest_btn = QToolButton()
+				self.cine_crudo_copy_rois_to_rest_btn.setText("ROI E→R")
+				self.cine_crudo_copy_rois_to_rest_btn.setToolTip("Copia los ROI manuales de Esfuerzo a Reposo como punto inicial. Después podés ajustar Reposo fino en el cine.")
+				self.cine_crudo_copy_rois_to_rest_btn.clicked.connect(self._copy_stress_rois_to_rest)
+				self.cine_crudo_copy_rois_to_rest_btn.setEnabled(False)
+				toolbar6_r3.addWidget(self.cine_crudo_copy_rois_to_rest_btn)
 				toolbar6_r3.addStretch(1)
 			if name == "comparacion_ejes":
 				# Controles de acción del montaje, centralizados en esta pestaña.
@@ -3816,6 +3839,7 @@ class MainWindow(QMainWindow):
 		self._ui_show_helpers = bool(self._ui_settings.value("ui/show_helpers", True, type=bool))
 		self._ui_enable_tooltips = bool(self._ui_settings.value("ui/enable_tooltips", True, type=bool))
 		self._ui_compact_controls = bool(self._ui_settings.value("ui/compact_controls", False, type=bool))
+		self._dual_pipeline_auto_enabled = bool(self._ui_settings.value("pipeline/dual_auto_enabled", True, type=bool))
 		src = str(self._ui_settings.value("analysis/perfusion_source", self.PERFUSION_SOURCE_ED))
 		self._perfusion_source = src if src in self.PERFUSION_SOURCE_LABELS else self.PERFUSION_SOURCE_ED
 
@@ -3823,6 +3847,7 @@ class MainWindow(QMainWindow):
 		self._ui_settings.setValue("ui/show_helpers", bool(self._ui_show_helpers))
 		self._ui_settings.setValue("ui/enable_tooltips", bool(self._ui_enable_tooltips))
 		self._ui_settings.setValue("ui/compact_controls", bool(self._ui_compact_controls))
+		self._ui_settings.setValue("pipeline/dual_auto_enabled", bool(getattr(self, "_dual_pipeline_auto_enabled", True)))
 		self._ui_settings.setValue("analysis/perfusion_source", self.perfusion_source())
 		self._ui_settings.sync()
 
@@ -4322,9 +4347,17 @@ class MainWindow(QMainWindow):
 		enable_tooltips.setChecked(bool(self._ui_enable_tooltips))
 		compact_controls = QCheckBox("Modo compacto (ocultar botones secundarios)")
 		compact_controls.setChecked(bool(self._ui_compact_controls))
+		dual_pipeline_auto = QCheckBox("Con dos etapas, procesar Ambas automáticamente")
+		dual_pipeline_auto.setChecked(bool(getattr(self, "_dual_pipeline_auto_enabled", True)))
+		dual_pipeline_auto.setToolTip(
+			"Al cargar Esfuerzo y Reposo, bloquea el pipeline en Ambas por defecto: "
+			"motion, reconstrucción, reorientación, cortes y fase/FEVI. Elegir "
+			"Esfuerzo o Reposo en el selector sigue permitiendo una corrección puntual."
+		)
 		ui_l.addWidget(show_helpers)
 		ui_l.addWidget(enable_tooltips)
 		ui_l.addWidget(compact_controls)
+		ui_l.addWidget(dual_pipeline_auto)
 		root.addWidget(ui_box)
 
 		# --- Análisis: fuente de perfusión segmentaria ---
@@ -4429,6 +4462,7 @@ class MainWindow(QMainWindow):
 		self._ui_show_helpers = bool(show_helpers.isChecked())
 		self._ui_enable_tooltips = bool(enable_tooltips.isChecked())
 		self._ui_compact_controls = bool(compact_controls.isChecked())
+		self._dual_pipeline_auto_enabled = bool(dual_pipeline_auto.isChecked())
 		self._apply_global_ui_preferences()
 		self._save_global_ui_preferences()
 
@@ -6812,6 +6846,7 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_seed_compare = None
 		self.cine_crudo_seed_mode = False
 		self._cine_crudo_active_stage = "stress"
+		self._dual_pipeline_manual_stage_override = None
 		self.cine_crudo_band_upper = None
 		self.cine_crudo_band_lower = None
 		self.cine_crudo_compare_line_y = None
@@ -6856,6 +6891,10 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_montage_cut_zoom = 1.0
 		self.cine_crudo_stripe_start = {"SA": 1, "VLA": 1, "HLA": 1}
 		self.cine_crudo_stripe_count = {"SA": 999, "VLA": 999, "HLA": 999}
+		self.cine_crudo_stripe_start_by_stage = {
+			"ESFUERZO": {"SA": 1, "VLA": 1, "HLA": 1},
+			"REPOSO": {"SA": 1, "VLA": 1, "HLA": 1},
+		}
 		self.cine_crudo_rest_offset = {"SA": 0, "VLA": 0, "HLA": 0}
 		self.cine_crudo_gate_from = 1
 		self.cine_crudo_gate_to = 1
@@ -6864,9 +6903,13 @@ class MainWindow(QMainWindow):
 		self._montage_drag_start_x = None
 		self._montage_drag_start_off = 0
 		self._montage_drag_start_gate = 1
+		self._montage_drag_selection_key = None
+		self._montage_focus_selection_key = "ESFUERZO:SA"
+		self.cine_crudo_focused_stripe = "ESFUERZO:SA"
 		self._montage_render_meta = {}
 		self.cine_crudo_selected_stripe = "SA"
 		self.cine_crudo_selected_stripes = {"ESFUERZO:SA"}
+		self.cine_crudo_focused_stripe = "ESFUERZO:SA"
 		self.cine_crudo_preview_mode = None
 		self._last_cine_crudo_preview_mode = None
 		self._cine_crudo_dual_render_meta = {}
@@ -12611,6 +12654,9 @@ class MainWindow(QMainWindow):
 			stage = "rest"
 		else:
 			stage = "stress"
+		# Cambiar explícitamente el selector es una intención clínica: habilita
+		# temporalmente procesar una sola etapa aun con dual-auto encendido.
+		self._dual_pipeline_manual_stage_override = None if stage == "both" else stage
 		self._set_active_cine_crudo_stage(stage)
 
 	def _cine_crudo_process_stress(self) -> bool:
@@ -12626,9 +12672,15 @@ class MainWindow(QMainWindow):
 		orden clínico Esfuerzo → Reposo. Si no hay segunda etapa, cae a Esfuerzo.
 		"""
 		active = getattr(self, "_cine_crudo_active_stage", "stress")
-		if active == "both" and self._secondary_cine_crudo_study() is not None:
+		has_dual = self._secondary_cine_crudo_study() is not None
+		manual = getattr(self, "_dual_pipeline_manual_stage_override", None)
+		# Regla por defecto: dos estudios → pipeline para ambas etapas. Solo se
+		# sale de ella mediante selección explícita de una etapa o configuración.
+		if has_dual and bool(getattr(self, "_dual_pipeline_auto_enabled", True)) and manual not in ("stress", "rest"):
 			return ["stress", "rest"]
-		if active == "rest" and self._secondary_cine_crudo_study() is not None:
+		if active == "both" and has_dual:
+			return ["stress", "rest"]
+		if active == "rest" and has_dual:
 			return ["rest"]
 		return ["stress"]
 
@@ -14770,6 +14822,35 @@ class MainWindow(QMainWindow):
 			return None
 		return x_img / max(1.0, float(pw - 1)), y_img / max(1.0, float(ph - 1))
 
+	def _montage_selection_key_at_event(self, event, source_label=None) -> str | None:
+		"""Devuelve la fila exacta ``ETAPA:EJE`` bajo el puntero en el montaje."""
+		label = source_label or (event.widget() if hasattr(event, "widget") else None)
+		if label is None:
+			return None
+		# QLabel se redimensiona al pixmap ya escalado; usar directamente su
+		# tamaño elimina el error de letterbox de _cine_crudo_limits_canvas_frac
+		# que hacía caer todo click sobre la fila 0.
+		lh = max(1.0, float(label.height()))
+		y_shown = float(event.pos().y())
+		if not 0.0 <= y_shown < lh:
+			return None
+		cache = getattr(self, "_montage_gray_cache", {}) or {}
+		geom = cache.get("geom", ())
+		rows_meta = cache.get("rows_meta", [])
+		if len(geom) < 9 or not rows_meta:
+			return None
+		# ``geom`` contiene 11 valores en el compositor actual (incluye W/H y
+		# REF_W). Desempaquetar los 10 primeros; el código anterior pedía 10
+		# valores pero recibía ``geom[:9]`` y por eso TODOS los clicks fallaban.
+		_panel, _pad, _title_h, _left, top, _cell_w, cell_h, _scale, _w, canvas_h = geom[:10]
+		# Preview: pixmap original (canvas_h) → QLabel mostrado (label.height).
+		y = y_shown * float(canvas_h) / lh
+		row_idx = int((int(y) - int(top)) // max(1, int(cell_h)))
+		if row_idx < 0 or row_idx >= len(rows_meta):
+			return None
+		row = rows_meta[row_idx]
+		return str(row.get("selection_key", f"{row.get('tag') or 'ESFUERZO'}:{row.get('prefix', 'SA')}"))
+
 	def _cine_crudo_limits_stage_at_event(self, event, source_label=None) -> str | None:
 		"""En vista dual de límites: etapa ('stress'/'rest') bajo el puntero, o None."""
 		meta = self._cine_crudo_cut_limits_meta
@@ -15626,6 +15707,13 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_gate_all_btn.setEnabled(True)
 			if hasattr(self, "cine_crudo_process_recon_btn"):
 				self.cine_crudo_process_recon_btn.setEnabled(True)
+			if hasattr(self, "cine_crudo_copy_rois_to_rest_btn"):
+				# Se habilita recién cuando ambas etapas tienen cortes SA en memoria.
+				sess = self._dual_session()
+				self.cine_crudo_copy_rois_to_rest_btn.setEnabled(
+					sess.stage("stress").cut_study is not None
+					and sess.stage("rest").cut_study is not None
+				)
 			if hasattr(self, "cine_crudo_save_axes_dcm_btn"):
 				self.cine_crudo_save_axes_dcm_btn.setEnabled(True)
 			if hasattr(self, "cine_crudo_montage_export_btn"):
@@ -15819,6 +15907,22 @@ class MainWindow(QMainWindow):
 		self._paint_montage_overlays(pix, cache)
 		return pix
 
+	def _refresh_montage_selection_overlay(self) -> None:
+		"""Redibuja SOLO los bordes de selección sobre el montaje cacheado.
+
+		No vuelve a calcular cortes, normalización, LUT ni compositor. Actualiza
+		la capa de overlay QPainter desde ``rows_meta`` y blitea el QPixmap al
+		QLabel, por lo que el click se refleja inmediatamente.
+		"""
+		cache = getattr(self, "_montage_gray_cache", None)
+		if not cache:
+			return
+		selected = set(getattr(self, "cine_crudo_selected_stripes", set()) or set())
+		for row in cache.get("rows_meta", []):
+			key = str(row.get("selection_key", f"{row.get('tag') or 'ESFUERZO'}:{row.get('prefix', 'SA')}"))
+			row["selected"] = key in selected
+		self._recolor_montage_from_cache(str(getattr(self, "cine_crudo_montage_cmap", "odyssey_cool")))
+
 	def _paint_montage_overlays(self, pix, cache):
 		"""Título, rótulos de eje rotados, recuadro de tira activa, títulos de panel
 		y esquinas anatómicas sobre el pixmap ya coloreado. Si hay columna de
@@ -15977,7 +16081,13 @@ class MainWindow(QMainWindow):
 			float(getattr(self, "cine_crudo_montage_lin_low", 0.0) or 0.0),
 			float(getattr(self, "cine_crudo_montage_lin_high", 1.0) or 0.0),
 			tuple(sorted((str(k), int(v)) for k, v in (getattr(self, "cine_crudo_rest_offset", {}) or {}).items())),
-			tuple(sorted((str(k), int(v)) for k, v in (getattr(self, "cine_crudo_stripe_start", {}) or {}).items())),
+			tuple(sorted(
+				(str(stage), str(axis), int(start))
+				for stage, values in (getattr(self, "cine_crudo_stripe_start_by_stage", {}) or {}).items()
+				for axis, start in (values or {}).items()
+			)),
+			tuple(sorted(getattr(self, "cine_crudo_selected_stripes", set()) or set())),
+			str(getattr(self, "cine_crudo_focused_stripe", "ESFUERZO:SA")),
 			tuple(sorted((str(k), int(v)) for k, v in (getattr(self, "cine_crudo_stripe_count", {}) or {}).items())),
 		)
 
@@ -16352,7 +16462,7 @@ class MainWindow(QMainWindow):
 					return k0, k1
 				return 0, nk - 1  # el cubo SA ya viene recortado a límites
 
-			def _build_rows(ax_cubes, rest_offsets=None):
+			def _build_rows(ax_cubes, rest_offsets=None, stage_tag="ESFUERZO"):
 				sa_cube = np.asarray(ax_cubes.get("SA", []), dtype=np.float64)
 				sa_v = _norm_vol(sa_cube)
 				vla_v = _norm_vol(np.asarray(ax_cubes.get("VLA", sa_cube)))
@@ -16378,14 +16488,16 @@ class MainWindow(QMainWindow):
 				def _window(axis_name: str, idxs: list[int]) -> list[int]:
 					if not idxs:
 						return idxs
-					start_1 = int(getattr(self, "cine_crudo_stripe_start", {}).get(axis_name, 1) or 1)
+					starts_by_stage = getattr(self, "cine_crudo_stripe_start_by_stage", {}) or {}
+					stage_starts = starts_by_stage.setdefault(stage_tag, {"SA": 1, "VLA": 1, "HLA": 1})
+					start_1 = int(stage_starts.get(axis_name, 1) or 1)
 					count_cfg = int(getattr(self, "cine_crudo_stripe_count", {}).get(axis_name, 999) or 999)
 					count = _template_defaults(len(idxs)) if count_cfg >= 999 else max(1, min(count_cfg, len(idxs)))
 					start = int(np.clip(start_1 - 1, 0, max(0, len(idxs) - 1)))
 					if start + count > len(idxs):
 						start = max(0, len(idxs) - count)
-					# Persistir start efectivo para drag continuo.
-					self.cine_crudo_stripe_start[axis_name] = start + 1
+					# Persistir start efectivo por etapa para drag/rueda independientes.
+					stage_starts[axis_name] = start + 1
 					return idxs[start:start + count]
 
 				sa_idx = _window("SA", sa_idx)
@@ -16393,9 +16505,9 @@ class MainWindow(QMainWindow):
 				hla_idx = _window("HLA", hla_idx)
 				return [(sa_v, sa_idx, "SA"), (vla_v, vla_idx, "VLA"), (hla_v, hla_idx, "HLA")]
 
-			stress_rows = _build_rows(stress_axes)
+			stress_rows = _build_rows(stress_axes, stage_tag="ESFUERZO")
 			has_rest = bool(rest_axes)
-			rest_rows = _build_rows(rest_axes, self.cine_crudo_rest_offset) if has_rest else None
+			rest_rows = _build_rows(rest_axes, self.cine_crudo_rest_offset, stage_tag="REPOSO") if has_rest else None
 
 			thickness = self._cine_crudo_cut_thickness_px()
 			th_mm = float(getattr(self, "cine_crudo_cut_thickness_mm", 0.0) or 0.0)
@@ -17149,8 +17261,63 @@ class MainWindow(QMainWindow):
 			self._log(f"[ERROR] Guardar ejes DICOM falló: {exc}")
 			QMessageBox.warning(self, "SINCRO", f"No se pudieron guardar los ejes DICOM:\n{exc}")
 
-	def _process_cine_crudo_reconstruction(self):
-		"""Promueve los cortes SA generados a estudio activo y corre el pipeline normal."""
+	def _copy_stress_rois_to_rest(self):
+		"""Copia ROI manuales de esfuerzo a reposo como semilla editable."""
+		stress_state = self._dual_session().stage("stress")
+		rest_state = self._dual_session().stage("rest")
+		if stress_state.cut_study is None or rest_state.cut_study is None:
+			QMessageBox.information(self, "SINCRO", "Primero generá cortes para Esfuerzo y Reposo.")
+			return
+		text = str(self.primary_manual_rois_text or self.manual_rois.toPlainText() or "").strip()
+		if not text:
+			QMessageBox.information(self, "SINCRO", "Primero definí o procesá los ROI de Esfuerzo.")
+			return
+		rois = self._parse_manual_rois_text(text)
+		if not rois:
+			QMessageBox.information(self, "SINCRO", "No hay ROI válidos de Esfuerzo para copiar.")
+			return
+		# Mantener solo slices existentes en Reposo; la copia queda manual/editable.
+		try:
+			n_rest = int(np.asarray(rest_state.cut_study.cube).shape[1])
+		except Exception:
+			n_rest = 0
+		copied = {int(k): tuple(float(v) for v in roi) for k, roi in rois.items() if 0 <= int(k) < n_rest}
+		if not copied:
+			QMessageBox.information(self, "SINCRO", "Los ROI de Esfuerzo no coinciden con los cortes disponibles de Reposo.")
+			return
+		self.compare_manual_rois_text = self._format_manual_rois(copied)
+		self.compare_manual_rois_autogenerated = False
+		# Copiar por texto no actualizaba el cine secundario si estaba visible como
+		# panel paralelo (active_cine_source suele seguir en primary). Cargar los
+		# ROI en el widget SIEMPRE y forzar Segmentación=manual: así la primera
+		# corrida usa la semilla copiada, no la máscara automática de toda la imagen.
+		self.cine_compare.set_manual_rois(copied)
+		if self.seg_method.currentText() != "manual":
+			self.seg_method.setCurrentText("manual")
+			self._log("[DUAL] ROI E→R: Segmentación cambiada a manual para respetar la copia.")
+		if self.active_cine_source == "compare":
+			self._set_manual_rois_text(self.compare_manual_rois_text, autogenerated=False)
+		self._log(f"[DUAL] ROI Esfuerzo→Reposo copiados ({len(copied)} cortes). Ajuste fino de Reposo habilitado.")
+		self.statusBar().showMessage("ROI copiados a Reposo; ajustá fino y procesá ambas etapas.", 5000)
+
+	def _process_cine_crudo_reconstruction(self, _force_stage: str | None = None):
+		"""Procesa fase/FEVI desde cortes SA; con dos etapas, procesa ambas en orden."""
+		if _force_stage not in ("stress", "rest"):
+			_force_stage = None
+		if _force_stage is None:
+			sess = self._dual_session()
+			if sess.stage("stress").cut_study is not None and sess.stage("rest").cut_study is not None:
+				self._log("[DUAL] Procesar recon: Esfuerzo → Reposo (fase + FEVI).")
+				# Esfuerzo es el primario visual; se procesa primero y reposo se
+				# incorpora automáticamente como compare_bundle desde memoria.
+				return self._process_cine_crudo_reconstruction(_force_stage="stress")
+		if _force_stage is not None:
+			self._set_active_cine_crudo_stage(_force_stage, refresh_view=False, force=True)
+			self._cine_crudo_recon_stage = _force_stage
+		# IMPORTANTE: recién después de seleccionar la etapa consultar el property
+		# compatiblizado. Antes se consultaba el slot dejado por la última etapa
+		# (usualmente Reposo), por lo que 'Procesar recon' podía promover la etapa
+		# equivocada y duplicarla en FEVI/montaje.
 		if self.cine_crudo_cut_study is None:
 			QMessageBox.information(self, "SINCRO", "Primero tocá Generar cortes y revisá SA/HLA/VLA en comparacion_ejes.")
 			return
@@ -17165,14 +17332,30 @@ class MainWindow(QMainWindow):
 		self._invalidate_output_cache()
 		self._log("Procesando sincronía/FEVI desde los cortes SA generados en cine_crudo.")
 		self.process_current()
+		# Guardar los resultados clínicos recién calculados en la etapa que los
+		# originó (StageState no tenía que depender del UI global para FEVI/fase).
+		stage_now = str(getattr(self, "_cine_crudo_recon_stage", "stress") or "stress")
+		stage_state = self._dual_session().stage(stage_now)
+		stage_state.seg = self.seg
+		stage_state.phase = self.phase_result
+		stage_state.metrics = self.metrics
+		stage_state.metrics_raw = self.metrics_raw
+		stage_state.phase_by_seg = self.phase_by_seg
+		stage_state.territory = self.territory
+		stage_state.ef = self._estimate_ef_for(self.study, self.seg)
 		# Plan C Fase 3: si la etapa opuesta ya tiene cortes SA en memoria,
 		# levantar comparación procesada sin depender de un DICOM reconstruido en disco.
 		primary_stage = "rest" if getattr(self, "_cine_crudo_recon_stage", "stress") == "rest" else "stress"
 		compare_stage = "stress" if primary_stage == "rest" else "rest"
 		if self._dual_session().stage(compare_stage).cut_study is not None:
 			try:
+				# En el primer procesamiento dual, usar la ROI de Esfuerzo como
+				# semilla editable para Reposo, igual que la reorientación. El usuario
+				# puede ajustar fino la segunda etapa antes de reprocesarla.
+				if primary_stage == "stress" and compare_stage == "rest" and not str(self.compare_manual_rois_text or "").strip():
+					self._copy_stress_rois_to_rest()
 				if self._load_compare_bundle_from_stage_memory(compare_stage):
-					self._log("Comparación stress/rest activada automáticamente desde memoria de etapas.")
+					self._log("[DUAL] Fase + FEVI de Reposo calculadas automáticamente desde memoria; comparación stress/rest activa.")
 			except Exception as exc:
 				self._log(f"[WARN] No se pudo cargar comparación dual desde memoria: {exc}")
 
@@ -17588,20 +17771,15 @@ class MainWindow(QMainWindow):
 			# para desplazar su ventana de cortes (start).
 			try:
 				lbl = source_label or (event.widget() if hasattr(event, "widget") else None)
-				# Usar la geometría REAL del compositor (incluye título, padding,
-				# zoom y alto variable por plantilla), no tercios de QLabel.
-				frac = self._cine_crudo_limits_canvas_frac(event, source_label=lbl)
 				cache = getattr(self, "_montage_gray_cache", {}) or {}
-				geom = cache.get("geom", ())
 				rows_meta = cache.get("rows_meta", [])
-				if frac is None or len(geom) < 9 or not rows_meta:
+				selection_key = self._montage_selection_key_at_event(event, source_label=lbl)
+				if selection_key is None or not rows_meta:
 					raise ValueError("sin geometría de montaje")
-				_panel, _pad, _title_h, _left, top, _cell_w, cell_h, _scale, _w, canvas_h = geom[:9]
-				_y = float(frac[1]) * max(1.0, float(canvas_h - 1))
-				row_idx = int(np.clip((int(_y) - int(top)) // max(1, int(cell_h)), 0, len(rows_meta) - 1))
-				row = rows_meta[row_idx]
+				row = next((r for r in rows_meta if str(r.get("selection_key", "")) == selection_key), None)
+				if row is None:
+					raise ValueError("fila de montaje no encontrada")
 				axis_click = str(row.get("prefix", "SA"))
-				selection_key = str(row.get("selection_key", f"{row.get('tag') or 'ESFUERZO'}:{axis_click}"))
 				ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
 				selected = set(getattr(self, "cine_crudo_selected_stripes", set()) or set())
 				if ctrl:
@@ -17612,14 +17790,24 @@ class MainWindow(QMainWindow):
 				else:
 					selected = {selection_key}
 				self.cine_crudo_selected_stripes = selected or {selection_key}
+				self.cine_crudo_focused_stripe = selection_key
+				self._montage_focus_selection_key = selection_key
 				self._montage_drag_axis = axis_click
+				self._montage_drag_selection_key = selection_key
 				self.cine_crudo_selected_stripe = axis_click
 				self._montage_drag_start_x = float(event.pos().x())
-				self._montage_drag_start_off = int(self.cine_crudo_stripe_start.get(axis_click, 1))
-				# Click simple: refresca para mostrar highlight de tira seleccionada.
-				self._schedule_montage_refresh(0)
-			except Exception:
-				pass
+				self._montage_drag_start_off = int(
+					(getattr(self, "cine_crudo_stripe_start_by_stage", {}) or {})
+					.get(str(row.get("tag", "") or "ESFUERZO").upper(), {})
+					.get(axis_click, 1)
+				)
+				# Para selección (sin mover cortes) redibujar SOLO el overlay desde
+				# caché: feedback visual inmediato, sin re-render de imágenes.
+				self._refresh_montage_selection_overlay()
+				self._log(f"Montaje: tira activa {selection_key}" + (" (selección múltiple)" if ctrl else ""))
+				self.statusBar().showMessage(f"Montaje: tira activa {selection_key}", 1500)
+			except Exception as exc:
+				self._log(f"[WARN] Click de tira no resuelto: {exc}")
 
 			# Drag horizontal en montaje: la fila se resolvió arriba con la geometría
 			# real. No usar mitades/tercios del QLabel: con zoom/plantillas eso hacía
@@ -17628,9 +17816,15 @@ class MainWindow(QMainWindow):
 			if self.cine_crudo_axes_for_export_rest:
 				try:
 					row_tag = str(row.get("tag", "") or "ESFUERZO").upper()
-					self._montage_drag_mode = "rest_offset" if row_tag == "REPOSO" else None
+					# No convertir un click en drag de offset automáticamente: eso
+					# sobrescribía el estado de la fila y ocultaba la selección. El
+					# drag normal navega la tira focal, igual en ambas etapas.
+					self._montage_drag_mode = None
 					self._montage_drag_start_x = float(event.pos().x())
-					self._montage_drag_start_off = int(self.cine_crudo_rest_offset.get(axis_click, 0))
+					self._montage_drag_start_off = int(
+						(getattr(self, "cine_crudo_stripe_start_by_stage", {}) or {})
+						.get(row_tag, {}).get(axis_click, 1)
+					)
 				except Exception:
 					self._montage_drag_axis = None
 					self._montage_drag_mode = None
@@ -17759,8 +17953,12 @@ class MainWindow(QMainWindow):
 					axis_name = str(self._montage_drag_axis)
 					cur = int(self._montage_drag_start_off)
 					new_start = max(1, cur - dcols)
-					if axis_name in self.cine_crudo_stripe_start:
-						self.cine_crudo_stripe_start[axis_name] = int(new_start)
+					key = str(getattr(self, "_montage_drag_selection_key", "") or "")
+					stage_tag = key.split(":", 1)[0] if ":" in key else "ESFUERZO"
+					starts = (getattr(self, "cine_crudo_stripe_start_by_stage", {}) or {}).setdefault(
+						stage_tag, {"SA": 1, "VLA": 1, "HLA": 1}
+					)
+					starts[axis_name] = int(new_start)
 					self._schedule_montage_refresh(8, fast=True)
 				except Exception:
 					pass
@@ -17809,6 +18007,7 @@ class MainWindow(QMainWindow):
 			self._montage_drag_axis = None
 			self._montage_drag_mode = None
 			self._montage_drag_start_x = None
+			self._montage_drag_selection_key = None
 			event.accept()
 			return
 		if self.cine_crudo_preview_mode == "cut_limits":
@@ -17848,9 +18047,18 @@ class MainWindow(QMainWindow):
 			step = 1 if delta > 0 else (-1 if delta < 0 else 0)
 			if step == 0:
 				return
-			axis = str(getattr(self, "cine_crudo_selected_stripe", "SA") or "SA")
-			cur = int(self.cine_crudo_stripe_start.get(axis, 1) or 1)
-			self.cine_crudo_stripe_start[axis] = max(1, cur - step)
+			# Rueda: mueve TODAS las filas seleccionadas con Ctrl+click. Sin
+			# selección múltiple conserva el foco de la última tira clickeada.
+			keys = set(getattr(self, "cine_crudo_selected_stripes", set()) or set())
+			if not keys:
+				keys = {str(getattr(self, "cine_crudo_focused_stripe", "") or "ESFUERZO:SA")}
+			for key in keys:
+				stage_tag, axis = key.split(":", 1) if ":" in key else ("ESFUERZO", "SA")
+				starts = (getattr(self, "cine_crudo_stripe_start_by_stage", {}) or {}).setdefault(
+					stage_tag, {"SA": 1, "VLA": 1, "HLA": 1}
+				)
+				cur = int(starts.get(axis, 1) or 1)
+				starts[axis] = max(1, cur - step)
 			self._schedule_montage_refresh(10, fast=True)
 			event.accept()
 		except Exception as exc:
@@ -17861,16 +18069,22 @@ class MainWindow(QMainWindow):
 		if self.cine_crudo_preview_mode == "sa_montage":
 			key = event.key()
 			mods = event.modifiers()
-			axis = str(getattr(self, "cine_crudo_selected_stripe", "SA") or "SA")
+			selection_keys = set(getattr(self, "cine_crudo_selected_stripes", set()) or set())
+			if not selection_keys:
+				selection_keys = {str(getattr(self, "cine_crudo_focused_stripe", "") or "ESFUERZO:SA")}
+			selection_key = str(getattr(self, "cine_crudo_focused_stripe", "") or next(iter(selection_keys)))
+			stage_tag, axis = selection_key.split(":", 1) if ":" in selection_key else ("ESFUERZO", "SA")
 			step = 3 if bool(mods & Qt.KeyboardModifier.ShiftModifier) else 1
 			if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
-				cur = int(self.cine_crudo_stripe_start.get(axis, 1) or 1)
-				if key == Qt.Key.Key_Left:
-					self.cine_crudo_stripe_start[axis] = max(1, cur + step)
-				else:
-					self.cine_crudo_stripe_start[axis] = max(1, cur - step)
+				for selected_key in selection_keys:
+					st, ax = selected_key.split(":", 1) if ":" in selected_key else ("ESFUERZO", "SA")
+					starts = (getattr(self, "cine_crudo_stripe_start_by_stage", {}) or {}).setdefault(
+						st, {"SA": 1, "VLA": 1, "HLA": 1}
+					)
+					cur = int(starts.get(ax, 1) or 1)
+					starts[ax] = max(1, cur + step if key == Qt.Key.Key_Left else cur - step)
 				self._schedule_montage_refresh(8, fast=True)
-				self.statusBar().showMessage(f"Montaje: tira {axis} start={self.cine_crudo_stripe_start.get(axis, 1)}", 1200)
+				self.statusBar().showMessage(f"Montaje: {len(selection_keys)} tira(s) desplazada(s) · foco {stage_tag} {axis}", 1200)
 				event.accept()
 				return
 			if key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
@@ -17883,7 +18097,7 @@ class MainWindow(QMainWindow):
 				event.accept()
 				return
 			if key in (Qt.Key.Key_R, Qt.Key.Key_Home):
-				self.cine_crudo_stripe_start[axis] = 1
+				starts[axis] = 1
 				self._schedule_montage_refresh(0)
 				event.accept()
 				return
@@ -17895,10 +18109,14 @@ class MainWindow(QMainWindow):
 		try:
 			self.statusBar().showMessage("Montaje: doble click = reset tira activa", 1800)
 			# Reset de la tira seleccionada al inicio de ventana.
-			axis = str(getattr(self, "cine_crudo_selected_stripe", "SA") or "SA")
-			self.cine_crudo_stripe_start[axis] = 1
+			selection_key = str(getattr(self, "cine_crudo_focused_stripe", "") or next(iter(getattr(self, "cine_crudo_selected_stripes", set()) or set()), "ESFUERZO:SA"))
+			stage_tag, axis = selection_key.split(":", 1) if ":" in selection_key else ("ESFUERZO", "SA")
+			starts = (getattr(self, "cine_crudo_stripe_start_by_stage", {}) or {}).setdefault(
+				stage_tag, {"SA": 1, "VLA": 1, "HLA": 1}
+			)
+			starts[axis] = 1
 			self._schedule_montage_refresh(0)
-			self._log(f"Montaje: reset de tira {axis} (start=1).")
+			self._log(f"Montaje: reset de tira {stage_tag} {axis} (start=1).")
 			event.accept()
 		except Exception as exc:
 			self._log(f"[WARN] Doble click en montaje falló: {exc}")
