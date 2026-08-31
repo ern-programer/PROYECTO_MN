@@ -352,6 +352,12 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_rest_source_label = ""
 		self.cine_crudo_cut_thickness_mm = 0.0
 		self.cine_crudo_cut_thickness_mm_rest = 0.0
+		# Límites Base/Ápex por etapa (1-based en UI). Evita que stress/rest
+		# compartan accidentalmente los mismos markers en modo dual.
+		self._cine_crudo_cut_limits_by_stage = {
+			"stress": {"base_1": 1, "apex_1": 1},
+			"rest": {"base_1": 1, "apex_1": 1},
+		}
 		# Recorte del montaje: "limits" (markers base/ápex) o "voi" (elipse VOI).
 		self.cine_crudo_montage_crop_mode = "limits"
 		# Plantillas de presentación del montaje.
@@ -431,6 +437,9 @@ class MainWindow(QMainWindow):
 		self._preview_pan_anchor = None
 		self.cine_crudo_preview_mode: str | None = None
 		self._cine_crudo_dual_render_meta: dict = {}
+		# Contexto visual temporal de ejecución dual (paso/etapa/índice), usado
+		# para rotular claramente Esfuerzo vs Reposo durante procesos largos.
+		self._cine_crudo_dual_context: dict | None = None
 		self._cine_crudo_cut_limits_meta: dict | None = None
 		self._tooltips_cache_main: dict[QWidget, str] = {}
 		self._ui_show_helpers = True
@@ -5179,8 +5188,9 @@ class MainWindow(QMainWindow):
 		# --- Ventana de scatter hermana (EM/SC): si el loader la adjuntó, ---
 		# --- habilitar el control y PREGUNTAR al usuario si quiere usarla. ---
 		_sc = getattr(self.study, "scatter_projections", None)
+		_sc_rest = getattr(self._secondary_cine_crudo_study(), "scatter_projections", None)
 		if hasattr(self, "cine_crudo_scatter_check"):
-			if _sc is not None:
+			if _sc is not None or _sc_rest is not None:
 				self.cine_crudo_scatter_check.setEnabled(True)
 				self.cine_crudo_scatter_k_spin.setEnabled(True)
 				# Si el DICOM trae las ventanas de energía, el loader calculó el
@@ -5189,14 +5199,23 @@ class MainWindow(QMainWindow):
 				_k_tew = getattr(self.study, "scatter_k_tew", None)
 				if _k_tew is not None and float(_k_tew) > 0:
 					self.cine_crudo_scatter_k_spin.setValue(float(_k_tew))
-				sc_name = os.path.basename(str(getattr(self.study, "scatter_path", "") or "?_SC"))
+				sc_name_top = os.path.basename(str(getattr(self.study, "scatter_path", "") or "?_SC")) if _sc is not None else "N/D"
+				sc_name_bot = os.path.basename(str(getattr(self._secondary_cine_crudo_study(), "scatter_path", "") or "?_SC")) if _sc_rest is not None else "N/D"
 				_k_msg = f" (k TEW={float(_k_tew):.3f} de las ventanas del DICOM)" if _k_tew else ""
-				self._log(f"Ventana de scatter detectada: {sc_name} (misma geometría que EM){_k_msg}.")
+				if _sc is not None and _sc_rest is not None:
+					self._log(f"Ventanas de scatter detectadas en ambas etapas: stress={sc_name_top} | rest={sc_name_bot}{_k_msg}.")
+				else:
+					self._log(f"Ventana de scatter detectada: {sc_name_top if _sc is not None else sc_name_bot} (misma geometría que EM){_k_msg}.")
 				ans = QMessageBox.question(
 					self, "SINCRO — Scatter EM/SC",
-					f"Se detectó un archivo de SCATTER hermano:\n{sc_name}\n\n"
-					"¿Usarlo para la corrección de scatter en la reconstrucción?\n"
-					"(P = EM − k×SC, pre-recon. Podés cambiarlo con el checkbox 'Desc. SC'.)",
+					(
+						"Se detectó SCATTER hermano en la(s) etapa(s) crudas:\n"
+						f"• Stress: {sc_name_top}\n"
+						f"• Rest: {sc_name_bot}\n\n"
+						"¿Usarlo para la corrección de scatter en la reconstrucción?\n"
+						"(P = EM − k×SC, pre-recon. Podés cambiarlo con el checkbox 'Desc. SC'.)"
+					)
+					,
 					QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
 					QMessageBox.StandardButton.Yes,
 				)
@@ -6798,6 +6817,10 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_rest_source_label = ""
 		self.cine_crudo_cut_thickness_mm = 0.0
 		self.cine_crudo_cut_thickness_mm_rest = 0.0
+		self._cine_crudo_cut_limits_by_stage = {
+			"stress": {"base_1": 1, "apex_1": 1},
+			"rest": {"base_1": 1, "apex_1": 1},
+		}
 		self.cine_crudo_montage_crop_mode = "limits"
 		self.cine_crudo_montage_template = "nueve"
 		self.cine_crudo_montage_cut_zoom = 1.0
@@ -12504,14 +12527,22 @@ class MainWindow(QMainWindow):
 		}
 		return canvas
 
-	def _set_active_cine_crudo_stage(self, stage: str):
+	def _set_active_cine_crudo_stage(self, stage: str, *, refresh_view: bool = True):
 		"""Selecciona qué etapa(s) (stress/rest/both) reciben las herramientas del crudo."""
+		prev_stage = getattr(self, "_cine_crudo_active_stage", "stress")
+		# Guardar los límites del stage saliente antes de cambiar.
+		if prev_stage in ("stress", "rest"):
+			self._cine_crudo_capture_limits_from_spins(prev_stage)
 		if stage not in ("stress", "rest", "both"):
 			stage = "stress"
 		if self._secondary_cine_crudo_study() is None:
 			stage = "stress"
-		changed = stage != getattr(self, "_cine_crudo_active_stage", "stress")
+		changed = stage != prev_stage
 		self._cine_crudo_active_stage = stage
+		if stage in ("stress", "rest"):
+			self._cine_crudo_recon_stage = stage
+			# Cargar en UI los límites propios de la etapa entrante.
+			self._cine_crudo_apply_stage_limits_to_spins(stage)
 		if hasattr(self, "cine_crudo_stage_combo") and self.cine_crudo_stage_combo is not None:
 			label = {"stress": "Esfuerzo", "rest": "Reposo", "both": "Ambas"}[stage]
 			if self.cine_crudo_stage_combo.currentText() != label:
@@ -12521,7 +12552,15 @@ class MainWindow(QMainWindow):
 		if changed:
 			etapa = {"stress": "Esfuerzo", "rest": "Reposo", "both": "Ambas (esfuerzo + reposo)"}[stage]
 			self._log(f"Etapa activa del crudo: {etapa} — las herramientas actúan sobre esa(s) etapa(s).")
-		self._refresh_cine_crudo_view()
+		if refresh_view:
+			# Si estamos en la pantalla de límites (Base/Ápex), NO volver al cine:
+			# re-renderizar la misma pantalla con la nueva etapa activa.
+			if getattr(self, "cine_crudo_preview_mode", None) == "cut_limits":
+				if stage in ("stress", "rest") and self._dual_session().stage(stage).recon_result is not None:
+					self._cine_crudo_recon_stage = stage
+				self._preview_cine_crudo_cut_limits()
+			else:
+				self._refresh_cine_crudo_view()
 
 	def _on_cine_crudo_stage_combo_changed(self, text: str):
 		t = str(text).lower()
@@ -12538,6 +12577,69 @@ class MainWindow(QMainWindow):
 
 	def _cine_crudo_process_rest(self) -> bool:
 		return getattr(self, "_cine_crudo_active_stage", "stress") in ("rest", "both") and self._secondary_cine_crudo_study() is not None
+
+	def _cine_crudo_target_stages(self) -> list[str]:
+		"""Etapas efectivas para ejecutar una herramienta del crudo.
+
+		Si el selector está en "Ambas" y existe estudio secundario, se procesa en
+		orden clínico Esfuerzo → Reposo. Si no hay segunda etapa, cae a Esfuerzo.
+		"""
+		active = getattr(self, "_cine_crudo_active_stage", "stress")
+		if active == "both" and self._secondary_cine_crudo_study() is not None:
+			return ["stress", "rest"]
+		if active == "rest" and self._secondary_cine_crudo_study() is not None:
+			return ["rest"]
+		return ["stress"]
+
+	def _run_cine_crudo_stage_orchestrator(self, step_label: str, runner):
+		"""Orquesta una acción por etapa, incluyendo modo "Ambas" sin duplicar UI."""
+		stages = self._cine_crudo_target_stages()
+		if not stages:
+			return False
+		if len(stages) == 1:
+			return runner(stages[0])
+
+		prev_active = getattr(self, "_cine_crudo_active_stage", "stress")
+		prev_recon_stage = getattr(self, "_cine_crudo_recon_stage", "stress")
+		self._log(f"[DUAL] {step_label}: ejecución en Ambas (Esfuerzo → Reposo).")
+		ok_all = True
+		was_both = (prev_active == "both")
+		try:
+			for idx, stage in enumerate(stages, start=1):
+				stage_txt = "Esfuerzo" if stage == "stress" else "Reposo"
+				self._cine_crudo_active_stage = stage
+				self._cine_crudo_recon_stage = stage
+				self._cine_crudo_dual_context = {
+					"step": str(step_label),
+					"stage": str(stage),
+					"idx": int(idx),
+					"total": int(len(stages)),
+				}
+				self._log(f"[DUAL] {step_label}: etapa {idx}/{len(stages)} → {stage_txt}.")
+				try:
+					self.statusBar().showMessage(f"{step_label} dual · {stage_txt} ({idx}/{len(stages)})", 5000)
+				except Exception:
+					pass
+				ok = runner(stage)
+				if ok is False:
+					ok_all = False
+					self._log(f"[DUAL] {step_label}: secuencia detenida en {stage_txt}.")
+					break
+		finally:
+			self._cine_crudo_dual_context = None
+			self._cine_crudo_recon_stage = prev_recon_stage
+			# Importante: al volver a "Ambas" NO refrescar el cine crudo, para no
+			# pisar el preview de reconstrucción/cortes que dejó la secuencia.
+			self._set_active_cine_crudo_stage(prev_active, refresh_view=False)
+		# Al terminar en "Ambas" NO forzar refresh de cine crudo: eso pisa la
+		# pantalla de reconstrucción/cortes y genera el "salto" visual no deseado.
+		if was_both and ok_all:
+			self._log(f"[DUAL] {step_label}: completado (Esfuerzo+Reposo). Se conserva la vista actual.")
+			try:
+				self.statusBar().showMessage(f"{step_label} dual completo · Esfuerzo + Reposo", 7000)
+			except Exception:
+				pass
+		return ok_all
 
 	def _detect_stage_from_study(self, study) -> str | None:
 		"""Heurística: infiere 'stress'/'rest' desde metadata DICOM. None si es ambiguo."""
@@ -13842,17 +13944,27 @@ class MainWindow(QMainWindow):
 		)
 		return res.image
 
-	def _reconstruct_cine_crudo_raw(self, feta_only: bool = False):
+	def _reconstruct_cine_crudo_raw(self, feta_only: bool = False, _force_stage: str | None = None):
 		"""Reconstruye desde crudo la etapa seleccionada (Esfuerzo=primario / Reposo=secundario).
 
 		``feta_only``: si True, reconstruye SOLO la banda axial (feta) delimitada por
 		los markers Base/Ápex — excluye actividad extracardíaca de arriba/abajo y es
 		más rápido. El volumen resultante es el de trabajo (reorientación/análisis).
 		"""
+		if _force_stage is None:
+			stages = self._cine_crudo_target_stages()
+			if len(stages) > 1:
+				return self._run_cine_crudo_stage_orchestrator(
+					"Recon raw",
+					lambda stage: self._reconstruct_cine_crudo_raw(feta_only=feta_only, _force_stage=stage),
+				)
+			_force_stage = stages[0]
+		if _force_stage:
+			self._cine_crudo_active_stage = str(_force_stage)
 		raw_study, motion_result, corrected, stage = self._cine_crudo_recon_target()
 		if raw_study is None:
 			QMessageBox.information(self, "SINCRO", "Cargá un estudio crudo gated en cine_crudo primero.")
-			return		# Fijar el estudio activo de reconstrucción para todo el pipeline downstream
+			return False		# Fijar el estudio activo de reconstrucción para todo el pipeline downstream
 		# (reorientación, cortes, metadatos) según la etapa elegida.
 		self.cine_crudo_raw_study_for_recon = raw_study
 		self._cine_crudo_recon_stage = stage
@@ -13861,8 +13973,6 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_timer.stop()
 		self.cine_crudo_playing = False
 		self._update_cine_crudo_toggle_text()
-		if getattr(self, "_cine_crudo_active_stage", "stress") == "both" and self._secondary_cine_crudo_study() is not None:
-			self._log("Selector en 'Ambas': la reconstrucción/reorientación es por etapa. Reconstruyo ESFUERZO; luego marcá como reposo o cambiá a Reposo y reconstruí la otra para el montaje.")
 		_undo_before = None if getattr(self, "_undo_suspended", False) else self._snapshot_attrs(self.UNDO_ATTRS_RECON, deep=False)
 		try:
 			from core.raw_reconstruction import reconstruct_raw_gated_pipeline
@@ -13879,7 +13989,7 @@ class MainWindow(QMainWindow):
 				if self.cine_crudo_recon_result is None:
 					QMessageBox.information(self, "SINCRO", "Reconstruir selección: primero tocá 'Recon raw' (FBP rápido), ajustá las líneas Base/Ápex sobre el corazón y recién ahí reconstruí la selección.")
 					self._set_progress(100, "Reconstruir selección: falta recon base")
-					return
+					return False
 				height = int(projections.shape[2])
 				z0, z1 = self._cine_crudo_cut_bounds(height)
 				from dataclasses import replace as _dc_replace
@@ -13887,6 +13997,11 @@ class MainWindow(QMainWindow):
 				feta_txt = f" · feta z=[{z0},{z1}]/{height}"
 				self._log(f"Reconstruir selección: feta axial z=[{z0},{z1}] de {height} (markers Base/Ápex).")
 			etapa_txt = "reposo" if stage == "rest" else "esfuerzo"
+			etapa_caps = "REPOSO" if stage == "rest" else "ESFUERZO"
+			dual_ctx = getattr(self, "_cine_crudo_dual_context", None) or {}
+			dual_tag = ""
+			if int(dual_ctx.get("total", 1)) > 1:
+				dual_tag = f" ({int(dual_ctx.get('idx', 1))}/{int(dual_ctx.get('total', 2))})"
 			if motion_result is not None and corrected is not None:
 				motion = dict(motion_result)
 				source_label = f"{etapa_txt} · corregido por motion correction{feta_txt}"
@@ -13902,12 +14017,13 @@ class MainWindow(QMainWindow):
 				(getattr(cfg, "resolution_recovery", False) or getattr(cfg, "rr_ungated", False))
 				and getattr(cfg, "psf_model", None) is not None
 			)
-			titulo = "NÍTIDA (OmniRes) — recuperación de resolución" if nitida_on else f"Reconstrucción {cfg.reconstruction_method.upper()}"
+			titulo_base = "NÍTIDA (OmniRes) — recuperación de resolución" if nitida_on else f"Reconstrucción {cfg.reconstruction_method.upper()}"
+			titulo = f"{titulo_base} · {etapa_caps}{dual_tag}"
 			recon_dialog = QProgressDialog(
 				f"{titulo}\nEsto puede tardar según iteraciones y tamaño de matriz…",
 				None, 0, 100, self,
 			)
-			recon_dialog.setWindowTitle("SINCRO · Reconstruyendo")
+			recon_dialog.setWindowTitle(f"SINCRO · Reconstruyendo · {etapa_caps}{dual_tag}")
 			recon_dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
 			recon_dialog.setMinimumWidth(420)
 			recon_dialog.setMinimumDuration(0)
@@ -14021,6 +14137,9 @@ class MainWindow(QMainWindow):
 				if not feta_only:
 					self.cine_crudo_cut_base_spin.setValue(1)
 					self.cine_crudo_cut_apex_spin.setValue(max(1, n_slices))
+					self._cine_crudo_stage_limits_set(stage, 1, max(1, n_slices), n_slices)
+				else:
+					self._cine_crudo_capture_limits_from_spins(stage)
 			if hasattr(self, "cine_crudo_cut_thickness_spin"):
 				self.cine_crudo_cut_thickness_spin.setEnabled(True)
 			if hasattr(self, "cine_crudo_preview_limits_btn"):
@@ -14038,10 +14157,12 @@ class MainWindow(QMainWindow):
 			self._commit_undo("Reconstrucción", self.UNDO_ATTRS_RECON, _undo_before, deep=False)
 			self._mark_step_done("crudo")
 			self._mark_step_done("recon", cfg.reconstruction_method, getattr(result.gated_volume, "shape", None))
+			return True
 		except Exception as exc:
 			self._log(f"[ERROR] Recon raw falló: {exc}")
 			self._set_progress(100, "Recon raw falló")
 			QMessageBox.warning(self, "SINCRO", f"No se pudo reconstruir desde crudo:\n{exc}")
+			return False
 
 	def _dump_feta_for_harness(self, result, raw_study, angles, cfg, z0: int, z1: int, stage: str) -> None:
 		"""Vuelca la feta reconstruida + proyecciones corregidas + geometría a disco.
@@ -14112,9 +14233,94 @@ class MainWindow(QMainWindow):
 			json.dump(payload, fh, ensure_ascii=False, indent=2)
 		self._log(f"Reorientación volcada para harness -> {out_dir}\\reorient.json  (eje={payload['long_axis']})")
 
+	def _cine_crudo_stage_limits_get(self, stage: str | None = None, n_slices: int | None = None) -> tuple[int, int]:
+		"""Límites Base/Ápex 1-based de una etapa, con clamp al tamaño actual."""
+		st = str(stage or getattr(self, "_cine_crudo_recon_stage", "stress") or "stress").lower()
+		if st not in ("stress", "rest"):
+			st = "stress"
+		by_stage = getattr(self, "_cine_crudo_cut_limits_by_stage", None)
+		if not isinstance(by_stage, dict):
+			by_stage = {
+				"stress": {"base_1": 1, "apex_1": 1},
+				"rest": {"base_1": 1, "apex_1": 1},
+			}
+			self._cine_crudo_cut_limits_by_stage = by_stage
+		vals = by_stage.get(st)
+		if not isinstance(vals, dict):
+			vals = {"base_1": 1, "apex_1": 1}
+			by_stage[st] = vals
+		if n_slices is None:
+			try:
+				res = self._dual_session().stage(st).recon_result
+				n_slices = int(np.asarray(res.gated_volume).shape[1]) if res is not None else 1
+			except Exception:
+				n_slices = 1
+		n = max(1, int(n_slices))
+		base_1 = int(np.clip(int(vals.get("base_1", 1)), 1, n))
+		apex_1 = int(np.clip(int(vals.get("apex_1", n)), 1, n))
+		if base_1 > apex_1:
+			base_1, apex_1 = apex_1, base_1
+		vals["base_1"] = int(base_1)
+		vals["apex_1"] = int(apex_1)
+		return int(base_1), int(apex_1)
+
+	def _cine_crudo_stage_limits_set(self, stage: str | None, base_1: int, apex_1: int, n_slices: int | None = None) -> tuple[int, int]:
+		"""Guarda límites Base/Ápex 1-based por etapa (stress/rest)."""
+		st = str(stage or getattr(self, "_cine_crudo_recon_stage", "stress") or "stress").lower()
+		if st not in ("stress", "rest"):
+			st = "stress"
+		if n_slices is None:
+			try:
+				res = self._dual_session().stage(st).recon_result
+				n_slices = int(np.asarray(res.gated_volume).shape[1]) if res is not None else 1
+			except Exception:
+				n_slices = 1
+		n = max(1, int(n_slices))
+		b = int(np.clip(int(base_1), 1, n))
+		a = int(np.clip(int(apex_1), 1, n))
+		if b > a:
+			b, a = a, b
+		by_stage = getattr(self, "_cine_crudo_cut_limits_by_stage", None)
+		if not isinstance(by_stage, dict):
+			by_stage = {}
+			self._cine_crudo_cut_limits_by_stage = by_stage
+		by_stage.setdefault("stress", {"base_1": 1, "apex_1": 1})
+		by_stage.setdefault("rest", {"base_1": 1, "apex_1": 1})
+		by_stage[st] = {"base_1": int(b), "apex_1": int(a)}
+		return int(b), int(a)
+
+	def _cine_crudo_capture_limits_from_spins(self, stage: str | None = None) -> None:
+		"""Persiste a etapa activa los valores de los spins Base/Ápex."""
+		if not (hasattr(self, "cine_crudo_cut_base_spin") and hasattr(self, "cine_crudo_cut_apex_spin")):
+			return
+		st = str(stage or getattr(self, "_cine_crudo_recon_stage", "stress") or "stress").lower()
+		if st not in ("stress", "rest"):
+			st = "stress"
+		try:
+			res = self._dual_session().stage(st).recon_result
+			n = int(np.asarray(res.gated_volume).shape[1]) if res is not None else max(1, int(self.cine_crudo_cut_base_spin.maximum()))
+		except Exception:
+			n = max(1, int(self.cine_crudo_cut_base_spin.maximum()))
+		self._cine_crudo_stage_limits_set(st, int(self.cine_crudo_cut_base_spin.value()), int(self.cine_crudo_cut_apex_spin.value()), n)
+
+	def _cine_crudo_apply_stage_limits_to_spins(self, stage: str | None = None, n_slices: int | None = None) -> None:
+		"""Carga en los spins los límites guardados de una etapa."""
+		if not (hasattr(self, "cine_crudo_cut_base_spin") and hasattr(self, "cine_crudo_cut_apex_spin")):
+			return
+		st = str(stage or getattr(self, "_cine_crudo_recon_stage", "stress") or "stress").lower()
+		if st not in ("stress", "rest"):
+			st = "stress"
+		b, a = self._cine_crudo_stage_limits_get(st, n_slices)
+		self.cine_crudo_cut_base_spin.blockSignals(True)
+		self.cine_crudo_cut_apex_spin.blockSignals(True)
+		self.cine_crudo_cut_base_spin.setValue(int(b))
+		self.cine_crudo_cut_apex_spin.setValue(int(a))
+		self.cine_crudo_cut_base_spin.blockSignals(False)
+		self.cine_crudo_cut_apex_spin.blockSignals(False)
+
 	def _cine_crudo_cut_bounds(self, n_slices: int) -> tuple[int, int]:
-		base = int(self.cine_crudo_cut_base_spin.value()) if hasattr(self, "cine_crudo_cut_base_spin") else 1
-		apex = int(self.cine_crudo_cut_apex_spin.value()) if hasattr(self, "cine_crudo_cut_apex_spin") else int(n_slices)
+		stage = getattr(self, "_cine_crudo_recon_stage", "stress")
+		base, apex = self._cine_crudo_stage_limits_get(stage, int(n_slices))
 		z0 = int(np.clip(min(base, apex) - 1, 0, max(0, int(n_slices) - 1)))
 		z1 = int(np.clip(max(base, apex) - 1, 0, max(0, int(n_slices) - 1)))
 		if z1 <= z0:
@@ -14319,11 +14525,82 @@ class MainWindow(QMainWindow):
 			self._cine_crudo_cut_limits_meta = None
 			return
 		try:
+			# Si el usuario tocó los spins, persistir esos valores en la etapa activa
+			# antes de recomputar los límites (estado por etapa en modo dual).
+			self._cine_crudo_capture_limits_from_spins(getattr(self, "_cine_crudo_recon_stage", "stress"))
 			result = self.cine_crudo_recon_result
 			z0, z1 = self._cine_crudo_cut_bounds(int(np.asarray(result.gated_volume).shape[1]))
 			thickness = self._cine_crudo_cut_thickness_px()
-			out_png, meta = self._write_cine_crudo_limits_qc(result, z0, z1, thickness, active_marker=active_marker)
-			self._cine_crudo_cut_limits_meta = dict(meta)
+			# Vista DUAL de límites: si ambas etapas ya están reconstruidas, mostrar
+			# ESFUERZO arriba y REPOSO abajo (la 2da etapa NO pisa a la 1ra).
+			sess = self._dual_session()
+			stress_res = sess.stage("stress").recon_result
+			rest_res = sess.stage("rest").recon_result
+			dual_view = stress_res is not None and rest_res is not None
+			out_pix = None
+			if dual_view:
+				prev_stage = getattr(self, "_cine_crudo_recon_stage", "stress")
+				active_stage = getattr(self, "_cine_crudo_active_stage", "stress")
+				if prev_stage in ("stress", "rest"):
+					active = prev_stage
+				elif active_stage in ("stress", "rest"):
+					active = str(active_stage)
+				else:
+					active = "stress"
+				stage_pix: dict[str, QPixmap] = {}
+				stage_meta: dict[str, dict] = {}
+				try:
+					for st, res in (("stress", stress_res), ("rest", rest_res)):
+						self._cine_crudo_recon_stage = st
+						zz0, zz1 = self._cine_crudo_cut_bounds(int(np.asarray(res.gated_volume).shape[1]))
+						png_st, meta_st = self._write_cine_crudo_limits_qc(
+							res, zz0, zz1, thickness,
+							active_marker=active_marker if st == active else None,
+						)
+						stage_pix[st] = QPixmap(png_st)
+						stage_meta[st] = dict(meta_st)
+				finally:
+					self._cine_crudo_recon_stage = prev_stage
+				top_pix, bottom_pix = stage_pix["stress"], stage_pix["rest"]
+				top_label = "ESFUERZO — límites" + (" ●" if active == "stress" else "")
+				bottom_label = "REPOSO — límites" + (" ●" if active == "rest" else "")
+				out_pix = self._stack_cine_crudo_dual_pixmaps(top_pix, bottom_pix, top_label, bottom_label, active_stage=active)
+				dmeta = dict(getattr(self, "_cine_crudo_dual_render_meta", None) or {})
+				meta = dict(stage_meta[active])
+				bar_h = float(dmeta.get("bar_h", 22))
+				canvas_w = float(max(1, out_pix.width()))
+				canvas_h = float(max(1, out_pix.height()))
+				split_y = float(dmeta.get("split_y", 0))
+				# Regiones en FRACCIONES del canvas (independientes del zoom con el
+				# que se muestre el pixmap): fx/fy = esquina sup-izq, fw/fh = tamaño.
+				regions = {
+					"stress": {
+						"fx": ((canvas_w - float(top_pix.width())) / 2.0) / canvas_w,
+						"fy": bar_h / canvas_h,
+						"fw": float(top_pix.width()) / canvas_w,
+						"fh": float(top_pix.height()) / canvas_h,
+						"fy_bar": 0.0,  # su barra de título arranca en 0
+					},
+					"rest": {
+						"fx": ((canvas_w - float(bottom_pix.width())) / 2.0) / canvas_w,
+						"fy": (split_y + bar_h) / canvas_h,
+						"fw": float(bottom_pix.width()) / canvas_w,
+						"fh": float(bottom_pix.height()) / canvas_h,
+						"fy_bar": split_y / canvas_h,
+					},
+				}
+				meta["dual_overlay"] = dict(regions[active])
+				meta["dual_regions"] = regions
+				meta["dual_active"] = active
+				meta["dual_stage_meta"] = {
+					"stress": dict(stage_meta.get("stress", {})),
+					"rest": dict(stage_meta.get("rest", {})),
+				}
+				self._cine_crudo_cut_limits_meta = meta
+			else:
+				out_png, meta = self._write_cine_crudo_limits_qc(result, z0, z1, thickness, active_marker=active_marker)
+				self._cine_crudo_cut_limits_meta = dict(meta)
+				out_pix = QPixmap(out_png)
 			self.cine_crudo_preview_mode = "cut_limits"
 			# Al entrar a la pantalla de markers (Base/Ápex) la mostramos a zoom 40%,
 			# para ver el volumen completo y colocar las líneas sin paneo. No pisa un
@@ -14334,7 +14611,7 @@ class MainWindow(QMainWindow):
 			self._last_cine_crudo_preview_mode = "cut_limits"
 			for tab_name in ("comparacion_ejes", "cine_crudo"):
 				if tab_name in self.preview_labels:
-					pix = QPixmap(out_png)
+					pix = QPixmap(out_pix)
 					self.preview_pixmaps[tab_name] = pix
 					self.preview_base_sizes[tab_name] = pix.size()
 					self.preview_labels[tab_name].setToolTip(
@@ -14352,21 +14629,16 @@ class MainWindow(QMainWindow):
 			self._cine_crudo_cut_limits_meta = None
 			self._log(f"[WARN] Preview límites falló: {exc}")
 
-	def _cine_crudo_cut_limits_event_to_slice(self, event, source_label=None):
-		"""Mapea click/drag en preview de límites a índice de slice (k).
+	def _cine_crudo_limits_canvas_frac(self, event, source_label=None):
+		"""Posición del evento como FRACCIÓN (0..1) del pixmap mostrado.
 
-		Funciona sobre la imagen renderizada en `comparacion_ejes` / `cine_crudo`
-		durante `cine_crudo_preview_mode == 'cut_limits'`.
+		Independiente del zoom: el pixmap del preview puede estar re-escalado
+		(_apply_preview_zoom), así que solo las fracciones son estables.
 		"""
-		meta = self._cine_crudo_cut_limits_meta
-		if not meta:
-			return None
 		label = source_label
 		if label is None:
 			label = event.widget() if hasattr(event, "widget") else None
-		if label is None:
-			return None
-		if label not in self.preview_labels.values():
+		if label is None or label not in self.preview_labels.values():
 			return None
 		shown = label.pixmap() if hasattr(label, "pixmap") else None
 		if shown is None or shown.isNull():
@@ -14376,17 +14648,59 @@ class MainWindow(QMainWindow):
 		pw = int(shown.width())
 		ph = int(shown.height())
 		scale = min(lw / max(1, pw), lh / max(1, ph))
-		dw = pw * scale
-		dh = ph * scale
-		xo = (lw - dw) / 2.0
-		yo = (lh - dh) / 2.0
+		xo = (lw - pw * scale) / 2.0
+		yo = (lh - ph * scale) / 2.0
 		x_img = (float(event.pos().x()) - xo) / max(1e-6, scale)
 		y_img = (float(event.pos().y()) - yo) / max(1e-6, scale)
 		if not (0.0 <= x_img <= float(pw - 1) and 0.0 <= y_img <= float(ph - 1)):
 			return None
-		xn = x_img / max(1.0, float(pw - 1))
-		# yn_img: 0 arriba, 1 abajo (coords de imagen/QLabel)
-		yn_img = y_img / max(1.0, float(ph - 1))
+		return x_img / max(1.0, float(pw - 1)), y_img / max(1.0, float(ph - 1))
+
+	def _cine_crudo_limits_stage_at_event(self, event, source_label=None) -> str | None:
+		"""En vista dual de límites: etapa ('stress'/'rest') bajo el puntero, o None."""
+		meta = self._cine_crudo_cut_limits_meta
+		if not meta or not isinstance(meta.get("dual_regions"), dict):
+			return None
+		pos = self._cine_crudo_limits_canvas_frac(event, source_label=source_label)
+		if pos is None:
+			return None
+		fx, fy = pos
+		for st, r in meta["dual_regions"].items():
+			x0 = float(r.get("fx", 0.0)) - 0.01
+			y0 = float(r.get("fy_bar", r.get("fy", 0.0))) - 0.01  # incluye barra título
+			x1 = float(r.get("fx", 0.0)) + float(r.get("fw", 1.0)) + 0.01
+			y1 = float(r.get("fy", 0.0)) + float(r.get("fh", 1.0)) + 0.01
+			if x0 <= fx <= x1 and y0 <= fy <= y1:
+				return str(st)
+		return None
+
+	def _cine_crudo_cut_limits_event_to_slice(self, event, source_label=None):
+		"""Mapea click/drag en preview de límites a índice de slice (k).
+
+		Funciona sobre la imagen renderizada en `comparacion_ejes` / `cine_crudo`
+		durante `cine_crudo_preview_mode == 'cut_limits'`.
+		"""
+		meta = self._cine_crudo_cut_limits_meta
+		if not meta:
+			return None
+		# Fracción 0..1 sobre el pixmap mostrado (robusto al zoom).
+		frac = self._cine_crudo_limits_canvas_frac(event, source_label=source_label)
+		if frac is None:
+			return None
+		fx, fy = frac
+		# Vista dual (Esfuerzo arriba / Reposo abajo): remapear a la sub-imagen de
+		# la etapa ACTIVA usando fracciones del canvas; clicks fuera → None.
+		overlay = meta.get("dual_overlay") if isinstance(meta, dict) else None
+		if overlay and "fx" in overlay:
+			ox, oy = float(overlay.get("fx", 0.0)), float(overlay.get("fy", 0.0))
+			ow, oh = float(overlay.get("fw", 1.0)), float(overlay.get("fh", 1.0))
+			if not (ox <= fx <= ox + ow and oy <= fy <= oy + oh):
+				return None
+			xn = (fx - ox) / max(1e-6, ow)
+			yn_img = (fy - oy) / max(1e-6, oh)
+		else:
+			xn = fx
+			yn_img = fy
 		# yb_fig: 0 abajo, 1 arriba (coords normalizadas de Matplotlib Figure)
 		yb_fig = 1.0 - yn_img
 		top = meta.get("top_axes", {})
@@ -14433,10 +14747,10 @@ class MainWindow(QMainWindow):
 			return
 		if self.cine_crudo_recon_result is None:
 			return
+		stage = str(getattr(self, "_cine_crudo_recon_stage", "stress") or "stress")
 		nz = int(np.asarray(self.cine_crudo_recon_result.gated_volume).shape[1])
 		z = int(np.clip(z, 0, max(0, nz - 1)))
-		base_1 = int(self.cine_crudo_cut_base_spin.value()) if hasattr(self, "cine_crudo_cut_base_spin") else 1
-		apex_1 = int(self.cine_crudo_cut_apex_spin.value()) if hasattr(self, "cine_crudo_cut_apex_spin") else nz
+		base_1, apex_1 = self._cine_crudo_stage_limits_get(stage, nz)
 		if marker == "base":
 			base_1 = z + 1
 		else:
@@ -14447,11 +14761,12 @@ class MainWindow(QMainWindow):
 				apex_1 = base_1
 			else:
 				base_1 = apex_1
+		base_1, apex_1 = self._cine_crudo_stage_limits_set(stage, base_1, apex_1, nz)
 		if hasattr(self, "cine_crudo_cut_base_spin") and hasattr(self, "cine_crudo_cut_apex_spin"):
 			self.cine_crudo_cut_base_spin.blockSignals(True)
 			self.cine_crudo_cut_apex_spin.blockSignals(True)
-			self.cine_crudo_cut_base_spin.setValue(int(np.clip(base_1, 1, max(1, nz))))
-			self.cine_crudo_cut_apex_spin.setValue(int(np.clip(apex_1, 1, max(1, nz))))
+			self.cine_crudo_cut_base_spin.setValue(int(base_1))
+			self.cine_crudo_cut_apex_spin.setValue(int(apex_1))
 			self.cine_crudo_cut_base_spin.blockSignals(False)
 			self.cine_crudo_cut_apex_spin.blockSignals(False)
 		self._preview_cine_crudo_cut_limits(active_marker=marker)
@@ -14737,16 +15052,27 @@ class MainWindow(QMainWindow):
 				f"(eje largo + Base/Ápex + espesor); la otra etapa arrancará igual, pero editable."
 			)
 
-	def _open_cine_crudo_reorientation(self):
+	def _open_cine_crudo_reorientation(self, _force_stage: str | None = None):
 		"""Abre el diálogo interactivo de reorientación oblicua (Rec/Ref estilo Xeleris)."""
+		if _force_stage is None:
+			stages = self._cine_crudo_target_stages()
+			if len(stages) > 1:
+				return self._run_cine_crudo_stage_orchestrator(
+					"Reorientación",
+					lambda stage: self._open_cine_crudo_reorientation(_force_stage=stage),
+				)
+			_force_stage = stages[0]
+		if _force_stage:
+			self._cine_crudo_active_stage = str(_force_stage)
+			self._cine_crudo_recon_stage = str(_force_stage)
 		if self.cine_crudo_recon_result is None:
 			QMessageBox.information(self, "SINCRO", "Primero reconstruí el crudo con Recon raw.")
-			return
+			return False
 		try:
 			from ui.reorientation_dialog import CardiacReorientationDialog
 		except Exception as exc:
 			QMessageBox.warning(self, "SINCRO", f"No se pudo abrir la reorientación:\n{exc}")
-			return
+			return False
 		_undo_group = self.UNDO_ATTRS_REORIENT + self.UNDO_ATTRS_CUTS
 		_undo_before = None if getattr(self, "_undo_suspended", False) else self._snapshot_attrs(_undo_group, deep=False)
 		result = self.cine_crudo_recon_result
@@ -14796,7 +15122,7 @@ class MainWindow(QMainWindow):
 			),
 		)
 		if dlg.exec() != QDialog.DialogCode.Accepted or dlg.reoriented_gated is None:
-			return
+			return False
 		self.cine_crudo_reoriented_gated = np.asarray(dlg.reoriented_gated, dtype=np.float64)
 		self.cine_crudo_reoriented_ungated = (
 			np.asarray(dlg.reoriented_ungated, dtype=np.float64)
@@ -14823,6 +15149,7 @@ class MainWindow(QMainWindow):
 			self.cine_crudo_cut_apex_spin.setValue(apex_1)
 			for sp in (self.cine_crudo_cut_base_spin, self.cine_crudo_cut_apex_spin):
 				sp.blockSignals(False)
+		self._cine_crudo_stage_limits_set(getattr(self, "_cine_crudo_recon_stage", "stress"), base_1, apex_1, n)
 		if hasattr(self, "cine_crudo_cut_thickness_spin"):
 			self.cine_crudo_cut_thickness_spin.setEnabled(True)
 			self.cine_crudo_cut_thickness_spin.setValue(int(getattr(dlg, "thickness", 1)))
@@ -14868,12 +15195,24 @@ class MainWindow(QMainWindow):
 				if "Editor" in action.text():
 					action.setEnabled(True)
 					break
+		return True
 
-	def _generate_cine_crudo_cardiac_cuts(self):
+	def _generate_cine_crudo_cardiac_cuts(self, _force_stage: str | None = None):
 		"""Genera los cortes cardíacos desde el volumen reconstruido; SA alimenta fase/FEVI."""
+		if _force_stage is None:
+			stages = self._cine_crudo_target_stages()
+			if len(stages) > 1:
+				return self._run_cine_crudo_stage_orchestrator(
+					"Generar cortes",
+					lambda stage: self._generate_cine_crudo_cardiac_cuts(_force_stage=stage),
+				)
+			_force_stage = stages[0]
+		if _force_stage:
+			self._cine_crudo_active_stage = str(_force_stage)
+			self._cine_crudo_recon_stage = str(_force_stage)
 		if self.cine_crudo_recon_result is None:
 			QMessageBox.information(self, "SINCRO", "Primero reconstruí el crudo con Recon raw.")
-			return
+			return False
 		_undo_before = None if getattr(self, "_undo_suspended", False) else self._snapshot_attrs(self.UNDO_ATTRS_CUTS)
 		try:
 			result = self.cine_crudo_recon_result
@@ -14928,7 +15267,7 @@ class MainWindow(QMainWindow):
 				self._log("Motion-frozen: no hay volumen MF (¿checkbox activado al reconstruir?)")
 			if sa_cube.shape[1] < 2:
 				QMessageBox.information(self, "SINCRO", "Los límites deben dejar al menos 2 cortes SA.")
-				return
+				return False
 			# Pasajero de fase (FBP): mismo recorte base→ápex y mismos cortes SA que
 			# el visible. Se usa como base del análisis de FASE (ver paso 4). None si
 			# no hay pasajero (NÍTIDA off o recon sin RR).
@@ -15055,9 +15394,11 @@ class MainWindow(QMainWindow):
 			self._set_progress(100, "Cortes SA/HLA/VLA generados")
 			self._commit_undo("Generar cortes", self.UNDO_ATTRS_CUTS, _undo_before)
 			self._mark_step_done("cuts", z0, z1, thickness)
+			return True
 		except Exception as exc:
 			self._log(f"[ERROR] Generar cortes falló: {exc}")
 			QMessageBox.warning(self, "SINCRO", f"No se pudieron generar los cortes:\n{exc}")
+			return False
 
 	def _montage_cmap_lut(self, name):
 		"""LUT uint8 (256,3) del colormap (incluye los .col registrados)."""
@@ -16577,6 +16918,16 @@ class MainWindow(QMainWindow):
 		self._invalidate_output_cache()
 		self._log("Procesando sincronía/FEVI desde los cortes SA generados en cine_crudo.")
 		self.process_current()
+		# Plan C Fase 3: si la etapa opuesta ya tiene cortes SA en memoria,
+		# levantar comparación procesada sin depender de un DICOM reconstruido en disco.
+		primary_stage = "rest" if getattr(self, "_cine_crudo_recon_stage", "stress") == "rest" else "stress"
+		compare_stage = "stress" if primary_stage == "rest" else "rest"
+		if self._dual_session().stage(compare_stage).cut_study is not None:
+			try:
+				if self._load_compare_bundle_from_stage_memory(compare_stage):
+					self._log("Comparación stress/rest activada automáticamente desde memoria de etapas.")
+			except Exception as exc:
+				self._log(f"[WARN] No se pudo cargar comparación dual desde memoria: {exc}")
 
 	def _show_cine_crudo_shift_curves(self):
 		"""Muestra curvas de shifts X/Y vs frame (estilo Xeleris) para depurar la corrección."""
@@ -17058,8 +17409,34 @@ class MainWindow(QMainWindow):
 			return
 		if self.cine_crudo_preview_mode == "cut_limits":
 			try:
+				# Vista dual: click sobre la etapa NO activa la selecciona (recuadro
+				# rojo, como amyloidosis planar) sin editar markers en ese click.
+				meta = self._cine_crudo_cut_limits_meta or {}
+				clicked_stage = self._cine_crudo_limits_stage_at_event(event, source_label=source_label)
+				if clicked_stage is not None and clicked_stage != str(meta.get("dual_active", "")):
+					self._cine_crudo_drag_marker = None
+					self._cine_crudo_recon_stage = clicked_stage
+					self._set_active_cine_crudo_stage(clicked_stage, refresh_view=False)
+					self._preview_cine_crudo_cut_limits()
+					stage_txt = "Esfuerzo" if clicked_stage == "stress" else "Reposo"
+					self.statusBar().showMessage(f"Etapa activa: {stage_txt} — los markers Base/Ápex editan esta imagen", 5000)
+					event.accept()
+					return
+				z = self._cine_crudo_cut_limits_event_to_slice(event, source_label=source_label)
 				mk = self._cine_crudo_marker_at_limits_event(event, source_label=source_label)
+				# UX robusta: si el click cae en zona válida del panel activo pero no
+				# "tocó" exactamente la línea, enganchar el marcador más cercano.
+				if mk is None and z is not None:
+					try:
+						z0 = int(meta.get("z0", 0))
+						z1 = int(meta.get("z1", 0))
+						mk = "base" if abs(int(z) - z0) <= abs(int(z) - z1) else "apex"
+					except Exception:
+						mk = None
 				self._cine_crudo_drag_marker = mk
+				if mk in {"base", "apex"} and z is not None:
+					# Reposiciona en el click y deja arrastre continuo en move.
+					self._update_cine_crudo_cut_spins_from_drag(mk, int(z))
 				preview = source_label
 				if preview is None:
 					preview = event.widget() if hasattr(event, "widget") else None
@@ -17657,7 +18034,42 @@ class MainWindow(QMainWindow):
 			self.process_current()
 			return
 
+		def _stage_from_metadata(path_text: str) -> str | None:
+			"""Lee metadata DICOM liviana (sin pixel data) para inferir stress/rest."""
+			try:
+				import pydicom
+				ds = pydicom.dcmread(path_text, stop_before_pixels=True, force=True)
+				parts = []
+				for tag in ("SeriesDescription", "StudyDescription", "ProtocolName"):
+					val = getattr(ds, tag, None)
+					if val:
+						parts.append(str(val))
+				it = getattr(ds, "ImageType", None)
+				if it:
+					parts.append(" ".join(str(x) for x in it))
+				text = " ".join(parts).lower()
+				if not text:
+					return None
+				stress_kw = ("stress", "esfuerzo", "ejercicio", "exercise", "dipirid", "dipyrid", "adenos", "dobutam", "regaden", "persantin")
+				rest_kw = ("rest", "reposo", "basal", "resting")
+				has_stress = any(k in text for k in stress_kw)
+				has_rest = any(k in text for k in rest_kw)
+				if has_stress and not has_rest:
+					return "stress"
+				if has_rest and not has_stress:
+					return "rest"
+			except Exception:
+				pass
+			return None
+
 		def _score_stress(path_text: str) -> int:
+			# Prioridad 1: metadata DICOM (SeriesDescription/ProtocolName/ImageType).
+			meta_stage = _stage_from_metadata(path_text)
+			if meta_stage == "stress":
+				return 10
+			if meta_stage == "rest":
+				return -10
+			# Fallback: nombre de archivo.
 			u = os.path.basename(path_text).upper()
 			score = 0
 			if "STRESS" in u:
@@ -17666,6 +18078,14 @@ class MainWindow(QMainWindow):
 				score -= 1
 			return score
 
+		meta_1 = _stage_from_metadata(valid_paths[0])
+		meta_2 = _stage_from_metadata(valid_paths[1])
+		if meta_1 or meta_2:
+			self._log(
+				f"Etapas por metadata DICOM: {os.path.basename(valid_paths[0])} → {meta_1 or 'indeterminada'} | "
+				f"{os.path.basename(valid_paths[1])} → {meta_2 or 'indeterminada'}. "
+				"Esfuerzo se carga como primario (arriba)."
+			)
 		primary_path = max(valid_paths, key=_score_stress)
 		compare_path = valid_paths[0] if valid_paths[1] == primary_path else valid_paths[1]
 		self.file_edit.setText(primary_path)
@@ -17702,6 +18122,9 @@ class MainWindow(QMainWindow):
 			self.dual_mode_active = True
 			self._refresh_cine_source_selector()
 			self._apply_cine_source("primary", preserve_position=True)
+			# Con dos etapas crudas cargadas, arrancar con el selector en "Ambas":
+			# las herramientas (corrección/recon/reorient/cortes) procesan las dos.
+			self._set_active_cine_crudo_stage("both", refresh_view=False)
 			# Al cargar la segunda etapa cruda, refrescar de inmediato la pestaña
 			# superior para que muestre Stress/Rest apilados.
 			self._refresh_cine_crudo_view()
@@ -17720,7 +18143,12 @@ class MainWindow(QMainWindow):
 
 	def _process_secondary_bundle(self, path: str, preloaded_study=None) -> dict:
 		comp_study = preloaded_study if preloaded_study is not None else dicom_loader.load(path, verbose=False)
-		comp_axis = self._load_axis_companions(path)
+		comp_axis = {}
+		if path:
+			try:
+				comp_axis = self._load_axis_companions(path)
+			except Exception:
+				comp_axis = {}
 		comp_cube_corrected, _ = self._apply_gate_dropout_correction(comp_study.cube, "comparación")
 		comp_cube_corrected, comp_intestinal_info = self._apply_intestinal_subtraction_to_cube(
 			comp_cube_corrected, self.cine_compare
@@ -17794,6 +18222,70 @@ class MainWindow(QMainWindow):
 			"ef": comp_ef,
 			"manual_rois_text": self.compare_manual_rois_text,
 		}
+
+	def _load_compare_bundle_from_stage_memory(self, stage: str) -> bool:
+		"""Carga comparación procesada desde una etapa dual ya preparada en memoria."""
+		stage_key = "rest" if str(stage) == "rest" else "stress"
+		stage_state = self._dual_session().stage(stage_key)
+		mem_study = stage_state.cut_study
+		if mem_study is None or self.study is None or self.metrics is None:
+			return False
+		if mem_study is self.study:
+			return False
+		try:
+			n_g = int(np.asarray(mem_study.cube).shape[0])
+			if n_g < 3:
+				self._log(f"[DUAL] Comparación desde memoria omitida: etapa {stage_key} sin gating suficiente (<3).")
+				return False
+		except Exception:
+			pass
+
+		stage_label = "Reposo" if stage_key == "rest" else "Esfuerzo"
+		pseudo_path = str(stage_state.source_path or stage_state.cut_source_label or f"{stage_key}_memory")
+		self._set_progress(78, f"Procesando comparación desde {stage_label} (memoria)...")
+		bundle = self._process_secondary_bundle(pseudo_path, preloaded_study=mem_study)
+		bundle["path"] = str(stage_state.source_path or "")
+		bundle["label"] = str(stage_state.label or stage_label)
+
+		self.compare_bundle = bundle
+		self.compare_metrics = bundle["metrics"]
+		self.compare_ef = bundle["ef"]
+		self.compare_label = bundle["label"]
+		self.compare_raw_study = None
+		self.compare_raw_path = str(stage_state.source_path or "")
+		self._refresh_cine_source_selector()
+		self._apply_cine_source("primary", preserve_position=True)
+
+		left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
+		right_label = self.compare_label or "Comparación"
+		if bool(self.realtime_deferred_render_check.isChecked()):
+			prev_fast = bool(self.compare_interactive_fast_mode)
+			self.compare_interactive_fast_mode = True
+			try:
+				self._write_compare_stress_rest()
+			finally:
+				self.compare_interactive_fast_mode = prev_fast
+			self.dual_mode_active = True
+			self._load_previews_selected(self._default_preview_tabs())
+			self._refresh_summary()
+			self._select_tab_by_title("histograma")
+			self._schedule_deferred_hq_render(
+				"compare",
+				delay_ms=320,
+				compare_bundle=bundle,
+				left_label=left_label,
+				right_label=right_label,
+			)
+			self._set_progress(92, f"Comparación rápida lista ({stage_label} memoria); HQ diferido...")
+			self.statusBar().showMessage(f"Comparación rápida cargada desde {stage_label} (memoria)")
+			self._log(f"[DUAL] Comparación rápida cargada desde {stage_label} en memoria; HQ diferido en progreso.")
+			return True
+
+		self._set_progress(82, f"Generando comparación HQ desde {stage_label} (memoria)...")
+		self._run_compare_hq_pipeline(bundle, left_label=left_label, right_label=right_label, deferred=False)
+		self._set_progress(100, "Comparación lista")
+		self._log(f"[DUAL] Comparación HQ cargada desde {stage_label} en memoria.")
+		return True
 
 	def _write_outputs_for_bundle(self, bundle: dict, target_dir: str, target_tabs: set[str] | None = None):
 		os.makedirs(target_dir, exist_ok=True)
