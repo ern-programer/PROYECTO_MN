@@ -2988,24 +2988,34 @@ class MainWindow(QMainWindow):
 		return panel
 
 	def _build_curves_panel(self) -> QWidget:
-		"""Zona derecha de la banda inferior (mockup interfaz02): las dos curvas
-		ya renderizadas, apiladas — histograma clínico de fase arriba y curva
-		volumen/derivada abajo. Solo-lectura: reflejan lo calculado por el motor."""
+		"""Zona de curvas clínicas: 1 columna en simple, 2×2 en dual.
+
+		Fila superior: histogramas de fase/asynchrony. Fila inferior: FEVI.
+		Las columnas son Esfuerzo y Reposo cuando ambas etapas están disponibles.
+		"""
 		panel = QWidget()
 		panel.setMinimumWidth(220)
-		lay = QVBoxLayout(panel)
+		lay = QGridLayout(panel)
 		lay.setContentsMargins(3, 3, 3, 3)
 		lay.setSpacing(3)
-		self.curve_hist_view = QLabel("Histograma de fase: procesá un estudio.")
-		self.curve_hist_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-		self.curve_hist_view.setMinimumHeight(110)
-		self.curve_hist_view.setStyleSheet("color:#5b6470; background:#0b1220; border:1px solid #26324a;")
-		self.curve_fevi_view = QLabel("Curva volumen/derivada: modo avanzado.")
-		self.curve_fevi_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-		self.curve_fevi_view.setMinimumHeight(110)
-		self.curve_fevi_view.setStyleSheet("color:#5b6470; background:#0b1220; border:1px solid #26324a;")
-		lay.addWidget(self.curve_hist_view, 1)
-		lay.addWidget(self.curve_fevi_view, 1)
+		def _curve_label(text: str) -> QLabel:
+			label = QLabel(text)
+			label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+			label.setMinimumHeight(110)
+			label.setStyleSheet("color:#5b6470; background:#0b1220; border:1px solid #26324a;")
+			return label
+		self.curve_hist_view = _curve_label("Histograma de fase: procesá un estudio.")
+		self.curve_hist_compare_view = _curve_label("Histograma Reposo: sin segunda etapa.")
+		self.curve_fevi_view = _curve_label("Curva volumen/derivada: modo avanzado.")
+		self.curve_fevi_compare_view = _curve_label("Curva FEVI Reposo: sin segunda etapa.")
+		lay.addWidget(self.curve_hist_view, 0, 0)
+		lay.addWidget(self.curve_hist_compare_view, 0, 1)
+		lay.addWidget(self.curve_fevi_view, 1, 0)
+		lay.addWidget(self.curve_fevi_compare_view, 1, 1)
+		lay.setColumnStretch(0, 1)
+		lay.setColumnStretch(1, 1)
+		lay.setRowStretch(0, 1)
+		lay.setRowStretch(1, 1)
 		self.curves_panel = panel
 		return panel
 
@@ -3028,6 +3038,20 @@ class MainWindow(QMainWindow):
 		target_w = max(240, label.width() - 4)
 		label.setText("")
 		label.setPixmap(pix.scaledToWidth(target_w, Qt.TransformationMode.SmoothTransformation))
+
+	def _load_curve_pixmap_from_path(self, label: QLabel, path: str, placeholder: str) -> None:
+		"""Carga una curva desde una ruta explícita (salida de la 2da etapa)."""
+		if not path or not os.path.isfile(path):
+			label.setPixmap(QPixmap())
+			label.setText(placeholder)
+			return
+		pix = QPixmap(path)
+		if pix.isNull():
+			label.setPixmap(QPixmap())
+			label.setText(placeholder)
+			return
+		label.setText("")
+		label.setPixmap(pix.scaledToWidth(max(200, label.width() - 4), Qt.TransformationMode.SmoothTransformation))
 
 	def _render_empty_curve(self, label: QLabel, xlabel: str, ylabel: str, filename: str) -> None:
 		"""Dibuja unos ejes X/Y vacíos (sin datos) en `label`, para no dejar
@@ -3096,7 +3120,7 @@ class MainWindow(QMainWindow):
 			style_name = "clinico"
 		return style_catalog[style_name]
 
-	def _render_fevi_curve_panel(self, label: QLabel, ef: dict | None) -> bool:
+	def _render_fevi_curve_panel(self, label: QLabel, ef: dict | None, output_filename: str = "curva_fevi_panel.png", title_suffix: str = "") -> bool:
 		"""Dibuja la curva volumen/gate (FEVI) autónoma para la banda inferior,
 		replicando el panel 'Time/Volume y derivada' (mismo estilo y colores que
 		Panel funcional gated). Devuelve True si pudo dibujar datos."""
@@ -3125,7 +3149,7 @@ class MainWindow(QMainWindow):
 			ax.axvline(es_gate, color=style["es"], linestyle="--", linewidth=1.2)
 			vol_max = float(np.nanmax(gate_volumes)) if np.isfinite(gate_volumes).any() else 1.0
 			ax.set_ylim(0.0, vol_max * 1.15)
-			ax.set_title("Time/Volume y derivada", color=style["fg"], fontsize=10, fontweight="bold")
+			ax.set_title(f"Time/Volume y derivada{title_suffix}", color=style["fg"], fontsize=10, fontweight="bold")
 			ax.set_xlabel("Gate", color=style["subtle"], fontsize=9)
 			ax.set_ylabel("Volumen (mL)", color=style["vol"], fontsize=9)
 			ax.tick_params(axis="x", colors=style["subtle"], labelsize=7)
@@ -3133,7 +3157,7 @@ class MainWindow(QMainWindow):
 			for spine in ax.spines.values():
 				spine.set_color(style["grid"])
 			ax.grid(True, color=style["grid"], alpha=0.45)
-			out = os.path.join(self.output_dir, "curva_fevi_panel.png")
+			out = os.path.join(self.output_dir, output_filename)
 			fig.tight_layout()
 			fig.savefig(out, dpi=140, facecolor=style["fig_bg"], bbox_inches="tight")
 			plt.close(fig)
@@ -3143,6 +3167,26 @@ class MainWindow(QMainWindow):
 			label.setPixmap(pix.scaledToWidth(target_w, Qt.TransformationMode.SmoothTransformation))
 			return True
 		except Exception:
+			return False
+
+	def _render_phase_histogram_panel(self, label: QLabel, phase_result, metrics: dict | None, output_filename: str, title: str) -> bool:
+		"""Render liviano de histograma para una etapa desde sus datos en memoria."""
+		if phase_result is None or not isinstance(metrics, dict):
+			return False
+		try:
+			from viz.histogram import build_phase_histogram, save_histogram
+			fig = build_phase_histogram(
+				np.asarray(phase_result.phases_deg, dtype=np.float64),
+				metrics=metrics, bins=72, title=title,
+			)
+			out = os.path.join(self.output_dir, output_filename)
+			save_histogram(fig, out, dpi=125)
+			import matplotlib.pyplot as plt
+			plt.close(fig)
+			self._load_curve_pixmap_from_path(label, out, "Histograma: sin datos.")
+			return True
+		except Exception as exc:
+			self._log(f"[WARN] Histograma de etapa no renderizado: {exc}")
 			return False
 
 	def _format_async_metrics_lines(self, metrics: dict, ef_pct=None, ef: dict | None = None) -> list[str]:
@@ -3176,17 +3220,34 @@ class MainWindow(QMainWindow):
 				lines.append(f"TVmáx: {ef.get('tvmax_text')}")
 		return lines
 
-	def _format_async_delta_lines(self, primary: dict, compare: dict) -> list[str]:
-		"""Delta de asincronía etapa 1 − etapa 2 (convención del módulo: primario − comparación)."""
-		try:
-			d_sd = float(primary.get("phase_sd", 0.0)) - float(compare.get("phase_sd", 0.0))
-			d_bw = float(primary.get("bandwidth", 0.0)) - float(compare.get("bandwidth", 0.0))
-		except (TypeError, ValueError, AttributeError):
+	def _format_async_delta_lines(self, primary: dict, compare: dict, primary_ef: dict | None = None, compare_ef: dict | None = None) -> list[str]:
+		"""Deltas clínicos Esfuerzo − Reposo para el resumen dual."""
+		if not isinstance(primary, dict) or not isinstance(compare, dict):
 			return []
-		return [
-			"<b>Δ (etapa 1 − etapa 2)</b>",
-			f"Δ SD: {d_sd:+.1f}°   Δ Ancho banda: {d_bw:+.1f}°",
+		def _delta(key: str, decimals: int = 1, suffix: str = "") -> str | None:
+			try:
+				a, b = float(primary.get(key)), float(compare.get(key))
+				if np.isfinite(a) and np.isfinite(b):
+					return f"Δ {key}: {a - b:+.{decimals}f}{suffix}"
+			except (TypeError, ValueError):
+				pass
+			return None
+		items = [
+			_delta("peak_phase", 1, "°"),
+			_delta("phase_sd", 1, "°"),
+			_delta("bandwidth", 1, "°"),
+			_delta("entropy_normalized_pct", 1, "%"),
 		]
+		try:
+			a = float((primary_ef or {}).get("ef_pct"))
+			b = float((compare_ef or {}).get("ef_pct"))
+			if np.isfinite(a) and np.isfinite(b):
+				items.append(f"Δ FEVI: {a - b:+.1f}%")
+		except (TypeError, ValueError):
+			pass
+		items = [item for item in items if item]
+		return ["<b>Δ Esfuerzo − Reposo</b>", *items] if items else []
+
 
 	def _format_processing_info_lines(self) -> list[str]:
 		"""Genera líneas compactas con TODOS los filtros, correcciones y parámetros aplicados."""
@@ -3224,81 +3285,12 @@ class MainWindow(QMainWindow):
 		motion = getattr(self, "cine_crudo_motion_result", None)
 		recon_from_raw = motion is not None
 
-		# --- Línea 1: Método de reconstrucción + NÍTIDA + post-filtro ---
-		recon_parts: list[str] = []
-		if not reconstructed_flag:
-			recon_parts.append("Proyecciones crudas (sin reconstruir)")
-		elif recon_from_raw:
-			if recon_method in ("OSEM", "MLEM"):
-				recon_parts.append(f"{recon_method} {n_iter}it/{n_sub}sub")
-			elif recon_method:
-				recon_parts.append(recon_method)
-			else:
-				recon_parts.append("FBP")
-		else:
-			recon_parts.append("Reconstruido (DICOM)")
-		if nitida:
-			recon_parts.append("NÍTIDA (RR)")
-		if post_on and post_fwhm > 0:
-			recon_parts.append(f"Post-filtro gaussiano {post_fwhm:.0f}mm")
-		parts.append("<b>Recon:</b> " + " · ".join(recon_parts))
+		# En "Resultados en vivo" se muestran solo datos clínicos accionables.
+		# Reconstrucción, filtros y correcciones permanecen disponibles en los
+		# controles/Log e informe técnico, pero no ocupan este resumen.
 
-		# --- Línea 2: Filtros de proyección (siempre mostrar) ---
-		def _fmt_filter(kind: str, cutoff: float, order: int) -> str:
-			if not kind or kind.lower() == "none":
-				return "sin filtro"
-			return f"{kind} cutoff={cutoff:.2f} orden={order}"
-
-		ung_lbl = _fmt_filter(ung_kind, ung_cut, ung_ord)
-		gat_lbl = _fmt_filter(gat_kind, gat_cut, gat_ord)
-		filter_line = f"UngGat: {ung_lbl} · Gated: {gat_lbl}"
-		if nitida:
-			filter_line += " [anulados por NÍTIDA]"
-		parts.append(f"<b>Filtros proyección:</b> {filter_line}")
-
-		# --- Línea 3: Correcciones ---
-		corr: list[str] = []
-		if self.gate_dropout_enabled():
-			corr.append("Dropout gate: ON")
-		sub_info = getattr(self, "intestinal_subtraction_info", None)
-		if sub_info and sub_info.get("applied"):
-			sub_method = str(sub_info.get("method") or "idw").upper()
-			corr.append(f"Sustracción intestinal: {sub_method}")
-		if motion:
-			meth = str(motion.get("method_auto_selected") or motion.get("method") or "manual")
-			meth_clean = meth.replace("_", " ").title()
-			max_sy = float(motion.get("max_shift_px", 0.0) or 0.0)
-			edited = " (manual)" if motion.get("manual_edited") else ""
-			corr.append(f"Motion: {meth_clean} (máx {max_sy:.1f} px){edited}")
-		if corr:
-			parts.append("<b>Correcciones:</b> " + " · ".join(corr))
-
-		# --- Línea 4: Análisis de fase / FEVI ---
-		seg_method = str(self.seg_method.currentText()) if hasattr(self, "seg_method") else ""
-		roi_src = self.roi_source() if hasattr(self, "roi_source") else ""
-		amp = float(self.phase_threshold_spin.value()) if hasattr(self, "phase_threshold_spin") else 0.40
-		harm = int(self.harmonics_spin.value()) if hasattr(self, "harmonics_spin") else 1
-		norm = bool(self.normalize_check.isChecked()) if hasattr(self, "normalize_check") else False
-		fevi_m = self.fevi_method() if hasattr(self, "fevi_method") else ""
-		seg_parts = [
-			f"Seg: {seg_method}",
-			f"ROI: {'irregular' if 'ectb' in roi_src.lower() else 'anillo'}",
-			f"Amp filter: {amp:.2f}",
-			f"Armónicos: {harm}",
-		]
-		if norm:
-			seg_parts.append("Norm ref: ON")
-		if fevi_m:
-			fevi_lbl = "ECTb" if "ectb" in fevi_m.lower() else fevi_m
-			seg_parts.append(f"FEVI: {fevi_lbl}")
-		parts.append("<b>Fase/FEVI:</b> " + " · ".join(seg_parts))
-
-		return parts
-		if fevi_m:
-			fevi_lbl = "ECTb" if "ectb" in fevi_m.lower() else fevi_m
-			seg_parts.append(f"FEVI: {fevi_lbl}")
-		parts.append("<b>Fase/FEVI:</b> " + " · ".join(seg_parts))
-
+		# Los parámetros técnicos de análisis se consultan en Configuración e
+		# informe técnico; no pertenecen al resumen clínico "en vivo".
 		return parts
 
 	def _refresh_readonly_results_panel(self) -> None:
@@ -3383,20 +3375,55 @@ class MainWindow(QMainWindow):
 				ef = self._estimate_lv_ef()
 			except Exception:
 				ef = None
-		# Bloque de pipeline aplicado (correcciones + filtros + recon).
-		proc_info = self._format_processing_info_lines()
-		proc_prefix = ("<span style='color:#6b7280;font-size:9pt;'>"
-					   + "<br>".join(proc_info)
-					   + "</span><br>") if proc_info else ""
 		metrics = getattr(self, "metrics", None)
 		if not metrics:
-			if proc_prefix:
-				self.main_metrics_readout.setText(proc_prefix + "<i>Sin resultados aún: procesá el estudio.</i>")
-			else:
-				self.main_metrics_readout.setText("Sin resultados: procesá un estudio.")
+			self.main_metrics_readout.setText("Sin resultados: procesá el estudio.")
 		else:
 			ef_pct = ef.get("ef_pct") if isinstance(ef, dict) else None
 			compare_metrics = getattr(self, "compare_metrics", None)
+			compare_ef = getattr(self, "compare_ef", None)
+			# Determinar por datos qué etapa es la primaria visual y cuál es la
+			# opuesta. No usar solo _cine_crudo_recon_stage: tras el orquestador
+			# dual puede quedar apuntando a la última etapa aunque self.study sea la
+			# primera, y eso terminaba consultando la misma etapa dos veces.
+			other = None
+			try:
+				sess = self._dual_session()
+				if self.study is sess.stage("stress").cut_study:
+					other = sess.stage("rest")
+				elif self.study is sess.stage("rest").cut_study:
+					other = sess.stage("stress")
+				else:
+					active_stage = str(getattr(self, "_cine_crudo_recon_stage", "stress") or "stress")
+					other = sess.stage("rest" if active_stage == "stress" else "stress")
+			except Exception:
+				other = None
+			# La UI no debe depender exclusivamente de compare_bundle: en el flujo
+			# dual los resultados de ambas etapas viven canónicamente en DualSession.
+			# Si el render/HQ diferido todavía no instaló el bundle, mostrar igual la
+			# segunda etapa apenas estén sus métricas disponibles.
+			try:
+				# La etapa primaria real es la que alimenta self.study (stress en el
+				# flujo dual normal); buscar SIEMPRE su complementaria, sin depender
+				# del _recon_stage que puede quedar apuntando al último paso (reposo).
+				dual_rest = self._dual_session().stage("rest")
+				dual_stress = self._dual_session().stage("stress")
+				if dual_rest.cut_study is self.study:
+					dual_other = dual_stress
+				else:
+					dual_other = dual_rest
+				if compare_metrics is None and dual_other.metrics is not None:
+					compare_metrics = dual_other.metrics
+					compare_ef = dual_other.ef
+			except Exception:
+				pass
+			if compare_metrics is None:
+				try:
+					if other is not None and other.metrics is not None:
+						compare_metrics = other.metrics
+						compare_ef = other.ef
+				except Exception:
+					pass
 			if compare_metrics is not None:
 				# Dos etapas apiladas como la pantalla Asincronía VI del ECTb (b_07):
 				# etapa procesada arriba, etapa de comparación abajo, + delta.
@@ -3411,22 +3438,28 @@ class MainWindow(QMainWindow):
 					if second_phase in ("Reposo", "Esfuerzo")
 					else str(self.compare_label or "Etapa 2").strip()
 				)
+				# Dos columnas equivalentes: lectura simultánea Esfuerzo | Reposo.
+				# Mantiene los mismos campos por etapa para comparar sin buscar entre
+				# bloques apilados de texto.
+				left_lines = "<br>".join(self._format_async_metrics_lines(metrics, ef_pct, ef))
+				right_lines = "<br>".join(self._format_async_metrics_lines(
+					compare_metrics,
+					compare_ef.get("ef_pct") if isinstance(compare_ef, dict) else None,
+					compare_ef,
+				))
 				text = (
-					proc_prefix
-					+ f"<b>{primary_label}</b><br>"
-					+ "<br>".join(self._format_async_metrics_lines(metrics, ef_pct, ef))
-					+ "<br><br>"
-					+ f"<b>{compare_label}</b><br>"
-					+ "<br>".join(self._format_async_metrics_lines(compare_metrics, None))
+					"<table style='border-spacing:0; width:100%;'>"
+					f"<tr><td style='vertical-align:top; padding-right:14px;'><b>{primary_label}</b><br>{left_lines}</td>"
+					f"<td style='vertical-align:top;'><b>{compare_label}</b><br>{right_lines}</td></tr>"
+					"</table>"
 				)
-				delta = self._format_async_delta_lines(metrics, compare_metrics)
+				delta = self._format_async_delta_lines(metrics, compare_metrics, ef, compare_ef)
 				if delta:
 					text += "<br><br>" + "<br>".join(delta)
 				self.main_metrics_readout.setText(text)
 			else:
 				self.main_metrics_readout.setText(
-					proc_prefix
-					+ "<br>".join(self._format_async_metrics_lines(metrics, ef_pct, ef))
+					"<br>".join(self._format_async_metrics_lines(metrics, ef_pct, ef))
 				)
 			# Ayuda consultable (piloto): explicación de PFR/TVmáx al pasar el mouse.
 			if isinstance(ef, dict) and ef.get("pfr_text"):
@@ -3439,10 +3472,67 @@ class MainWindow(QMainWindow):
 		# Asincronía (histograma de fase): solo si hay resultado actual; si no,
 		# ejes vacíos para no mostrar el último gráfico que quedó.
 		hist_path = os.path.join(self.output_dir, "histograma.png")
-		if getattr(self, "phase_result", None) is not None and os.path.isfile(hist_path):
-			self._load_curve_pixmap(self.curve_hist_view, "histograma.png", "Histograma de fase: procesá un estudio.")
+		# El histograma de output puede ser un QC combinado crudo/clínico. Para la
+		# grilla dual, renderizar SIEMPRE cada etapa desde sus fases clínicas para
+		# no mezclar Esfuerzo+Reposo en la celda izquierda.
+		if getattr(self, "phase_result", None) is not None and isinstance(metrics, dict):
+			self._render_phase_histogram_panel(
+				self.curve_hist_view, self.phase_result, metrics,
+				"histograma_esfuerzo_panel.png", "Histograma de fase · Esfuerzo",
+			)
 		else:
 			self._render_empty_curve(self.curve_hist_view, "Fase (°)", "Frecuencia", "_empty_hist.png")
+		# Segunda columna: resultados/curvas de la etapa opuesta. Usar primero el
+		# bundle ya renderizado; fallback a DualSession para no esperar a HQ.
+		comp_bundle = getattr(self, "compare_bundle", None)
+		comp_metrics_curve = getattr(self, "compare_metrics", None)
+		comp_ef_curve = getattr(self, "compare_ef", None)
+		try:
+			dual_rest = self._dual_session().stage("rest")
+			dual_stress = self._dual_session().stage("stress")
+			dual_other_curve = dual_stress if dual_rest.cut_study is self.study else dual_rest
+			if comp_metrics_curve is None and dual_other_curve.metrics is not None:
+				comp_metrics_curve = dual_other_curve.metrics
+				comp_ef_curve = dual_other_curve.ef
+				comp_phase_curve_fallback = dual_other_curve.phase
+			else:
+				comp_phase_curve_fallback = None
+		except Exception:
+			comp_phase_curve_fallback = None
+		if comp_metrics_curve is None:
+			try:
+				active_stage = str(getattr(self, "_cine_crudo_recon_stage", "stress") or "stress")
+				other = self._dual_session().stage("rest" if active_stage == "stress" else "stress")
+				comp_metrics_curve = other.metrics
+				comp_ef_curve = other.ef
+			except Exception:
+				pass
+		if comp_metrics_curve is not None:
+			# El compare_output puede llegar vacío hasta que termine HQ. Para que
+			# nunca haya panel oscuro, renderizar el histograma de Reposo desde la
+			# fase/métricas en memoria (misma fuente que la curva FEVI).
+			comp_phase_curve = comp_bundle.get("phase_result") if isinstance(comp_bundle, dict) else None
+			if comp_phase_curve is None:
+				try:
+					comp_phase_curve = comp_phase_curve_fallback
+					if comp_phase_curve is None:
+						active_stage = str(getattr(self, "_cine_crudo_recon_stage", "stress") or "stress")
+						comp_phase_curve = self._dual_session().stage("rest" if active_stage == "stress" else "stress").phase
+				except Exception:
+					comp_phase_curve = None
+			if not self._render_phase_histogram_panel(
+				self.curve_hist_compare_view, comp_phase_curve, comp_metrics_curve,
+				"histograma_reposo_panel.png", "Histograma de fase · Reposo",
+			):
+				self._render_empty_curve(self.curve_hist_compare_view, "Fase (°)", "Frecuencia", "_empty_hist_reposo.png")
+			if not self._render_fevi_curve_panel(
+				self.curve_fevi_compare_view, comp_ef_curve,
+				output_filename="curva_fevi_reposo_panel.png", title_suffix=" · Reposo",
+			):
+				self._render_empty_curve(self.curve_fevi_compare_view, "Gate", "Volumen (mL)", "_empty_fevi_reposo.png")
+		else:
+			self._render_empty_curve(self.curve_hist_compare_view, "Fase (°)", "Frecuencia", "_empty_hist_reposo.png")
+			self._render_empty_curve(self.curve_fevi_compare_view, "Gate", "Volumen (mL)", "_empty_fevi_reposo.png")
 		# FEVI (volumen/gate): curva autónoma desde el EF ya calculado (funciona en
 		# básico y avanzado, sin depender del pipeline pesado). Si no hay datos
 		# suficientes, ejes vacíos.
@@ -9209,6 +9299,10 @@ class MainWindow(QMainWindow):
 			path_override=str(getattr(self, "_output_study_path_override", "") or self.file_edit.text().strip()),
 			study_obj=self.study,
 		)
+		# El resumen técnico termina más abajo, pero el box "Resultados en vivo"
+		# y sus curvas deben refrescarse EN ESTA llamada. Sin esto, al completar
+		# reposo desde memoria quedaban mostrando el render previo de esfuerzo.
+		self._refresh_readonly_results_panel()
 
 		clinical = []
 		clinical.append(f"Visualizando: {ctx['phase']}")
@@ -17355,7 +17449,19 @@ class MainWindow(QMainWindow):
 				if primary_stage == "stress" and compare_stage == "rest" and not str(self.compare_manual_rois_text or "").strip():
 					self._copy_stress_rois_to_rest()
 				if self._load_compare_bundle_from_stage_memory(compare_stage):
-					self._log("[DUAL] Fase + FEVI de Reposo calculadas automáticamente desde memoria; comparación stress/rest activa.")
+					other_state = self._dual_session().stage(compare_stage)
+					self._log(
+						f"[DUAL] Fase + FEVI de {('Reposo' if compare_stage == 'rest' else 'Esfuerzo')} "
+						f"calculadas automáticamente desde memoria; comparación stress/rest activa "
+						f"(fase={'OK' if other_state.phase is not None else 'N/D'}, "
+						f"métricas={'OK' if other_state.metrics is not None else 'N/D'}, "
+						f"FEVI={'OK' if other_state.ef is not None else 'N/D'})."
+					)
+				else:
+					self._log(f"[WARN] [DUAL] No se pudo procesar {compare_stage} desde memoria; no habrá segunda columna clínica.")
+				# Refrescar DESPUÉS de poblar compare_bundle/DualSession, no solo al
+				# terminar process_current(), que corrió antes de esta segunda etapa.
+				self._refresh_summary()
 			except Exception as exc:
 				self._log(f"[WARN] No se pudo cargar comparación dual desde memoria: {exc}")
 
@@ -18719,6 +18825,27 @@ class MainWindow(QMainWindow):
 		bundle = self._process_secondary_bundle(pseudo_path, preloaded_study=mem_study)
 		bundle["path"] = str(stage_state.source_path or "")
 		bundle["label"] = str(stage_state.label or stage_label)
+		# Persistir SIEMPRE el análisis secundario en el estado canónico de la
+		# etapa. Antes solo vivía en compare_bundle; si el render diferido lo
+		# reemplazaba/limpiaba, Resultados en vivo y la grilla 2×2 quedaban vacíos.
+		stage_state.seg = bundle["seg"]
+		stage_state.phase = bundle["phase_result"]
+		stage_state.metrics = bundle["metrics"]
+		stage_state.metrics_raw = bundle.get("metrics_raw")
+		stage_state.phase_by_seg = bundle["phase_by_seg"]
+		stage_state.territory = bundle["territory"]
+		stage_state.ef = bundle["ef"]
+		# Persistir el análisis secundario en el StageState canónico ANTES de
+		# instalar/renderizar compare_bundle. El bundle puede regenerarse o quedar
+		# temporalmente ausente durante el render HQ, pero Resultados en vivo y la
+		# grilla 2×2 siempre deben conservar Reposo.
+		stage_state.seg = bundle.get("seg")
+		stage_state.phase = bundle.get("phase_result")
+		stage_state.metrics = bundle.get("metrics")
+		stage_state.metrics_raw = bundle.get("metrics_raw")
+		stage_state.phase_by_seg = bundle.get("phase_by_seg")
+		stage_state.territory = bundle.get("territory")
+		stage_state.ef = bundle.get("ef")
 
 		self.compare_bundle = bundle
 		self.compare_metrics = bundle["metrics"]
