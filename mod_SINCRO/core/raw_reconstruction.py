@@ -45,6 +45,9 @@ class RawReconConfig:
     # Calcado de Xeleris ECToolbox (FBP) para este protocolo cardiaco:
     # ungated Butterworth cutoff 0.52 / orden 5; gated cutoff 0.40 / orden 10
     # (cutoff en fraccion de Nyquist).
+    # NOTA: con metodo iterativo (OSEM/MLEM) el Butterworth se aplica
+    # POST-reconstruccion como filtro 3D radial (pre-filtrar el sinograma
+    # rompe el modelo Poisson y genera ruido correlacionado).
     ungated_filter: ProjectionFilterConfig = field(default_factory=lambda: ProjectionFilterConfig("butterworth", 0.52, 5))
     gated_filter: ProjectionFilterConfig = field(default_factory=lambda: ProjectionFilterConfig("butterworth", 0.40, 10))
     iterative_iterations: int = 4
@@ -548,8 +551,17 @@ def reconstruct_projection_volume(
     proj = np.asarray(projections, dtype=np.float64)
     if proj.ndim != 3:
         raise ValueError(f"projections debe ser 3D (angles,H,W); recibio {proj.shape}")
+    # En iterativo el Butterworth NO se pre-aplica al sinograma (rompe el modelo
+    # Poisson de OSEM/MLEM y genera ruido correlacionado): se aplica POST-recon
+    # como filtro 3D radial. Los demás kinds (lowpass/wiener) conservan el
+    # comportamiento pre-filtro histórico.
+    post_butterworth: tuple[float, int] | None = None
     if projection_filter is not None:
-        proj = filter_projections(proj, projection_filter)
+        _pf_kind = _normalize_filter_kind(projection_filter.kind)
+        if _pf_kind == "butterworth":
+            post_butterworth = (float(projection_filter.cutoff), int(projection_filter.order))
+        elif _pf_kind != "none":
+            proj = filter_projections(proj, projection_filter)
     proj = np.clip(proj, 0.0, None)
     n_angles, height, width = proj.shape
     theta = np.linspace(0.0, 360.0, n_angles, endpoint=False) if angles_deg is None else np.asarray(angles_deg, dtype=np.float64)
@@ -569,7 +581,7 @@ def reconstruct_projection_volume(
     # resultado geométrico que el bucle por corte, sin overhead Python por slice.
     # Soporta AC (mu_map); quedan fuera PSF (RR) y priors MAP.
     if psf is None and not use_map:
-        return _iterative_reconstruct_volume_fast(
+        out_fast = _iterative_reconstruct_volume_fast(
             proj,
             theta,
             iterations=int(iterations),
@@ -580,6 +592,7 @@ def reconstruct_projection_volume(
             mu_scale=float(attenuation_mu_scale),
             px_cm=float(attenuation_pixel_size_cm),
         )
+        return _apply_post_butterworth(out_fast, post_butterworth, slice_range)
     # La imagen de "sensibilidad" (retroproyección de un sinograma de unos) NO
     # depende de los datos medidos ni de la iteración actual: solo depende de
     # la geometría (ángulos del subset + tamaño de detector/salida), que es
@@ -618,6 +631,25 @@ def reconstruct_projection_volume(
         )
         if progress is not None and n_band:
             progress(done / n_band)
+    return _apply_post_butterworth(out, post_butterworth, slice_range)
+
+
+def _apply_post_butterworth(
+    volume: np.ndarray,
+    post_butterworth: tuple[float, int] | None,
+    slice_range: tuple[int, int] | None,
+) -> np.ndarray:
+    """Post-filtro Butterworth 3D para OSEM/MLEM, respetando la feta axial."""
+    if post_butterworth is None:
+        return volume
+    cutoff, order = post_butterworth
+    if slice_range is None:
+        return _butterworth_3d(volume, cutoff, order)
+    # Filtrar solo la banda reconstruida: fuera de ella el volumen es cero y
+    # el FFT 3D sobre el volumen completo metería ringing en los bordes.
+    z0, z1 = _resolve_slice_range(slice_range, int(volume.shape[0]))
+    out = np.asarray(volume, dtype=np.float64).copy()
+    out[z0:z1 + 1] = _butterworth_3d(out[z0:z1 + 1], cutoff, order)
     return out
 
 
@@ -1120,6 +1152,17 @@ def reconstruct_raw_gated_pipeline(
     gated_method = str(cfg.gated_method or method).strip().lower()
     gated_subsets = int(cfg.osem_subsets) if gated_method == "osem" else 1
     gated_rr_psf = cfg.psf_model if (rr_gat and gated_method in {"osem", "mlem"}) else None
+
+    if method in {"osem", "mlem"} and _normalize_filter_kind(cfg.ungated_filter.kind) == "butterworth":
+        notes.append(
+            f"UngGat {method.upper()}: Butterworth {cfg.ungated_filter.cutoff:.2f}/{cfg.ungated_filter.order} "
+            "aplicado POST-reconstrucción (3D radial), no como pre-filtro del sinograma."
+        )
+    if gated_method in {"osem", "mlem"} and _normalize_filter_kind(cfg.gated_filter.kind) == "butterworth":
+        notes.append(
+            f"Gated {gated_method.upper()}: Butterworth {cfg.gated_filter.cutoff:.2f}/{cfg.gated_filter.order} "
+            "aplicado POST-reconstrucción (3D radial), no como pre-filtro del sinograma."
+        )
 
     ac_requested = bool(getattr(cfg, "attenuation_correction", False))
     ac_mu_map = None

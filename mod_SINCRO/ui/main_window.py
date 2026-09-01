@@ -1972,7 +1972,7 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_ung_filter_combo.addItems(["none", "lowpass", "butterworth", "wiener"])
 				self.cine_crudo_ung_filter_combo.setCurrentText("butterworth")
 				self.cine_crudo_ung_filter_combo.setMaximumWidth(104)
-				self.cine_crudo_ung_filter_combo.setToolTip("Filtro de proyecciones para la rama UngGat/perfusión total.")
+				self.cine_crudo_ung_filter_combo.setToolTip("Filtro rama UngGat/perfusión. FBP: pre-filtro del sinograma (calco Xeleris). OSEM/MLEM: el Butterworth se aplica POST-reconstrucción (suavizado 3D).")
 				toolbar6_r1.addWidget(self.cine_crudo_ung_filter_combo)
 				self.cine_crudo_ung_cutoff_spin = QDoubleSpinBox()
 				self.cine_crudo_ung_cutoff_spin.setRange(0.01, 1.00)
@@ -1999,7 +1999,7 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_gated_filter_combo.addItems(["none", "lowpass", "butterworth", "wiener"])
 				self.cine_crudo_gated_filter_combo.setCurrentText("butterworth")
 				self.cine_crudo_gated_filter_combo.setMaximumWidth(104)
-				self.cine_crudo_gated_filter_combo.setToolTip("Filtro de proyecciones para reconstrucción gate-by-gate.")
+				self.cine_crudo_gated_filter_combo.setToolTip("Filtro rama gated. FBP: pre-filtro del sinograma (calco Xeleris). OSEM/MLEM: el Butterworth se aplica POST-reconstrucción (suavizado 3D).")
 				toolbar6_r1.addWidget(self.cine_crudo_gated_filter_combo)
 				self.cine_crudo_gated_cutoff_spin = QDoubleSpinBox()
 				self.cine_crudo_gated_cutoff_spin.setRange(0.01, 1.00)
@@ -2034,14 +2034,14 @@ class MainWindow(QMainWindow):
 				toolbar6_r2.addWidget(QLabel("Iter"))
 				self.cine_crudo_iter_spin = QSpinBox()
 				self.cine_crudo_iter_spin.setRange(1, 20)
-				self.cine_crudo_iter_spin.setValue(2)
+				self.cine_crudo_iter_spin.setValue(3)
 				self.cine_crudo_iter_spin.setMaximumWidth(50)
-				self.cine_crudo_iter_spin.setToolTip("Iteraciones para MLEM/OSEM. Para prueba UI usá 1–2; en matriz real puede tardar.")
+				self.cine_crudo_iter_spin.setToolTip("Iteraciones para MLEM/OSEM. Default clínico 3×6 subsets; con NÍTIDA se usan al menos 8.")
 				toolbar6_r2.addWidget(self.cine_crudo_iter_spin)
 				toolbar6_r2.addWidget(QLabel("Sub"))
 				self.cine_crudo_osem_subsets_spin = QSpinBox()
 				self.cine_crudo_osem_subsets_spin.setRange(1, 16)
-				self.cine_crudo_osem_subsets_spin.setValue(4)
+				self.cine_crudo_osem_subsets_spin.setValue(6)
 				self.cine_crudo_osem_subsets_spin.setMaximumWidth(50)
 				self.cine_crudo_osem_subsets_spin.setToolTip("Subsets para OSEM. En FBP/MLEM se ignora.")
 				toolbar6_r2.addWidget(self.cine_crudo_osem_subsets_spin)
@@ -3176,7 +3176,14 @@ class MainWindow(QMainWindow):
 			ax.axvline(es_gate, color=style["es"], linestyle="--", linewidth=1.2)
 			vol_max = float(np.nanmax(gate_volumes)) if np.isfinite(gate_volumes).any() else 1.0
 			ax.set_ylim(0.0, vol_max * 1.15)
-			ax.set_title(f"Time/Volume y derivada{title_suffix}", color=style["fg"], fontsize=10, fontweight="bold")
+			ef_txt = ""
+			try:
+				ef_val = float(ef.get("ef_pct"))
+				if np.isfinite(ef_val):
+					ef_txt = f" — FEVI {ef_val:.1f}%"
+			except (TypeError, ValueError):
+				pass
+			ax.set_title(f"Time/Volume y derivada{title_suffix}{ef_txt}", color=style["fg"], fontsize=10, fontweight="bold")
 			ax.set_xlabel("Gate", color=style["subtle"], fontsize=9)
 			ax.set_ylabel("Volumen (mL)", color=style["vol"], fontsize=9)
 			ax.tick_params(axis="x", colors=style["subtle"], labelsize=7)
@@ -3571,7 +3578,7 @@ class MainWindow(QMainWindow):
 		# FEVI (volumen/gate): curva autónoma desde el EF ya calculado (funciona en
 		# básico y avanzado, sin depender del pipeline pesado). Si no hay datos
 		# suficientes, ejes vacíos.
-		if not self._render_fevi_curve_panel(self.curve_fevi_view, ef):
+		if not self._render_fevi_curve_panel(self.curve_fevi_view, ef, title_suffix=" · Esfuerzo"):
 			self._render_empty_curve(self.curve_fevi_view, "Gate", "Volumen (mL)", "_empty_fevi.png")
 		# Título de la 2da. etapa sobre el cine_compare (reposo/esfuerzo según la
 		# 1ra. cargada); se actualiza cada vez que se reprocesa/carga.
@@ -11857,6 +11864,8 @@ class MainWindow(QMainWindow):
 					self.compare_bundle.get("metrics"),
 					self.territory,
 					self.compare_bundle.get("territory"),
+					ef,
+					getattr(self, "compare_ef", None) or self.compare_bundle.get("ef"),
 				)
 		except Exception as exc:
 			self._log(f"Comparación stress-rest no disponible para PDF: {exc}")
@@ -13730,16 +13739,15 @@ class MainWindow(QMainWindow):
 		# Método independiente de la rama gated. NÍTIDA ya NO fuerza OSEM en gated
 		# (es solo-ungated): el gated conserva su propio método/filtro.
 		gated_method = str(self.cine_crudo_gated_method_combo.currentText()).strip().lower() if hasattr(self, "cine_crudo_gated_method_combo") and self.cine_crudo_gated_method_combo is not None else method
-		# Con NÍTIDA activa solo se anula el filtro UNGATED (pre-difuminar el
-		# sinograma peleó contra la PSF). El filtro GATED se conserva (NÍTIDA no
-		# toca el gated).
-		if rr_active:
+		# Con OSEM/MLEM el Butterworth del combo se aplica POST-recon (3D) dentro
+		# del motor: ya no pelea con la PSF de NÍTIDA ni rompe el modelo Poisson.
+		# Solo lowpass/wiener siguen siendo pre-filtro: con NÍTIDA se anulan.
+		ungated_filter = self._cine_crudo_recon_filter_config("ungated")
+		gated_filter = self._cine_crudo_recon_filter_config("gated")
+		if rr_active and str(ungated_filter.kind).strip().lower() in {"lowpass", "wiener"}:
 			from core.raw_reconstruction import ProjectionFilterConfig
+			self._log(f"NÍTIDA (OmniRes): el pre-filtro {ungated_filter.kind} del UngGat pelea con la PSF; lo anulo (usá butterworth, que va post-recon).")
 			ungated_filter = ProjectionFilterConfig(kind="none", cutoff=0.5, order=1)
-			gated_filter = self._cine_crudo_recon_filter_config("gated")
-		else:
-			ungated_filter = self._cine_crudo_recon_filter_config("ungated")
-			gated_filter = self._cine_crudo_recon_filter_config("gated")
 		# Suavizar POR RAMA: ungated y gated independientes.
 		post_sigma_ung = self._cine_crudo_post_filter_sigma_px(study)
 		post_sigma_gat = self._cine_crudo_post_filter_gated_sigma_px(study)
@@ -13766,13 +13774,17 @@ class MainWindow(QMainWindow):
 		nitida2_mode = "none"
 		if getattr(self, "cine_crudo_nitida2_combo", None) is not None:
 			nitida2_mode = str(self.cine_crudo_nitida2_combo.currentData() or "none")
+		iters = int(self.cine_crudo_iter_spin.value()) if hasattr(self, "cine_crudo_iter_spin") else 3
+		if rr_active and iters < 8:
+			self._log(f"NÍTIDA (OmniRes): {iters} iteraciones no alcanzan para converger la RR; uso 8.")
+			iters = 8
 		return RawReconConfig(
 			reconstruction_method=method,
 			gated_method=gated_method,
 			ungated_filter=ungated_filter,
 			gated_filter=gated_filter,
-			iterative_iterations=int(self.cine_crudo_iter_spin.value()) if hasattr(self, "cine_crudo_iter_spin") else 2,
-			osem_subsets=int(self.cine_crudo_osem_subsets_spin.value()) if hasattr(self, "cine_crudo_osem_subsets_spin") else 4,
+			iterative_iterations=iters,
+			osem_subsets=int(self.cine_crudo_osem_subsets_spin.value()) if hasattr(self, "cine_crudo_osem_subsets_spin") else 6,
 			display_slice_step_px=2,
 			resolution_recovery=False,
 			rr_ungated=rr_active,
