@@ -452,16 +452,24 @@ def generate_html_report(
     # --- FEVI ---
     fevi_html = ""
     ef_pct = ef.get("ef_pct") if ef else None
+    rest_func = (stress_rest or {}).get("rest_function", {}) if stress_rest and stress_rest.get("available") else {}
+    rest_ef_pct = rest_func.get("ef_pct")
+    def _fevi_color(v: float) -> str:
+        return "var(--accent-green)" if v >= 55 else ("var(--accent-yellow)" if v >= 40 else "var(--accent-red)")
     if ef_pct is not None and np.isfinite(float(ef_pct)):
-        color = "var(--accent-green)" if float(ef_pct) >= 55 else (
-            "var(--accent-yellow)" if float(ef_pct) >= 40 else "var(--accent-red)"
-        )
-        fevi_html = f"""
-        <div class="fevi-highlight">
+        blocks = f"""
           <div>
-            <div class="fevi-number" style="color:{color}">{float(ef_pct):.0f}%</div>
-            <div class="fevi-label">FEVI preliminar</div>
-          </div>
+            <div class="fevi-number" style="color:{_fevi_color(float(ef_pct))}">{float(ef_pct):.0f}%</div>
+            <div class="fevi-label">FEVI Esfuerzo</div>
+          </div>"""
+        if rest_ef_pct is not None and np.isfinite(float(rest_ef_pct)):
+            blocks += f"""
+          <div>
+            <div class="fevi-number" style="color:{_fevi_color(float(rest_ef_pct))}">{float(rest_ef_pct):.0f}%</div>
+            <div class="fevi-label">FEVI Reposo</div>
+          </div>"""
+        fevi_html = f"""
+        <div class="fevi-highlight">{blocks}
           <div>
             <div style="font-size:1.1rem; color:var(--fg)">EDV {_safe_float(ef.get('edv_ml'),1)} mL</div>
             <div style="font-size:1.1rem; color:var(--fg)">ESV {_safe_float(ef.get('esv_ml'),1)} mL</div>
@@ -580,15 +588,17 @@ def generate_html_report(
     if panel_fn:
         visual_sections.append(f'<div class="featured" style="max-width:900px; margin:0 auto;">{panel_fn}<div class="caption">Panel funcional gated: ED/ES + curvas de volumen y fase.</div></div>')
 
-    # Galería principal - polar fase + histograma lado a lado, luego polar perfusión.
+    # Mapas polares de fase por etapa (el histograma QC combinado ya no va: los
+    # histogramas por etapa se muestran más abajo, uno por columna).
+    compare_dir = os.path.join(output_dir, "_compare")
     polar_fase_tag = _img_to_data_uri(os.path.join(output_dir, "polar_map.png"))
-    hist_tag = _img_to_data_uri(os.path.join(output_dir, "histograma.png"))
-    if polar_fase_tag or hist_tag:
+    polar_fase_rest_tag = _img_to_data_uri(os.path.join(compare_dir, "polar_map.png"))
+    if polar_fase_tag or polar_fase_rest_tag:
         duo = ""
         if polar_fase_tag:
-            duo += f'<div style="flex:1; min-width:0; display:flex; flex-direction:column;"><img src="{polar_fase_tag}" alt="Mapa polar de fase AHA" style="width:100%; border-radius:var(--radius); flex:1; object-fit:fill;"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Mapa polar de fase AHA (17)</div></div>'
-        if hist_tag:
-            duo += f'<div style="flex:1; min-width:0; display:flex; flex-direction:column;"><img src="{hist_tag}" alt="Histograma de fase" style="width:100%; border-radius:var(--radius); flex:1; object-fit:fill;"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Histograma de fase</div></div>'
+            duo += f'<div style="flex:1; min-width:0; display:flex; flex-direction:column;"><img src="{polar_fase_tag}" alt="Mapa polar de fase · Esfuerzo" style="width:100%; border-radius:var(--radius); flex:1; object-fit:fill;"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Mapa polar de fase AHA (17) · Esfuerzo</div></div>'
+        if polar_fase_rest_tag:
+            duo += f'<div style="flex:1; min-width:0; display:flex; flex-direction:column;"><img src="{polar_fase_rest_tag}" alt="Mapa polar de fase · Reposo" style="width:100%; border-radius:var(--radius); flex:1; object-fit:fill;"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Mapa polar de fase AHA (17) · Reposo</div></div>'
         visual_sections.append(f'<div style="display:flex; gap:16px; margin:16px 0; align-items:stretch;">{duo}</div>')
 
     # Fase y función POR ETAPA (dual): histogramas y curvas FEVI Esfuerzo | Reposo.
@@ -610,13 +620,16 @@ def generate_html_report(
             )
             visual_sections.append(f'<div style="display:flex; gap:16px; margin:16px 0;">{row}</div>')
 
-    # Polar perfusión + bullseye lado a lado.
+    # Polar perfusión filtrado por etapa + bullseye.
     polar_smooth_uri = _img_to_data_uri(os.path.join(output_dir, "polar_perfusion_smooth.png"))
+    polar_smooth_rest_uri = _img_to_data_uri(os.path.join(compare_dir, "polar_perfusion_smooth.png"))
     bullseye_uri = _img_to_data_uri(os.path.join(output_dir, "bullseye_directo.png"))
-    if polar_smooth_uri or bullseye_uri:
+    if polar_smooth_uri or polar_smooth_rest_uri or bullseye_uri:
         duo2 = ""
         if polar_smooth_uri:
-            duo2 += f'<div style="flex:1; min-width:0;"><img src="{polar_smooth_uri}" alt="Polar perfusión filtrado" style="width:100%; border-radius:var(--radius);"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Mapa polar continuo de perfusión (filtrado). Apex en centro, base en borde.</div></div>'
+            duo2 += f'<div style="flex:1; min-width:0;"><img src="{polar_smooth_uri}" alt="Polar perfusión filtrado · Esfuerzo" style="width:100%; border-radius:var(--radius);"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Mapa polar continuo de perfusión (filtrado) · Esfuerzo</div></div>'
+        if polar_smooth_rest_uri:
+            duo2 += f'<div style="flex:1; min-width:0;"><img src="{polar_smooth_rest_uri}" alt="Polar perfusión filtrado · Reposo" style="width:100%; border-radius:var(--radius);"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Mapa polar continuo de perfusión (filtrado) · Reposo</div></div>'
         if bullseye_uri:
             duo2 += f'<div style="flex:1; min-width:0;"><img src="{bullseye_uri}" alt="Bullseye AHA" style="width:100%; border-radius:var(--radius);"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Bull&#8217;s-eye segmentario AHA (perfusión)</div></div>'
         visual_sections.append(f'<div style="display:flex; gap:16px; margin:16px 0;">{duo2}</div>')
@@ -659,10 +672,9 @@ def generate_html_report(
         if td_items:
             visual_sections.append(f'<h3 style="color:var(--accent); margin:24px 0 12px;">Reconstrucción 3D</h3><div class="gallery">{td_items}</div>')
 
-    # GIFs animados
+    # GIFs animados (el montaje cine ya aparece arriba: no repetirlo acá).
     gif_specs = [
         ("polar_cine.gif", "Polar cine gatillado (evolución por gate)"),
-        ("sa_montage_cine.gif", "Montaje clínico cine"),
     ]
     gif_items = ""
     for fname, caption in gif_specs:
