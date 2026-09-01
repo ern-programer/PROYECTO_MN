@@ -156,6 +156,8 @@ def compare_stress_rest(
     rest_metrics: dict,
     stress_territory: dict[str, dict] | None = None,
     rest_territory: dict[str, dict] | None = None,
+    stress_ef: dict | None = None,
+    rest_ef: dict | None = None,
 ) -> dict:
     """Compara las métricas de fase de esfuerzo vs reposo.
 
@@ -199,6 +201,20 @@ def compare_stress_rest(
         rest_used[key] = float(r) if isinstance(r, (int, float)) else float("nan")
 
     territory = compare_territories(stress_territory, rest_territory)
+    # Función ventricular: no pertenece a métricas de fase, pero forma parte de
+    # la comparación clínica stress/rest y el informe debe mostrar ambas FEVI.
+    def _ef_snapshot(ef: dict | None) -> dict[str, float]:
+        ef = ef or {}
+        out: dict[str, float] = {}
+        for key in ("ef_pct", "edv_ml", "esv_ml", "pfr_edv_per_s", "tpfr_ms"):
+            out[key] = _scalar_delta(ef.get(key), 0.0) if ef.get(key) is not None else float("nan")
+        return out
+    stress_function = _ef_snapshot(stress_ef)
+    rest_function = _ef_snapshot(rest_ef)
+    function_deltas = {
+        key: _scalar_delta(stress_function.get(key), rest_function.get(key))
+        for key in stress_function
+    }
 
     return {
         "available": True,
@@ -207,6 +223,9 @@ def compare_stress_rest(
         "stress": stress_used,
         "rest": rest_used,
         "territory": territory,
+        "stress_function": stress_function,
+        "rest_function": rest_function,
+        "function_deltas": function_deltas,
         "notes": _interpret(deltas),
         "references": [
             "Fukumoto 2025 (PMID 40021521): phase entropy en esfuerzo predice eventos cardíacos mayores.",

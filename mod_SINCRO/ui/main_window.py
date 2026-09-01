@@ -680,10 +680,10 @@ class MainWindow(QMainWindow):
 		self.polar_perf_smooth_method_combo.addItems(["Gaussiano", "Butterworth"])
 		self.polar_perf_smooth_method_combo.setCurrentText("Gaussiano")
 		self.polar_perf_smooth_strength_spin = QDoubleSpinBox()
-		self.polar_perf_smooth_strength_spin.setRange(0.0, 8.0)
+		self.polar_perf_smooth_strength_spin.setRange(0.0, 16.0)
 		self.polar_perf_smooth_strength_spin.setSingleStep(0.25)
 		self.polar_perf_smooth_strength_spin.setDecimals(2)
-		self.polar_perf_smooth_strength_spin.setValue(2.0)
+		self.polar_perf_smooth_strength_spin.setValue(8.0)
 		polar_perf_smooth_widget = QWidget()
 		polar_perf_smooth_layout = QHBoxLayout(polar_perf_smooth_widget)
 		polar_perf_smooth_layout.setContentsMargins(0, 0, 0, 0)
@@ -2569,11 +2569,26 @@ class MainWindow(QMainWindow):
 		self.bottom_hsplit.setChildrenCollapsible(False)
 		self.bottom_hsplit.setHandleWidth(6)
 		self.bottom_hsplit.addWidget(cine_area)
-		self.bottom_hsplit.addWidget(self._build_readonly_results_panel())
-		self.bottom_hsplit.addWidget(self._build_curves_panel())
+		# Bloque clínico único: Resultados + curvas 2×2 y una franja Δ común.
+		# Evita que el splitter comprima los cuatro gráficos a una tira angosta.
+		results_curves = QWidget()
+		results_curves_l = QVBoxLayout(results_curves)
+		results_curves_l.setContentsMargins(0, 0, 0, 0)
+		results_curves_l.setSpacing(2)
+		self.results_curves_split = QSplitter(Qt.Orientation.Horizontal)
+		self.results_curves_split.setChildrenCollapsible(False)
+		self.results_curves_split.setHandleWidth(6)
+		self.results_curves_split.addWidget(self._build_readonly_results_panel())
+		self.results_curves_split.addWidget(self._build_curves_panel())
+		self.results_curves_split.setStretchFactor(0, 0)
+		self.results_curves_split.setStretchFactor(1, 1)
+		self.results_curves_split.setSizes([310, 520])
+		results_curves_l.addWidget(self.results_curves_split, 1)
+		self.main_delta_readout = self._build_main_delta_readout()
+		results_curves_l.addWidget(self.main_delta_readout, 0)
+		self.bottom_hsplit.addWidget(results_curves)
 		self.bottom_hsplit.setStretchFactor(0, 1)
-		self.bottom_hsplit.setStretchFactor(1, 0)
-		self.bottom_hsplit.setStretchFactor(2, 0)
+		self.bottom_hsplit.setStretchFactor(1, 2)
 
 		lower_cine_panel = QWidget()
 		self._lower_cine_panel = lower_cine_panel
@@ -2612,7 +2627,8 @@ class MainWindow(QMainWindow):
 		right_splitter.setSizes([840, 220])
 		# 3 zonas: cine+2da etapa | Datos+Resultados | curvas. La primera es más
 		# ancha porque ahora contiene las DOS imágenes (cine + cine_compare).
-		self.bottom_hsplit.setSizes([400, 260, 280])
+		# Banda inferior: 25% visores/controles, 75% datos + resultados + curvas.
+		self.bottom_hsplit.setSizes([250, 750])
 		self.main_splitter = splitter
 		self.right_splitter = right_splitter
 		self._ui_settings = QSettings("Gammasys", "GammaSync")
@@ -2983,9 +2999,20 @@ class MainWindow(QMainWindow):
 		self.main_metrics_readout.setStyleSheet("font-size:10pt; color:#1f2937;")
 		res_l.addWidget(self.main_metrics_readout)
 		lay.addWidget(res_box, 1)
-
 		self.readonly_panel = panel
 		return panel
+
+	def _build_main_delta_readout(self) -> QLabel:
+		"""Franja Δ común para resultados y gráficos en el flujo dual."""
+		label = QLabel("")
+		label.setWordWrap(False)
+		label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+		label.setStyleSheet(
+			"font-size:9pt; color:#0f172a; background:#f8fafc; "
+			"border-top:1px solid #cbd5e1; padding:4px 7px;"
+		)
+		label.setVisible(False)
+		return label
 
 	def _build_curves_panel(self) -> QWidget:
 		"""Zona de curvas clínicas: 1 columna en simple, 2×2 en dual.
@@ -3001,7 +3028,7 @@ class MainWindow(QMainWindow):
 		def _curve_label(text: str) -> QLabel:
 			label = QLabel(text)
 			label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-			label.setMinimumHeight(110)
+			label.setMinimumHeight(96)
 			label.setStyleSheet("color:#5b6470; background:#0b1220; border:1px solid #26324a;")
 			return label
 		self.curve_hist_view = _curve_label("Histograma de fase: procesá un estudio.")
@@ -3378,6 +3405,8 @@ class MainWindow(QMainWindow):
 		metrics = getattr(self, "metrics", None)
 		if not metrics:
 			self.main_metrics_readout.setText("Sin resultados: procesá el estudio.")
+			self.main_delta_readout.setText("")
+			self.main_delta_readout.setVisible(False)
 		else:
 			ef_pct = ef.get("ef_pct") if isinstance(ef, dict) else None
 			compare_metrics = getattr(self, "compare_metrics", None)
@@ -3455,9 +3484,15 @@ class MainWindow(QMainWindow):
 				)
 				delta = self._format_async_delta_lines(metrics, compare_metrics, ef, compare_ef)
 				if delta:
-					text += "<br><br>" + "<br>".join(delta)
+					self.main_delta_readout.setText(" &nbsp;|&nbsp; ".join(delta))
+					self.main_delta_readout.setVisible(True)
+				else:
+					self.main_delta_readout.setText("")
+					self.main_delta_readout.setVisible(False)
 				self.main_metrics_readout.setText(text)
 			else:
+				self.main_delta_readout.setText("")
+				self.main_delta_readout.setVisible(False)
 				self.main_metrics_readout.setText(
 					"<br>".join(self._format_async_metrics_lines(metrics, ef_pct, ef))
 				)
@@ -3645,9 +3680,9 @@ class MainWindow(QMainWindow):
 		right_state = self._ui_settings.value("right_splitter_state_v3", None)
 		if right_state is not None:
 			self.right_splitter.restoreState(right_state)
-		# Clave versionada v5: la banda pasó de 4 a 3 zonas (el cine_compare se
-		# movió DENTRO del cine principal), así que el estado viejo se descarta.
-		bottom_state = self._ui_settings.value("bottom_hsplit_state_v5", None)
+		# Clave versionada v7: nuevo reparto 25/75 entre cine y bloque clínico.
+		# Se ignora el estado v6 para que el cambio se aplique desde el arranque.
+		bottom_state = self._ui_settings.value("bottom_hsplit_state_v7", None)
 		if bottom_state is not None:
 			self.bottom_hsplit.restoreState(bottom_state)
 
@@ -3920,7 +3955,7 @@ class MainWindow(QMainWindow):
 		self._ui_settings.setValue("window_geometry", self.saveGeometry())
 		self._ui_settings.setValue("main_splitter_state_v2", self.main_splitter.saveState())
 		self._ui_settings.setValue("right_splitter_state_v3", self.right_splitter.saveState())
-		self._ui_settings.setValue("bottom_hsplit_state_v5", self.bottom_hsplit.saveState())
+		self._ui_settings.setValue("bottom_hsplit_state_v7", self.bottom_hsplit.saveState())
 		self._save_sidebar_sections_state()
 		self._save_fevi_settings()
 		self._ui_settings.sync()
@@ -7004,6 +7039,7 @@ class MainWindow(QMainWindow):
 		self._last_cine_crudo_preview_mode = None
 		self._cine_crudo_dual_render_meta = {}
 		self._cine_crudo_cut_limits_meta = None
+		self._cuts_qc_pix_by_stage = {}
 		self._preview_pan_active = False
 		self._preview_pan_anchor = None
 
@@ -9249,6 +9285,8 @@ class MainWindow(QMainWindow):
 					self.compare_bundle.get("metrics"),
 					self.territory,
 					self.compare_bundle.get("territory"),
+					ef,
+					getattr(self, "compare_ef", None) or self.compare_bundle.get("ef"),
 				)
 		except Exception as exc:
 			self._log(f"Comparación stress-rest no disponible para export: {exc}")
@@ -11458,9 +11496,10 @@ class MainWindow(QMainWindow):
 		if name == "polar_perfusion_directa" and self.polar_view_mode == "cine":
 			self._load_polar_cine_preview()
 			return
-		if name == "polar_perfusion_directa" and getattr(self, "_polar_perf_cart_cache", None):
+		if name == "polar_perfusion_directa" and getattr(self, "_polar_perf_cart_cache", None) and self.compare_bundle is None:
 			# Vista estática con el cmap de pantalla (independiente del informe):
 			# recolorea en memoria desde la caché en vez de cargar el PNG de disco.
+			# En dual NO: el PNG de disco es el compuesto Esfuerzo | Reposo.
 			if self._rerender_polar_perfusion_screen():
 				return
 		if name == "comparacion_ejes":
@@ -13769,14 +13808,18 @@ class MainWindow(QMainWindow):
 						if getattr(self, "cine_crudo_scatter_k_spin", None) is not None else 1.0),
 		)
 
-	# --- Pasajero de fase (FBP) para NÍTIDA ---
-	# Cuando NÍTIDA (RR) está activa, perfusión/FEVI usan el volumen nítido, pero
-	# la FASE se calcula sobre un volumen FBP paralelo ("pasajero"): los límites
-	# normales de disincronía (Emory/Xeleris) están calibrados sobre FBP-Butterworth
-	# y la RR infla el Phase SD (medido: 8.1°→20.7°, NORMAL→MILD). Filtros semi-
-	# ocultos: se pueden sobre-escribir con presets/phase_passenger_config.json.
+	# --- Pasajero de fase (FBP) ---
+	# La FASE se calcula SIEMPRE sobre un volumen FBP paralelo ("pasajero") con
+	# filtros y postfiltro FIJOS: los límites normales de disincronía (Emory/
+	# Xeleris) están calibrados sobre FBP-Butterworth y las recon iterativas/RR
+	# inflan el Phase SD (medido: 8.1°→20.7°, NORMAL→MILD). FEVI/perfusión usan
+	# la recon del usuario (mejor cavidad); la fase queda reproducible entre
+	# configuraciones y entre etapas. Override: presets/phase_passenger_config.json.
 	PHASE_PASSENGER_DEFAULT_UNG = ("butterworth", 0.52, 5)
 	PHASE_PASSENGER_DEFAULT_GATED = ("butterworth", 0.40, 10)
+	#: Postfiltro gaussiano ESTÁNDAR del pasajero (FWHM mm). Fijo a propósito:
+	#: NO hereda el "Suavizar" del usuario para que la fase no varíe con la UI.
+	PHASE_PASSENGER_POST_FWHM_MM = 8.0
 
 	def _phase_passenger_filters(self):
 		"""(ung, gated) filtros FBP del pasajero de fase. Override opcional vía preset JSON."""
@@ -13808,11 +13851,12 @@ class MainWindow(QMainWindow):
 		from core.raw_reconstruction import RawReconConfig, ProjectionFilterConfig
 
 		ung, gated = self._phase_passenger_filters()
-		# El pasajero debe reproducir el FBP standalone: hereda el MISMO post-filtro
-		# gaussiano que la recon visible (perilla 'Suavizar'). Si no, el FBP del
-		# pasajero queda sin suavizar y el Phase SD se infla (medido 11°→27.6°,
-		# NORMAL→MILD), rompiendo el objetivo de que NÍTIDA iguale al FBP en fase.
-		post_sigma_px = self._cine_crudo_post_filter_sigma_px(study)
+		# Postfiltro ESTÁNDAR fijo (no hereda 'Suavizar'): fase 100% reproducible
+		# entre configuraciones de usuario y entre etapas esfuerzo/reposo.
+		study = study or getattr(self, "cine_crudo_raw_study_for_recon", None) or self.study
+		ps = getattr(study, "pixel_spacing", None) if study is not None else None
+		pixel_mm = float(ps[0]) if ps else 6.4
+		post_sigma_px = (self.PHASE_PASSENGER_POST_FWHM_MM / 2.354820045) / max(pixel_mm, 1e-6)
 		return RawReconConfig(
 			reconstruction_method="fbp",
 			ungated_filter=ProjectionFilterConfig(kind=ung[0], cutoff=ung[1], order=ung[2]),
@@ -14290,31 +14334,30 @@ class MainWindow(QMainWindow):
 					self._dump_feta_for_harness(result, raw_study, angles, cfg, z0, z1, stage)
 				except Exception as exc:
 					self._log(f"[WARN] No pude volcar la feta para el harness: {exc}")
-			# Pasajero de fase (FBP): con NÍTIDA activa la fase se calculará sobre un
-			# volumen FBP paralelo de la MISMA geometría (mismos shifts de motion y
-			# proyecciones bg-restadas). Perfusión/FEVI siguen usando el nítido.
+			# Pasajero de fase (FBP): SIEMPRE. La fase se calcula sobre un volumen
+			# FBP-Butterworth fijo de la MISMA geometría (mismos shifts de motion y
+			# proyecciones bg-restadas). Perfusión/FEVI usan la recon del usuario.
 			self.cine_crudo_recon_result_phase = None
-			if nitida_on:
-				try:
-					self._set_progress(99, "Pasajero de fase (FBP)...")
-					phase_cfg = self._phase_passenger_recon_config(raw_study)
-					if getattr(cfg, "recon_slice_range", None) is not None:
-						from dataclasses import replace as _dc_replace
-						phase_cfg = _dc_replace(phase_cfg, recon_slice_range=cfg.recon_slice_range)
-					phase_result = reconstruct_raw_gated_pipeline(
-						projections, angles, motion_result=motion, config=phase_cfg
-					)
-					self.cine_crudo_recon_result_phase = phase_result
-					self._log(
-						"Pasajero de fase FBP generado: "
-						f"UngGat={phase_cfg.ungated_filter.kind} {phase_cfg.ungated_filter.cutoff:.2f}/{phase_cfg.ungated_filter.order}; "
-						f"Gated={phase_cfg.gated_filter.kind} {phase_cfg.gated_filter.cutoff:.2f}/{phase_cfg.gated_filter.order}; "
-						f"post-filtro sigma={phase_cfg.post_filter_sigma_px:.2f}px; "
-						f"volumen={phase_result.gated_volume.shape}. La fase se calculará sobre este volumen."
-					)
-				except Exception as exc:
-					self.cine_crudo_recon_result_phase = None
-					self._log(f"[WARN] Pasajero de fase FBP no generado; la fase caerá al volumen NÍTIDA: {exc}")
+			try:
+				self._set_progress(99, "Pasajero de fase (FBP)...")
+				phase_cfg = self._phase_passenger_recon_config(raw_study)
+				if getattr(cfg, "recon_slice_range", None) is not None:
+					from dataclasses import replace as _dc_replace
+					phase_cfg = _dc_replace(phase_cfg, recon_slice_range=cfg.recon_slice_range)
+				phase_result = reconstruct_raw_gated_pipeline(
+					projections, angles, motion_result=motion, config=phase_cfg
+				)
+				self.cine_crudo_recon_result_phase = phase_result
+				self._log(
+					"Pasajero de fase FBP generado: "
+					f"UngGat={phase_cfg.ungated_filter.kind} {phase_cfg.ungated_filter.cutoff:.2f}/{phase_cfg.ungated_filter.order}; "
+					f"Gated={phase_cfg.gated_filter.kind} {phase_cfg.gated_filter.cutoff:.2f}/{phase_cfg.gated_filter.order}; "
+					f"post-filtro sigma={phase_cfg.post_filter_sigma_px:.2f}px; "
+					f"volumen={phase_result.gated_volume.shape}. La fase se calculará sobre este volumen."
+				)
+			except Exception as exc:
+				self.cine_crudo_recon_result_phase = None
+				self._log(f"[WARN] Pasajero de fase FBP no generado; la fase caerá al volumen visible: {exc}")
 
 			self.cine_crudo_recon_study = None
 			self.cine_crudo_cut_study = None
@@ -15702,9 +15745,25 @@ class MainWindow(QMainWindow):
 					sa_cube_phase = None
 			out_png = self._write_cine_crudo_cuts_qc(ung_vol, z0, z1)
 			self.cine_crudo_preview_mode = "generated_cuts"
+			# QC dual: cachear el QC por etapa y, si ambas ya generaron cortes,
+			# mostrar ESFUERZO arriba y REPOSO abajo (la 2da no tapa a la 1ra).
+			stage_now = str(getattr(self, "_cine_crudo_recon_stage", "stress") or "stress")
+			qc_cache = getattr(self, "_cuts_qc_pix_by_stage", None)
+			if not isinstance(qc_cache, dict):
+				qc_cache = {}
+				self._cuts_qc_pix_by_stage = qc_cache
+			qc_cache[stage_now] = QPixmap(out_png)
+			if "stress" in qc_cache and "rest" in qc_cache and not qc_cache["stress"].isNull() and not qc_cache["rest"].isNull():
+				display_pix = self._stack_cine_crudo_dual_pixmaps(
+					qc_cache["stress"], qc_cache["rest"],
+					"ESFUERZO — cortes generados", "REPOSO — cortes generados",
+					active_stage=stage_now,
+				)
+			else:
+				display_pix = QPixmap(out_png)
 			for tab_name in ("comparacion_ejes", "cine_crudo"):
 				if tab_name in self.preview_labels:
-					pix = QPixmap(out_png)
+					pix = QPixmap(display_pix)
 					self.preview_pixmaps[tab_name] = pix
 					self.preview_base_sizes[tab_name] = pix.size()
 					self._apply_preview_zoom(tab_name)
@@ -18735,6 +18794,22 @@ class MainWindow(QMainWindow):
 		self._log_intestinal_subtraction(comp_intestinal_info)
 		comp_cube_for_segmentation = self._apply_intestinal_mask_to_cube(comp_cube_corrected, self.cine_compare, require_global_visual=False)
 		comp_cube_for_analysis = comp_cube_corrected
+		# Pasajero de fase de la 2da etapa: mismas correcciones que el visible.
+		comp_cube_phase = getattr(comp_study, "cube_phase", None)
+		if comp_cube_phase is not None:
+			try:
+				comp_phase_base = np.asarray(comp_cube_phase, dtype=np.float64)
+				if comp_phase_base.shape == np.asarray(comp_study.cube).shape:
+					comp_phase_corr, _ = self._apply_gate_dropout_correction(
+						comp_phase_base, "comparación fase (pasajero FBP)", log=False
+					)
+					comp_phase_corr, _ = self._apply_intestinal_subtraction_to_cube(
+						comp_phase_corr, self.cine_compare
+					)
+					comp_cube_for_analysis = comp_phase_corr
+					self._log("Fase de la 2da etapa calculada sobre pasajero FBP (cube_phase).")
+			except Exception:
+				pass
 		seg_method = "auto"
 		manual_rois = None
 		parsed_compare_rois = self._parse_manual_rois_text(self.compare_manual_rois_text)
@@ -18851,7 +18926,8 @@ class MainWindow(QMainWindow):
 		self.compare_metrics = bundle["metrics"]
 		self.compare_ef = bundle["ef"]
 		self.compare_label = bundle["label"]
-		self.compare_raw_study = None
+		# NO tocar compare_raw_study: es property → rest.raw_study en DualSession.
+		# Anularlo dejaba el reposo sin crudo (selector bloqueado, re-recon imposible).
 		self.compare_raw_path = str(stage_state.source_path or "")
 		self._refresh_cine_source_selector()
 		self._apply_cine_source("primary", preserve_position=True)
@@ -18946,7 +19022,7 @@ class MainWindow(QMainWindow):
 		if target_tabs is not None:
 			names = [n for n in names if n in set(target_tabs)]
 		for name in names:
-			if name in ("comparacion_stress_rest", "comparacion_ejes", "polar_perfusion_directa", "guia_fase_vi"):
+			if name in ("comparacion_stress_rest", "comparacion_ejes", "guia_fase_vi"):
 				continue
 			left_path = os.path.join(self.output_dir, f"{name}.png")
 			right_path = os.path.join(self.compare_output_dir, f"{name}.png")

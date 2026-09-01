@@ -541,6 +541,25 @@ def generate_html_report(
             ("asynchrony_index", "Asynchrony Idx", "%"),
         ]:
             sr_rows.append((label, f"{_safe_float(st.get(key), 1)}{unit}", f"{_safe_float(rs.get(key), 1)}{unit}", f"{_safe_float(deltas.get(key), 1)}{unit}"))
+    # Función ventricular por etapa: también debe figurar en la comparación,
+    # no solo como dato del estudio primario al comienzo del informe.
+    func_s = stress_rest.get("stress_function", {}) or {}
+    func_r = stress_rest.get("rest_function", {}) or {}
+    func_d = stress_rest.get("function_deltas", {}) or {}
+    for key, label, unit, decimals in [
+      ("ef_pct", "FEVI", "%", 1),
+      ("edv_ml", "EDV", "mL", 1),
+      ("esv_ml", "ESV", "mL", 1),
+      ("pfr_edv_per_s", "PFR/EDV", "/s", 2),
+      ("tpfr_ms", "TPFR", "ms", 0),
+    ]:
+      if np.isfinite(float(func_s.get(key, float("nan")))) or np.isfinite(float(func_r.get(key, float("nan")))):
+        sr_rows.append((
+          label,
+          f"{_safe_float(func_s.get(key), decimals)}{unit}",
+          f"{_safe_float(func_r.get(key), decimals)}{unit}",
+          f"{_safe_float(func_d.get(key), decimals)}{unit}",
+        ))
         stress_rest_html = f"<h3 style='color:var(--accent); margin:24px 0 12px;'>Delta stress-rest</h3>" + _build_table(
             ["Métrica", "Esfuerzo", "Reposo", "Δ"], sr_rows
         )
@@ -561,28 +580,6 @@ def generate_html_report(
     if panel_fn:
         visual_sections.append(f'<div class="featured" style="max-width:900px; margin:0 auto;">{panel_fn}<div class="caption">Panel funcional gated: ED/ES + curvas de volumen y fase.</div></div>')
 
-    # MIPs crudas con selector de escala interactivo.
-    mip_specs = [("raw_ap_mip.png", "AP (anterior)"), ("raw_oai_mip.png", "OAI 45°"), ("raw_ll_mip.png", "Lat. izquierda")]
-    mip_items = ""
-    for fname, label in mip_specs:
-        uri = _img_to_data_uri(os.path.join(output_dir, fname))
-        if uri:
-            mip_id = fname.replace(".", "_")
-            mip_items += f'''<div class="gallery-item">
-  <img src="{uri}" alt="{label}" id="{mip_id}" class="mip-img" style="width:100%; filter: grayscale(1);">
-  <div class="caption">{label}</div>
-</div>'''
-    if mip_items:
-        visual_sections.append(f'''<h3 style="color:var(--accent); margin:24px 0 12px;">Proyecciones planares</h3>
-<div class="mip-scale-bar">
-  <button class="mip-scale-btn active" data-filter="grayscale(1)">Gris</button>
-  <button class="mip-scale-btn" data-filter="grayscale(0)">Original</button>
-  <button class="mip-scale-btn" data-filter="grayscale(1) sepia(1) hue-rotate(200deg) saturate(3)">Azul</button>
-  <button class="mip-scale-btn" data-filter="grayscale(1) sepia(1) hue-rotate(340deg) saturate(4)">Hot</button>
-  <button class="mip-scale-btn" data-filter="grayscale(1) invert(1)">Invertido</button>
-</div>
-<div class="gallery">{mip_items}</div>''')
-
     # Galería principal - polar fase + histograma lado a lado, luego polar perfusión.
     polar_fase_tag = _img_to_data_uri(os.path.join(output_dir, "polar_map.png"))
     hist_tag = _img_to_data_uri(os.path.join(output_dir, "histograma.png"))
@@ -593,6 +590,25 @@ def generate_html_report(
         if hist_tag:
             duo += f'<div style="flex:1; min-width:0; display:flex; flex-direction:column;"><img src="{hist_tag}" alt="Histograma de fase" style="width:100%; border-radius:var(--radius); flex:1; object-fit:fill;"><div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">Histograma de fase</div></div>'
         visual_sections.append(f'<div style="display:flex; gap:16px; margin:16px 0; align-items:stretch;">{duo}</div>')
+
+    # Fase y función POR ETAPA (dual): histogramas y curvas FEVI Esfuerzo | Reposo.
+    stage_duos = [
+        ("histograma_esfuerzo_panel.png", "Histograma de fase · Esfuerzo",
+         "histograma_reposo_panel.png", "Histograma de fase · Reposo"),
+        ("curva_fevi_panel.png", "Curva volumen/derivada (FEVI) · Esfuerzo",
+         "curva_fevi_reposo_panel.png", "Curva volumen/derivada (FEVI) · Reposo"),
+    ]
+    for left_f, left_cap, right_f, right_cap in stage_duos:
+        left_uri = _img_to_data_uri(os.path.join(output_dir, left_f))
+        right_uri = _img_to_data_uri(os.path.join(output_dir, right_f))
+        if left_uri and right_uri:
+            row = (
+                f'<div style="flex:1; min-width:0;"><img src="{left_uri}" alt="{left_cap}" style="width:100%; border-radius:var(--radius);">'
+                f'<div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">{left_cap}</div></div>'
+                f'<div style="flex:1; min-width:0;"><img src="{right_uri}" alt="{right_cap}" style="width:100%; border-radius:var(--radius);">'
+                f'<div style="text-align:center; padding:6px; font-size:0.82rem; color:var(--fg-muted);">{right_cap}</div></div>'
+            )
+            visual_sections.append(f'<div style="display:flex; gap:16px; margin:16px 0;">{row}</div>')
 
     # Polar perfusión + bullseye lado a lado.
     polar_smooth_uri = _img_to_data_uri(os.path.join(output_dir, "polar_perfusion_smooth.png"))
@@ -607,7 +623,6 @@ def generate_html_report(
 
     gallery_specs = [
         ("comparacion_ejes.png", "Comparación original vs reconstruido"),
-        ("curva_fevi.png", "Curva FEVI preliminar"),
         ("curva_tac.png", "Curva de actividad por gate"),
     ]
     if stress_rest and stress_rest.get("available"):
@@ -619,6 +634,11 @@ def generate_html_report(
             gallery_items += f'<div class="gallery-item">{tag}<div class="caption">{caption}</div></div>'
     if gallery_items:
         visual_sections.append(f'<h3 style="color:var(--accent); margin:24px 0 12px;">Visualizaciones</h3><div class="gallery">{gallery_items}</div>')
+
+    # Curva FEVI principal en formato grande (featured), no como miniatura.
+    fevi_curve_tag = _img_tag(os.path.join(output_dir, "curva_fevi.png"), "Curva FEVI", "featured-img")
+    if fevi_curve_tag:
+        visual_sections.append(f'<div class="featured">{fevi_curve_tag}<div class="caption">Curva FEVI: volumen por gate y derivada dV/dt.</div></div>')
 
     # Guía fase VI con altura doble (para que la tabla sea legible).
     guia_tag = _img_tag(os.path.join(output_dir, "guia_fase_vi.png"), "Guía para fase VI", "featured-img")

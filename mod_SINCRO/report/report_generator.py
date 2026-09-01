@@ -355,6 +355,26 @@ def generate_report(
 					f"{_safe_float(rs.get(key), 1)}{unit}",
 					_fmt_deg(deltas.get(key)) if key != "entropy_shannon_bits" else f"{_safe_float(deltas.get(key), 3)}",
 				])
+			# Función ventricular por etapa: FEVI/volúmenes/llenado, que no forman
+			# parte de las métricas de fase pero son indispensables en la lectura
+			# stress-rest. Δ = esfuerzo − reposo.
+			func_s = stress_rest.get("stress_function", {}) or {}
+			func_r = stress_rest.get("rest_function", {}) or {}
+			func_d = stress_rest.get("function_deltas", {}) or {}
+			for key, label, unit, decimals in (
+				("ef_pct", "FEVI", "%", 1),
+				("edv_ml", "EDV", "mL", 1),
+				("esv_ml", "ESV", "mL", 1),
+				("pfr_edv_per_s", "PFR/EDV", "/s", 2),
+				("tpfr_ms", "TPFR", "ms", 0),
+			):
+				if np.isfinite(float(func_s.get(key, float("nan")))) or np.isfinite(float(func_r.get(key, float("nan")))):
+					sr_rows.append([
+						label,
+						f"{_safe_float(func_s.get(key), decimals)}{unit}",
+						f"{_safe_float(func_r.get(key), decimals)}{unit}",
+						f"{_safe_float(func_d.get(key), decimals)}{unit}",
+					])
 			sr_table = Table(sr_rows, colWidths=[42 * mm, 34 * mm, 34 * mm, 36 * mm])
 			sr_table.setStyle(TableStyle([
 				("BACKGROUND", (0, 0), (-1, 0), DARK_BLUE),
@@ -603,26 +623,6 @@ def generate_report(
 	story.append(PageBreak())
 	story.append(Paragraph("4. Visualizaciones", section_style))
 
-	# Estudio en crudo: MIP AP / OAI 45° / Lateral izq, en una fila compacta.
-	mip_specs = [("raw_ap_mip.png", "AP"), ("raw_oai_mip.png", "OAI 45°"), ("raw_ll_mip.png", "Lat. izq")]
-	mip_cells = [
-		_scaled_image(os.path.join(output_dir, fn), max_width=54 * mm, max_height=72 * mm)
-		for fn, _lbl in mip_specs
-		if os.path.exists(os.path.join(output_dir, fn))
-	]
-	if mip_cells:
-		mip_table = Table([mip_cells], colWidths=[56 * mm] * len(mip_cells))
-		mip_table.setStyle(TableStyle([
-			("ALIGN", (0, 0), (-1, -1), "CENTER"),
-			("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-		]))
-		mip_table.hAlign = "CENTER"
-		story.append(mip_table)
-		story.append(Paragraph(
-			"Estudio en crudo — proyecciones planares de adquisición: anterior (AP), oblicua anterior izquierda (45°) y lateral izquierda. Panorama del trazador (tórax completo) antes de la reorientación.",
-			ParagraphStyle("MipCap", parent=small_style, alignment=1, spaceAfter=4 * mm),
-		))
-
 	# Montaje clínico: destacado, en formato vertical (sin página dedicada).
 	montage_path = os.path.join(output_dir, "sa_montage.png")
 	if os.path.exists(montage_path):
@@ -644,7 +644,6 @@ def generate_report(
 		("polar_map_delta_signed.png", "Delta con signo (esfuerzo - reposo), circular: conserva dirección del cambio (adelanto/atraso relativo)."),
 		("polar_map_absdiff.png", "Delta absoluto |esfuerzo - reposo|: magnitud del cambio regional sin dirección (hotspots dinámicos)."),
 		("polar_perfusion_directa.png", "Mapa polar continuo de perfusión (apex-centro, base-borde). Uso: heterogeneidad perfusional regional continua."),
-		("polar_cine_montaje.png", "Polar cine gatillado (muestra de gates). Uso: dinámica temporal del patrón polar. Animados: polar_cine.gif / polar_cine.mp4."),
 		("bullseye_directo.png", "Bull's-eye segmentario AHA (17) de perfusión directa. Uso: resumen rápido de intensidad regional."),
 		("guia_fase_vi.png", "Guía para fase VI: bull's-eye doble (fase + perfusión/viabilidad) y tabla segmentaria AHA-17. Cruza cuándo se contrae cada segmento con cuánto capta; con estudio de comparación muestra reposo y esfuerzo (Δfase) en una imagen."),
 		("ejes_ortogonales.png", "Ejes SA/HLA/VLA."),
@@ -654,6 +653,10 @@ def generate_report(
 		("comparacion_stress_rest.png", "Comparación de disincronía entre estudios (stress vs rest): PSD, BW, Kurtosis, Entropy con Δ e interpretación de stunning."),
 		("curva_tac.png", "Curva de actividad por gate."),
 		("curva_fevi.png", "Curva FEVI preliminar con volumen y derivada."),
+		("histograma_esfuerzo_panel.png", "Histograma de fase · Esfuerzo (pasajero FBP estándar)."),
+		("histograma_reposo_panel.png", "Histograma de fase · Reposo (pasajero FBP estándar)."),
+		("curva_fevi_panel.png", "Curva volumen/derivada (FEVI) · Esfuerzo."),
+		("curva_fevi_reposo_panel.png", "Curva volumen/derivada (FEVI) · Reposo."),
 	]
 	for fname, caption in img_files:
 		path = os.path.join(output_dir, fname)
