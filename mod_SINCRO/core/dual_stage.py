@@ -70,6 +70,7 @@ class StageState:
     reoriented_gated: Any = None
     reoriented_phase: Any = None
     reoriented_mf: Any = None
+    reoriented_ct: Any = None
 
     # --- cortes SA/HLA/VLA ---
     cut_study: Any = None                 # GatedStudy con cube SA (para process_current)
@@ -77,6 +78,7 @@ class StageState:
     axes: dict = field(default_factory=dict)          # {"SA","HLA","VLA"} nítido/gated
     axes_ungated: dict = field(default_factory=dict)  # ídem ungated (perfusión)
     axes_mf: dict = field(default_factory=dict)       # ídem motion-frozen (si MF on)
+    axes_ct: dict = field(default_factory=dict)       # ídem CT registrado (fusión)
     cut_thickness_mm: float = 0.0
 
     # --- análisis (fase / asincronía / FEVI) ---
@@ -87,6 +89,16 @@ class StageState:
     phase_by_seg: Any = None
     territory: Any = None
     ef: dict | None = None
+
+    # --- CT / atenuación (cada etapa con SU PROPIO CT; no se comparte) ---
+    ct_path: str = ""
+    mu_map_native: Any = None             # μ-map (cm^-1) en grilla nativa de la fuente
+    mu_map_spacing_zyx: Any = None        # spacing (z,y,x) mm del μ-map nativo
+    mu_map_source: str = ""               # "att_export" | "ct_bilineal"
+    mu_map_description: str = ""
+    mu_map_recon_grid: Any = None         # cache: μ-map remuestreado/registrado a grilla recon
+    mu_map_shift_zyx: Any = None          # Δ del refinamiento NCC (voxeles z,y,x)
+    ct_volume_native: Any = None          # volumen de display (HU si vino CT; μ si vino ATTMAP)
 
     # --- metadatos de presentación ---
     label: str = ""       # etiqueta clínica ("Esfuerzo"/"Reposo"/personalizada)

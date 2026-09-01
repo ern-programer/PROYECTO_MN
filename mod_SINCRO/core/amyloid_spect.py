@@ -567,19 +567,22 @@ def load_attenuation_map_from_path(path: str) -> AttenuationMapResult:
     items = sorted(series[best_uid], key=lambda item: _dicom_sort_key(item[1]))
 
     first_path, first_ds = items[0]
-    arrs = []
-    for fpath, _ in items:
+
+    def _read_scaled(fpath: str) -> np.ndarray:
         ds = pydicom.dcmread(fpath, force=True)
         a = np.asarray(ds.pixel_array, dtype=np.float64)
-        while a.ndim > 2:
-            a = a[0]
-        if a.ndim == 2:
-            arrs.append(a)
+        slope = float(getattr(ds, "RescaleSlope", 1.0) or 1.0)
+        intercept = float(getattr(ds, "RescaleIntercept", 0.0) or 0.0)
+        if slope != 1.0 or intercept != 0.0:
+            a = a * slope + intercept
+        return a
 
-    if not arrs:
-        # fallback multiframe
-        ds = pydicom.dcmread(first_path, force=True)
-        a = np.asarray(ds.pixel_array, dtype=np.float64)
+    if len(items) == 1:
+        # Archivo único: puede ser multiframe (3D). NO quedarse con el primer
+        # frame (bug histórico: ATTMAP multiframe leído como (1,H,W) vacío).
+        a = _read_scaled(first_path)
+        while a.ndim > 3:
+            a = a[0]
         if a.ndim == 3:
             vol = a
         elif a.ndim == 2:
@@ -587,6 +590,15 @@ def load_attenuation_map_from_path(path: str) -> AttenuationMapResult:
         else:
             raise ValueError(f"ATT MAP no convertible a volumen 3D: {a.shape}")
     else:
+        arrs = []
+        for fpath, _ in items:
+            a = _read_scaled(fpath)
+            while a.ndim > 2:
+                a = a[0]
+            if a.ndim == 2:
+                arrs.append(a)
+        if not arrs:
+            raise ValueError("ATT MAP sin frames 2D legibles en la serie.")
         vol = np.stack(arrs, axis=0)
 
     desc = str(getattr(first_ds, "SeriesDescription", "") or "ATT MAP")

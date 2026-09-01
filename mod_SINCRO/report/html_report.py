@@ -677,6 +677,12 @@ def generate_html_report(
     gallery_specs = [
         ("comparacion_ejes.png", "Comparación original vs reconstruido"),
         ("curva_tac.png", "Curva de actividad por gate"),
+        ("ct_fusion_sa_stress.png", "Fusión SPECT/CT en ejes cardiacos · Esfuerzo"),
+        ("ct_fusion_sa_rest.png", "Fusión SPECT/CT en ejes cardiacos · Reposo"),
+        ("ct_fusion_stress.png", "Fusión SPECT/CT (grilla de reconstrucción) · Esfuerzo"),
+        ("ct_fusion_rest.png", "Fusión SPECT/CT (grilla de reconstrucción) · Reposo"),
+        ("ac_qc_stress.png", "QC de alineación μ-map · Esfuerzo"),
+        ("ac_qc_rest.png", "QC de alineación μ-map · Reposo"),
     ]
     if stress_rest and stress_rest.get("available"):
         gallery_specs.append(("comparacion_stress_rest.png", "Comparación stress vs rest"))

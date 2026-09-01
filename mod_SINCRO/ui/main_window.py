@@ -185,9 +185,11 @@ class MainWindow(QMainWindow):
 	cine_crudo_reoriented_gated = _recon_stage_prop("reoriented_gated")
 	cine_crudo_reoriented_gated_phase = _recon_stage_prop("reoriented_phase")
 	cine_crudo_reoriented_mf = _recon_stage_prop("reoriented_mf")
+	cine_crudo_reoriented_ct = _recon_stage_prop("reoriented_ct")
 	cine_crudo_axes_for_export = _recon_stage_prop("axes")
 	cine_crudo_axes_for_export_ungated = _recon_stage_prop("axes_ungated")
 	cine_crudo_axes_for_export_mf = _recon_stage_prop("axes_mf")
+	cine_crudo_axes_for_export_ct = _recon_stage_prop("axes_ct")
 	cine_crudo_cut_thickness_mm = _recon_stage_prop("cut_thickness_mm")
 	# Slots del montaje por etapa (ahora vistas del MISMO almacenamiento por etapa;
 	# la copia stress/rest del flujo actual pasa a ser idempotente):
@@ -2087,6 +2089,43 @@ class MainWindow(QMainWindow):
 					"ventana. Calibrar con fantoma/estudio real.")
 				self.cine_crudo_scatter_k_spin.valueChanged.connect(self._on_scatter_preview_changed)
 				toolbar6_r2.addWidget(self.cine_crudo_scatter_k_spin)
+				# --- CT/ATT + AC: corrección de atenuación iterativa (OSEM/MLEM). El
+				# μ-map es POR ETAPA (cada etapa con su propio CT, no se comparte).
+				self.cine_crudo_ct_btn = QPushButton("CT/ATT")
+				self.cine_crudo_ct_btn.setMaximumWidth(64)
+				self.cine_crudo_ct_btn.setToolTip(
+					"Carga CT o mapa de atenuación (ATTMAP/CTAC) para la ETAPA ACTIVA.\n"
+					"• ATTMAP exportado por el equipo: se usa como μ-map directo.\n"
+					"• CT en HU: se convierte a μ-map con el modelo bilineal CTAC (140 keV).\n"
+					"Cada etapa (Esfuerzo/Reposo) requiere su propio CT.")
+				self.cine_crudo_ct_btn.clicked.connect(self._load_cine_crudo_ct_attmap)
+				toolbar6_r2.addWidget(self.cine_crudo_ct_btn)
+				self.cine_crudo_ac_check = QCheckBox("AC")
+				self.cine_crudo_ac_check.setChecked(False)
+				self.cine_crudo_ac_check.setEnabled(False)
+				self.cine_crudo_ac_check.setToolTip(
+					"Corrección de atenuación física en la reconstrucción iterativa "
+					"(OSEM/MLEM modelan el μ-map en el forward/backprojection). Requiere "
+					"CT/ATT cargado para la etapa. FBP no usa AC iterativa. El pasajero "
+					"de fase SIEMPRE va sin AC (límites normales calibrados sin AC).")
+				toolbar6_r2.addWidget(self.cine_crudo_ac_check)
+				self.cine_crudo_ac_qc_btn = QPushButton("QC AC")
+				self.cine_crudo_ac_qc_btn.setMaximumWidth(58)
+				self.cine_crudo_ac_qc_btn.setToolTip(
+					"QC visual de la alineación μ-map ↔ reconstrucción: contornos del "
+					"cuerpo (cian) y tejido denso (naranja) del CT/ATT superpuestos al "
+					"volumen ungated en axial/coronal/sagital. Requiere recon previa.")
+				self.cine_crudo_ac_qc_btn.clicked.connect(self._show_ac_qc)
+				toolbar6_r2.addWidget(self.cine_crudo_ac_qc_btn)
+				self.cine_crudo_fusion_btn = QPushButton("Fusión")
+				self.cine_crudo_fusion_btn.setMaximumWidth(60)
+				self.cine_crudo_fusion_btn.setEnabled(False)
+				self.cine_crudo_fusion_btn.setToolTip(
+					"Fusión SPECT (color) sobre CT/ATT (gris) en la grilla de reconstrucción: "
+					"axial/coronal/sagital en 3 niveles. Usa el registro fino NCC si existe. "
+					"Requiere CT/ATT cargado + recon previa de la etapa.")
+				self.cine_crudo_fusion_btn.clicked.connect(self._show_ct_fusion_preview)
+				toolbar6_r2.addWidget(self.cine_crudo_fusion_btn)
 				# --- Filtros por rama en DOS filas (ungated / gated): la fila única se
 				# iba de pantalla y no permitía activar un filtro en una rama y otro en
 				# la otra. UNGATED = perfusión estática (alto conteo) -> NÍTIDA(RR) para
@@ -13789,6 +13828,449 @@ class MainWindow(QMainWindow):
 			order = int(self.cine_crudo_gated_order_spin.value()) if hasattr(self, "cine_crudo_gated_order_spin") else 10
 		return ProjectionFilterConfig(kind=kind, cutoff=cutoff, order=order)
 
+	def _load_cine_crudo_ct_attmap(self):
+		"""Carga ATTMAP o CT para la etapa elegida y deja el μ-map nativo en StageState.
+
+		Cuatro combinaciones explícitas: ATTMAP/CT × Esfuerzo/Reposo. ATTMAP
+		exportado (μ ≈ cm^-1) se usa directo; CT en HU se convierte con la
+		bilineal CTAC. Cada etapa tiene su propio CT (no se comparte).
+		"""
+		from core.ct_fusion import (
+			load_attenuation_map_from_path,
+			load_ct_volume_from_path,
+			mu_map_from_ct_hu,
+			validate_mu_map,
+		)
+
+		active = str(getattr(self, "_cine_crudo_recon_stage", None) or self._cine_crudo_active_stage_or_default())
+		dlg = QDialog(self)
+		dlg.setWindowTitle("SINCRO · CT/ATT para corrección de atenuación")
+		lay = QVBoxLayout(dlg)
+		lay.addWidget(QLabel("Fuente del μ-map (cada etapa usa su PROPIO CT/ATTMAP):"))
+		row1 = QHBoxLayout()
+		row1.addWidget(QLabel("Etapa:"))
+		stage_combo = QComboBox()
+		stage_combo.addItem("Esfuerzo", "stress")
+		stage_combo.addItem("Reposo", "rest")
+		stage_combo.setCurrentIndex(1 if active == "rest" else 0)
+		row1.addWidget(stage_combo, 1)
+		lay.addLayout(row1)
+		row2 = QHBoxLayout()
+		row2.addWidget(QLabel("Tipo:"))
+		type_combo = QComboBox()
+		type_combo.addItem("ATTMAP (μ-map exportado por el equipo)", "att")
+		type_combo.addItem("CT (HU → μ bilineal 140 keV)", "ct")
+		row2.addWidget(type_combo, 1)
+		lay.addLayout(row2)
+		picked = {"path": ""}
+		btns = QHBoxLayout()
+		b_file = QPushButton("Archivo...")
+		b_dir = QPushButton("Carpeta...")
+		b_cancel = QPushButton("Cancelar")
+
+		def _pick_file():
+			p, _ = QFileDialog.getOpenFileName(dlg, "CT/ATTMAP · archivo DICOM", "", "DICOM (*.dcm *.ima);;Todos (*.*)")
+			if p:
+				picked["path"] = p
+				dlg.accept()
+
+		def _pick_dir():
+			p = QFileDialog.getExistingDirectory(dlg, "CT/ATTMAP · carpeta de serie")
+			if p:
+				picked["path"] = p
+				dlg.accept()
+
+		b_file.clicked.connect(_pick_file)
+		b_dir.clicked.connect(_pick_dir)
+		b_cancel.clicked.connect(dlg.reject)
+		btns.addWidget(b_file)
+		btns.addWidget(b_dir)
+		btns.addWidget(b_cancel)
+		lay.addLayout(btns)
+		if dlg.exec() != QDialog.DialogCode.Accepted or not picked["path"]:
+			return
+		stage = str(stage_combo.currentData())
+		kind = str(type_combo.currentData())
+		path = picked["path"]
+		stage_txt = "ESFUERZO" if stage == "stress" else "REPOSO"
+		try:
+			conv_notes: list[str] = []
+			if kind == "ct":
+				res = load_ct_volume_from_path(path)
+				mu, conv_notes = mu_map_from_ct_hu(np.asarray(res.volume, dtype=np.float64))
+				source = "ct_bilineal"
+			else:
+				res = load_attenuation_map_from_path(path)
+				vol = np.asarray(res.volume, dtype=np.float64)
+				if float(np.nanmin(vol)) < -200.0:
+					mu, conv_notes = mu_map_from_ct_hu(vol)
+					conv_notes.append("La serie elegída como ATTMAP contenía HU de CT: se convirtió con la bilineal.")
+					source = "ct_bilineal"
+				else:
+					mu = np.clip(vol, 0.0, None)
+					q99 = float(np.percentile(mu, 99.0)) if mu.size else 0.0
+					if q99 > 2.0:
+						# Export en enteros escalados: normalizar p99 → μ agua.
+						mu = mu / q99 * 0.154
+						conv_notes.append(f"ATTMAP reescalado: p99={q99:.1f} → 0.154/cm (μ agua).")
+					source = "att_export"
+			ok, qc_notes = validate_mu_map(mu)
+			for n in list(getattr(res, "notes", []) or []) + conv_notes + qc_notes:
+				self._log(f"[AC] {n}")
+			if not ok:
+				QMessageBox.warning(
+					self, "SINCRO",
+					"El μ-map cargado no pasó el QC (ver log — posible export vacío/roto).\n"
+					"Probá cargando el CT y usá la conversión bilineal.",
+				)
+				return
+			st = self._dual_session().stage(stage)
+			st.ct_path = str(path)
+			st.mu_map_native = mu
+			st.ct_volume_native = np.asarray(res.volume, dtype=np.float64)
+			st.mu_map_spacing_zyx = getattr(res, "spacing_zyx", None)
+			st.mu_map_source = source
+			st.mu_map_description = str(getattr(res, "series_description", "") or "")
+			st.mu_map_recon_grid = None
+			st.mu_map_shift_zyx = None
+			if getattr(self, "cine_crudo_ac_check", None) is not None:
+				self.cine_crudo_ac_check.setEnabled(True)
+				self.cine_crudo_ac_check.setChecked(True)
+			if getattr(self, "cine_crudo_fusion_btn", None) is not None:
+				self.cine_crudo_fusion_btn.setEnabled(True)
+			src_txt = "ATTMAP export" if source == "att_export" else "CT→μ bilineal (140 keV)"
+			self._log(
+				f"[AC] μ-map cargado para {stage_txt}: {mu.shape}, fuente={src_txt}, "
+				f"spacing={st.mu_map_spacing_zyx}, serie='{st.mu_map_description}'. AC habilitada "
+				"(el check 'AC' la prende/apaga sin descargar el CT)."
+			)
+		except Exception as exc:
+			QMessageBox.warning(self, "SINCRO", f"No se pudo cargar CT/ATTMAP ({stage_txt}):\n{exc}")
+
+	def _cine_crudo_active_stage_or_default(self) -> str:
+		stage = str(getattr(self, "_cine_crudo_active_stage", "stress") or "stress")
+		return stage if stage in ("stress", "rest") else "stress"
+
+	def _stage_mu_map_for_recon(self, stage: str, projections: np.ndarray, raw_study=None):
+		"""μ-map de la etapa remuestreado a la grilla de recon (H,W,W) o (None, None).
+
+		Remuestreo por spacing + center crop; si hay una recon previa de la misma
+		etapa con la misma grilla, refina la traslación por NCC contra el ungated
+		(registro fino Fase 2). fill=0 (aire). Cachea el resultado para el QC.
+		"""
+		proj = np.asarray(projections)
+		height, width = int(proj.shape[2]), int(proj.shape[3])
+		st = self._dual_session().stage("rest" if str(stage) == "rest" else "stress")
+		refine_to = None
+		prev = getattr(st, "recon_result", None)
+		if prev is not None:
+			prev_ung = getattr(prev, "ungated_volume", None)
+			if prev_ung is not None and tuple(np.asarray(prev_ung).shape) == (height, width, width):
+				refine_to = np.asarray(prev_ung, dtype=np.float64)
+		return self._stage_mu_map_to_grid(stage, (height, width, width), raw_study=raw_study, refine_to=refine_to)
+
+	def _stage_mu_map_to_grid(self, stage: str, target_shape, raw_study=None, refine_to=None):
+		"""Remuestrea (y opcionalmente registra por NCC) el μ-map de la etapa a target_shape."""
+		from core.ct_fusion import resample_volume_to_spect_grid, validate_mu_map, refine_ct_to_spect_translation
+
+		st = self._dual_session().stage("rest" if str(stage) == "rest" else "stress")
+		mu_native = st.mu_map_native
+		if mu_native is None:
+			self._log(f"[AC][WARN] AC pedida pero la etapa {stage} no tiene CT/ATT cargado: reconstruyo SIN AC.")
+			return None, None
+		try:
+			height, width = int(target_shape[0]), int(target_shape[1])
+			raw_study = raw_study or st.raw_study_for_recon or st.raw_study or self.study
+			ps = getattr(raw_study, "pixel_spacing", None) if raw_study is not None else None
+			px_mm = float(ps[0]) if ps else 6.4
+			target = np.zeros(tuple(int(v) for v in target_shape), dtype=np.float64)
+			mu_rs, notes = resample_volume_to_spect_grid(
+				np.asarray(mu_native, dtype=np.float64), target,
+				source_spacing_zyx=st.mu_map_spacing_zyx,
+				spect_spacing_zyx=(px_mm, px_mm, px_mm),
+				fill_value=0.0, order=1,
+			)
+			for n in notes:
+				self._log(f"[AC] {n}")
+			if refine_to is not None and np.asarray(refine_to).shape == mu_rs.shape:
+				try:
+					mu_rs, shift, rnotes = refine_ct_to_spect_translation(
+						mu_rs, np.asarray(refine_to, dtype=np.float64),
+						search_radius_zyx=(3, 6, 6),
+					)
+					st.mu_map_shift_zyx = tuple(float(v) for v in shift)
+					for n in rnotes:
+						self._log(f"[AC] {n}")
+				except Exception as exc:
+					self._log(f"[AC][WARN] Refinamiento NCC falló ({exc}); uso remuestreo por spacing solo.")
+			else:
+				st.mu_map_shift_zyx = None
+				self._log("[AC] Sin recon previa de la etapa: remuestreo por spacing sin registro fino (se refina en la próxima recon).")
+			ok, qc_notes = validate_mu_map(mu_rs)
+			for n in qc_notes:
+				self._log(f"[AC] {n}")
+			if not ok:
+				self._log("[AC][WARN] μ-map remuestreado no pasó QC: reconstruyo SIN AC.")
+				return None, None
+			st.mu_map_recon_grid = mu_rs
+			self._log(
+				f"[AC] μ-map {stage} listo en grilla de recon {mu_rs.shape} "
+				f"(px={px_mm:.2f} mm). Verificá la alineación con 'QC AC'."
+			)
+			return mu_rs, px_mm / 10.0
+		except Exception as exc:
+			self._log(f"[AC][WARN] Remuestreo del μ-map falló ({exc}): reconstruyo SIN AC.")
+			return None, None
+
+	def _show_ac_qc(self):
+		"""QC visual de alineación μ-map ↔ recon: contornos del μ sobre el ungated."""
+		stage = str(getattr(self, "_cine_crudo_recon_stage", None) or self._cine_crudo_active_stage_or_default())
+		if stage not in ("stress", "rest"):
+			stage = "stress"
+		st = self._dual_session().stage(stage)
+		result = getattr(st, "recon_result", None) or getattr(self, "cine_crudo_recon_result", None)
+		if result is None:
+			QMessageBox.information(self, "SINCRO", "Primero reconstruí con 'Recon raw' para tener el volumen de referencia.")
+			return
+		ung = np.asarray(result.ungated_volume, dtype=np.float64)
+		mu = getattr(st, "mu_map_recon_grid", None)
+		if mu is None or np.asarray(mu).shape != ung.shape:
+			mu, _ = self._stage_mu_map_to_grid(stage, ung.shape, refine_to=ung)
+		if mu is None:
+			QMessageBox.information(self, "SINCRO", "No hay μ-map utilizable para esta etapa (cargá CT/ATT).")
+			return
+		try:
+			import matplotlib.pyplot as plt
+			mu = np.asarray(mu, dtype=np.float64)
+			zc, yc, xc = [s // 2 for s in ung.shape]
+			views = [
+				("Axial", ung[zc], mu[zc]),
+				("Coronal", ung[:, yc, :], mu[:, yc, :]),
+				("Sagital", ung[:, :, xc], mu[:, :, xc]),
+			]
+			fig, axes = plt.subplots(1, 3, figsize=(12, 4.2))
+			fig.patch.set_facecolor("#0b1220")
+			for ax, (title, sp_sl, mu_sl) in zip(axes, views):
+				sp_n = sp_sl / max(float(np.percentile(sp_sl, 99.5)), 1e-9)
+				ax.imshow(np.clip(sp_n, 0, 1), cmap="gray", interpolation="bicubic")
+				# Contornos del μ-map: cuerpo (μ>0.05/cm) y denso/hueso (μ>0.13/cm).
+				ax.contour(mu_sl, levels=[0.05], colors=["cyan"], linewidths=1.0)
+				ax.contour(mu_sl, levels=[0.13], colors=["orange"], linewidths=0.8)
+				ax.set_title(title, color="white", fontsize=10)
+				ax.axis("off")
+			shift = getattr(st, "mu_map_shift_zyx", None)
+			shift_txt = f" · ΔNCC z/y/x=({shift[0]:.0f},{shift[1]:.0f},{shift[2]:.0f}) vox" if shift else " · sin registro fino aún"
+			stage_txt = "ESFUERZO" if stage == "stress" else "REPOSO"
+			fig.suptitle(
+				f"QC AC · {stage_txt}: contornos μ-map (cian=cuerpo, naranja=denso) sobre recon ungated{shift_txt}",
+				color="white", fontsize=11,
+			)
+			fig.tight_layout(rect=[0, 0, 1, 0.93])
+			out_png = os.path.join(self.output_dir, f"ac_qc_{stage}.png")
+			fig.savefig(out_png, dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
+			plt.close(fig)
+			if "cine_crudo" in self.preview_labels:
+				pix = QPixmap(out_png)
+				self.preview_pixmaps["cine_crudo"] = pix
+				self.preview_base_sizes["cine_crudo"] = pix.size()
+				self.cine_crudo_preview_mode = "ac_qc"
+				self._set_preview_zoom("cine_crudo", 1.0)
+				self._apply_preview_zoom("cine_crudo")
+				self._select_tab_by_title("cine_crudo")
+			self._log(f"[AC] QC de alineación generado: {out_png}")
+		except Exception as exc:
+			self._log(f"[AC][WARN] QC AC falló: {exc}")
+
+	def _stage_ct_on_recon_grid(self, stage: str, target_shape):
+		"""CT de display de la etapa remuestreado (+Δ NCC si existe) a target_shape, o None."""
+		import scipy.ndimage as ndi_local
+		from core.ct_fusion import resample_volume_to_spect_grid
+
+		st = self._dual_session().stage("rest" if str(stage) == "rest" else "stress")
+		ct_native = getattr(st, "ct_volume_native", None)
+		if ct_native is None:
+			ct_native = getattr(st, "mu_map_native", None)
+		if ct_native is None:
+			return None
+		raw_study = st.raw_study_for_recon or st.raw_study or self.study
+		ps = getattr(raw_study, "pixel_spacing", None) if raw_study is not None else None
+		px_mm = float(ps[0]) if ps else 6.4
+		ct = np.asarray(ct_native, dtype=np.float64)
+		ct_rs, _notes = resample_volume_to_spect_grid(
+			ct, np.zeros(tuple(int(v) for v in target_shape), dtype=np.float64),
+			source_spacing_zyx=st.mu_map_spacing_zyx,
+			spect_spacing_zyx=(px_mm, px_mm, px_mm),
+			fill_value=float(np.min(ct)), order=1,
+		)
+		shift = getattr(st, "mu_map_shift_zyx", None)
+		if shift:
+			ct_rs = ndi_local.shift(ct_rs, shift=tuple(float(v) for v in shift), order=1, mode="nearest")
+		return ct_rs
+
+	def _show_ct_fusion_preview(self):
+		"""Fusión visual SPECT(color)/CT(gris) en la grilla de recon de la etapa activa."""
+		import scipy.ndimage as ndi_local
+
+		stage = str(getattr(self, "_cine_crudo_recon_stage", None) or self._cine_crudo_active_stage_or_default())
+		if stage not in ("stress", "rest"):
+			stage = "stress"
+		st = self._dual_session().stage(stage)
+		result = getattr(st, "recon_result", None) or getattr(self, "cine_crudo_recon_result", None)
+		if result is None:
+			QMessageBox.information(self, "SINCRO", "Primero reconstruí con 'Recon raw'.")
+			return
+		ct_native = getattr(st, "ct_volume_native", None)
+		if ct_native is None:
+			ct_native = getattr(st, "mu_map_native", None)
+		if ct_native is None:
+			QMessageBox.information(self, "SINCRO", "Cargá CT/ATT para esta etapa primero.")
+			return
+		# Si ya hay cortes en ejes cardiacos del CT (post-reorientación + Generar
+		# cortes), la fusión clínicamente útil es en SA: mostrar esa.
+		axes_ct = getattr(st, "axes_ct", None) or {}
+		axes_perf = getattr(st, "axes_ungated", None) or {}
+		if "SA" in axes_ct and "SA" in axes_perf:
+			try:
+				self._render_sa_fusion(stage, axes_ct, axes_perf)
+				return
+			except Exception as exc:
+				self._log(f"[FUSION][WARN] Fusión SA falló ({exc}); muestro fusión en grilla de recon.")
+		try:
+			from core.ct_fusion import resample_volume_to_spect_grid
+			import matplotlib.pyplot as plt
+			import matplotlib as mpl
+
+			ung = np.asarray(result.ungated_volume, dtype=np.float64)
+			raw_study = st.raw_study_for_recon or st.raw_study or self.study
+			ps = getattr(raw_study, "pixel_spacing", None) if raw_study is not None else None
+			px_mm = float(ps[0]) if ps else 6.4
+			ct = np.asarray(ct_native, dtype=np.float64)
+			ct_rs, notes = resample_volume_to_spect_grid(
+				ct, np.zeros_like(ung),
+				source_spacing_zyx=st.mu_map_spacing_zyx,
+				spect_spacing_zyx=(px_mm, px_mm, px_mm),
+				fill_value=float(np.min(ct)), order=1,
+			)
+			for n in notes:
+				self._log(f"[FUSION] {n}")
+			shift = getattr(st, "mu_map_shift_zyx", None)
+			if shift:
+				ct_rs = ndi_local.shift(ct_rs, shift=tuple(float(v) for v in shift), order=1, mode="nearest")
+				self._log(f"[FUSION] Aplicado Δ del registro NCC: z/y/x={shift}.")
+			# Ventana anatómica: HU tejido blando si es CT; percentiles si es μ.
+			if float(np.min(ct_rs)) < -200.0:
+				ct_disp = np.clip((ct_rs + 200.0) / 500.0, 0.0, 1.0)
+			else:
+				lo, hi = np.percentile(ct_rs, (1.0, 99.5))
+				ct_disp = np.clip((ct_rs - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
+			sp_n = np.clip(ung / max(float(np.percentile(ung, 99.5)), 1e-9), 0.0, 1.0)
+			try:
+				cmap = mpl.colormaps[str(getattr(self, "cine_crudo_screen_cmap", "") or "hot")]
+			except Exception:
+				cmap = mpl.colormaps["hot"]
+
+			zs, ys, xs = ung.shape
+			fracs = (0.35, 0.50, 0.65)
+			rows = [
+				("Axial", [(ct_disp[int(f * zs)], sp_n[int(f * zs)]) for f in fracs]),
+				("Coronal", [(ct_disp[:, int(f * ys), :], sp_n[:, int(f * ys), :]) for f in fracs]),
+				("Sagital", [(ct_disp[:, :, int(f * xs)], sp_n[:, :, int(f * xs)]) for f in fracs]),
+			]
+			fig, axes = plt.subplots(3, 3, figsize=(11, 11))
+			fig.patch.set_facecolor("#0b1220")
+			for r, (title, panels) in enumerate(rows):
+				for c, (ct_sl, sp_sl) in enumerate(panels):
+					ax = axes[r][c]
+					base = np.stack([ct_sl] * 3, axis=-1)
+					over = cmap(sp_sl)[..., :3]
+					alpha = (np.clip(sp_sl, 0.0, 1.0) ** 0.7 * 0.65)[..., None]
+					ax.imshow(np.clip(base * (1 - alpha) + over * alpha, 0, 1), interpolation="bicubic")
+					if c == 0:
+						ax.set_ylabel(title, color="white", fontsize=10)
+					ax.set_xticks([]); ax.set_yticks([])
+					for s in ax.spines.values():
+						s.set_color("#334155")
+			stage_txt = "ESFUERZO" if stage == "stress" else "REPOSO"
+			src_txt = "CT (HU)" if float(np.min(np.asarray(ct_native))) < -200.0 else "ATT (μ)"
+			fig.suptitle(
+				f"Fusión SPECT/CT · {stage_txt} · anatomía={src_txt} · grilla recon {ung.shape}",
+				color="white", fontsize=12,
+			)
+			fig.tight_layout(rect=[0, 0, 1, 0.95])
+			out_png = os.path.join(self.output_dir, f"ct_fusion_{stage}.png")
+			fig.savefig(out_png, dpi=125, bbox_inches="tight", facecolor=fig.get_facecolor())
+			plt.close(fig)
+			if "cine_crudo" in self.preview_labels:
+				pix = QPixmap(out_png)
+				self.preview_pixmaps["cine_crudo"] = pix
+				self.preview_base_sizes["cine_crudo"] = pix.size()
+				self.cine_crudo_preview_mode = "ct_fusion"
+				self._set_preview_zoom("cine_crudo", 1.0)
+				self._apply_preview_zoom("cine_crudo")
+				self._select_tab_by_title("cine_crudo")
+			self._log(f"[FUSION] Fusión SPECT/CT generada: {out_png}")
+		except Exception as exc:
+			self._log(f"[FUSION][WARN] Fusión falló: {exc}")
+
+	def _render_sa_fusion(self, stage: str, axes_ct: dict, axes_perf: dict):
+		"""Fusión en ejes cardiacos: perfusión SA (color) sobre CT SA (gris)."""
+		import matplotlib.pyplot as plt
+		import matplotlib as mpl
+
+		sa_ct = np.asarray(axes_ct["SA"], dtype=np.float64)
+		sa_pf = np.asarray(axes_perf["SA"], dtype=np.float64)
+		if sa_ct.ndim == 4:
+			sa_ct = sa_ct[0]
+		if sa_pf.ndim == 4:
+			sa_pf = sa_pf.sum(axis=0) if sa_pf.shape[0] > 1 else sa_pf[0]
+		n = min(int(sa_ct.shape[0]), int(sa_pf.shape[0]))
+		if n < 1:
+			raise ValueError("sin cortes SA")
+		if float(np.min(sa_ct)) < -200.0:
+			ct_disp = np.clip((sa_ct + 200.0) / 500.0, 0.0, 1.0)
+		else:
+			lo, hi = np.percentile(sa_ct, (1.0, 99.5))
+			ct_disp = np.clip((sa_ct - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
+		pf_n = np.clip(sa_pf / max(float(np.percentile(sa_pf, 99.5)), 1e-9), 0.0, 1.0)
+		try:
+			cmap = mpl.colormaps[str(getattr(self, "cine_crudo_screen_cmap", "") or "hot")]
+		except Exception:
+			cmap = mpl.colormaps["hot"]
+		cols = 4
+		show_idx = list(range(n))[:12]
+		rows_n = int(np.ceil(len(show_idx) / cols))
+		fig, axes = plt.subplots(rows_n, cols, figsize=(3.0 * cols, 3.0 * rows_n))
+		fig.patch.set_facecolor("#0b1220")
+		axes = np.atleast_2d(axes)
+		for i, ax in enumerate(axes.flat):
+			ax.axis("off")
+			if i >= len(show_idx):
+				continue
+			k = show_idx[i]
+			base = np.stack([ct_disp[k]] * 3, axis=-1)
+			over = cmap(pf_n[k])[..., :3]
+			alpha = (np.clip(pf_n[k], 0.0, 1.0) ** 0.7 * 0.65)[..., None]
+			ax.imshow(np.clip(base * (1 - alpha) + over * alpha, 0, 1), interpolation="bicubic")
+			ax.set_title(f"SA {k + 1}", color="#94a3b8", fontsize=8)
+		stage_txt = "ESFUERZO" if stage == "stress" else "REPOSO"
+		fig.suptitle(
+			f"Fusión en ejes cardiacos · {stage_txt} · perfusión SA sobre CT (base→ápex)",
+			color="white", fontsize=12,
+		)
+		fig.tight_layout(rect=[0, 0, 1, 0.94])
+		out_png = os.path.join(self.output_dir, f"ct_fusion_sa_{stage}.png")
+		fig.savefig(out_png, dpi=125, bbox_inches="tight", facecolor=fig.get_facecolor())
+		plt.close(fig)
+		if "cine_crudo" in self.preview_labels:
+			pix = QPixmap(out_png)
+			self.preview_pixmaps["cine_crudo"] = pix
+			self.preview_base_sizes["cine_crudo"] = pix.size()
+			self.cine_crudo_preview_mode = "ct_fusion"
+			self._set_preview_zoom("cine_crudo", 1.0)
+			self._apply_preview_zoom("cine_crudo")
+			self._select_tab_by_title("cine_crudo")
+		self._log(f"[FUSION] Fusión SA generada: {out_png}")
+
 	def _cine_crudo_recon_config(self, study=None):
 		from core.raw_reconstruction import RawReconConfig
 
@@ -13876,6 +14358,8 @@ class MainWindow(QMainWindow):
 			fbp_clean_sharpen_k=fbc_k,
 			background_subtract=bool(getattr(self, "cine_crudo_bg_check", None) is not None
 								and self.cine_crudo_bg_check.isChecked()),
+			attenuation_correction=bool(getattr(self, "cine_crudo_ac_check", None) is not None
+								and self.cine_crudo_ac_check.isChecked()),
 			nitida3_enabled=bool(getattr(self, "cine_crudo_nitida3_check", None) is not None
 							and self.cine_crudo_nitida3_check.isChecked()),
 			nitida3_iterations=int(self.cine_crudo_nitida3_iter_spin.value()) if getattr(self, "cine_crudo_nitida3_iter_spin", None) is not None else 2,
@@ -14134,6 +14618,9 @@ class MainWindow(QMainWindow):
 		if result is None:
 			return
 		cfg = result.config
+		if bool(getattr(cfg, "attenuation_correction", False)):
+			self._log("[AC] Recompute por rama no soporta AC iterativa: usá 'Recon raw' completo para conservar la corrección.")
+			return
 		_rr_g = bool(getattr(cfg, "resolution_recovery", False))
 		_rr_ung = _rr_g if getattr(cfg, "rr_ungated", None) is None else bool(cfg.rr_ungated)
 		_rr_gat = _rr_g if getattr(cfg, "rr_gated", None) is None else bool(cfg.rr_gated)
@@ -14348,6 +14835,11 @@ class MainWindow(QMainWindow):
 				self._log("[INFO] MLEM/OSEM CPU en matriz real puede tardar; para pruebas rápidas usá Iter=1-2.")
 			self._set_progress(45, f"Reconstruyendo raw ({cfg.reconstruction_method.upper()})...")
 
+			# AC: μ-map de la ETAPA remuestreado a la grilla de recon (o None).
+			ac_mu_map, ac_px_cm = (None, None)
+			if bool(getattr(cfg, "attenuation_correction", False)):
+				ac_mu_map, ac_px_cm = self._stage_mu_map_for_recon(stage, projections, raw_study)
+
 			nitida_on = bool(
 				(getattr(cfg, "resolution_recovery", False) or getattr(cfg, "rr_ungated", False))
 				and getattr(cfg, "psf_model", None) is not None
@@ -14385,11 +14877,18 @@ class MainWindow(QMainWindow):
 					projections, angles, motion_result=motion, config=cfg,
 					progress_callback=_recon_progress,
 					scatter_projections=getattr(raw_study, "scatter_projections", None),
+					attenuation_mu_map=ac_mu_map,
+					attenuation_pixel_size_cm=ac_px_cm,
 				)
 			finally:
 				recon_dialog.close()
 				recon_dialog.deleteLater()
 			self.cine_crudo_recon_result = result
+			# Las notas de AC del motor son la única evidencia de si la corrección
+			# realmente aplicó (p.ej. FBP no la usa): mostrarlas SIEMPRE en el log.
+			for _n in list(getattr(result, "notes", []) or []):
+				if "AC " in _n or "AC iterativa" in _n or "ATT MAP" in _n:
+					self._log(f"[AC] {_n}")
 
 			# OSEM-Adj: reemplazar el volumen ungated con la recon adyunta.
 			if getattr(self, "_use_adjoint_osem", False):
@@ -14455,6 +14954,7 @@ class MainWindow(QMainWindow):
 			self.cine_crudo_reoriented_gated = None
 			self.cine_crudo_reoriented_ungated = None
 			self.cine_crudo_reoriented_gated_phase = None
+			self.cine_crudo_reoriented_ct = None
 			self.cine_crudo_reoriented_mf = None
 			if hasattr(self, "cine_crudo_reorient_btn"):
 				self.cine_crudo_reorient_btn.setEnabled(True)
@@ -15527,6 +16027,11 @@ class MainWindow(QMainWindow):
 		_reo_px = getattr(raw_study, "pixel_spacing", None) if raw_study is not None else None
 		_reo_voxel_mm = float(_reo_px[0]) if _reo_px else None
 		phase_res = st.recon_result_phase
+		ct_on_grid = None
+		try:
+			ct_on_grid = self._stage_ct_on_recon_grid(stage, ung_vol.shape)
+		except Exception as exc:
+			self._log(f"[FUSION][WARN] CT no disponible para reorientar ({stage}): {exc}")
 		return {
 			"ungated_volume": ung_vol,
 			"gated_volume": gated_vol,
@@ -15535,6 +16040,7 @@ class MainWindow(QMainWindow):
 			"voxel_mm": _reo_voxel_mm,
 			"locked_voi": self._reorient_locked_voi_for_stage(),
 			"initial_orientation": self._reorient_seed_for_stage(),
+			"ct_volume": ct_on_grid,
 			"phase_gated_volume": (
 				np.asarray(phase_res.gated_volume, dtype=np.float64)
 				if phase_res is not None else None
@@ -15660,6 +16166,11 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_reoriented_gated_phase = (
 			np.asarray(dlg.reoriented_gated_phase, dtype=np.float64)
 			if getattr(dlg, "reoriented_gated_phase", None) is not None else None
+		)
+		# CT registrado reorientado (mismo reslice, sin VOI) para fusión en ejes.
+		self.cine_crudo_reoriented_ct = (
+			np.asarray(dlg.reoriented_ct, dtype=np.float64)
+			if getattr(dlg, "reoriented_ct", None) is not None else None
 		)
 		n = int(self.cine_crudo_reoriented_gated.shape[1])
 		base_1 = int(np.clip(dlg.base_k + 1, 1, n))
@@ -15815,6 +16326,25 @@ class MainWindow(QMainWindow):
 			else:
 				self.cine_crudo_axes_for_export_mf = {}
 				self._log("Motion-frozen: no hay volumen MF (¿checkbox activado al reconstruir?)")
+			# Cortes del CT registrado reorientado (fusión en ejes cardiacos): mismo
+			# recorte base→ápex y mismos cortes anatómicos que el visible.
+			ct_reo = getattr(self, "cine_crudo_reoriented_ct", None)
+			if ct_reo is not None:
+				try:
+					ct_reo = np.asarray(ct_reo, dtype=np.float64)
+					ct_cube4 = self._thickened_sa_cube(ct_reo[None, ...], z0, z1, thickness)
+					cuts_ct = anatomical_cuts_gated(ct_cube4)
+					self.cine_crudo_axes_for_export_ct = {
+						"SA": np.ascontiguousarray(cuts_ct["sa"]),
+						"HLA": np.ascontiguousarray(cuts_ct["hla"]),
+						"VLA": np.ascontiguousarray(cuts_ct["vla"]),
+					}
+					self._log(f"[FUSION] Cortes CT en ejes cardiacos generados: SA {cuts_ct['sa'].shape}.")
+				except Exception as exc:
+					self.cine_crudo_axes_for_export_ct = {}
+					self._log(f"[FUSION][WARN] Cortes CT fallaron: {exc}")
+			else:
+				self.cine_crudo_axes_for_export_ct = {}
 			if sa_cube.shape[1] < 2:
 				QMessageBox.information(self, "SINCRO", "Los límites deben dejar al menos 2 cortes SA.")
 				return False

@@ -82,7 +82,7 @@ class _Handle:
 class CardiacReorientationDialog(QDialog):
     """Reorientacion oblicua interactiva del VI."""
 
-    def __init__(self, ungated_volume, gated_volume=None, source_label="", geometry=None, parent=None, locked_voi=None, initial_orientation=None, phase_gated_volume=None, voxel_mm=None, motion_frozen_volume=None, motion_frozen_gated_volume=None):
+    def __init__(self, ungated_volume, gated_volume=None, source_label="", geometry=None, parent=None, locked_voi=None, initial_orientation=None, phase_gated_volume=None, voxel_mm=None, motion_frozen_volume=None, motion_frozen_gated_volume=None, ct_volume=None):
         super().__init__(parent)
         self.setWindowTitle("Reorientar corazón · Rec/Ref")
         self.setWindowFlags(
@@ -110,6 +110,7 @@ class CardiacReorientationDialog(QDialog):
         self._phase_gated = None if phase_gated_volume is None else np.asarray(phase_gated_volume, dtype=np.float64)
         # Volumen motion-frozen (estático): misma reorientación que el ungated.
         self._mf = None if motion_frozen_volume is None else np.asarray(motion_frozen_volume, dtype=np.float64)
+        self._ct = None if ct_volume is None else np.asarray(ct_volume, dtype=np.float64)
         # Volumen motion-frozen POR GATE (4D): misma reorientación que el gated.
         self._mf_gated = None if motion_frozen_gated_volume is None else np.asarray(motion_frozen_gated_volume, dtype=np.float64)
         self._geometry = geometry if isinstance(geometry, SpectGeometry) else None
@@ -122,6 +123,7 @@ class CardiacReorientationDialog(QDialog):
         self.reoriented_gated = None
         self.reoriented_gated_phase = None
         self.reoriented_mf = None
+        self.reoriented_ct = None
         self.reoriented_mf_gated = None
         self.result_long_axis = None
         self.result_center = None
@@ -150,9 +152,20 @@ class CardiacReorientationDialog(QDialog):
 
         # Auto-orientación del VI usando el movimiento del gated SPECT: aísla el
         # VI del hígado por variabilidad temporal y estima centro + eje largo.
+        # Si hay CT en HU, suprime tejido subdiafragmático (hígado/intestino)
+        # SOLO para el auto-orient; los datos visibles no se tocan.
+        self._ct_supp_mask = None
+        if self._ct is not None and float(np.min(self._ct)) < -200.0:
+            try:
+                from core.ct_fusion import subdiaphragmatic_mask_from_ct
+                supp, _sn = subdiaphragmatic_mask_from_ct(self._ct)
+                if supp.shape == self._ung.shape and supp.any():
+                    self._ct_supp_mask = supp
+            except Exception:
+                self._ct_supp_mask = None
         self._auto = None
         try:
-            self._auto = auto_orient_lv(self._gated, self._ung)
+            self._auto = auto_orient_lv(*self._auto_orient_inputs())
         except Exception:
             self._auto = None
         if self._auto is not None:
@@ -492,10 +505,18 @@ class CardiacReorientationDialog(QDialog):
             self._recompute_and_draw()
             self.canvas.draw_idle()
 
+    def _auto_orient_inputs(self):
+        """(gated, ung) para auto_orient_lv, con supresión subdiafragmática CT si hay."""
+        if self._ct_supp_mask is None:
+            return self._gated, self._ung
+        keep = ~self._ct_supp_mask
+        gated = self._gated * keep[None, ...] if self._gated is not None else None
+        return gated, self._ung * keep
+
     def _auto_orient(self):
         """Re-ejecuta la auto-orientación del VI (movimiento gated + PCA)."""
         try:
-            auto = auto_orient_lv(self._gated, self._ung)
+            auto = auto_orient_lv(*self._auto_orient_inputs())
         except Exception:
             auto = None
         if not auto:
@@ -1394,6 +1415,15 @@ class CardiacReorientationDialog(QDialog):
                 self.reoriented_gated_phase = self._apply_post_ops_4d(reo_p)
         except Exception:
             self.reoriented_gated_phase = None
+        # CT registrado: mismo reslice PERO SIN máscara VOI (anatomía de contexto
+        # alrededor del corazón; la elipse solo aplica al SPECT).
+        try:
+            if self._ct is not None:
+                reo_ct = reslice_from_vector(self._ct, center, u, out, order=1,
+                                            sample_scale=sample_scale)
+                self.reoriented_ct = self._apply_post_ops_3d(reo_ct)
+        except Exception:
+            self.reoriented_ct = None
         try:
             # Motion-frozen (estático): misma VOI, mismo vector, mismo out, mismos
             # post-ops que el ungated -> queda alineado con la perfusión.
