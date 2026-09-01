@@ -378,6 +378,7 @@ def generate_html_report(
     ef: dict,
     stress_rest: dict | None = None,
     perfusion_phase_rows: list | None = None,
+    perfusion_quant: dict | None = None,
     editor_html: str = "",
     hash_max_files: int = 200,
     hash_max_days: int = 90,
@@ -438,9 +439,11 @@ def generate_html_report(
     exec_html = ""
     try:
         from core.executive_summary import build_executive_summary
+        rest_func_summary = (stress_rest or {}).get("rest_function") if (stress_rest and stress_rest.get("available")) else None
         summary = build_executive_summary(
             metrics=metrics, ef=ef, territory=territory,
             volumes=volumes, phase_label=phase_label,
+            rest_ef=rest_func_summary,
         )
         if summary.get("available"):
             sections = summary.get("sections", [])
@@ -549,27 +552,64 @@ def generate_html_report(
             ("asynchrony_index", "Asynchrony Idx", "%"),
         ]:
             sr_rows.append((label, f"{_safe_float(st.get(key), 1)}{unit}", f"{_safe_float(rs.get(key), 1)}{unit}", f"{_safe_float(deltas.get(key), 1)}{unit}"))
-    # Función ventricular por etapa: también debe figurar en la comparación,
-    # no solo como dato del estudio primario al comienzo del informe.
-    func_s = stress_rest.get("stress_function", {}) or {}
-    func_r = stress_rest.get("rest_function", {}) or {}
-    func_d = stress_rest.get("function_deltas", {}) or {}
-    for key, label, unit, decimals in [
-      ("ef_pct", "FEVI", "%", 1),
-      ("edv_ml", "EDV", "mL", 1),
-      ("esv_ml", "ESV", "mL", 1),
-      ("pfr_edv_per_s", "PFR/EDV", "/s", 2),
-      ("tpfr_ms", "TPFR", "ms", 0),
-    ]:
-      if np.isfinite(float(func_s.get(key, float("nan")))) or np.isfinite(float(func_r.get(key, float("nan")))):
-        sr_rows.append((
-          label,
-          f"{_safe_float(func_s.get(key), decimals)}{unit}",
-          f"{_safe_float(func_r.get(key), decimals)}{unit}",
-          f"{_safe_float(func_d.get(key), decimals)}{unit}",
-        ))
-        stress_rest_html = f"<h3 style='color:var(--accent); margin:24px 0 12px;'>Delta stress-rest</h3>" + _build_table(
+        # Función ventricular por etapa: también debe figurar en la comparación,
+        # no solo como dato del estudio primario al comienzo del informe.
+        func_s = stress_rest.get("stress_function", {}) or {}
+        func_r = stress_rest.get("rest_function", {}) or {}
+        func_d = stress_rest.get("function_deltas", {}) or {}
+        for key, label, unit, decimals in [
+            ("ef_pct", "FEVI", "%", 1),
+            ("edv_ml", "EDV", "mL", 1),
+            ("esv_ml", "ESV", "mL", 1),
+            ("pfr_edv_per_s", "PFR/EDV", "/s", 2),
+            ("tpfr_ms", "TPFR", "ms", 0),
+        ]:
+            if np.isfinite(float(func_s.get(key, float("nan")))) or np.isfinite(float(func_r.get(key, float("nan")))):
+                sr_rows.append((
+                    label,
+                    f"{_safe_float(func_s.get(key), decimals)}{unit}",
+                    f"{_safe_float(func_r.get(key), decimals)}{unit}",
+                    f"{_safe_float(func_d.get(key), decimals)}{unit}",
+                ))
+        stress_rest_html = "<h3 style='color:var(--accent); margin:24px 0 12px;'>Delta stress-rest</h3>" + _build_table(
             ["Métrica", "Esfuerzo", "Reposo", "Δ"], sr_rows
+        )
+
+    # --- Cuantificación relativa de perfusión (AHA 17) ---
+    perfusion_quant_html = ""
+    if perfusion_quant and perfusion_quant.get("available"):
+        has_rest_pq = bool(perfusion_quant.get("has_rest"))
+        pq_rows = []
+        for r in perfusion_quant.get("rows", []):
+            row = [f"{r['segment']}. {r['name']}", str(r.get("territory", "")), f"{_safe_float(r.get('stress_pct'), 0)}%"]
+            if has_rest_pq:
+                row.append(f"{_safe_float(r.get('rest_pct'), 0)}%")
+            row.append(str(r.get("stress_class", "")))
+            if has_rest_pq:
+                row.append(str(r.get("reversibility", "") or "—"))
+            pq_rows.append(tuple(row))
+        pq_headers = ["Segmento", "Territorio", "Esfuerzo (%máx)"]
+        if has_rest_pq:
+            pq_headers.append("Reposo (%máx)")
+        pq_headers.append("Clasificación")
+        if has_rest_pq:
+            pq_headers.append("Reversibilidad")
+        n_def = len(perfusion_quant.get("stress_defect_segments", []))
+        n_sev = len(perfusion_quant.get("stress_severe_segments", []))
+        n_rev = len(perfusion_quant.get("reversible_segments", []))
+        extent = perfusion_quant.get("extent_pct", float("nan"))
+        resumen_pq = (
+            f"Defectos en esfuerzo: {n_def}/17 segmentos "
+            f"(extensión {_safe_float(extent, 0)}%, severos: {n_sev})"
+        )
+        if has_rest_pq:
+            resumen_pq += f" · Reversibles en reposo: {n_rev}"
+        notes_html = "".join(f"<li>{n}</li>" for n in perfusion_quant.get("notes", []))
+        perfusion_quant_html = (
+            "<h3 style='color:var(--accent); margin:24px 0 12px;'>Cuantificación relativa de perfusión (AHA 17)</h3>"
+            + f"<p style='margin-bottom:10px;'><b>{resumen_pq}</b></p>"
+            + _build_table(pq_headers, pq_rows)
+            + f"<ul style='color:var(--fg-muted); font-size:0.85rem; margin-top:8px;'>{notes_html}</ul>"
         )
 
     # --- Visualizaciones ---
@@ -787,6 +827,7 @@ def generate_html_report(
   {metrics_table}
   {territory_html}
   {stress_rest_html}
+  {perfusion_quant_html}
 </div>
 
 <div id="tab-visual" class="tab-panel" data-group="main">

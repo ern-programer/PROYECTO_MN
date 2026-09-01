@@ -69,6 +69,7 @@ from core.perfusion_texture import (
 )
 from core.segmental_report import SEGMENT_NAMES, build_segmental_report
 from core.stress_rest import compare_stress_rest
+from core.perfusion_quant import perfusion_by_segment, perfusion_quant_summary
 from core.executive_summary import build_executive_summary
 from core.intestinal_subtraction import apply_intestinal_subtraction
 from core.ectb_lv import (
@@ -7417,6 +7418,8 @@ class MainWindow(QMainWindow):
 		parts = []
 		if qc.get("phase_passenger"):
 			parts.append("fase sobre FBP (pasajero)")
+		else:
+			parts.append("fase sobre volumen VISIBLE (sin pasajero)")
 		if qc.get("class_changed"):
 			parts.append(f"cambio {qc.get('raw_classification')}→{qc.get('clinical_classification')}")
 		if float(qc.get("low_confidence_tail_pct", 0.0)) >= LOW_CONFIDENCE_TAIL_WARN_PCT:
@@ -7563,8 +7566,13 @@ class MainWindow(QMainWindow):
 						cube_for_analysis = cube_phase_corr
 						phase_passenger_active = True
 						self._log("Fase calculada sobre pasajero FBP (cube_phase).")
-				except Exception:
+					else:
+						self._log(f"[FASE][WARN] Pasajero FBP descartado en análisis: shape {cube_phase_base.shape} != visible {np.asarray(self.study.cube).shape}. Fase sobre volumen VISIBLE.")
+				except Exception as exc:
 					phase_passenger_active = False
+					self._log(f"[FASE][WARN] Pasajero FBP inutilizable en análisis: {exc}. Fase sobre volumen VISIBLE.")
+			elif getattr(self, "cine_crudo_cut_study", None) is self.study:
+				self._log("[FASE][WARN] El estudio promovido desde el crudo NO trae cube_phase: fase sobre volumen VISIBLE (filtro-dependiente).")
 			self.phase_used_passenger = bool(phase_passenger_active)
 			intestinal_sig_primary = self._intestinal_signature_for_widget(self.cine)
 			intestinal_sig_primary["global_render"] = "ignored_for_segmentation"
@@ -9219,6 +9227,85 @@ class MainWindow(QMainWindow):
 		perfusion_phase_rows = combine_perfusion_phase(texture_by_seg, self.phase_by_seg)
 		return texture_by_seg, perfusion_phase_rows
 
+	def _rest_stage_state(self):
+		"""StageState de reposo si existe y no es el mismo estudio primario."""
+		try:
+			state = self._dual_session().stage("rest")
+		except Exception:
+			return None
+		if state is None or state.cut_study is None or state.cut_study is self.study:
+			return None
+		return state
+
+	def _stress_rest_for_reports(self, ef):
+		"""Comparación stress-rest para informes.
+
+		Usa compare_bundle si está; si el bundle fue regenerado/limpiado por el
+		render diferido, cae al StageState canónico de reposo (que persiste
+		metrics/territory/ef). Sin esto, el informe perdía la FEVI de reposo.
+		"""
+		if self.metrics is None:
+			return None
+		rest_metrics = rest_territory = rest_ef = None
+		if self.compare_bundle is not None:
+			rest_metrics = self.compare_bundle.get("metrics")
+			rest_territory = self.compare_bundle.get("territory")
+			rest_ef = getattr(self, "compare_ef", None) or self.compare_bundle.get("ef")
+		if rest_metrics is None:
+			rest_metrics = getattr(self, "compare_metrics", None)
+		state = self._rest_stage_state()
+		if state is not None:
+			if rest_metrics is None:
+				rest_metrics = state.metrics
+			if rest_territory is None:
+				rest_territory = state.territory
+			if not (rest_ef and rest_ef.get("available")):
+				rest_ef = state.ef or rest_ef
+		if not rest_metrics:
+			return None
+		return compare_stress_rest(
+			self.metrics,
+			rest_metrics,
+			self.territory,
+			rest_territory,
+			ef,
+			rest_ef,
+		)
+
+	def _compute_perfusion_quant(self):
+		"""Cuantificación relativa de perfusión por segmento AHA (esf. + rep. si hay)."""
+		if self.study is None or self.aha is None:
+			return None
+		seg_map = getattr(self.aha, "segment_map", None)
+		cube = getattr(self.study, "cube", None)
+		if seg_map is None or cube is None or np.asarray(cube).ndim != 4:
+			return None
+		stress_perf = np.asarray(cube, dtype=np.float64).mean(axis=0)
+		if stress_perf.shape != np.asarray(seg_map).shape:
+			return None
+		stress_pct = perfusion_by_segment(stress_perf, seg_map)
+		rest_pct = None
+		rest_study = rest_aha = None
+		if self.compare_bundle is not None:
+			rest_study = self.compare_bundle.get("study")
+			rest_aha = self.compare_bundle.get("aha")
+		if rest_study is None:
+			state = self._rest_stage_state()
+			if state is not None and state.seg is not None:
+				rest_study = state.cut_study
+				try:
+					rest_aha = map_to_17_segments(state.seg)
+				except Exception:
+					rest_aha = None
+		if rest_study is not None and rest_aha is not None:
+			r_map = getattr(rest_aha, "segment_map", None)
+			r_cube = getattr(rest_study, "cube", None)
+			if r_map is not None and r_cube is not None and np.asarray(r_cube).ndim == 4:
+				r_perf = np.asarray(r_cube, dtype=np.float64).mean(axis=0)
+				if r_perf.shape == np.asarray(r_map).shape:
+					rest_pct = perfusion_by_segment(r_perf, r_map)
+		return perfusion_quant_summary(stress_pct, rest_pct)
+
 	def _export_structured_results(self):
 		"""Exporta resultados a JSON/CSV/Excel en el directorio de salida."""
 		if self.study is None or self.metrics is None:
@@ -9286,15 +9373,7 @@ class MainWindow(QMainWindow):
 		except Exception as exc:
 			self._log(f"Textura de perfusión no disponible para export: {exc}")
 		try:
-			if self.compare_bundle is not None:
-				stress_rest = compare_stress_rest(
-					self.metrics,
-					self.compare_bundle.get("metrics"),
-					self.territory,
-					self.compare_bundle.get("territory"),
-					ef,
-					getattr(self, "compare_ef", None) or self.compare_bundle.get("ef"),
-				)
+			stress_rest = self._stress_rest_for_reports(ef)
 		except Exception as exc:
 			self._log(f"Comparación stress-rest no disponible para export: {exc}")
 
@@ -11858,17 +11937,14 @@ class MainWindow(QMainWindow):
 		except Exception as exc:
 			self._log(f"Textura de perfusión no disponible para PDF: {exc}")
 		try:
-			if self.compare_bundle is not None:
-				stress_rest = compare_stress_rest(
-					self.metrics,
-					self.compare_bundle.get("metrics"),
-					self.territory,
-					self.compare_bundle.get("territory"),
-					ef,
-					getattr(self, "compare_ef", None) or self.compare_bundle.get("ef"),
-				)
+			stress_rest = self._stress_rest_for_reports(ef)
 		except Exception as exc:
 			self._log(f"Comparación stress-rest no disponible para PDF: {exc}")
+		perfusion_quant = None
+		try:
+			perfusion_quant = self._compute_perfusion_quant()
+		except Exception as exc:
+			self._log(f"Cuantificación de perfusión no disponible: {exc}")
 		try:
 			self._ensure_pdf_extra_images()
 		except Exception as exc:
@@ -11886,6 +11962,7 @@ class MainWindow(QMainWindow):
 				ef=ef,
 				stress_rest=stress_rest,
 				perfusion_phase_rows=perfusion_phase_rows,
+				perfusion_quant=perfusion_quant,
 			)
 			self._log(f"PDF actualizado: {pdf_path}")
 		except Exception as exc:
@@ -11906,6 +11983,7 @@ class MainWindow(QMainWindow):
 				ef=ef,
 				stress_rest=stress_rest,
 				perfusion_phase_rows=perfusion_phase_rows,
+				perfusion_quant=perfusion_quant,
 				editor_html=getattr(self, "_report_editor_html", ""),
 				hash_max_files=int(self._ui_settings.value("integrity/hash_max_files", 200)) if hasattr(self, "_ui_settings") else 200,
 				hash_max_days=int(self._ui_settings.value("integrity/hash_max_days", 90)) if hasattr(self, "_ui_settings") else 90,
@@ -15741,20 +15819,33 @@ class MainWindow(QMainWindow):
 				QMessageBox.information(self, "SINCRO", "Los límites deben dejar al menos 2 cortes SA.")
 				return False
 			# Pasajero de fase (FBP): mismo recorte base→ápex y mismos cortes SA que
-			# el visible. Se usa como base del análisis de FASE (ver paso 4). None si
-			# no hay pasajero (NÍTIDA off o recon sin RR).
+			# el visible. Se usa como base del análisis de FASE (ver paso 4). El
+			# fallback al pasajero SIN reorientar solo vale si NO hubo reorientación
+			# (si la hubo, cortar el crudo daría anatomía equivocada).
 			sa_cube_phase = None
+			reo_done = getattr(self, "cine_crudo_reoriented_gated", None) is not None
 			phase_vol = getattr(self, "cine_crudo_reoriented_gated_phase", None)
-			if phase_vol is None and getattr(self, "cine_crudo_recon_result_phase", None) is not None:
-				phase_vol = getattr(self.cine_crudo_recon_result_phase, "gated_volume", None)
+			phase_src = "reorientado"
+			if phase_vol is None:
+				if reo_done:
+					self._log("[FASE][WARN] Hay reorientación pero el pasajero FBP no fue reorientado: la fase caerá al volumen visible (filtro-dependiente).")
+				elif getattr(self, "cine_crudo_recon_result_phase", None) is not None:
+					phase_vol = getattr(self.cine_crudo_recon_result_phase, "gated_volume", None)
+					phase_src = "recon (sin reorientar)"
+				else:
+					self._log("[FASE][WARN] Sin pasajero FBP disponible al generar cortes: la fase se calculará sobre el volumen visible (filtro-dependiente).")
 			if phase_vol is not None:
 				try:
 					phase_vol = np.asarray(phase_vol, dtype=np.float64)
 					if phase_vol.shape == gated_vol.shape:
 						reo_cube_p = self._thickened_sa_cube(phase_vol, z0, z1, thickness)
 						sa_cube_phase = np.ascontiguousarray(anatomical_cuts_gated(reo_cube_p)["sa"])
-				except Exception:
+						self._log(f"[FASE] Cortes SA del pasajero FBP generados ({phase_src}): {sa_cube_phase.shape}.")
+					else:
+						self._log(f"[FASE][WARN] Pasajero FBP descartado por shape: pasajero {phase_vol.shape} vs visible {gated_vol.shape}. La fase caerá al volumen visible.")
+				except Exception as exc:
 					sa_cube_phase = None
+					self._log(f"[FASE][WARN] Corte del pasajero FBP falló: {exc}. La fase caerá al volumen visible.")
 			out_png = self._write_cine_crudo_cuts_qc(ung_vol, z0, z1)
 			self.cine_crudo_preview_mode = "generated_cuts"
 			# QC dual: cachear el QC por etapa y, si ambas ya generaron cortes,

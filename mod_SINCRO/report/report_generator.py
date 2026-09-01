@@ -97,6 +97,7 @@ def generate_report(
 	ef: dict,
 	stress_rest: dict | None = None,
 	perfusion_phase_rows: list | None = None,
+	perfusion_quant: dict | None = None,
 ) -> str:
 	"""Genera informe PDF clínico con bloque de auditoría y retorna la ruta final."""
 
@@ -145,12 +146,14 @@ def generate_report(
 	# --- Resumen ejecutivo (síntesis del hallazgo) -----------------------------
 	try:
 		from core.executive_summary import build_executive_summary
+		rest_func_summary = (stress_rest or {}).get("rest_function") if (stress_rest and stress_rest.get("available")) else None
 		exec_summary = build_executive_summary(
 			metrics=metrics,
 			ef=ef,
 			territory=territory,
 			volumes=volumes,
 			phase_label=phase_label,
+			rest_ef=rest_func_summary,
 		)
 		if exec_summary.get("available"):
 			story.append(Paragraph("Resumen ejecutivo", section_style))
@@ -278,6 +281,18 @@ def generate_report(
 			])
 	else:
 		metrics_rows.append(["FEVI preliminar", "No disponible"]) 
+	# FEVI/volúmenes de reposo (si hay comparación stress-rest disponible).
+	rest_func_main = (stress_rest or {}).get("rest_function", {}) if (stress_rest and stress_rest.get("available")) else {}
+	try:
+		_rest_ef_val = float(rest_func_main.get("ef_pct", float("nan")))
+	except (TypeError, ValueError):
+		_rest_ef_val = float("nan")
+	if np.isfinite(_rest_ef_val):
+		metrics_rows.append(["FEVI reposo", f"{_safe_float(rest_func_main.get('ef_pct'), 1)}%"])
+		metrics_rows.append([
+			"EDV / ESV reposo",
+			f"{_safe_float(rest_func_main.get('edv_ml'), 1)} / {_safe_float(rest_func_main.get('esv_ml'), 1)} mL",
+		])
 	met_table = Table(metrics_rows, colWidths=[62 * mm, 104 * mm])
 	met_table.setStyle(TableStyle([
 		("BACKGROUND", (0, 0), (0, -1), LIGHT_BLUE),
@@ -299,7 +314,7 @@ def generate_report(
 			return "N/D"
 
 	territory = territory or {}
-	if territory or (stress_rest and stress_rest.get("available")) or perfusion_phase_rows:
+	if territory or (stress_rest and stress_rest.get("available")) or perfusion_phase_rows or (perfusion_quant and perfusion_quant.get("available")):
 		story.append(Paragraph("2b. Territorios coronarios, textura y stress-rest", section_style))
 
 		# Tabla de territorios coronarios (fase por LAD/LCx/RCA)
@@ -434,6 +449,59 @@ def generate_report(
 					small_style,
 				))
 				story.append(Spacer(1, 3 * mm))
+
+		# Cuantificación relativa de perfusión por segmento AHA (sin DB de normales).
+		if perfusion_quant and perfusion_quant.get("available"):
+			has_rest_pq = bool(perfusion_quant.get("has_rest"))
+			pq_header = ["Segmento", "Terr.", "Esf. %máx"]
+			if has_rest_pq:
+				pq_header.append("Rep. %máx")
+			pq_header.append("Clasif.")
+			if has_rest_pq:
+				pq_header.append("Reversib.")
+			pq_rows = [pq_header]
+			for r in perfusion_quant.get("rows", []):
+				row = [
+					f"{r['segment']}. {r['name']}",
+					str(r.get("territory", "")),
+					f"{_safe_float(r.get('stress_pct'), 0)}%",
+				]
+				if has_rest_pq:
+					row.append(f"{_safe_float(r.get('rest_pct'), 0)}%")
+				row.append(str(r.get("stress_class", "")))
+				if has_rest_pq:
+					row.append(str(r.get("reversibility", "") or "—"))
+				pq_rows.append(row)
+			if has_rest_pq:
+				pq_widths = [52 * mm, 18 * mm, 24 * mm, 24 * mm, 24 * mm, 24 * mm]
+			else:
+				pq_widths = [72 * mm, 30 * mm, 34 * mm, 30 * mm]
+			pq_table = Table(pq_rows, colWidths=pq_widths)
+			pq_table.setStyle(TableStyle([
+				("BACKGROUND", (0, 0), (-1, 0), DARK_BLUE),
+				("TEXTCOLOR", (0, 0), (-1, 0), white),
+				("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+				("FONTSIZE", (0, 0), (-1, -1), 8),
+				("ROWBACKGROUNDS", (0, 1), (-1, -1), [white, LIGHT_GREY]),
+				("GRID", (0, 0), (-1, -1), 0.4, HexColor("#cccccc")),
+				("LEFTPADDING", (0, 0), (-1, -1), 2 * mm),
+			]))
+			n_def = len(perfusion_quant.get("stress_defect_segments", []))
+			n_sev = len(perfusion_quant.get("stress_severe_segments", []))
+			n_rev = len(perfusion_quant.get("reversible_segments", []))
+			resumen_pq = f"Defectos en esfuerzo: {n_def}/17 segmentos (severos: {n_sev})"
+			if has_rest_pq:
+				resumen_pq += f" | reversibles en reposo: {n_rev}"
+			story.append(Paragraph(
+				f"<b>Cuantificación relativa de perfusión (AHA 17)</b> — {resumen_pq}",
+				body_style,
+			))
+			story.append(Spacer(1, 1.5 * mm))
+			story.append(pq_table)
+			story.append(Spacer(1, 1.5 * mm))
+			for note in perfusion_quant.get("notes", []):
+				story.append(Paragraph(f"• {note}", small_style))
+			story.append(Spacer(1, 3 * mm))
 
 
 	story.append(Paragraph("3. Criterios usados (auditoría y validación)", section_style))

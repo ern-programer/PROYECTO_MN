@@ -58,6 +58,7 @@ def build_executive_summary(
     volumes: dict | None = None,
     phase_label: str = "Estudio",
     db_eval: dict | None = None,
+    rest_ef: dict | None = None,
 ) -> dict:
     """Construye el resumen ejecutivo (hallazgo en lenguaje natural).
 
@@ -136,14 +137,26 @@ def build_executive_summary(
         })
 
     # --- Función ventricular --------------------------------------------
+    rest_ef = rest_ef or {}
+    rest_pct = _num(rest_ef.get("ef_pct"))
     if ef.get("available"):
         ef_pct = _num(ef.get("ef_pct"))
         edv = _num(ef.get("edv_ml"))
         esv = _num(ef.get("esv_ml"))
-        frase_func = f"FEVI preliminar {_fmt(ef_pct, 1, '%')}"
+        ef_label = "FEVI esfuerzo preliminar" if rest_pct is not None else "FEVI preliminar"
+        frase_func = f"{ef_label} {_fmt(ef_pct, 1, '%')}"
         if edv is not None and esv is not None:
             frase_func += f" (EDV {_fmt(edv, 0, ' mL')} / ESV {_fmt(esv, 0, ' mL')})"
         frase_func += "."
+        if rest_pct is not None:
+            frase_func += f" FEVI reposo {_fmt(rest_pct, 1, '%')}"
+            rest_edv = _num(rest_ef.get("edv_ml"))
+            rest_esv = _num(rest_ef.get("esv_ml"))
+            if rest_edv is not None and rest_esv is not None:
+                frase_func += f" (EDV {_fmt(rest_edv, 0, ' mL')} / ESV {_fmt(rest_esv, 0, ' mL')})"
+            frase_func += "."
+            if ef_pct is not None:
+                frase_func += f" Δ FEVI esfuerzo−reposo: {ef_pct - rest_pct:+.1f} puntos."
         if ef.get("pfr_text"):
             frase_func += f" PFR: {ef.get('pfr_text')}."
         if ef.get("tvmax_text"):
@@ -182,6 +195,7 @@ def build_executive_summary(
         "most_delayed_territory": terr_name,
         "most_delayed_territory_phase": terr_mean,
         "ef_pct": _num(ef.get("ef_pct")) if ef else None,
+        "rest_ef_pct": rest_pct,
         "edv_ml": _num(ef.get("edv_ml")) if ef else None,
         "esv_ml": _num(ef.get("esv_ml")) if ef else None,
         "thickening_pct": _num(ef.get("thickening_pct")) if ef else None,

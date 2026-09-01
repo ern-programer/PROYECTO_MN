@@ -1381,13 +1381,20 @@ class CardiacReorientationDialog(QDialog):
                 reo_g = reslice_from_vector_gated(cube_voi, center, u, out, order=1,
                                                  sample_scale=sample_scale)
                 self.reoriented_gated = self._apply_post_ops_4d(reo_g)
-            # Pasajero de fase (FBP): misma VOI, mismo vector, mismo out, mismos
-            # post-ops -> queda perfectamente alineado con el gated visible.
+        except Exception:
+            self.reoriented_ungated = self._reo
+        # Pasajero de fase (FBP): misma VOI, mismo vector, mismo out, mismos
+        # post-ops -> queda perfectamente alineado con el gated visible.
+        # En try SEPARADO: un fallo acá no debe pisar ungated/gated ni MF.
+        try:
             if self._phase_gated is not None:
                 cube_voi_p = self._apply_voi_gated(self._phase_gated)
                 reo_p = reslice_from_vector_gated(cube_voi_p, center, u, out, order=1,
                                                  sample_scale=sample_scale)
                 self.reoriented_gated_phase = self._apply_post_ops_4d(reo_p)
+        except Exception:
+            self.reoriented_gated_phase = None
+        try:
             # Motion-frozen (estático): misma VOI, mismo vector, mismo out, mismos
             # post-ops que el ungated -> queda alineado con la perfusión.
             if self._mf is not None:
@@ -1402,5 +1409,5 @@ class CardiacReorientationDialog(QDialog):
                                                     sample_scale=sample_scale)
                 self.reoriented_mf_gated = self._apply_post_ops_4d(reo_mfg)
         except Exception:
-            self.reoriented_ungated = self._reo
+            pass
         self.accept()
