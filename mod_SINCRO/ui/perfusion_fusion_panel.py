@@ -1285,8 +1285,8 @@ class PerfusionFusionPanel(QDialog):
         _reg_lay.setSpacing(4)
         _reg_lay.addWidget(self._perfusion_stage_combo)
         _reg_lay.addWidget(self._btn_fusion_layout, 1)
-        self._btn_perfusion_cancel = QPushButton("Cancelar")
-        self._btn_perfusion_cancel.setToolTip("Cierra el panel SIN enviar el registro (vuelve al flujo de perfusión).")
+        self._btn_perfusion_cancel = QPushButton("Cerrar")
+        self._btn_perfusion_cancel.setToolTip("Cierra el panel (el registro/máscara de cada etapa queda en memoria).")
         self._btn_perfusion_cancel.clicked.connect(self.close)
         _reg_lay.addWidget(self._btn_perfusion_cancel)
         flow.addWidget(_reg_box, 3, 8)
@@ -1462,6 +1462,23 @@ class PerfusionFusionPanel(QDialog):
         self._progress.setValue(0)
         self._progress.setFormat("Listo")
         recon_grid.addWidget(self._progress, 3, 0, 1, 11)
+
+        # PERFUSIÓN: la recon vive en el flujo principal — ocultar TODOS los
+        # controles de recon/filtros; quedan 'Vista' (cortes cardíacos) y la
+        # barra de progreso bien visible.
+        _vista_lbl_item = recon_grid.itemAtPosition(1, 7)
+        _keep = {self._view_combo, self._progress}
+        if _vista_lbl_item is not None and _vista_lbl_item.widget() is not None:
+            _keep.add(_vista_lbl_item.widget())
+        for _r in range(3):
+            for _c in range(recon_grid.columnCount()):
+                _it = recon_grid.itemAtPosition(_r, _c)
+                _w = _it.widget() if _it is not None else None
+                if _w is not None and _w not in _keep:
+                    _w.setVisible(False)
+        recon_box.setTitle("Vista y progreso")
+        self._progress.setMinimumHeight(26)
+        self._progress.setMinimumWidth(320)
         
         # Reconstrucción: ancho compacto (no se expande)
         recon_box.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
@@ -8068,6 +8085,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._perfusion_stage_combo.blockSignals(False)
         if ct_volume is not None and hasattr(self, "_btn_vrt"):
             self._btn_vrt.setEnabled(True)
+        # Botón 7: en AMYLO lo habilitaba la recon propia (acá bypasseada).
+        self._btn_fusion_layout.setEnabled(self._current_volume is not None)
+        self._refresh_perfusion_ac_button(str(stage))
         if ct_volume is not None and hasattr(self, "_ct_anatomical_check"):
             # La máscara CT necesita este check (oculto en perfusión) siempre ON.
             self._ct_anatomical_check.setChecked(True)
@@ -8223,6 +8243,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         if self._restore_perfusion_stage_session(new_stage):
             self._perfusion_current_stage = new_stage
             self._apply_perfusion_header(new_stage)
+            self._refresh_perfusion_ac_button(new_stage)
             return
         cb = getattr(self, "_perfusion_stage_change_cb", None)
         if cb is None:
@@ -8233,6 +8254,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._status.setText(f"No se pudo cambiar de etapa: {exc}")
         else:
             self._apply_perfusion_header(new_stage)
+            self._refresh_perfusion_ac_button(new_stage)
 
     def _on_perfusion_mask_hide_toggled(self, hidden: bool):
         """Oculta/muestra la máscara reutilizando el check 'Máscara CT' de MPR."""
@@ -8243,8 +8265,23 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         self._btn_mask_hide.setText("Mostrar máscara" if hidden else "Ocultar máscara")
         self._render_current_with_overlay()
 
+    def _refresh_perfusion_ac_button(self, stage: str):
+        """Estado visual del botón 7 según si esta etapa ya envió su registro a AC."""
+        applied = getattr(self, "_perfusion_ac_applied", set())
+        if str(stage) in applied:
+            txt = "ESFUERZO" if str(stage) == "stress" else "REPOSO"
+            self._btn_fusion_layout.setText(f"✓ AC aplicada · {txt}")
+            self._btn_fusion_layout.setStyleSheet(
+                "background-color:#15803d; color:white; font-weight:bold; padding:6px 12px; border-radius:4px;"
+            )
+        else:
+            self._btn_fusion_layout.setText("7. → Registro a AC")
+            self._btn_fusion_layout.setStyleSheet(
+                "background-color:#0e7490; color:white; font-weight:bold; padding:6px 12px; border-radius:4px;"
+            )
+
     def _apply_registration_to_ac(self):
-        """Envía el CT/ATT registrado a la etapa de perfusión (AC) y CIERRA el panel."""
+        """Envía el CT/ATT registrado a la etapa elegida (AC). NO cierra: repetir en la otra etapa."""
         cb = getattr(self, "_perfusion_apply_cb", None)
         if cb is None:
             QMessageBox.information(
@@ -8255,11 +8292,28 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         if self._ct_registered is None and self._att_map_registered is None:
             QMessageBox.information(self, "SINCRO", "Primero registrá el CT/ATT sobre el SPECT (paso 4).")
             return
+        stage = str(self._perfusion_stage_combo.currentData() or "stress")
         try:
-            cb(str(self._perfusion_stage_combo.currentData() or "stress"))
-            self.close()
+            cb(stage)
         except Exception as exc:
             QMessageBox.warning(self, "SINCRO", f"No se pudo aplicar el registro a AC:\n{exc}")
+            return
+        applied = getattr(self, "_perfusion_ac_applied", None)
+        if applied is None:
+            applied = set()
+            self._perfusion_ac_applied = applied
+        applied.add(stage)
+        self._refresh_perfusion_ac_button(stage)
+        stage_txt = "ESFUERZO" if stage == "stress" else "REPOSO"
+        other = "rest" if stage == "stress" else "stress"
+        if other in applied:
+            self._status.setText("✓ AC aplicada a AMBAS etapas — podés cerrar el panel (botón Cerrar).")
+        else:
+            other_txt = "Reposo" if other == "rest" else "Esfuerzo"
+            self._status.setText(
+                f"✓ Registro de {stage_txt} enviado a AC (recon automática en la ventana principal). "
+                f"Cambiá la etapa a {other_txt} y repetí el paso 7."
+            )
 
     @staticmethod
     def _read_planar_bridge() -> dict | None:

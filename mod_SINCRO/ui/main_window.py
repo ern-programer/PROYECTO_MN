@@ -14454,6 +14454,11 @@ class MainWindow(QMainWindow):
 				self._reconstruct_cine_crudo_raw(_force_stage=stage)
 			except Exception as exc:
 				self._log(f"[AC][WARN] Re-recon automática falló ({exc}): tocá 'Recon raw' manualmente.")
+			else:
+				stage_txt = "ESFUERZO" if stage == "stress" else "REPOSO"
+				self.statusBar().showMessage(
+					f"✓ AC aplicada a {stage_txt}: recon OSEM con μ-map registrado en la fusión.", 15000
+				)
 		except Exception as exc:
 			QMessageBox.warning(self, "SINCRO", f"No se pudo importar el registro:\n{exc}")
 

@@ -107,6 +107,7 @@ class VrtWindow(QDialog):
         self._cine_speed = 3.0   # grados por frame
         self._fast_mode = False
         self._drag_pos = None
+        self._mid_drag = None  # ventaneo botón del medio: (origen, brillo0, densidad0)
 
         self._cine_timer = QTimer(self)
         self._cine_timer.timeout.connect(self._cine_step)
@@ -311,8 +312,27 @@ class VrtWindow(QDialog):
     def _on_press(self, ev):
         if ev.button() == Qt.MouseButton.LeftButton:
             self._drag_pos = ev.position().toPoint()
+        elif ev.button() == Qt.MouseButton.MiddleButton:
+            self._mid_drag = (ev.position().toPoint(), float(self._brightness), float(self._density))
 
     def _on_move(self, ev):
+        if self._mid_drag is not None:
+            # Ventaneo tipo fusión: horizontal = brillo, vertical = densidad (contraste).
+            org, b0, d0 = self._mid_drag
+            pos = ev.position().toPoint()
+            b = float(np.clip(b0 + (pos.x() - org.x()) * 0.010,
+                              self._bri_slider.minimum() / 100.0, self._bri_slider.maximum() / 100.0))
+            d = float(np.clip(d0 - (pos.y() - org.y()) * 0.004,
+                              self._den_slider.minimum() / 100.0, self._den_slider.maximum() / 100.0))
+            self._brightness, self._density = b, d
+            for slider, val in ((self._bri_slider, b), (self._den_slider, d)):
+                slider.blockSignals(True)
+                slider.setValue(int(round(val * 100)))
+                slider.blockSignals(False)
+            self._bri_lbl.setText(f"{int(b * 100)}%")
+            self._den_lbl.setText(f"{int(d * 100)}%")
+            self._schedule(fast=True)
+            return
         if self._drag_pos is None:
             return
         pos = ev.position().toPoint()
@@ -326,6 +346,7 @@ class VrtWindow(QDialog):
 
     def _on_release(self, ev):
         self._drag_pos = None
+        self._mid_drag = None
         self._hq_timer.start(220)
 
     def _on_wheel(self, ev):
