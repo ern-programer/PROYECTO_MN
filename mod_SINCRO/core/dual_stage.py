@@ -98,7 +98,11 @@ class StageState:
     mu_map_description: str = ""
     mu_map_recon_grid: Any = None         # cache: μ-map remuestreado/registrado a grilla recon
     mu_map_shift_zyx: Any = None          # Δ del refinamiento NCC (voxeles z,y,x)
+    mu_map_manual_shift_zyx: Any = None   # Δ manual del visor de fusión (prioridad sobre NCC)
+    mu_map_flip_zyx: Any = None           # espejos (z,y,x) del CT fijados en el visor de fusión
     ct_volume_native: Any = None          # volumen de display (HU si vino CT; μ si vino ATTMAP)
+    ct_affine_ijk_to_lps: Any = None      # affine DICOM del CT/ATT (clave para orientación consistente)
+    ct_spacing_zyx: Any = None            # spacing propio del CT display (no confundir con el del μ-map)
 
     # --- metadatos de presentación ---
     label: str = ""       # etiqueta clínica ("Esfuerzo"/"Reposo"/personalizada)

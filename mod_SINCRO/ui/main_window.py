@@ -2114,18 +2114,27 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_ac_qc_btn.setToolTip(
 					"QC visual de la alineación μ-map ↔ reconstrucción: contornos del "
 					"cuerpo (cian) y tejido denso (naranja) del CT/ATT superpuestos al "
-					"volumen ungated en axial/coronal/sagital. Requiere recon previa.")
+					"volumen ungated en axial/coronal/sagital. Requiere recon previa. "
+					"Segundo click: vuelve a la vista anterior.")
 				self.cine_crudo_ac_qc_btn.clicked.connect(self._show_ac_qc)
 				toolbar6_r2.addWidget(self.cine_crudo_ac_qc_btn)
 				self.cine_crudo_fusion_btn = QPushButton("Fusión")
 				self.cine_crudo_fusion_btn.setMaximumWidth(60)
 				self.cine_crudo_fusion_btn.setEnabled(False)
 				self.cine_crudo_fusion_btn.setToolTip(
-					"Fusión SPECT (color) sobre CT/ATT (gris) en la grilla de reconstrucción: "
-					"axial/coronal/sagital en 3 niveles. Usa el registro fino NCC si existe. "
-					"Requiere CT/ATT cargado + recon previa de la etapa.")
+					"Abre el panel de fusión SPECT/CT de PERFUSIÓN (adaptado del de AMYLO) "
+					"precargado con el crudo de la etapa activa: recon + cortes ahí, cargar CT, "
+					"registrar (Ctrl/Shift/medio), fusionar en cortes tomo o cardiacos. "
+					"Después 'Reg→AC' trae el registro acá.")
 				self.cine_crudo_fusion_btn.clicked.connect(self._show_ct_fusion_preview)
 				toolbar6_r2.addWidget(self.cine_crudo_fusion_btn)
+				self.cine_crudo_import_reg_btn = QPushButton("Reg→AC")
+				self.cine_crudo_import_reg_btn.setMaximumWidth(64)
+				self.cine_crudo_import_reg_btn.setToolTip(
+					"Importa el CT/ATT registrado en la ventana de fusión hacia la etapa activa "
+					"y habilita AC: la próxima 'Recon raw' aplica la corrección con ESE registro.")
+				self.cine_crudo_import_reg_btn.clicked.connect(self._import_amylo_fusion_registration)
+				toolbar6_r2.addWidget(self.cine_crudo_import_reg_btn)
 				# --- Filtros por rama en DOS filas (ungated / gated): la fila única se
 				# iba de pantalla y no permitía activar un filtro en una rama y otro en
 				# la otra. UNGATED = perfusión estática (alto conteo) -> NÍTIDA(RR) para
@@ -3699,8 +3708,7 @@ class MainWindow(QMainWindow):
 				self._write_outputs_for_bundle(self.compare_bundle, self.compare_output_dir, target_tabs=pending)
 			self._write_outputs(target_tabs=pending)
 			if self.compare_bundle is not None:
-				left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
-				right_label = self.compare_label or "Comparación"
+				left_label, right_label = self._dual_compare_labels()
 				self._compose_dual_tab_images(left_label, right_label, target_tabs=pending)
 			self._load_previews_selected(pending)
 		except Exception as exc:
@@ -6101,6 +6109,7 @@ class MainWindow(QMainWindow):
 		self.cine_primary_btn.setEnabled(self.study is not None)
 		self.cine_compare_btn.setEnabled(has_secondary)
 		self.cine_source_combo.blockSignals(False)
+		self._update_patient_banner()
 
 	def _load_manual_rois_text_for_source(self, source: str) -> str:
 		return self.compare_manual_rois_text if source == "compare" else self.primary_manual_rois_text
@@ -6380,8 +6389,7 @@ class MainWindow(QMainWindow):
 			self._write_outputs()
 			if self.compare_bundle is not None and self.advanced_mode_enabled:
 				self._write_outputs_for_bundle(self.compare_bundle, self.compare_output_dir)
-				left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
-				right_label = self.compare_label or "Comparación"
+				left_label, right_label = self._dual_compare_labels()
 				self._compose_dual_tab_images(left_label, right_label)
 			self._load_previews()
 			self._set_progress(100, "Procesamiento completo")
@@ -6724,8 +6732,7 @@ class MainWindow(QMainWindow):
 			target_tabs = {"curva_fevi", "panel_funcional_gated", "bullseye_directo"}
 			self._write_outputs(target_tabs=target_tabs)
 			if self.compare_bundle is not None:
-				left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
-				right_label = self.compare_label or "Comparación"
+				left_label, right_label = self._dual_compare_labels()
 				self._compose_dual_tab_images(left_label, right_label, target_tabs=target_tabs)
 			self._load_previews_selected(target_tabs)
 			visual_payload = self._collect_visual_signature_payload()
@@ -7926,8 +7933,7 @@ class MainWindow(QMainWindow):
 							self._write_outputs_for_bundle(self.compare_bundle, self.compare_output_dir, target_tabs=pending)
 						self._write_outputs(target_tabs=pending)
 						if self.compare_bundle is not None:
-							left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
-							right_label = self.compare_label or "Comparación"
+							left_label, right_label = self._dual_compare_labels()
 							self._compose_dual_tab_images(left_label, right_label, target_tabs=pending)
 						self._load_previews_selected(pending)
 					except Exception as exc:
@@ -8914,7 +8920,8 @@ class MainWindow(QMainWindow):
 	def _study_context(self, *, path_override: str | None = None, study_obj=None) -> dict[str, str]:
 		study_ref = study_obj if study_obj is not None else self.study
 		path_txt = str(path_override if path_override is not None else (self.file_edit.text().strip() if self.file_edit is not None else ""))
-		phase = self._phase_label_from_path(path_txt, "Estudio")
+		# Etapa desde metadata DICOM primero; el nombre de archivo es solo fallback.
+		phase = self._cine_crudo_stage_display(study_ref) or self._phase_label_from_path(path_txt, "Estudio")
 		patient_name = str(getattr(study_ref, "patient_name", "") or "").strip()
 		patient_id = str(getattr(study_ref, "patient_id", "") or "").strip()
 		study_date = self._format_dicom_date(str(getattr(study_ref, "study_date", "") or ""))
@@ -8931,6 +8938,58 @@ class MainWindow(QMainWindow):
 	def _study_context_label(self, *, path_override: str | None = None, study_obj=None) -> str:
 		ctx = self._study_context(path_override=path_override, study_obj=study_obj)
 		return f"{ctx['phase']} | {ctx['patient_name']} | ID {ctx['patient_id']} | Fecha {ctx['study_date']}"
+
+	def _patient_banner_text(self, stage: str | None = None, include_stage: bool = True) -> str:
+		"""Paciente · ID · Fecha · ETAPA — la etapa sale del DICOM (fallback: slot stress/rest)."""
+		stg = str(stage or getattr(self, "_cine_crudo_active_stage", "stress") or "stress")
+		study = self.study
+		if stg == "rest":
+			study = self._secondary_cine_crudo_study() or self.study
+		try:
+			if stg in ("stress", "rest"):
+				st = self._dual_session().stage(stg)
+				study = getattr(st, "raw_study_for_recon", None) or getattr(st, "raw_study", None) or study
+		except Exception:
+			pass
+		name = str(getattr(study, "patient_name", "") or "").strip().replace("^", " ") or "Paciente N/D"
+		pid = str(getattr(study, "patient_id", "") or "").strip()
+		date = self._format_dicom_date(str(getattr(study, "study_date", "") or ""))
+		if stg == "both":
+			stage_txt = "ESFUERZO + REPOSO"
+		else:
+			stage_txt = (self._cine_crudo_stage_display(study) or ("Reposo" if stg == "rest" else "Esfuerzo")).upper()
+		parts = [name]
+		if pid:
+			parts.append(f"ID {pid}")
+		parts.append(date)
+		if include_stage:
+			parts.append(stage_txt)
+		return " · ".join(parts)
+
+	def _update_patient_banner(self):
+		"""Banner permanente en la barra de estado: paciente + fecha + etapa activa."""
+		lbl = getattr(self, "_patient_banner_lbl", None)
+		if lbl is None:
+			lbl = QLabel("")
+			lbl.setStyleSheet("color:#fbbf24; font-weight:bold; padding:0 10px;")
+			self.statusBar().addPermanentWidget(lbl)
+			self._patient_banner_lbl = lbl
+		try:
+			lbl.setText(self._patient_banner_text() if self.study is not None else "")
+		except Exception:
+			lbl.setText("")
+
+	def _dual_compare_labels(self) -> tuple[str, str]:
+		"""Rótulos de renders comparativos: SIEMPRE Esfuerzo/Reposo (DICOM), nunca el nombre del archivo."""
+		left = self._cine_crudo_stage_display(self.study) or "Esfuerzo"
+		try:
+			cmp_study = self._second_stage_study()
+		except Exception:
+			cmp_study = None
+		right = self._cine_crudo_stage_display(cmp_study) or "Reposo"
+		if left == right:
+			left, right = "Esfuerzo", "Reposo"
+		return left, right
 
 	def _second_stage_study(self):
 		"""Estudio de la 2da etapa cargada (reconstruido o crudo), o None."""
@@ -12895,6 +12954,7 @@ class MainWindow(QMainWindow):
 		if changed:
 			etapa = {"stress": "Esfuerzo", "rest": "Reposo", "both": "Ambas (esfuerzo + reposo)"}[stage]
 			self._log(f"Etapa activa del crudo: {etapa} — las herramientas actúan sobre esa(s) etapa(s).")
+		self._update_patient_banner()
 		if refresh_view:
 			# Si estamos en la pantalla de límites (Base/Ápex), NO volver al cine:
 			# re-renderizar la misma pantalla con la nueva etapa activa.
@@ -13111,8 +13171,8 @@ class MainWindow(QMainWindow):
 				seed_stage=seed_secondary,
 			)
 			active = getattr(self, "_cine_crudo_active_stage", "stress")
-			top_name = self._cine_crudo_stage_display(self.study) or "Stress"
-			bottom_name = self._cine_crudo_stage_display(self._secondary_cine_crudo_study()) or "Rest"
+			top_name = self._cine_crudo_stage_display(self.study) or "Esfuerzo"
+			bottom_name = self._cine_crudo_stage_display(self._secondary_cine_crudo_study()) or "Reposo"
 			top_label = top_name + (" ●" if active in ("stress", "both") else "")
 			bottom_label = bottom_name + (" ●" if active in ("rest", "both") else "")
 			n = min(len(primary_frames), len(compare_frames))
@@ -13928,6 +13988,8 @@ class MainWindow(QMainWindow):
 			st.ct_path = str(path)
 			st.mu_map_native = mu
 			st.ct_volume_native = np.asarray(res.volume, dtype=np.float64)
+			st.ct_affine_ijk_to_lps = getattr(res, "affine_ijk_to_lps", None)
+			st.ct_spacing_zyx = getattr(res, "spacing_zyx", None)
 			st.mu_map_spacing_zyx = getattr(res, "spacing_zyx", None)
 			st.mu_map_source = source
 			st.mu_map_description = str(getattr(res, "series_description", "") or "")
@@ -13937,7 +13999,7 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_ac_check.setEnabled(True)
 				self.cine_crudo_ac_check.setChecked(True)
 			if getattr(self, "cine_crudo_fusion_btn", None) is not None:
-				self.cine_crudo_fusion_btn.setEnabled(True)
+				self._refresh_fusion_btn_state()
 			src_txt = "ATTMAP export" if source == "att_export" else "CT→μ bilineal (140 keV)"
 			self._log(
 				f"[AC] μ-map cargado para {stage_txt}: {mu.shape}, fuente={src_txt}, "
@@ -13992,7 +14054,23 @@ class MainWindow(QMainWindow):
 			)
 			for n in notes:
 				self._log(f"[AC] {n}")
-			if refine_to is not None and np.asarray(refine_to).shape == mu_rs.shape:
+			flips = getattr(st, "mu_map_flip_zyx", None)
+			if flips and any(flips):
+				for axis_i, do_flip in enumerate(flips):
+					if do_flip:
+						mu_rs = np.flip(mu_rs, axis=axis_i)
+				mu_rs = np.ascontiguousarray(mu_rs)
+				self._log(f"[AC] Espejos del CT aplicados al μ-map (visor de fusión): z/y/x={flips}.")
+			manual = getattr(st, "mu_map_manual_shift_zyx", None)
+			if manual is not None:
+				# Registro explícito (visor de fusión o import del panel): NCC NUNCA
+				# debe re-desplazarlo — incluso con Δ=(0,0,0) (μ-map YA registrado).
+				if any(abs(float(v)) > 1e-6 for v in manual):
+					import scipy.ndimage as ndi_local
+					mu_rs = ndi_local.shift(mu_rs, shift=tuple(float(v) for v in manual), order=1, mode="nearest")
+				st.mu_map_shift_zyx = tuple(float(v) for v in manual)
+				self._log(f"[AC] Registro explícito aplicado: Δ z/y/x={manual} vox. NCC omitido.")
+			elif refine_to is not None and np.asarray(refine_to).shape == mu_rs.shape:
 				try:
 					mu_rs, shift, rnotes = refine_ct_to_spect_translation(
 						mu_rs, np.asarray(refine_to, dtype=np.float64),
@@ -14023,7 +14101,19 @@ class MainWindow(QMainWindow):
 			return None, None
 
 	def _show_ac_qc(self):
-		"""QC visual de alineación μ-map ↔ recon: contornos del μ sobre el ungated."""
+		"""QC visual de alineación μ-map ↔ recon. Toggle: 2do click restaura la vista anterior."""
+		if getattr(self, "cine_crudo_preview_mode", None) == "ac_qc":
+			prev = getattr(self, "_ac_qc_prev_state", None) or {}
+			self._ac_qc_prev_state = None
+			self.cine_crudo_preview_mode = prev.get("mode")
+			pix = prev.get("pix")
+			if pix is not None and not pix.isNull() and "cine_crudo" in self.preview_labels:
+				self.preview_pixmaps["cine_crudo"] = pix
+				self.preview_base_sizes["cine_crudo"] = pix.size()
+				self._apply_preview_zoom("cine_crudo")
+			else:
+				self._refresh_cine_crudo_view()
+			return
 		stage = str(getattr(self, "_cine_crudo_recon_stage", None) or self._cine_crudo_active_stage_or_default())
 		if stage not in ("stress", "rest"):
 			stage = "stress"
@@ -14070,6 +14160,11 @@ class MainWindow(QMainWindow):
 			fig.savefig(out_png, dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
 			plt.close(fig)
 			if "cine_crudo" in self.preview_labels:
+				# Estado previo para que el 2do click del botón QC AC vuelva atrás.
+				self._ac_qc_prev_state = {
+					"mode": getattr(self, "cine_crudo_preview_mode", None),
+					"pix": self.preview_pixmaps.get("cine_crudo"),
+				}
 				pix = QPixmap(out_png)
 				self.preview_pixmaps["cine_crudo"] = pix
 				self.preview_base_sizes["cine_crudo"] = pix.size()
@@ -14098,20 +14193,276 @@ class MainWindow(QMainWindow):
 		ct = np.asarray(ct_native, dtype=np.float64)
 		ct_rs, _notes = resample_volume_to_spect_grid(
 			ct, np.zeros(tuple(int(v) for v in target_shape), dtype=np.float64),
-			source_spacing_zyx=st.mu_map_spacing_zyx,
+			source_spacing_zyx=getattr(st, "ct_spacing_zyx", None) or st.mu_map_spacing_zyx,
 			spect_spacing_zyx=(px_mm, px_mm, px_mm),
 			fill_value=float(np.min(ct)), order=1,
 		)
-		shift = getattr(st, "mu_map_shift_zyx", None)
+		flips = getattr(st, "mu_map_flip_zyx", None)
+		if flips and any(flips):
+			for axis_i, do_flip in enumerate(flips):
+				if do_flip:
+					ct_rs = np.flip(ct_rs, axis=axis_i)
+			ct_rs = np.ascontiguousarray(ct_rs)
+		shift = getattr(st, "mu_map_manual_shift_zyx", None) or getattr(st, "mu_map_shift_zyx", None)
 		if shift:
 			ct_rs = ndi_local.shift(ct_rs, shift=tuple(float(v) for v in shift), order=1, mode="nearest")
 		return ct_rs
 
+	def _refresh_fusion_btn_state(self):
+		"""Fusión se habilita cuando ALGUNA etapa tiene SPECT reconstruido Y CT/ATT."""
+		btn = getattr(self, "cine_crudo_fusion_btn", None)
+		if btn is None:
+			return
+		ok = False
+		try:
+			for stg in ("stress", "rest"):
+				st = self._dual_session().stage(stg)
+				has_ct = getattr(st, "ct_volume_native", None) is not None or getattr(st, "mu_map_native", None) is not None
+				if getattr(st, "recon_result", None) is not None and has_ct:
+					ok = True
+					break
+		except Exception:
+			ok = False
+		btn.setEnabled(ok)
+
 	def _show_ct_fusion_preview(self):
-		"""Fusión visual SPECT(color)/CT(gris) en la grilla de recon de la etapa activa."""
+		"""Abre el panel de fusión SPECT/CT de PERFUSIÓN (copia adaptada del de AMYLO).
+
+		Flujo correcto (igual que AMYLO): recon del SPECT → superponer/registrar el
+		CT sobre los cortes reconstruidos (tomo o cardiacos) → 'Reg→AC' trae ese
+		registro a la etapa → re-Recon raw con AC aplica la corrección física.
+		"""
+		try:
+			from ui.perfusion_fusion_panel import PerfusionFusionPanel
+		except Exception as exc:
+			QMessageBox.warning(self, "SINCRO", f"No se pudo abrir la ventana de fusión:\n{exc}")
+			return
+		stage = str(getattr(self, "_cine_crudo_recon_stage", None) or self._cine_crudo_active_stage_or_default())
+		if stage not in ("stress", "rest"):
+			stage = "stress"
+		st = self._dual_session().stage(stage)
+		result = getattr(st, "recon_result", None)
+		ct_native = getattr(st, "ct_volume_native", None)
+		if ct_native is None:
+			ct_native = getattr(st, "mu_map_native", None)
+		if result is None or ct_native is None:
+			QMessageBox.information(
+				self, "SINCRO",
+				"La fusión necesita el SPECT RECONSTRUIDO y el CT/ATT de la etapa:\n"
+				"1) Recon raw  2) botón CT/ATT. Con ambos cargados se habilita Fusión.",
+			)
+			return
+		panel = getattr(self, "_perfusion_fusion_panel", None)
+		if panel is None:
+			# Top-level SIN parent: minimiza normal en Windows (regla Qt owned-window).
+			panel = PerfusionFusionPanel(None)
+			self._perfusion_fusion_panel = panel
+		panel._perfusion_apply_cb = self._import_amylo_fusion_registration
+		panel._perfusion_stage_change_cb = self._on_fusion_panel_stage_changed
+		raw_study = st.raw_study_for_recon or st.raw_study or self.study
+		ps = getattr(raw_study, "pixel_spacing", None) if raw_study is not None else None
+		px_mm = float(ps[0]) if ps else 6.4
+		spect_sigs = getattr(panel, "_perfusion_spect_sig", None)
+		if spect_sigs is None:
+			spect_sigs = {}
+			panel._perfusion_spect_sig = spect_sigs
+		has_session = (
+			stage in getattr(panel, "_perfusion_stage_sessions", {})
+			or getattr(panel, "_perfusion_current_stage", None) == stage
+		)
+		if has_session:
+			# La sesión en memoria de la etapa MANDA (registro/máscara/nudges del
+			# usuario intactos). Solo refrescar el SPECT si hay recon nueva (AC).
+			try:
+				if spect_sigs.get(stage) != id(result):
+					panel.update_perfusion_spect(stage, result.ungated_volume, (px_mm, px_mm, px_mm))
+					spect_sigs[stage] = id(result)
+					self._log(f"[FUSION] SPECT de {stage} refrescado en el panel (registro CT conservado).")
+				if getattr(panel, "_perfusion_current_stage", None) != stage:
+					idx = panel._perfusion_stage_combo.findData(stage)
+					if idx >= 0:
+						panel._perfusion_stage_combo.setCurrentIndex(idx)  # dispara restore de sesión
+			except Exception as exc:
+				self._log(f"[FUSION][WARN] Refresh de sesión falló: {exc}")
+		else:
+			try:
+				_t0 = perf_counter()
+				panel.set_perfusion_inputs(
+					spect_volume=result.ungated_volume,
+					spect_spacing_zyx=(px_mm, px_mm, px_mm),
+					ct_volume=ct_native,
+					ct_spacing_zyx=getattr(st, "ct_spacing_zyx", None) or getattr(st, "mu_map_spacing_zyx", None),
+					ct_affine=getattr(st, "ct_affine_ijk_to_lps", None),
+					cardiac_axes=getattr(st, "axes_ungated", None) or None,
+					stage=stage,
+					source_label=str(getattr(st, "source_path", "") or ""),
+				)
+				self._log(f"[PERF] precarga panel de fusión ({stage}): {perf_counter() - _t0:.1f}s")
+				spect_sigs[stage] = id(result)
+				if getattr(st, "ct_spacing_zyx", None) is None and np.asarray(ct_native).shape[1] > 128:
+					self._log("[FUSION][WARN] CT de alta resolución SIN spacing propio guardado: el remuestreo puede "
+						"quedar mal posicionado. Recargá el CT con el botón CT/ATT.")
+				if getattr(st, "ct_affine_ijk_to_lps", None) is None:
+					self._log("[FUSION][WARN] El CT de la etapa NO tiene affine DICOM guardado (cargado antes del fix): "
+						"recargalo con el botón CT/ATT para que 'CT nativa' y la CT registrada tengan la MISMA orientación.")
+				self._log(
+					f"[FUSION] SPECT reconstruido + CT de {stage} transferidos al panel; "
+					"registro automático ejecutado — la fusión queda visible de entrada."
+				)
+			except Exception as exc:
+				self._log(f"[FUSION][WARN] No pude precargar SPECT+CT en el panel: {exc}")
+		try:
+			panel.set_perfusion_header(stage, self._patient_banner_text(stage=stage))
+		except Exception:
+			pass
+		panel.show()
+		panel.raise_()
+		panel.activateWindow()
+
+	def _on_fusion_panel_stage_changed(self, stage: str):
+		"""El combo Etapa del panel de fusión pidió cargar la otra etapa."""
+		panel = getattr(self, "_perfusion_fusion_panel", None)
+		if panel is None:
+			return
+		stage = "rest" if str(stage) == "rest" else "stress"
+		st = self._dual_session().stage(stage)
+		result = getattr(st, "recon_result", None)
+		ct_native = getattr(st, "ct_volume_native", None)
+		if ct_native is None:
+			ct_native = getattr(st, "mu_map_native", None)
+		if result is None or ct_native is None:
+			stage_txt = "REPOSO" if stage == "rest" else "ESFUERZO"
+			faltan = []
+			if result is None:
+				faltan.append("reconstruir (Recon raw)")
+			if ct_native is None:
+				faltan.append("cargar CT/ATT (botón CT/ATT, eligiendo esa etapa)")
+			panel._status.setText(f"Etapa {stage_txt}: falta {' y '.join(faltan)} en el flujo de perfusión.")
+			self._log(f"[FUSION] Cambio a {stage_txt} rechazado: falta {' y '.join(faltan)}.")
+			return
+		try:
+			raw_study = st.raw_study_for_recon or st.raw_study or self.study
+			ps = getattr(raw_study, "pixel_spacing", None) if raw_study is not None else None
+			px_mm = float(ps[0]) if ps else 6.4
+			panel.set_perfusion_inputs(
+				spect_volume=result.ungated_volume,
+				spect_spacing_zyx=(px_mm, px_mm, px_mm),
+				ct_volume=ct_native,
+				ct_spacing_zyx=getattr(st, "ct_spacing_zyx", None) or getattr(st, "mu_map_spacing_zyx", None),
+				ct_affine=getattr(st, "ct_affine_ijk_to_lps", None),
+				cardiac_axes=getattr(st, "axes_ungated", None) or None,
+				stage=stage,
+				source_label=str(getattr(st, "source_path", "") or ""),
+			)
+			sigs = getattr(panel, "_perfusion_spect_sig", None)
+			if sigs is None:
+				sigs = {}
+				panel._perfusion_spect_sig = sigs
+			sigs[stage] = id(result)
+			try:
+				panel.set_perfusion_header(stage, self._patient_banner_text(stage=stage))
+			except Exception:
+				pass
+			self._log(f"[FUSION] Panel cambiado a etapa {stage}: SPECT+CT cargados y registrados (primera vez).")
+		except Exception as exc:
+			self._log(f"[FUSION][WARN] Cambio de etapa falló: {exc}")
+
+	def _import_amylo_fusion_registration(self, stage: str | None = None):
+		"""Trae el CT/ATT registrado en el panel de fusión a la etapa indicada (para AC)."""
+		from core.ct_fusion import mu_map_from_ct_hu, validate_mu_map
+
+		panel = getattr(self, "_perfusion_fusion_panel", None)
+		if panel is None:
+			QMessageBox.information(self, "SINCRO", "Primero abrí 'Fusión' y registrá el CT ahí.")
+			return
+		if stage not in ("stress", "rest"):
+			stage = str(getattr(self, "_cine_crudo_recon_stage", None) or self._cine_crudo_active_stage_or_default())
+		if stage not in ("stress", "rest"):
+			stage = "stress"
+		self._log(f"[AC] Importando registro del panel de fusión hacia {stage}...")
+		try:
+			att = getattr(panel, "_att_map_registered", None)
+			ct = getattr(panel, "_ct_registered", None)
+			conv_notes: list[str] = []
+			if att is not None:
+				mu = np.clip(np.asarray(att, dtype=np.float64), 0.0, None)
+				q99 = float(np.percentile(mu, 99.0)) if mu.size else 0.0
+				if q99 > 2.0:
+					mu = mu / q99 * 0.154
+					conv_notes.append(f"ATT registrado reescalado: p99={q99:.1f} → 0.154/cm.")
+				source = "att_export"
+			elif ct is not None:
+				mu, conv_notes = mu_map_from_ct_hu(np.asarray(ct, dtype=np.float64))
+				source = "ct_bilineal"
+			else:
+				QMessageBox.information(self, "SINCRO", "La ventana de fusión no tiene CT/ATT registrado todavía.")
+				return
+			ok, qc_notes = validate_mu_map(mu)
+			for n in conv_notes + qc_notes:
+				self._log(f"[AC] {n}")
+			if not ok:
+				QMessageBox.warning(self, "SINCRO", "El μ-map registrado no pasó el QC (ver log).")
+				return
+			st = self._dual_session().stage(stage)
+			# ¿Cambió realmente el registro? Solo saltear la re-recon si además la
+			# recon vigente YA se hizo con AC (si no, hay que reconstruir igual).
+			prev_mu = getattr(st, "mu_map_native", None)
+			recon_has_ac = bool(getattr(getattr(getattr(st, "recon_result", None), "config", None), "attenuation_correction", False))
+			unchanged = (
+				recon_has_ac
+				and prev_mu is not None
+				and np.asarray(prev_mu).shape == mu.shape
+				and bool(np.allclose(np.asarray(prev_mu), mu, atol=1e-9))
+			)
+			st.mu_map_native = mu
+			# NO pisar el CT display nativo (alta resolución + affine) con la versión
+			# registrada de baja resolución: solo si la etapa no tenía CT.
+			if getattr(st, "ct_volume_native", None) is None:
+				st.ct_volume_native = np.asarray(ct, dtype=np.float64) if ct is not None else mu
+			# Preservar el spacing NATIVO del CT antes de pisar el del μ-map con el
+			# de la grilla SPECT (si no, el próximo preload remuestrea el CT nativo
+			# con spacing equivocado y "queda en cualquier lado").
+			if getattr(st, "ct_spacing_zyx", None) is None:
+				st.ct_spacing_zyx = getattr(st, "mu_map_spacing_zyx", None)
+			sp_spacing = getattr(panel, "_spect_spacing_zyx", None)
+			st.mu_map_spacing_zyx = tuple(float(v) for v in sp_spacing) if sp_spacing else None
+			st.mu_map_source = source
+			st.mu_map_description = "registrado en ventana de fusión AMYLO"
+			# Ya viene registrado sobre la grilla SPECT: sin NCC ni ajustes extra.
+			st.mu_map_manual_shift_zyx = (0.0, 0.0, 0.0)
+			st.mu_map_flip_zyx = None
+			st.mu_map_recon_grid = None
+			if getattr(self, "cine_crudo_ac_check", None) is not None:
+				self.cine_crudo_ac_check.setEnabled(True)
+				self.cine_crudo_ac_check.setChecked(True)
+			if unchanged:
+				self._log(f"[AC] Registro importado idéntico al vigente en {stage}: no re-reconstruyo.")
+				return
+			self._log(
+				f"[AC] Registro importado del panel para {stage}: μ-map {mu.shape} "
+				f"({source}), spacing={st.mu_map_spacing_zyx}. Reconstruyendo con AC automáticamente..."
+			)
+			# La AC física vive DENTRO del motor iterativo: FBP la ignoraría y "no pasa nada".
+			try:
+				combo = getattr(self, "cine_crudo_recon_method_combo", None)
+				if combo is not None and str(combo.currentText()).strip().lower() == "fbp":
+					combo.setCurrentText("OSEM")
+					self._log("[AC] Método ungated FBP no modela AC: cambiado automáticamente a OSEM.")
+			except Exception:
+				pass
+			try:
+				self._reconstruct_cine_crudo_raw(_force_stage=stage)
+			except Exception as exc:
+				self._log(f"[AC][WARN] Re-recon automática falló ({exc}): tocá 'Recon raw' manualmente.")
+		except Exception as exc:
+			QMessageBox.warning(self, "SINCRO", f"No se pudo importar el registro:\n{exc}")
+
+	def _show_ct_fusion_preview_static(self, stage: str | None = None):
+		"""Render estático de fusión en grilla de recon (PNG para preview/informe)."""
 		import scipy.ndimage as ndi_local
 
-		stage = str(getattr(self, "_cine_crudo_recon_stage", None) or self._cine_crudo_active_stage_or_default())
+		if stage is None:
+			stage = str(getattr(self, "_cine_crudo_recon_stage", None) or self._cine_crudo_active_stage_or_default())
 		if stage not in ("stress", "rest"):
 			stage = "stress"
 		st = self._dual_session().stage(stage)
@@ -14125,16 +14476,6 @@ class MainWindow(QMainWindow):
 		if ct_native is None:
 			QMessageBox.information(self, "SINCRO", "Cargá CT/ATT para esta etapa primero.")
 			return
-		# Si ya hay cortes en ejes cardiacos del CT (post-reorientación + Generar
-		# cortes), la fusión clínicamente útil es en SA: mostrar esa.
-		axes_ct = getattr(st, "axes_ct", None) or {}
-		axes_perf = getattr(st, "axes_ungated", None) or {}
-		if "SA" in axes_ct and "SA" in axes_perf:
-			try:
-				self._render_sa_fusion(stage, axes_ct, axes_perf)
-				return
-			except Exception as exc:
-				self._log(f"[FUSION][WARN] Fusión SA falló ({exc}); muestro fusión en grilla de recon.")
 		try:
 			from core.ct_fusion import resample_volume_to_spect_grid
 			import matplotlib.pyplot as plt
@@ -14991,6 +15332,10 @@ class MainWindow(QMainWindow):
 			self._commit_undo("Reconstrucción", self.UNDO_ATTRS_RECON, _undo_before, deep=False)
 			self._mark_step_done("crudo")
 			self._mark_step_done("recon", cfg.reconstruction_method, getattr(result.gated_volume, "shape", None))
+			try:
+				self._refresh_fusion_btn_state()
+			except Exception:
+				pass
 			return True
 		except Exception as exc:
 			self._log(f"[ERROR] Recon raw falló: {exc}")
@@ -17384,7 +17729,7 @@ class MainWindow(QMainWindow):
 			zoom_txt = f" · zoom corte x{cut_zoom:.2f}"
 			n_sa_stress = len(stress_rows[0][1])
 			suptitle = (
-				f"Montaje clínico{bnd_txt} · Esp {th_txt}{scale_txt} · recorte {crop_txt}{gate_txt}{tpl_txt}{zoom_txt} · "
+				f"{self._patient_banner_text(include_stage=False)} — Montaje clínico{bnd_txt} · Esp {th_txt}{scale_txt} · recorte {crop_txt}{gate_txt}{tpl_txt}{zoom_txt} · "
 				f"SA {n_sa_stress} cortes" + (" · ESFUERZO/REPOSO" if has_rest else "")
 			)
 
@@ -19565,8 +19910,7 @@ class MainWindow(QMainWindow):
 		self._refresh_cine_source_selector()
 		self._apply_cine_source("primary", preserve_position=True)
 
-		left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
-		right_label = self.compare_label or "Comparación"
+		left_label, right_label = self._dual_compare_labels()
 		if bool(self.realtime_deferred_render_check.isChecked()):
 			prev_fast = bool(self.compare_interactive_fast_mode)
 			self.compare_interactive_fast_mode = True
@@ -19675,7 +20019,7 @@ class MainWindow(QMainWindow):
 				ax.set_xticks([])
 				ax.set_yticks([])
 				ax.set_title(title, color="#e2e8f0", fontsize=11, fontweight="bold")
-			fig.suptitle(f"Comparativa {name}", color="#f8fafc", fontsize=12, fontweight="bold")
+			fig.suptitle(f"Comparativa {name} — {self._patient_banner_text(include_stage=False)}", color="#f8fafc", fontsize=12, fontweight="bold")
 			fig.tight_layout(rect=(0, 0, 1, 0.95))
 			fig.savefig(left_path, dpi=150, bbox_inches="tight")
 			plt.close(fig)
@@ -19789,8 +20133,7 @@ class MainWindow(QMainWindow):
 			self._refresh_cine_source_selector()
 			# Hidratar ambos cines de inmediato para que el segundo visor quede editable.
 			self._apply_cine_source("primary", preserve_position=True)
-			left_label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0] or "Actual"
-			right_label = self.compare_label or "Comparación"
+			left_label, right_label = self._dual_compare_labels()
 
 			if bool(self.realtime_deferred_render_check.isChecked()):
 				self._set_progress(75, "Vista rápida de comparación...")
