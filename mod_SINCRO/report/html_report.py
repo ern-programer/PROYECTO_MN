@@ -687,6 +687,27 @@ def generate_html_report(
         stress_rest_html = "<h3 style='color:var(--accent); margin:24px 0 12px;'>Delta stress-rest</h3>" + _build_table(
             ["Métrica", "Esfuerzo", "Reposo", "Δ"], sr_rows
         )
+        tid = stress_rest.get("tid") or {}
+        if tid.get("available"):
+            ratio = float(tid["ratio"])
+            cutoff = float(tid.get("soft_cutoff", 1.20))
+            elevated = bool(tid.get("elevated"))
+            tcolor = "var(--accent-red)" if elevated else "var(--accent-green)"
+            tnote = (
+                f"≥ {cutoff:.2f} (umbral orientativo, no diagnóstico): posible isquemia "
+                "extensa/multivaso o de tronco. Correlacionar con perfusión y clínica."
+                if elevated
+                else f"&lt; {cutoff:.2f} (umbral orientativo): sin dilatación transitoria "
+                "significativa por este parámetro."
+            )
+            stress_rest_html += (
+                f"<div style='margin:16px 0; padding:12px 16px; border-left:4px solid {tcolor};'>"
+                "<div style='font-size:0.9rem; color:var(--fg-muted);'>TID — Dilatación isquémica transitoria (gatillado)</div>"
+                f"<div style='font-size:1.6rem; font-weight:700; color:{tcolor};'>{ratio:.2f}</div>"
+                f"<div style='font-size:0.85rem; color:var(--fg);'>EDV esfuerzo/reposo = "
+                f"{float(tid['stress_edv_ml']):.0f}/{float(tid['rest_edv_ml']):.0f} mL — {tnote}</div>"
+                "</div>"
+            )
 
     # --- Cuantificación relativa de perfusión (AHA 17) ---
     perfusion_quant_html = ""

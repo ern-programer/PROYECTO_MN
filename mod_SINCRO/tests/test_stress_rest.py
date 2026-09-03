@@ -9,6 +9,8 @@ from core.stress_rest import (
     circular_delta_deg,
     compare_stress_rest,
     compare_territories,
+    transient_ischemic_dilation,
+    TID_GATED_SOFT_CUTOFF,
 )
 
 
@@ -91,3 +93,36 @@ def test_territorio_ausente_da_nan():
     out = compare_territories(None, None)
     for terr in ("LAD", "LCx", "RCA"):
         assert math.isnan(out[terr]["delta_mean_circular"])
+
+
+def test_tid_ratio_esfuerzo_sobre_reposo():
+    out = transient_ischemic_dilation(130.0, 100.0)
+    assert out["available"] is True
+    assert abs(out["ratio"] - 1.30) < 1e-9
+    assert out["stress_edv_ml"] == 130.0
+    assert out["rest_edv_ml"] == 100.0
+    assert out["elevated"] is True  # 1.30 >= cutoff
+
+
+def test_tid_no_elevado_bajo_cutoff():
+    out = transient_ischemic_dilation(100.0, 100.0)
+    assert out["available"] is True
+    assert out["elevated"] is False
+    assert out["soft_cutoff"] == TID_GATED_SOFT_CUTOFF
+
+
+def test_tid_edv_invalido_no_disponible():
+    assert transient_ischemic_dilation(None, 100.0)["available"] is False
+    assert transient_ischemic_dilation(100.0, 0.0)["available"] is False
+    assert transient_ischemic_dilation(float("nan"), 100.0)["available"] is False
+
+
+def test_tid_incluido_en_compare_stress_rest():
+    stress = _metrics(45.0, 80.0, 4.5, 70.0, 12.0, 100.0)
+    rest = _metrics(35.0, 60.0, 4.0, 62.0, 8.0, 100.0)
+    out = compare_stress_rest(
+        stress, rest,
+        stress_ef={"edv_ml": 132.0}, rest_ef={"edv_ml": 110.0},
+    )
+    assert out["tid"]["available"] is True
+    assert abs(out["tid"]["ratio"] - 1.2) < 1e-9

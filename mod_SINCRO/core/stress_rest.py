@@ -58,6 +58,11 @@ _ANGULAR_METRICS = (
 INDUCIBLE_SD_DELTA_DEG = 5.0
 INDUCIBLE_BW_DELTA_DEG = 15.0
 
+#: Umbral orientativo del TID GATILLADO (cociente EDV esfuerzo/reposo). NO es un
+#: cutoff diagnóstico: el TID clásico se mide sobre perfusión ungated (~1.22); el
+#: gatillado (EDV) tiende a valores algo menores y depende de población/cámara.
+TID_GATED_SOFT_CUTOFF = 1.20
+
 
 def circular_delta_deg(a: float, b: float) -> float:
     """Delta angular ``a - b`` envuelto a (-180, 180]. NaN si alguno es NaN."""
@@ -75,6 +80,37 @@ def _scalar_delta(a: Any, b: Any) -> float:
     if not (np.isfinite(av) and np.isfinite(bv)):
         return float("nan")
     return float(av - bv)
+
+
+def transient_ischemic_dilation(
+    stress_edv_ml: Any, rest_edv_ml: Any
+) -> dict:
+    """TID gatillado = EDV(esfuerzo) / EDV(reposo).
+
+    Cociente de los volúmenes de fin de diástole del MISMO método (ECTb) entre
+    esfuerzo y reposo. Al ser un cociente del mismo método, cancela el sesgo
+    sistemático del volumen absoluto (útil cuando el valor absoluto difiere de,
+    p.ej., el volumen por TC). NO es diagnóstico: un ratio elevado (orientativo
+    ``>= TID_GATED_SOFT_CUTOFF``) sugiere dilatación isquémica transitoria,
+    hallazgo pronóstico a correlacionar con la clínica y la perfusión.
+    """
+    try:
+        s = float(stress_edv_ml)
+        r = float(rest_edv_ml)
+    except (TypeError, ValueError):
+        return {"available": False, "reason": "faltan EDV de esfuerzo o reposo"}
+    if not (np.isfinite(s) and np.isfinite(r)) or s <= 0.0 or r <= 0.0:
+        return {"available": False, "reason": "EDV no válido para el cociente"}
+    ratio = s / r
+    return {
+        "available": True,
+        "ratio": float(ratio),
+        "stress_edv_ml": s,
+        "rest_edv_ml": r,
+        "soft_cutoff": TID_GATED_SOFT_CUTOFF,
+        "elevated": bool(ratio >= TID_GATED_SOFT_CUTOFF),
+        "method": "gated_edv_ratio",
+    }
 
 
 def compare_territories(
@@ -216,6 +252,10 @@ def compare_stress_rest(
         for key in stress_function
     }
 
+    tid = transient_ischemic_dilation(
+        (stress_ef or {}).get("edv_ml"), (rest_ef or {}).get("edv_ml")
+    )
+
     return {
         "available": True,
         "convention": "delta = esfuerzo - reposo",
@@ -226,6 +266,7 @@ def compare_stress_rest(
         "stress_function": stress_function,
         "rest_function": rest_function,
         "function_deltas": function_deltas,
+        "tid": tid,
         "notes": _interpret(deltas),
         "references": [
             "Fukumoto 2025 (PMID 40021521): phase entropy en esfuerzo predice eventos cardíacos mayores.",

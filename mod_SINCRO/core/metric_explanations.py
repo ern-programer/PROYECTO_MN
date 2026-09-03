@@ -126,6 +126,31 @@ _EXPLANATIONS: dict[str, dict[str, str]] = {
         ),
         "reference": "Umbrales de viabilidad por MPI de reposo (aproximación clínica).",
     },
+    "tid": {
+        "title": "TID — Dilatación Isquémica Transitoria (gatillada)",
+        "short": "Cociente del tamaño del VI esfuerzo/reposo; elevado sugiere isquemia extensa.",
+        "what": (
+            "Compara el tamaño de la cavidad del ventrículo izquierdo entre "
+            "esfuerzo y reposo. Cuando la cavidad se ve mayor en esfuerzo (TID "
+            "elevado) puede reflejar isquemia extensa (enfermedad multivaso o de "
+            "tronco) o dilatación subendocárdica difusa; es un marcador pronóstico "
+            "clásico del SPECT de perfusión."
+        ),
+        "how": (
+            "Versión GATILLADA: cociente del volumen de fin de diástole (EDV) del "
+            "mismo método (ECTb) entre esfuerzo y reposo: TID = EDV_esfuerzo / "
+            "EDV_reposo. Al ser un cociente del mismo método, cancela el sesgo del "
+            "volumen absoluto. (El TID clásico se mide sobre perfusión ungated "
+            "sumada; esa variante queda como desarrollo futuro.)"
+        ),
+        "units": "Cociente adimensional (esfuerzo/reposo).",
+        "cutoffs": (
+            "Orientativo (NO diagnóstico): gatillado ~≥1.20; el TID clásico ungated "
+            "suele citarse ~1.22. Depende de protocolo, cámara y población: "
+            "interpretar con la perfusión y la clínica."
+        ),
+        "reference": "TID en SPECT de perfusión (marcador pronóstico); variante gatillada por EDV ratio.",
+    },
 }
 
 

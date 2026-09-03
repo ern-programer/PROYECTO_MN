@@ -68,7 +68,7 @@ from core.perfusion_texture import (
 	perfusion_texture_by_segment,
 )
 from core.segmental_report import SEGMENT_NAMES, build_segmental_report
-from core.stress_rest import compare_stress_rest
+from core.stress_rest import compare_stress_rest, transient_ischemic_dilation
 from core.perfusion_quant import perfusion_by_segment, perfusion_quant_summary
 from core.executive_summary import build_executive_summary
 from core.intestinal_subtraction import apply_intestinal_subtraction
@@ -9893,6 +9893,21 @@ class MainWindow(QMainWindow):
 							"    → El engrosamiento cayó marcadamente respecto de la otra etapa: "
 							"correlacionar con perfusión regional (posible isquemia/stunning)."
 						)
+			tid_compare_ef = getattr(self, "compare_ef", None)
+			if tid_compare_ef and tid_compare_ef.get("available"):
+				tid = transient_ischemic_dilation(ef.get("edv_ml"), tid_compare_ef.get("edv_ml"))
+				if tid.get("available"):
+					cur_lbl = ctx.get("phase", "Esfuerzo")
+					cmp_lbl = self.compare_label or "Reposo"
+					clinical.append(
+						f"  TID (dilatación isquémica transitoria, gatillado): {float(tid['ratio']):.2f}  "
+						f"(EDV {cur_lbl}/{cmp_lbl} = {float(tid['stress_edv_ml']):.0f}/{float(tid['rest_edv_ml']):.0f} mL)"
+					)
+					if tid.get("elevated"):
+						clinical.append(
+							f"    → TID ≥ {float(tid['soft_cutoff']):.2f} (umbral orientativo, no diagnóstico): "
+							"posible isquemia extensa/multivaso; correlacionar con perfusión y clínica."
+						)
 			if ef.get("shape_index_ed") is not None:
 				clinical.append(
 					f"  Índice de esfericidad ED/ES: {float(ef['shape_index_ed']):.2f} / "
@@ -10040,6 +10055,7 @@ class MainWindow(QMainWindow):
 				volumes=vol,
 				phase_label=str(ctx.get("phase", "Estudio")),
 				db_eval=exec_db_eval,
+				rest_ef=getattr(self, "compare_ef", None),
 			)
 			self.summary_executive.setPlainText(exec_summary.get("plain_text", ""))
 		except Exception:

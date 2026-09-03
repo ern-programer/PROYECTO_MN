@@ -404,6 +404,26 @@ def generate_report(
 			story.append(Spacer(1, 1.5 * mm))
 			story.append(sr_table)
 			story.append(Spacer(1, 1.5 * mm))
+			tid = stress_rest.get("tid") or {}
+			if tid.get("available"):
+				ratio = float(tid["ratio"])
+				cutoff = float(tid.get("soft_cutoff", 1.20))
+				tid_txt = (
+					f"<b>TID — Dilatación isquémica transitoria (gatillado): {ratio:.2f}</b> "
+					f"(EDV esfuerzo/reposo = {float(tid['stress_edv_ml']):.0f}/{float(tid['rest_edv_ml']):.0f} mL). "
+				)
+				if tid.get("elevated"):
+					tid_txt += (
+						f"Ratio &gt;= {cutoff:.2f} (umbral orientativo, no diagnóstico): posible isquemia "
+						"extensa/multivaso o de tronco; correlacionar con perfusión y clínica."
+					)
+				else:
+					tid_txt += (
+						f"Ratio &lt; {cutoff:.2f} (umbral orientativo): sin dilatación transitoria "
+						"significativa por este parámetro."
+					)
+				story.append(Paragraph(tid_txt, body_style))
+				story.append(Spacer(1, 2 * mm))
 			for note in stress_rest.get("notes", []):
 				story.append(Paragraph(f"• {note}", small_style))
 			story.append(Spacer(1, 3 * mm))

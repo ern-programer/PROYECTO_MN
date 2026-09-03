@@ -16,6 +16,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from core.stress_rest import transient_ischemic_dilation
+
 
 def _num(value: Any) -> float | None:
     """Convierte a float finito o devuelve None."""
@@ -139,6 +141,7 @@ def build_executive_summary(
     # --- Función ventricular --------------------------------------------
     rest_ef = rest_ef or {}
     rest_pct = _num(rest_ef.get("ef_pct"))
+    tid = transient_ischemic_dilation(ef.get("edv_ml"), rest_ef.get("edv_ml")) if ef else {"available": False}
     if ef.get("available"):
         ef_pct = _num(ef.get("ef_pct"))
         edv = _num(ef.get("edv_ml"))
@@ -164,6 +167,14 @@ def build_executive_summary(
         thk = _num(ef.get("thickening_pct"))
         if thk is not None:
             frase_func += f" Engrosamiento sistólico global {_fmt(thk, 1, '%')}."
+        if tid.get("available"):
+            frase_func += f" TID gatillado (EDV esfuerzo/reposo): {_fmt(tid.get('ratio'), 2)}"
+            if tid.get("elevated"):
+                frase_func += (
+                    f" (≥ {_fmt(tid.get('soft_cutoff'), 2)}, umbral orientativo: posible "
+                    "isquemia extensa/multivaso, correlacionar con perfusión)"
+                )
+            frase_func += "."
         sections.append({"title": "Función ventricular", "text": frase_func})
 
     # --- Cierre / recomendación de lectura ------------------------------
@@ -199,6 +210,8 @@ def build_executive_summary(
         "edv_ml": _num(ef.get("edv_ml")) if ef else None,
         "esv_ml": _num(ef.get("esv_ml")) if ef else None,
         "thickening_pct": _num(ef.get("thickening_pct")) if ef else None,
+        "tid_ratio": _num(tid.get("ratio")) if tid.get("available") else None,
+        "tid_elevated": bool(tid.get("elevated")) if tid.get("available") else None,
         "myocardial_ml": _num(volumes.get("myocardial_ml")) if volumes else None,
     }
 
