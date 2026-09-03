@@ -4632,6 +4632,44 @@ class MainWindow(QMainWindow):
 		integrity_l.addRow(hash_info)
 		root.addWidget(integrity_box)
 
+		# --- Datos experimentales / investigación ---
+		research_box = QGroupBox("Datos experimentales / investigación")
+		research_l = QVBoxLayout(research_box)
+		research_msg = QLabel(
+			"Comparación experimental de volumen/masa miocárdica (máscara CT vs gated SPECT). "
+			"Es un dato de investigación, no diagnóstico; no altera ningún resultado clínico."
+		)
+		research_msg.setWordWrap(True)
+		research_msg.setStyleSheet("color:#6b7280; font-size:8pt;")
+		research_l.addWidget(research_msg)
+		show_experimental = QCheckBox("Mostrar la comparación experimental en el informe")
+		show_experimental.setChecked(self._research_flag("show_experimental", False))
+		show_experimental.setToolTip(
+			"Si está activo, el informe HTML incluye la tarjeta de comparación de volumen "
+			"miocárdico (máscara CT vs gated SPECT). Requiere máscara de fusión CT."
+		)
+		collect_data = QCheckBox("Acumular casos para análisis poblacional (SQLite local)")
+		collect_data.setChecked(self._research_flag("collect_data", False))
+		collect_data.setToolTip(
+			"Si está activo, cada informe con máscara CT presente guarda una fila en el "
+			"almacén local de investigación (no incluye imágenes, solo métricas)."
+		)
+		research_l.addWidget(show_experimental)
+		research_l.addWidget(collect_data)
+		try:
+			from core import research_store as _rs
+			_ncases = _rs.count_cases()
+		except Exception:
+			_ncases = 0
+		research_count = QLabel(f"Casos acumulados: {_ncases}")
+		research_count.setStyleSheet("color:#6b7280; font-size:8pt;")
+		research_l.addWidget(research_count)
+		export_btn = QPushButton("Exportar datos poblacionales (CSV)…")
+		export_btn.setToolTip("Vuelca todos los casos acumulados a un CSV para procesarlos afuera.")
+		export_btn.clicked.connect(self._export_research_cases)
+		research_l.addWidget(export_btn)
+		root.addWidget(research_box)
+
 		# Aplicar el tema en vivo al cambiar el combo (aunque se cancele el diálogo,
 		# ya queda aplicado el tema elegido; se persiste solo al Aceptar).
 		def _on_theme_changed(_idx: int):
@@ -4682,6 +4720,8 @@ class MainWindow(QMainWindow):
 		if settings:
 			settings.setValue("integrity/hash_max_files", int(hash_max_files.value()))
 			settings.setValue("integrity/hash_max_days", int(hash_max_days.value()))
+			settings.setValue("research/show_experimental", bool(show_experimental.isChecked()))
+			settings.setValue("research/collect_data", bool(collect_data.isChecked()))
 			settings.sync()
 
 		self.statusBar().showMessage("Configuración aplicada")
@@ -7961,6 +8001,116 @@ class MainWindow(QMainWindow):
 						self._load_previews_selected(pending)
 					except Exception as exc:
 						self._log(f"[WARN] Lazy render falló ({', '.join(sorted(pending))}): {exc}")
+
+	def _export_research_cases(self):
+		"""Exporta el store poblacional a CSV elegido por el usuario."""
+		try:
+			from core import research_store
+		except Exception as exc:
+			QMessageBox.warning(self, "Investigación", f"No se pudo cargar el almacén: {exc}")
+			return
+		n = research_store.count_cases()
+		if n <= 0:
+			QMessageBox.information(self, "Investigación", "No hay casos acumulados para exportar.")
+			return
+		default_name = f"sincro_casos_experimentales_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+		start_dir = os.path.join(getattr(self, "output_dir", "") or "", default_name)
+		path, _ = QFileDialog.getSaveFileName(
+			self, "Exportar datos poblacionales", start_dir, "CSV (*.csv)"
+		)
+		if not path:
+			return
+		try:
+			written = research_store.export_csv(path)
+			QMessageBox.information(self, "Investigación", f"Exportados {written} casos a:\n{path}")
+			self._log(f"[INVESTIGACION] Exportados {written} casos a {path}")
+		except Exception as exc:
+			QMessageBox.warning(self, "Investigación", f"Error al exportar: {exc}")
+
+	def _research_flag(self, key: str, default: bool) -> bool:
+		settings = getattr(self, "_ui_settings", None)
+		if settings is None:
+			return default
+		try:
+			return bool(settings.value(f"research/{key}", default, type=bool))
+		except Exception:
+			return default
+
+	def _maybe_handle_experimental_myo_volume(self, vol: dict, ef: dict) -> None:
+		"""Inyecta la comparación experimental en el informe y/o acumula el caso.
+
+		- Tarjeta en el informe: solo si research/show_experimental está activo.
+		- Store poblacional: solo si research/collect_data está activo.
+		Ambos toggles son independientes; ninguno altera resultados clínicos.
+		"""
+		ct_myo_ml = None
+		try:
+			panel = getattr(self, "_perfusion_fusion_panel", None)
+			if panel is not None and hasattr(panel, "get_ct_mask_volume_ml"):
+				ct_myo_ml = panel.get_ct_mask_volume_ml()
+		except Exception:
+			ct_myo_ml = None
+		if ct_myo_ml is None:
+			return
+
+		if self._research_flag("show_experimental", False):
+			vol["ct_mask_myo_ml"] = float(ct_myo_ml)
+
+		if self._research_flag("collect_data", False):
+			self._record_experimental_case(float(ct_myo_ml), ef or {}, vol or {})
+
+	def _record_experimental_case(self, ct_myo_ml: float, ef: dict, vol: dict) -> None:
+		"""Graba un caso (máscara CT vs gated SPECT) en el store poblacional."""
+		try:
+			from core import research_store
+		except Exception:
+			return
+		DENS = 1.05
+		ct_mass = ct_myo_ml * DENS
+		spect_myo_ml = vol.get("myocardial_ml")
+		spect_mass = ef.get("myocardial_mass_g")
+		if spect_mass is None and spect_myo_ml is not None:
+			try:
+				spect_mass = float(spect_myo_ml) * DENS
+			except Exception:
+				spect_mass = None
+		diff_mass = None
+		diff_pct = None
+		try:
+			if spect_mass is not None and float(spect_mass) > 0:
+				diff_mass = ct_mass - float(spect_mass)
+				diff_pct = 100.0 * diff_mass / float(spect_mass)
+		except Exception:
+			diff_mass = diff_pct = None
+
+		def _f(v):
+			try:
+				return float(v) if v is not None else None
+			except Exception:
+				return None
+
+		study = getattr(self, "study", None)
+		row = {
+			"patient_id": str(getattr(study, "patient_id", "") or ""),
+			"study_date": str(getattr(study, "study_date", "") or ""),
+			"stage": str(getattr(self, "_active_stage", "") or ""),
+			"ct_myo_ml": _f(ct_myo_ml),
+			"ct_mass_g": _f(ct_mass),
+			"spect_myo_ml": _f(spect_myo_ml),
+			"spect_mass_g": _f(spect_mass),
+			"ef_pct": _f(ef.get("ef_pct")),
+			"edv_ml": _f(ef.get("edv_ml")),
+			"esv_ml": _f(ef.get("esv_ml")),
+			"camera_manufacturer": str(getattr(study, "manufacturer", "") or ""),
+			"camera_model": str(getattr(study, "manufacturer_model", getattr(study, "model", "")) or ""),
+			"diff_mass_g": _f(diff_mass),
+			"diff_pct": _f(diff_pct),
+		}
+		try:
+			if research_store.record_case(row):
+				self._log(f"[INVESTIGACION] Caso experimental acumulado (masa CT {ct_mass:.1f} g).")
+		except Exception:
+			pass
 
 	def _effective_voxel_volume_ml(self) -> float | None:
 		if self.study is None:
@@ -12035,17 +12185,10 @@ class MainWindow(QMainWindow):
 		vol = self._compute_volumes_ml()
 		ef = self._estimate_lv_ef()
 		vol = self._harmonize_volumes_with_ef(vol, ef)
-		# Dato experimental: volumen miocárdico VI desde la máscara de fusión CT
-		# (segmentación CT corregida por el usuario). Se compara en el informe
-		# contra la masa/volumen miocárdico del gated SPECT.
-		try:
-			_panel = getattr(self, "_perfusion_fusion_panel", None)
-			if _panel is not None and hasattr(_panel, "get_ct_mask_volume_ml"):
-				_ct_myo_ml = _panel.get_ct_mask_volume_ml()
-				if _ct_myo_ml is not None:
-					vol["ct_mask_myo_ml"] = float(_ct_myo_ml)
-		except Exception:
-			pass
+		# Dato experimental: volumen miocárdico VI desde la máscara de fusión CT.
+		# La tarjeta del informe se muestra solo si el usuario lo activó; el caso
+		# se acumula en el store poblacional según su propio toggle (independientes).
+		self._maybe_handle_experimental_myo_volume(vol, ef)
 		if ef.get("available") and ef.get("thickening_pct") is not None:
 			compare_ef = getattr(self, "compare_ef", None)
 			if compare_ef and compare_ef.get("available") and compare_ef.get("thickening_pct") is not None:

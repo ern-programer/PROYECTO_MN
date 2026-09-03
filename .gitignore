@@ -62,3 +62,7 @@ Desktop.ini
 # --- Logs ---
 *.log
 *.tmp
+
+# --- SINCRO: datos de runtime / investigacion (no versionar) ---
+mod_SINCRO/research_data/
+mod_SINCRO/report_hashes/

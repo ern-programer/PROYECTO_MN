@@ -194,6 +194,14 @@ body {
 .vc-table th { color: var(--fg-muted); font-weight: 600; }
 .vc-table tr.vc-diff td { font-weight: 700; color: var(--fg); border-bottom: none; }
 .vc-note { color: var(--fg-muted); font-size: 0.8rem; margin: 10px 0 0; }
+.vc-flag {
+  margin: 12px 0 0; padding: 8px 12px; border-radius: 8px; font-size: 0.85rem;
+}
+.vc-flag .vc-flag-title { font-weight: 700; }
+.vc-flag.ok { background: rgba(34,197,94,0.12); color: #16a34a; border: 1px solid rgba(34,197,94,0.35); }
+.vc-flag.warn { background: rgba(245,158,11,0.12); color: #b45309; border: 1px solid rgba(245,158,11,0.40); }
+.vc-flag ul { margin: 6px 0 0; padding-left: 18px; font-weight: 500; }
+.vc-flag li { margin: 2px 0; }
 
 /* Tabs */
 .tabs { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 24px; }
@@ -535,6 +543,7 @@ def generate_html_report(
             for name, v, m in rows
         )
         diff_html = ""
+        d_pct = None
         if sp_mass is not None and sp_mass > 0 and sp_ml is not None:
             d_ml = float(ct_myo_ml) - sp_ml
             d_mass = ct_mass - sp_mass
@@ -543,6 +552,33 @@ def generate_html_report(
                 f"<tr class='vc-diff'><td>Diferencia (CT − SPECT)</td>"
                 f"<td>{d_ml:+.1f} mL</td><td>{d_mass:+.1f} g ({d_pct:+.1f}%)</td></tr>"
             )
+
+        # Flag de plausibilidad (QC, no diagnóstico): discrepancia alta o cavidad pequeña con FEVI alta.
+        def _finite(v):
+            try:
+                f = float(v)
+                return f if np.isfinite(f) else None
+            except Exception:
+                return None
+        ef_pct_v = _finite((ef or {}).get("ef_pct"))
+        edv_v = _finite((ef or {}).get("edv_ml"))
+        flag_warnings = []
+        if d_pct is not None and abs(d_pct) > 40.0:
+            flag_warnings.append(
+                f"Discrepancia alta entre volumen anatómico (CT) y funcional (SPECT): {d_pct:+.0f}%.")
+        if edv_v is not None and edv_v < 70.0 and ef_pct_v is not None and ef_pct_v > 75.0:
+            flag_warnings.append(
+                f"Cavidad pequeña (EDV {edv_v:.0f} mL) con FEVI alta ({ef_pct_v:.0f}%): "
+                "la FEVI gated puede estar sobrestimada por efecto de volumen parcial.")
+        if flag_warnings:
+            items = "".join(f"<li>{w}</li>" for w in flag_warnings)
+            flag_html = (
+                '<div class="vc-flag warn"><span class="vc-flag-title">⚠ Revisar plausibilidad</span>'
+                f"<ul>{items}</ul></div>")
+        else:
+            flag_html = (
+                '<div class="vc-flag ok"><span class="vc-flag-title">✓ Volúmenes coherentes</span>'
+                ' — sin señales de sobrestimación por cavidad pequeña.</div>')
         vol_compare_html = f"""
     <div class="vol-compare">
       <h3>Volumen miocárdico VI — comparación experimental
@@ -554,6 +590,7 @@ def generate_html_report(
       <p class="vc-note">La máscara CT mide la pared miocárdica <b>anatómica</b> (segmentación CT
       corregida por el usuario, remuestreada a la grilla SPECT). El valor gated SPECT deriva de la
       segmentación <b>funcional</b> por conteo. Son métodos distintos; la comparación es orientativa.</p>
+      {flag_html}
     </div>"""
 
     # --- Métricas cards ---
