@@ -206,7 +206,7 @@ def compare_stress_rest(
     def _ef_snapshot(ef: dict | None) -> dict[str, float]:
         ef = ef or {}
         out: dict[str, float] = {}
-        for key in ("ef_pct", "edv_ml", "esv_ml", "pfr_edv_per_s", "tpfr_ms"):
+        for key in ("ef_pct", "edv_ml", "esv_ml", "myocardial_mass_g", "pfr_edv_per_s", "tpfr_ms"):
             out[key] = _scalar_delta(ef.get(key), 0.0) if ef.get(key) is not None else float("nan")
         return out
     stress_function = _ef_snapshot(stress_ef)

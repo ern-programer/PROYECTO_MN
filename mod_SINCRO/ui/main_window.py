@@ -1087,7 +1087,7 @@ class MainWindow(QMainWindow):
 		self.apply_roi_all_btn.setToolTip("Copia el ROI del slice actual a todos los slices del volumen.")
 		self.load_one_or_two_btn = QPushButton("Cargar 1/2 estudios")
 		self.load_one_or_two_btn.clicked.connect(self.load_one_or_two_studies)
-		self.load_one_or_two_btn.setToolTip("Permite cargar y procesar una fase (stress o rest) o dos fases para comparación integral.")
+		self.load_one_or_two_btn.setToolTip("Carga una o dos fases (stress/rest). Opción 'Carpeta inteligente': marcás una carpeta y lee/carga todo (Esfuerzo y Reposo con sus EM, ATT, CT y Scatter).")
 		self.preparacion_btn = QPushButton("Preparar / Reconstruir…")
 		self.preparacion_btn.clicked.connect(self.open_preparacion_window)
 		self.preparacion_btn.setToolTip(
@@ -1983,13 +1983,13 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_ung_cutoff_spin.setDecimals(2)
 				self.cine_crudo_ung_cutoff_spin.setValue(0.52)
 				self.cine_crudo_ung_cutoff_spin.setMaximumWidth(60)
-				self.cine_crudo_ung_cutoff_spin.setToolTip("Cutoff normalizado (fracción de Nyquist) del filtro UngGat. Xeleris FBP: 0.52.")
+				self.cine_crudo_ung_cutoff_spin.setToolTip("Cutoff normalizado (fracción de Nyquist) del filtro UngGat. Default cardíaco (matriz 64² · órbita 180°) calcado de Xeleris ECToolbox: 0.52. Con OSEM/MLEM el Butterworth se aplica post-recon (no es pre-filtro FBP).")
 				toolbar6_r1.addWidget(self.cine_crudo_ung_cutoff_spin)
 				self.cine_crudo_ung_order_spin = QSpinBox()
 				self.cine_crudo_ung_order_spin.setRange(1, 20)
 				self.cine_crudo_ung_order_spin.setValue(5)
 				self.cine_crudo_ung_order_spin.setMaximumWidth(50)
-				self.cine_crudo_ung_order_spin.setToolTip("Orden del filtro UngGat.")
+				self.cine_crudo_ung_order_spin.setToolTip("Orden del filtro UngGat. Default cardíaco calcado de Xeleris ECToolbox: 5.")
 				toolbar6_r1.addWidget(self.cine_crudo_ung_order_spin)
 				toolbar6_r1.addWidget(QLabel("Gated"))
 				self.cine_crudo_gated_method_combo = QComboBox()
@@ -2010,13 +2010,13 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_gated_cutoff_spin.setDecimals(2)
 				self.cine_crudo_gated_cutoff_spin.setValue(0.40)
 				self.cine_crudo_gated_cutoff_spin.setMaximumWidth(60)
-				self.cine_crudo_gated_cutoff_spin.setToolTip("Cutoff normalizado (fracción de Nyquist) del filtro gated. Xeleris FBP: 0.40.")
+				self.cine_crudo_gated_cutoff_spin.setToolTip("Cutoff normalizado (fracción de Nyquist) del filtro gated. Default cardíaco (matriz 64² · órbita 180°) calcado de Xeleris ECToolbox: 0.40. Con OSEM/MLEM el Butterworth se aplica post-recon (no es pre-filtro FBP).")
 				toolbar6_r1.addWidget(self.cine_crudo_gated_cutoff_spin)
 				self.cine_crudo_gated_order_spin = QSpinBox()
 				self.cine_crudo_gated_order_spin.setRange(1, 20)
 				self.cine_crudo_gated_order_spin.setValue(10)
 				self.cine_crudo_gated_order_spin.setMaximumWidth(50)
-				self.cine_crudo_gated_order_spin.setToolTip("Orden del filtro gated. Xeleris FBP: 10.")
+				self.cine_crudo_gated_order_spin.setToolTip("Orden del filtro gated. Default cardíaco calcado de Xeleris ECToolbox: 10.")
 				toolbar6_r1.addWidget(self.cine_crudo_gated_order_spin)
 				toolbar6_r1.addStretch(1)
 
@@ -12035,6 +12035,17 @@ class MainWindow(QMainWindow):
 		vol = self._compute_volumes_ml()
 		ef = self._estimate_lv_ef()
 		vol = self._harmonize_volumes_with_ef(vol, ef)
+		# Dato experimental: volumen miocárdico VI desde la máscara de fusión CT
+		# (segmentación CT corregida por el usuario). Se compara en el informe
+		# contra la masa/volumen miocárdico del gated SPECT.
+		try:
+			_panel = getattr(self, "_perfusion_fusion_panel", None)
+			if _panel is not None and hasattr(_panel, "get_ct_mask_volume_ml"):
+				_ct_myo_ml = _panel.get_ct_mask_volume_ml()
+				if _ct_myo_ml is not None:
+					vol["ct_mask_myo_ml"] = float(_ct_myo_ml)
+		except Exception:
+			pass
 		if ef.get("available") and ef.get("thickening_pct") is not None:
 			compare_ef = getattr(self, "compare_ef", None)
 			if compare_ef and compare_ef.get("available") and compare_ef.get("thickening_pct") is not None:
@@ -14592,10 +14603,48 @@ class MainWindow(QMainWindow):
 		except Exception as exc:
 			self._log(f"[FUSION][WARN] Cambio de etapa falló: {exc}")
 
+	def _suggest_feta_limits_from_fusion(self, stage: str, margin: int = 2) -> None:
+		"""Pre-carga los límites Base/Ápex de la feta desde la máscara del corazón
+		ya fusionada (rango axial Z + margen). Es una sugerencia editable: no
+		reconstruye ni pisa una selección que el usuario haya tocado a mano."""
+		panel = getattr(self, "_perfusion_fusion_panel", None)
+		if panel is None or not hasattr(panel, "get_heart_axial_bounds"):
+			return
+		bounds = panel.get_heart_axial_bounds()
+		if not bounds:
+			return
+		z_min, z_max = int(bounds[0]), int(bounds[1])
+		try:
+			res = self._dual_session().stage(stage).recon_result
+			n = int(np.asarray(res.gated_volume).shape[1]) if res is not None else None
+		except Exception:
+			n = None
+		base_1 = z_min + 1 - margin
+		apex_1 = z_max + 1 + margin
+		if n:
+			base_1 = int(np.clip(base_1, 1, n))
+			apex_1 = int(np.clip(apex_1, 1, n))
+		else:
+			base_1 = max(1, base_1)
+			apex_1 = max(1, apex_1)
+		b, a = self._cine_crudo_stage_limits_set(stage, base_1, apex_1, n)
+		# Reflejar en los spins si esa etapa es la activa en pantalla.
+		if str(getattr(self, "_cine_crudo_recon_stage", "stress")) == stage:
+			for spin_name, val in (("cine_crudo_cut_base_spin", b), ("cine_crudo_cut_apex_spin", a)):
+				spin = getattr(self, spin_name, None)
+				if spin is not None:
+					spin.blockSignals(True)
+					spin.setValue(int(val))
+					spin.blockSignals(False)
+		stage_txt = "REPOSO" if stage == "rest" else "ESFUERZO"
+		self._log(
+			f"[FETA] Sugerencia de límites Base/Ápex para {stage_txt} desde la máscara "
+			f"fusionada: z=[{b},{a}] (margen ±{margin}). Editable; no re-reconstruye solo."
+		)
+
 	def _import_amylo_fusion_registration(self, stage: str | None = None):
 		"""Trae el CT/ATT registrado en el panel de fusión a la etapa indicada (para AC)."""
 		from core.ct_fusion import mu_map_from_ct_hu, validate_mu_map
-
 		panel = getattr(self, "_perfusion_fusion_panel", None)
 		if panel is None:
 			QMessageBox.information(self, "SINCRO", "Primero abrí 'Fusión' y registrá el CT ahí.")
@@ -14660,6 +14709,12 @@ class MainWindow(QMainWindow):
 			if getattr(self, "cine_crudo_ac_check", None) is not None:
 				self.cine_crudo_ac_check.setEnabled(True)
 				self.cine_crudo_ac_check.setChecked(True)
+			# Sugerir límites Base/Ápex de la feta desde la máscara ya fusionada
+			# (editable; no fuerza re-recon). Solo con CT/fusión presente.
+			try:
+				self._suggest_feta_limits_from_fusion(stage)
+			except Exception as exc:
+				self._log(f"[FETA][WARN] No pude sugerir límites desde la fusión: {exc}")
 			if unchanged:
 				self._log(f"[AC] Registro importado idéntico al vigente en {stage}: no re-reconstruyo.")
 				return
@@ -19988,6 +20043,28 @@ class MainWindow(QMainWindow):
 		self._load_compare_study_from_path(paths[0])
 
 	def load_one_or_two_studies(self):
+		# Ofrecer carga inteligente por carpeta (EM+ATT+CT+SC de ambas etapas) o
+		# la selección manual de 1/2 archivos de siempre.
+		box = QMessageBox(self)
+		box.setWindowTitle("SINCRO — Cargar estudios")
+		box.setIcon(QMessageBox.Icon.Question)
+		box.setText("¿Cómo querés cargar?")
+		box.setInformativeText(
+			"• Carpeta inteligente: marcás una carpeta y lee/carga todo lo que haya "
+			"(Esfuerzo y Reposo, con sus EM, ATT, CT y Scatter).\n"
+			"• Elegir archivos: seleccionás 1 o 2 estudios a mano."
+		)
+		btn_smart = box.addButton("🔍 Carpeta inteligente", QMessageBox.ButtonRole.AcceptRole)
+		btn_files = box.addButton("Elegir archivos", QMessageBox.ButtonRole.ActionRole)
+		box.addButton("Cancelar", QMessageBox.ButtonRole.RejectRole)
+		box.setDefaultButton(btn_smart)
+		box.exec()
+		clicked = box.clickedButton()
+		if clicked is btn_smart:
+			self._smart_load_ct_att_folder()
+			return
+		if clicked is not btn_files:
+			return
 		paths = self._select_dicom_paths(
 			title="Seleccionar uno o dos estudios (stress/rest)",
 			allow_multiple=True,

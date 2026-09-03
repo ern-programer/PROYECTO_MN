@@ -170,6 +170,30 @@ body {
   line-height: 1;
 }
 .fevi-highlight .fevi-label { color: var(--fg-muted); font-size: 0.9rem; }
+.fevi-dual {
+  display: flex; flex-wrap: wrap; align-items: stretch;
+  justify-content: center; gap: 24px;
+}
+.fevi-dual .fevi-highlight { margin: 24px 0; flex: 0 1 400px; }
+
+/* Comparación experimental de volumen miocárdico */
+.vol-compare {
+  max-width: 640px; margin: 8px auto 24px; padding: 16px 20px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.vol-compare h3 { margin: 0 0 12px; font-size: 1rem; color: var(--accent); }
+.vol-compare .exp-tag {
+  display: inline-block; margin-left: 8px; padding: 2px 8px;
+  font-size: 0.65rem; font-weight: 700; letter-spacing: 0.5px;
+  color: #0b1120; background: var(--accent-yellow);
+  border-radius: 10px; vertical-align: middle;
+}
+.vc-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.vc-table th, .vc-table td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+.vc-table th { color: var(--fg-muted); font-weight: 600; }
+.vc-table tr.vc-diff td { font-weight: 700; color: var(--fg); border-bottom: none; }
+.vc-note { color: var(--fg-muted); font-size: 0.8rem; margin: 10px 0 0; }
 
 /* Tabs */
 .tabs { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 24px; }
@@ -459,26 +483,78 @@ def generate_html_report(
     rest_ef_pct = rest_func.get("ef_pct")
     def _fevi_color(v: float) -> str:
         return "var(--accent-green)" if v >= 55 else ("var(--accent-yellow)" if v >= 40 else "var(--accent-red)")
-    if ef_pct is not None and np.isfinite(float(ef_pct)):
-        blocks = f"""
+    def _fevi_card(pct, label, edv, esv, mass) -> str:
+        return f"""
+        <div class="fevi-highlight">
           <div>
-            <div class="fevi-number" style="color:{_fevi_color(float(ef_pct))}">{float(ef_pct):.0f}%</div>
-            <div class="fevi-label">FEVI Esfuerzo</div>
-          </div>"""
-        if rest_ef_pct is not None and np.isfinite(float(rest_ef_pct)):
-            blocks += f"""
+            <div class="fevi-number" style="color:{_fevi_color(float(pct))}">{float(pct):.0f}%</div>
+            <div class="fevi-label">{label}</div>
+          </div>
           <div>
-            <div class="fevi-number" style="color:{_fevi_color(float(rest_ef_pct))}">{float(rest_ef_pct):.0f}%</div>
-            <div class="fevi-label">FEVI Reposo</div>
-          </div>"""
-        fevi_html = f"""
-        <div class="fevi-highlight">{blocks}
-          <div>
-            <div style="font-size:1.1rem; color:var(--fg)">EDV {_safe_float(ef.get('edv_ml'),1)} mL</div>
-            <div style="font-size:1.1rem; color:var(--fg)">ESV {_safe_float(ef.get('esv_ml'),1)} mL</div>
-            <div style="font-size:0.85rem; color:var(--fg-muted)">Masa {_safe_float(ef.get('myocardial_mass_g'),1)} g</div>
+            <div style="font-size:1.1rem; color:var(--fg)">EDV {_safe_float(edv,1)} mL</div>
+            <div style="font-size:1.1rem; color:var(--fg)">ESV {_safe_float(esv,1)} mL</div>
+            <div style="font-size:0.85rem; color:var(--fg-muted)">Masa {_safe_float(mass,1)} g</div>
           </div>
         </div>"""
+    if ef_pct is not None and np.isfinite(float(ef_pct)):
+        has_rest = rest_ef_pct is not None and np.isfinite(float(rest_ef_pct))
+        stress_card = _fevi_card(
+            ef_pct, "FEVI Esfuerzo" if has_rest else "FEVI",
+            ef.get("edv_ml"), ef.get("esv_ml"), ef.get("myocardial_mass_g"),
+        )
+        if has_rest:
+            rest_card = _fevi_card(
+                rest_ef_pct, "FEVI Reposo",
+                rest_func.get("edv_ml"), rest_func.get("esv_ml"), rest_func.get("myocardial_mass_g"),
+            )
+            fevi_html = f'<div class="fevi-dual">{stress_card}{rest_card}</div>'
+        else:
+            fevi_html = stress_card
+
+    # --- Comparación experimental de volumen miocárdico (máscara CT vs gated SPECT) ---
+    vol_compare_html = ""
+    ct_myo_ml = (volumes or {}).get("ct_mask_myo_ml")
+    myo_mass_spect = (ef or {}).get("myocardial_mass_g")
+    myo_ml_spect = (volumes or {}).get("myocardial_ml")
+    if ct_myo_ml is not None and np.isfinite(float(ct_myo_ml)) and float(ct_myo_ml) > 0:
+        _DENS = 1.05  # densidad miocárdica g/mL
+        ct_mass = float(ct_myo_ml) * _DENS
+        sp_ml = None
+        sp_mass = None
+        if myo_ml_spect is not None and np.isfinite(float(myo_ml_spect)) and float(myo_ml_spect) > 0:
+            sp_ml = float(myo_ml_spect)
+            sp_mass = sp_ml * _DENS
+        elif myo_mass_spect is not None and np.isfinite(float(myo_mass_spect)) and float(myo_mass_spect) > 0:
+            sp_mass = float(myo_mass_spect)
+            sp_ml = sp_mass / _DENS
+        rows = [("Máscara de fusión CT (anatómica)", float(ct_myo_ml), ct_mass)]
+        if sp_mass is not None:
+            rows.append(("Gated SPECT (funcional)", sp_ml, sp_mass))
+        body = "".join(
+            f"<tr><td>{name}</td><td>{v:.1f} mL</td><td>{m:.1f} g</td></tr>"
+            for name, v, m in rows
+        )
+        diff_html = ""
+        if sp_mass is not None and sp_mass > 0 and sp_ml is not None:
+            d_ml = float(ct_myo_ml) - sp_ml
+            d_mass = ct_mass - sp_mass
+            d_pct = 100.0 * d_mass / sp_mass
+            diff_html = (
+                f"<tr class='vc-diff'><td>Diferencia (CT − SPECT)</td>"
+                f"<td>{d_ml:+.1f} mL</td><td>{d_mass:+.1f} g ({d_pct:+.1f}%)</td></tr>"
+            )
+        vol_compare_html = f"""
+    <div class="vol-compare">
+      <h3>Volumen miocárdico VI — comparación experimental
+        <span class="exp-tag">EXPERIMENTAL · investigación · no diagnóstico</span></h3>
+      <table class="vc-table">
+        <thead><tr><th>Fuente</th><th>Volumen pared</th><th>Masa (×1.05 g/mL)</th></tr></thead>
+        <tbody>{body}{diff_html}</tbody>
+      </table>
+      <p class="vc-note">La máscara CT mide la pared miocárdica <b>anatómica</b> (segmentación CT
+      corregida por el usuario, remuestreada a la grilla SPECT). El valor gated SPECT deriva de la
+      segmentación <b>funcional</b> por conteo. Son métodos distintos; la comparación es orientativa.</p>
+    </div>"""
 
     # --- Métricas cards ---
     psd = _safe_float(metrics.get("phase_sd"), 1)
@@ -815,6 +891,7 @@ def generate_html_report(
 
 {exec_html}
 {fevi_html}
+{vol_compare_html}
 
 <div class="tabs">
   <button class="tab-btn active" data-group="main" data-tab="tab-informe">Informe</button>

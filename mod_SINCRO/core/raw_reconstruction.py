@@ -42,7 +42,8 @@ class RawReconConfig:
     # Método independiente para la rama gated. Si es None, la rama gated usa
     # reconstruction_method (que es el método de la rama ungated/perfusión).
     gated_method: str | None = None
-    # Calcado de Xeleris ECToolbox (FBP) para este protocolo cardiaco:
+    # Calcado de Xeleris ECToolbox para el protocolo cardiaco habitual
+    # (matriz 64x64, adquisicion en orbita de 180 grados):
     # ungated Butterworth cutoff 0.52 / orden 5; gated cutoff 0.40 / orden 10
     # (cutoff en fraccion de Nyquist).
     # NOTA: con metodo iterativo (OSEM/MLEM) el Butterworth se aplica
@@ -89,6 +90,13 @@ class RawReconConfig:
     # quedan en cero (feta). Los cortes dentro de la banda son idénticos a los
     # del volumen completo.
     recon_slice_range: tuple[int, int] | None = None
+    # --- Máscara de FOV circular ---
+    # Pone a cero fuera del círculo inscripto de la matriz (radio = frac × n/2).
+    # Elimina el anillo del borde del círculo de reconstrucción y el ruido de las
+    # esquinas (más visible en gated de bajo conteo). Se aplica en XY a todos los
+    # cortes, post-recon y post-filtros.
+    circular_fov_mask: bool = True
+    circular_fov_radius_frac: float = 0.95
     # --- NITIDA II: denoiser temporal/espaciotemporal por armónicos ---
     # Denoiser gated de bajo conteo aplicado post-recon SOLO al volumen gated
     # (core.nitida2). Preserva el movimiento cardíaco (bandas de baja frecuencia)
@@ -267,6 +275,28 @@ def _butterworth_3d(volume: np.ndarray, cutoff: float, order: int) -> np.ndarray
     freq = np.sqrt(fz[:, None, None] ** 2 + fy[None, :, None] ** 2 + fx[None, None, :] ** 2)
     resp = 1.0 / np.sqrt(1.0 + (freq / cutoff) ** (2 * order))
     return np.fft.ifftn(np.fft.fftn(vol) * resp).real
+
+
+def _circular_fov_mask_2d(shape_yx: tuple[int, int], radius_frac: float) -> np.ndarray:
+    """Máscara booleana del círculo inscripto (True dentro) en el plano YX."""
+    ny, nx = int(shape_yx[0]), int(shape_yx[1])
+    cy, cx = (ny - 1) / 2.0, (nx - 1) / 2.0
+    yy, xx = np.ogrid[:ny, :nx]
+    r = float(np.clip(radius_frac, 0.1, 1.0)) * (min(ny, nx) / 2.0)
+    return ((yy - cy) ** 2 + (xx - cx) ** 2) <= (r * r)
+
+
+def _apply_circular_fov_mask(volume: np.ndarray, radius_frac: float) -> np.ndarray:
+    """Pone a cero fuera del círculo inscripto en las dos últimas dimensiones (YX).
+
+    Acepta 3D (Z,Y,X) o 4D (G,Z,Y,X). Elimina el anillo del borde del círculo de
+    reconstrucción y el ruido de esquinas sin tocar el interior.
+    """
+    vol = np.asarray(volume, dtype=np.float64)
+    if vol.ndim < 2:
+        return vol
+    mask = _circular_fov_mask_2d(vol.shape[-2:], radius_frac)
+    return vol * mask
 
 
 def filter_projections(projections: np.ndarray, config: ProjectionFilterConfig) -> np.ndarray:
@@ -1574,6 +1604,20 @@ def reconstruct_raw_gated_pipeline(
 
     if progress_callback is not None:
         progress_callback(1.0, "Reconstrucción completa")
+
+    # Máscara de FOV circular: elimina el anillo del borde del círculo de
+    # reconstrucción y el ruido de esquinas (XY, todos los cortes). Se aplica al
+    # final, sobre todos los volúmenes derivados, tras filtros y motion-frozen.
+    if bool(getattr(cfg, "circular_fov_mask", True)):
+        _rfrac = float(getattr(cfg, "circular_fov_radius_frac", 0.95))
+        ungated_volume = _apply_circular_fov_mask(ungated_volume, _rfrac)
+        gated_volume = _apply_circular_fov_mask(gated_volume, _rfrac)
+        _ungated_unfiltered = _apply_circular_fov_mask(_ungated_unfiltered, _rfrac)
+        if ungated_volume_mf is not None:
+            ungated_volume_mf = _apply_circular_fov_mask(ungated_volume_mf, _rfrac)
+        if gated_volume_mf_per_gate is not None:
+            gated_volume_mf_per_gate = _apply_circular_fov_mask(gated_volume_mf_per_gate, _rfrac)
+        notes.append(f"Máscara de FOV circular aplicada (radio={_rfrac:.2f}× de la semi-matriz).")
 
     phase_cube = gated_volume[:, :: int(cfg.fevi_slice_step_px)].copy()
     display_cube = make_display_cube(phase_cube, step_px=int(cfg.display_slice_step_px))

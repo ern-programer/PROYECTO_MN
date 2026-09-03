@@ -1142,13 +1142,14 @@ class PerfusionFusionPanel(QDialog):
         flow.addWidget(QLabel("Preset:"), 1, 1)
         self._preset_combo = QComboBox()
         self._preset_combo.addItem("Manual", "manual")
-        self._preset_combo.addItem("Perfusión 360 estándar 128 (FBP)", "amylo360_std128")
-        self._preset_combo.addItem("Perfusión 360 alta definición (OSEM)", "amylo360_hd")
+        self._preset_combo.addItem("Perfusión estándar (FBP + Butter)", "amylo360_std128")
+        self._preset_combo.addItem("Perfusión alta definición (OSEM)", "amylo360_hd")
         self._preset_combo.addItem("Clínico OSEM suave (2×10)", "clinical_osem_soft")
         self._preset_combo.addItem("Clínico OSEM 8×4 + Butter", "clinical_osem")
         self._preset_combo.setToolTip(
-            "Presets PYP/SPECT 360. 128x128 es recomendación de adquisición; "
-            "si el DICOM trae otra matriz, se reconstruye en la matriz adquirida."
+            "Presets de reconstrucción/filtros para perfusión SPECT/CT (adquisición "
+            "cardíaca habitual: matriz 64² · órbita 180°). La matriz y la órbita las "
+            "define el DICOM; el preset solo fija método, filtros e iteraciones."
         )
         self._preset_combo.currentIndexChanged.connect(self._on_preset_changed)
         flow.addWidget(self._preset_combo, 1, 2)
@@ -2637,6 +2638,20 @@ class PerfusionFusionPanel(QDialog):
             self._norm_token(info.get("protocol", "") or info.get("series_description", "") or info.get("study_description", "")),
         ]
         return "|".join(parts)
+
+    def _read_dicom_profile_info_any(self, source) -> dict:
+        """Perfil DICOM desde archivo o carpeta (busca el 1er .dcm legible con cámara)."""
+        p = str(source or "")
+        if p and os.path.isdir(p):
+            try:
+                for root, _dirs, files in os.walk(p):
+                    for fn in files:
+                        info = self._read_dicom_profile_info(os.path.join(root, fn))
+                        if info.get("manufacturer") or info.get("model"):
+                            return info
+            except Exception:
+                pass
+        return self._read_dicom_profile_info(p)
 
     def _read_dicom_profile_info(self, path: str) -> dict:
         info = {
@@ -7023,12 +7038,45 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         self._status.setText("F2.4: Máscara restaurada a su estado original (segmentación automática).")
         self._render_current_with_overlay()
     
+    def get_heart_axial_bounds(self):
+        """(z_min, z_max) 0-based del corazón en la grilla del SPECT, o None.
+
+        Sirve para sugerir los límites Base/Ápex de la feta desde la máscara
+        fusionada (mask_3d de la CT segmentada; fallback: bbox del cubo auto).
+        """
+        seg = getattr(self, "_ct_segmentation", None)
+        mask = getattr(seg, "mask_3d", None) if seg is not None else None
+        if mask is not None:
+            coords = np.argwhere(np.asarray(mask, dtype=bool))
+            if coords.size > 0:
+                return int(coords[:, 0].min()), int(coords[:, 0].max())
+        bbox = getattr(self, "_auto_cube_bbox_cached", None)
+        if bbox is not None and len(bbox) >= 2:
+            return int(bbox[0]), int(bbox[1])
+        return None
+
+    def get_ct_mask_volume_ml(self):
+        """Volumen (mL) de la máscara de miocardio VI segmentada en CT (corregida por usuario).
+
+        La máscara ya está en la grilla del SPECT, así que usa el spacing SPECT.
+        Devuelve None si no hay máscara con voxels.
+        """
+        seg = getattr(self, "_ct_segmentation", None)
+        mask = getattr(seg, "mask_3d", None) if seg is not None else None
+        if mask is None:
+            return None
+        voxels = int(np.asarray(mask, dtype=bool).sum())
+        if voxels <= 0:
+            return None
+        sp = self._spect_spacing_or_default()
+        voxel_vol_mm3 = float(sp[0]) * float(sp[1]) * float(sp[2])
+        return (voxels * voxel_vol_mm3) / 1000.0
+
     def _apply_mask_edit_and_recalc(self):
         """Aplica los cambios de edición manual y recalcula HMR."""
         ct_seg = getattr(self, '_ct_segmentation', None)
         if ct_seg is None:
-            return
-        
+            return        
         # Confirmar cambios: actualizar original
         self._mask_edit_original = ct_seg.mask_3d.copy()
         self._mask_edit_has_changes = False
@@ -8037,6 +8085,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         vol = np.asarray(spect_volume, dtype=np.float64)
         self._analysis = None
         self._current_spect_path = str(source_label or "perfusion_stage")
+        # Perfil DICOM (cámara/fabricante) para el preset de orientación por cámara.
+        self._dicom_profile_info = self._read_dicom_profile_info_any(source_label)
+        self._workflow_tag = "perf_spect_ct"
         self._base_spect_volume = vol.copy()
         self._current_volume = vol
         self._unfiltered_volume = None
@@ -8087,6 +8138,11 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._btn_vrt.setEnabled(True)
         # Botón 7: en AMYLO lo habilitaba la recon propia (acá bypasseada).
         self._btn_fusion_layout.setEnabled(self._current_volume is not None)
+        # Presets de cámara: disponibles apenas hay SPECT precargado.
+        if hasattr(self, "_btn_save_cam_preset"):
+            self._btn_save_cam_preset.setEnabled(True)
+        if hasattr(self, "_btn_apply_cam_preset"):
+            self._btn_apply_cam_preset.setEnabled(True)
         self._refresh_perfusion_ac_button(str(stage))
         if ct_volume is not None and hasattr(self, "_ct_anatomical_check"):
             # La máscara CT necesita este check (oculto en perfusión) siempre ON.
@@ -8119,6 +8175,13 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 f"Perfusión {('ESFUERZO' if stage == 'stress' else 'REPOSO')}: SPECT {tuple(vol.shape)} "
                 "precargado (sin CT)."
             )
+        # Preset de cámara: aplicar el guardado para esta cámara/protocolo (si existe).
+        # Va DESPUÉS del registro para que nudges/rotaciones del preset se apliquen
+        # sobre el CT ya registrado; el usuario igual puede modificarlo o guardar uno nuevo.
+        try:
+            self._apply_camera_profile_preset(auto=True)
+        except Exception as exc:
+            self._metrics.append(f"[PERF][WARN] auto-preset cámara no aplicado: {exc}")
         self._perfusion_current_stage = str(stage)
         self._save_perfusion_stage_session(str(stage))
 
