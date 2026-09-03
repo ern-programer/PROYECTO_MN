@@ -14866,14 +14866,39 @@ class MainWindow(QMainWindow):
 			self._select_tab_by_title("cine_crudo")
 		self._log(f"[FUSION] Fusión SA generada: {out_png}")
 
+	def _load_iter_cfg_by_stage(self):
+		"""Recupera la config de iteraciones por estudio persistida en QSettings."""
+		cfgs = getattr(self, "_iter_cfg_by_stage", None)
+		if cfgs is not None:
+			return cfgs
+		g_it = int(self.cine_crudo_iter_spin.value()) if hasattr(self, "cine_crudo_iter_spin") else 8
+		g_su = int(self.cine_crudo_osem_subsets_spin.value()) if hasattr(self, "cine_crudo_osem_subsets_spin") else 4
+		cfgs = {(s, b): [g_it, g_su] for s in ("stress", "rest") for b in ("ungated", "gated")}
+		try:
+			blob = self._ui_settings.value("recon/iter_cfg_by_stage", "")
+			if blob:
+				stored = json.loads(blob)
+				for k, v in stored.items():
+					s, b = k.split("|", 1)
+					if (s, b) in cfgs and isinstance(v, (list, tuple)) and len(v) == 2:
+						cfgs[(s, b)] = [int(v[0]), int(v[1])]
+		except Exception:
+			pass
+		self._iter_cfg_by_stage = cfgs
+		return cfgs
+
+	def _save_iter_cfg_by_stage(self):
+		"""Persiste la config de iteraciones por estudio en QSettings."""
+		try:
+			cfgs = getattr(self, "_iter_cfg_by_stage", None) or {}
+			stored = {f"{s}|{b}": [int(v[0]), int(v[1])] for (s, b), v in cfgs.items()}
+			self._ui_settings.setValue("recon/iter_cfg_by_stage", json.dumps(stored))
+		except Exception:
+			pass
+
 	def _open_iter_config_dialog(self):
 		"""Iteraciones/subsets POR ESTUDIO: ungated/gated × esfuerzo/reposo."""
-		cfgs = getattr(self, "_iter_cfg_by_stage", None)
-		if cfgs is None:
-			g_it = int(self.cine_crudo_iter_spin.value()) if hasattr(self, "cine_crudo_iter_spin") else 8
-			g_su = int(self.cine_crudo_osem_subsets_spin.value()) if hasattr(self, "cine_crudo_osem_subsets_spin") else 4
-			cfgs = {(s, b): [g_it, g_su] for s in ("stress", "rest") for b in ("ungated", "gated")}
-			self._iter_cfg_by_stage = cfgs
+		cfgs = self._load_iter_cfg_by_stage()
 		dlg = QDialog(self)
 		dlg.setWindowTitle("SINCRO — Iteraciones por estudio (OSEM/MLEM)")
 		grid = QGridLayout(dlg)
@@ -14902,6 +14927,7 @@ class MainWindow(QMainWindow):
 			return
 		for key, (it_spin, su_spin) in spins.items():
 			cfgs[key] = [int(it_spin.value()), int(su_spin.value())]
+		self._save_iter_cfg_by_stage()
 		resumen = " · ".join(
 			f"{'Esf' if s == 'stress' else 'Rep'}-{b[:3]}={cfgs[(s, b)][0]}it/{cfgs[(s, b)][1]}ss"
 			for s, b, _ in rows
@@ -14910,7 +14936,7 @@ class MainWindow(QMainWindow):
 
 	def _apply_stage_iter_overrides(self, cfg, stage: str):
 		"""Pisa iter/subsets del cfg con la config por estudio (si el usuario la definió)."""
-		cfgs = getattr(self, "_iter_cfg_by_stage", None)
+		cfgs = self._load_iter_cfg_by_stage()
 		if not cfgs:
 			return cfg
 		from dataclasses import replace as _dc_replace
