@@ -730,30 +730,45 @@ class MainWindow(QMainWindow):
 		self.manual_rois.setToolTip("Cada línea define un slice. Tras segmentar en auto/threshold, GammaSync vuelca acá el ROI detectado para poder reproducirlo en manual.")
 		self.manual_rois.textChanged.connect(self._on_manual_rois_text_changed)
 
-		controls_form.addRow("Segmentación", self.seg_method)
-		controls_form.addRow("ROI de análisis", self.roi_source_combo)
-		controls_form.addRow(self.cavity_center_check)
-		controls_form.addRow("Threshold", self.threshold_spin)
-		controls_form.addRow("Smooth sigma", self.sigma_spin)
-		controls_form.addRow("Harmonics", self.harmonics_spin)
-		controls_form.addRow("Amplitude filter clínico", self.phase_threshold_spin)
-		controls_form.addRow("Colormap fase", self.cmap_combo)
-		controls_form.addRow("Estilo visual", self.visual_style_combo)
-		controls_form.addRow("Rotación polar", self.polar_rotation_spin)
-		controls_form.addRow("Suavizado polar", polar_perf_smooth_widget)
-		controls_form.addRow("Velocidad polar cine", self.polar_cine_speed_spin)
-		controls_form.addRow("Math polar stress/rest", self.polar_compare_math_combo)
-		controls_form.addRow("Términos math", polar_math_terms)
-		controls_form.addRow(self.export_polar_mp4_check)
-		controls_form.addRow(self.profile_timing_check)
-		controls_form.addRow(self.realtime_deferred_render_check)
-		controls_form.addRow(self.normalize_check)
-		controls_form.addRow(gate_dropout_widget)
-		controls_form.addRow(self.global_intestinal_render_check)
-		controls_form.addRow("Sexo (DB normal)", self.normal_sex_combo)
-		controls_form.addRow("Protocolo (DB normal)", self.normal_protocol_combo)
-		controls_form.addRow("DB normal", self.normal_db_combo)
-		controls_form.addRow(self.auto_run_check)
+		# --- Panel de procesamiento reubicado: los ajustes por estudio ahora viven
+		# en el menú flotante "Ajustes de procesamiento" a la derecha de la barra
+		# de la pestaña PROCESAMIENTO (cine_crudo). El QGroupBox queda vacío y no se
+		# agrega al sidebar. ROI de análisis y centrar en cavidad siguen en la
+		# ventana "vista asincronía" y no se muestran acá.
+
+		# --- Preferencias movidas al diálogo de Configuración ---
+		# Se crean una sola vez acá (conservan sus atributos self.*) y se montan bajo
+		# demanda en open_ui_preferences_dialog; no se agregan al sidebar. Sexo y
+		# protocolo de la DB normal ya no se eligen: siguen al estudio cargado.
+		self._cfg_analysis_box = QGroupBox("Parámetros de análisis")
+		_cfg_analysis_form = QFormLayout(self._cfg_analysis_box)
+		_cfg_analysis_form.addRow("Harmonics", self.harmonics_spin)
+		_cfg_analysis_form.addRow("Amplitude filter clínico", self.phase_threshold_spin)
+		_cfg_analysis_form.addRow(self.normalize_check)
+		_cfg_analysis_form.addRow("DB normal", self.normal_db_combo)
+
+		self._cfg_polar_box = QGroupBox("Mapas polares")
+		_cfg_polar_form = QFormLayout(self._cfg_polar_box)
+		_cfg_polar_form.addRow("Rotación polar", self.polar_rotation_spin)
+		_cfg_polar_form.addRow("Suavizado polar", polar_perf_smooth_widget)
+		_cfg_polar_form.addRow("Velocidad polar cine", self.polar_cine_speed_spin)
+		_cfg_polar_form.addRow("Math polar stress/rest", self.polar_compare_math_combo)
+		_cfg_polar_form.addRow("Términos math", polar_math_terms)
+
+		self._cfg_visual_box = QGroupBox("Visualización / rendimiento")
+		_cfg_visual_form = QFormLayout(self._cfg_visual_box)
+		_cfg_visual_form.addRow("Colormap fase", self.cmap_combo)
+		_cfg_visual_form.addRow("Estilo visual", self.visual_style_combo)
+		_cfg_visual_form.addRow(self.global_intestinal_render_check)
+		_cfg_visual_form.addRow(self.profile_timing_check)
+		_cfg_visual_form.addRow(self.realtime_deferred_render_check)
+
+		self._cfg_polar_cine_box = QGroupBox("Cine polar")
+		_cfg_polar_cine_form = QFormLayout(self._cfg_polar_cine_box)
+		_cfg_polar_cine_form.addRow(self.export_polar_mp4_check)
+
+		for _cfg_box in (self._cfg_analysis_box, self._cfg_polar_box, self._cfg_visual_box, self._cfg_polar_cine_box):
+			_cfg_box.setVisible(False)
 
 		self.seg_method.setToolTip("auto: segmentación automática; threshold: umbral simple; manual: usa los ROIs que dibujes o pegues.")
 		self.roi_source_combo.setToolTip(
@@ -813,7 +828,8 @@ class MainWindow(QMainWindow):
 		self.normal_protocol_combo.setToolTip("Protocolo del estudio: stress da PSD/BW mayores que rest.")
 		self.normal_db_combo.setToolTip("Base normal publicada usada para lectura vs referencia; los límites son software-dependientes.")
 
-		self._sidebar_layout.addWidget(controls_box)
+		# controls_box (Procesamiento) ya no se agrega al sidebar: sus controles
+		# viven en el menú flotante de la pestaña PROCESAMIENTO.
 
 		# Grupo ECG - Contexto electrocardiográfico
 		ecg_box = QGroupBox("ECG (contexto clínico)")
@@ -2488,6 +2504,34 @@ class MainWindow(QMainWindow):
 					tooltip="Reconstrucción FBP/MLEM/OSEM, filtros de ungated/gated, reorientación y generación de cortes de eje.",
 				))
 				groups_row.addStretch(1)
+				# Ajustes de procesamiento por estudio: reubicados del sidebar a la
+				# derecha de esta barra (separados de las acciones) para que se lean
+				# como configuración. Popup flotante, no cambia el tamaño del preview.
+				proc_row1 = QHBoxLayout()
+				proc_row1.setContentsMargins(0, 0, 0, 0)
+				proc_row1.setSpacing(6)
+				proc_row1.addWidget(QLabel("Segmentación"))
+				proc_row1.addWidget(self.seg_method)
+				proc_row1.addWidget(QLabel("Threshold"))
+				proc_row1.addWidget(self.threshold_spin)
+				proc_row1.addWidget(QLabel("Smooth sigma"))
+				proc_row1.addWidget(self.sigma_spin)
+				proc_row1.addStretch(1)
+				proc_row2 = QHBoxLayout()
+				proc_row2.setContentsMargins(0, 0, 0, 0)
+				proc_row2.setSpacing(6)
+				proc_row2.addWidget(gate_dropout_widget)
+				proc_row2.addStretch(1)
+				proc_row3 = QHBoxLayout()
+				proc_row3.setContentsMargins(0, 0, 0, 0)
+				proc_row3.setSpacing(6)
+				proc_row3.addWidget(self.auto_run_check)
+				proc_row3.addStretch(1)
+				groups_row.addWidget(self._build_toolbar_group_menu(
+					"⚙ Ajustes de procesamiento ▾", [proc_row1, proc_row2, proc_row3],
+					key="cine_crudo_ajustes_procesamiento",
+					tooltip="Parámetros de procesamiento por estudio: segmentación, threshold, suavizado, corrección de dropout del último gate y auto-procesar al cargar.",
+				))
 				tab_layout.addLayout(groups_row)
 
 			label = QLabel("Sin procesar")
@@ -4569,6 +4613,8 @@ class MainWindow(QMainWindow):
 		ui_l.addWidget(enable_tooltips)
 		ui_l.addWidget(compact_controls)
 		tab_interfaz_l.addWidget(ui_box)
+		self._cfg_visual_box.setVisible(True)
+		tab_interfaz_l.addWidget(self._cfg_visual_box)
 
 		# --- Análisis: fuente de perfusión segmentaria ---
 		analysis_box = QGroupBox("Análisis")
@@ -4592,6 +4638,10 @@ class MainWindow(QMainWindow):
 		# 'Procesar Ambas automáticamente' es comportamiento de procesamiento: vive acá.
 		analysis_l.addRow(dual_pipeline_auto)
 		tab_analisis_l.addWidget(analysis_box)
+		self._cfg_analysis_box.setVisible(True)
+		tab_analisis_l.addWidget(self._cfg_analysis_box)
+		self._cfg_polar_box.setVisible(True)
+		tab_analisis_l.addWidget(self._cfg_polar_box)
 
 		# --- Escalas de color de las imágenes del informe ---
 		# El grid (16 combos) vive en self._report_cmap_box; se aloja acá dentro de
@@ -4603,7 +4653,13 @@ class MainWindow(QMainWindow):
 		report_cmap_scroll.setWidget(self._report_cmap_box)
 		tab_informe_l.addWidget(report_cmap_scroll)
 		dlg.finished.connect(
-			lambda _=0: (self._report_cmap_box.setParent(None), self._report_cmap_box.setVisible(False))
+			lambda _=0: [
+				(_b.setParent(None), _b.setVisible(False))
+				for _b in (
+					self._report_cmap_box, self._cfg_analysis_box, self._cfg_polar_box,
+					self._cfg_visual_box, self._cfg_polar_cine_box,
+				)
+			]
 		)
 
 		# --- Carpeta de salida ---
@@ -4614,6 +4670,8 @@ class MainWindow(QMainWindow):
 		output_btn.setToolTip("Abre el explorador en la carpeta donde se guardan los PNG, PDF y demás salidas.")
 		output_l.addWidget(output_btn)
 		tab_informe_l.addWidget(output_box)
+		self._cfg_polar_cine_box.setVisible(True)
+		tab_informe_l.addWidget(self._cfg_polar_cine_box)
 
 		# --- Integridad de informes HTML ---
 		integrity_box = QGroupBox("Integridad de informes HTML")
@@ -9444,7 +9502,20 @@ class MainWindow(QMainWindow):
 		)
 		return True
 
+	def _auto_normal_sex_label(self) -> str:
+		"""Sexo para la DB normal, derivado del DICOM del estudio (M/F)."""
+		raw = str(getattr(getattr(self, "study", None), "patient_sex", "") or "").strip().upper()
+		return "Mujer" if raw.startswith("F") else "Hombre"
+
+	def _auto_normal_protocol_label(self) -> str:
+		"""Protocolo para la DB normal, derivado de la etapa activa (stress/rest)."""
+		stage = str(getattr(self, "_cine_crudo_active_stage", "stress") or "stress")
+		return "Rest" if stage == "rest" else "Stress"
+
 	def _normal_db_context(self) -> tuple[str, str, str, dict]:
+		# Sexo y protocolo siguen al estudio cargado (no se eligen a mano).
+		self.normal_sex_combo.setCurrentText(self._auto_normal_sex_label())
+		self.normal_protocol_combo.setCurrentText(self._auto_normal_protocol_label())
 		sex = "male" if self.normal_sex_combo.currentText() == "Hombre" else "female"
 		protocol = "stress" if self.normal_protocol_combo.currentText() == "Stress" else "rest"
 		dataset = self.normal_db_combo.currentText()
