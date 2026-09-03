@@ -52,6 +52,9 @@ class RawReconConfig:
     gated_filter: ProjectionFilterConfig = field(default_factory=lambda: ProjectionFilterConfig("butterworth", 0.40, 10))
     iterative_iterations: int = 4
     osem_subsets: int = 4
+    # Iteraciones/subsets propios de la rama gated (None = hereda los de arriba).
+    gated_iterations: int | None = None
+    gated_osem_subsets: int | None = None
     fevi_slice_step_px: int = 1
     display_slice_step_px: int = 2
     # --- Recuperación de resolución NÍTIDA (OmniRes) ---
@@ -1150,7 +1153,8 @@ def reconstruct_raw_gated_pipeline(
 
     # Método independiente de la rama gated (None => hereda el de la rama ungated).
     gated_method = str(cfg.gated_method or method).strip().lower()
-    gated_subsets = int(cfg.osem_subsets) if gated_method == "osem" else 1
+    gated_iters = int(getattr(cfg, "gated_iterations", None) or cfg.iterative_iterations)
+    gated_subsets = int(getattr(cfg, "gated_osem_subsets", None) or cfg.osem_subsets) if gated_method == "osem" else 1
     gated_rr_psf = cfg.psf_model if (rr_gat and gated_method in {"osem", "mlem"}) else None
 
     if method in {"osem", "mlem"} and _normalize_filter_kind(cfg.ungated_filter.kind) == "butterworth":
@@ -1264,7 +1268,7 @@ def reconstruct_raw_gated_pipeline(
         method=gated_method,
         projection_filter=cfg.gated_filter,
         fbp_filter_name=cfg.fbp_filter_name,
-        iterations=int(cfg.iterative_iterations),
+        iterations=gated_iters,
         subsets=gated_subsets,
         psf=gated_rr_psf,
         slice_range=cfg.recon_slice_range,

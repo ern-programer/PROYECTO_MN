@@ -2034,20 +2034,33 @@ class MainWindow(QMainWindow):
 				# self.cine_crudo_gated_order_spin.valueChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
 				# self.cine_crudo_gated_method_combo.currentIndexChanged.connect(lambda *_: self._schedule_recon_branch_recompute("gated"))
 
-				toolbar6_r2.addWidget(QLabel("Iter"))
+				# Iter/Sub: gestionados por el diálogo 'Iteraciones ⚙' (spins ocultos:
+				# siguen siendo el default global que el diálogo pisa por estudio).
+				_lbl_iter = QLabel("Iter")
+				_lbl_iter.setVisible(False)
+				toolbar6_r2.addWidget(_lbl_iter)
 				self.cine_crudo_iter_spin = QSpinBox()
-				self.cine_crudo_iter_spin.setRange(1, 20)
-				self.cine_crudo_iter_spin.setValue(3)
+				self.cine_crudo_iter_spin.setRange(1, 30)
+				self.cine_crudo_iter_spin.setValue(8)
 				self.cine_crudo_iter_spin.setMaximumWidth(50)
-				self.cine_crudo_iter_spin.setToolTip("Iteraciones para MLEM/OSEM. Default clínico 3×6 subsets; con NÍTIDA se usan al menos 8.")
+				self.cine_crudo_iter_spin.setVisible(False)
 				toolbar6_r2.addWidget(self.cine_crudo_iter_spin)
-				toolbar6_r2.addWidget(QLabel("Sub"))
+				_lbl_sub = QLabel("Sub")
+				_lbl_sub.setVisible(False)
+				toolbar6_r2.addWidget(_lbl_sub)
 				self.cine_crudo_osem_subsets_spin = QSpinBox()
 				self.cine_crudo_osem_subsets_spin.setRange(1, 16)
-				self.cine_crudo_osem_subsets_spin.setValue(6)
+				self.cine_crudo_osem_subsets_spin.setValue(4)
 				self.cine_crudo_osem_subsets_spin.setMaximumWidth(50)
-				self.cine_crudo_osem_subsets_spin.setToolTip("Subsets para OSEM. En FBP/MLEM se ignora.")
+				self.cine_crudo_osem_subsets_spin.setVisible(False)
 				toolbar6_r2.addWidget(self.cine_crudo_osem_subsets_spin)
+				self.cine_crudo_iter_cfg_btn = QPushButton("Iteraciones ⚙")
+				self.cine_crudo_iter_cfg_btn.setMaximumWidth(104)
+				self.cine_crudo_iter_cfg_btn.setToolTip(
+					"Iteraciones/subsets POR ESTUDIO: ungated y gated de esfuerzo y reposo "
+					"por separado (default 8 iter × 4 subsets).")
+				self.cine_crudo_iter_cfg_btn.clicked.connect(self._open_iter_config_dialog)
+				toolbar6_r2.addWidget(self.cine_crudo_iter_cfg_btn)
 				# Fondo: preprocesado del sinograma COMÚN a todo el estudio (ungated +
 				# gated comparten las proyecciones crudas). No es de una rama: va acá.
 				self.cine_crudo_bg_check = QCheckBox("Fondo")
@@ -2134,6 +2147,8 @@ class MainWindow(QMainWindow):
 					"Importa el CT/ATT registrado en la ventana de fusión hacia la etapa activa "
 					"y habilita AC: la próxima 'Recon raw' aplica la corrección con ESE registro.")
 				self.cine_crudo_import_reg_btn.clicked.connect(self._import_amylo_fusion_registration)
+				# Redundante: el botón 7 del panel de fusión hace esto automáticamente.
+				self.cine_crudo_import_reg_btn.setVisible(False)
 				toolbar6_r2.addWidget(self.cine_crudo_import_reg_btn)
 				# --- Filtros por rama en DOS filas (ungated / gated): la fila única se
 				# iba de pantalla y no permitía activar un filtro en una rama y otro en
@@ -2333,10 +2348,18 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_denoise_plus_gated_slider.valueChanged.connect(
 					lambda v: self.cine_crudo_denoise_plus_gated_lbl.setText(f"{v/100.0:.2f}"))
 				toolbar6_r_filters_g.addStretch(1)
+				# Selector de etapa para 'Recon raw': Esfuerzo / Reposo / Ambas.
+				self.cine_crudo_recon_stage_combo = QComboBox()
+				self.cine_crudo_recon_stage_combo.addItem("Esfuerzo", "stress")
+				self.cine_crudo_recon_stage_combo.addItem("Reposo", "rest")
+				self.cine_crudo_recon_stage_combo.addItem("Ambas", "both")
+				self.cine_crudo_recon_stage_combo.setMaximumWidth(86)
+				self.cine_crudo_recon_stage_combo.setToolTip("Qué etapa(s) reconstruye 'Recon raw'.")
+				toolbar6_r2.addWidget(self.cine_crudo_recon_stage_combo)
 				self.cine_crudo_recon_btn = QToolButton()
 				self.cine_crudo_recon_btn.setText("Recon raw")
-				self.cine_crudo_recon_btn.setToolTip("Reconstruye desde crudo gated con la corrección actual y muestra QC: UngGat + gates. No altera el procesamiento clínico principal todavía.")
-				self.cine_crudo_recon_btn.clicked.connect(self._reconstruct_cine_crudo_raw)
+				self.cine_crudo_recon_btn.setToolTip("Reconstruye desde crudo gated la(s) etapa(s) del selector con la corrección actual y muestra QC: UngGat + gates.")
+				self.cine_crudo_recon_btn.clicked.connect(self._on_recon_raw_clicked)
 				toolbar6_r2.addWidget(self.cine_crudo_recon_btn)
 				self.cine_crudo_recon_feta_btn = QToolButton()
 				self.cine_crudo_recon_feta_btn.setText("Reconstruir selección")
@@ -13891,22 +13914,20 @@ class MainWindow(QMainWindow):
 	def _load_cine_crudo_ct_attmap(self):
 		"""Carga ATTMAP o CT para la etapa elegida y deja el μ-map nativo en StageState.
 
-		Cuatro combinaciones explícitas: ATTMAP/CT × Esfuerzo/Reposo. ATTMAP
-		exportado (μ ≈ cm^-1) se usa directo; CT en HU se convierte con la
-		bilineal CTAC. Cada etapa tiene su propio CT (no se comparte).
+		Cuatro combinaciones explícitas: ATTMAP/CT × Esfuerzo/Reposo, o carpeta
+		inteligente que detecta SPECT crudo + ATT + CT de ambas etapas de una.
 		"""
-		from core.ct_fusion import (
-			load_attenuation_map_from_path,
-			load_ct_volume_from_path,
-			mu_map_from_ct_hu,
-			validate_mu_map,
-		)
-
 		active = str(getattr(self, "_cine_crudo_recon_stage", None) or self._cine_crudo_active_stage_or_default())
 		dlg = QDialog(self)
 		dlg.setWindowTitle("SINCRO · CT/ATT para corrección de atenuación")
 		lay = QVBoxLayout(dlg)
-		lay.addWidget(QLabel("Fuente del μ-map (cada etapa usa su PROPIO CT/ATTMAP):"))
+		b_smart = QPushButton("🔍 Carpeta inteligente (SPECT + ATT + CT de ambas etapas)")
+		b_smart.setToolTip(
+			"Escanea una carpeta y clasifica automáticamente por metadata DICOM y nombre: "
+			"crudos SPECT (esfuerzo/reposo), ATT maps y CTs de cada etapa. Carga todo de una.")
+		b_smart.setStyleSheet("font-weight:bold; padding:6px;")
+		lay.addWidget(b_smart)
+		lay.addWidget(QLabel("— o carga manual (cada etapa usa su PROPIO CT/ATTMAP):"))
 		row1 = QHBoxLayout()
 		row1.addWidget(QLabel("Etapa:"))
 		stage_combo = QComboBox()
@@ -13922,7 +13943,7 @@ class MainWindow(QMainWindow):
 		type_combo.addItem("CT (HU → μ bilineal 140 keV)", "ct")
 		row2.addWidget(type_combo, 1)
 		lay.addLayout(row2)
-		picked = {"path": ""}
+		picked = {"path": "", "smart": False}
 		btns = QHBoxLayout()
 		b_file = QPushButton("Archivo...")
 		b_dir = QPushButton("Carpeta...")
@@ -13940,6 +13961,11 @@ class MainWindow(QMainWindow):
 				picked["path"] = p
 				dlg.accept()
 
+		def _pick_smart():
+			picked["smart"] = True
+			dlg.accept()
+
+		b_smart.clicked.connect(_pick_smart)
 		b_file.clicked.connect(_pick_file)
 		b_dir.clicked.connect(_pick_dir)
 		b_cancel.clicked.connect(dlg.reject)
@@ -13947,16 +13973,31 @@ class MainWindow(QMainWindow):
 		btns.addWidget(b_dir)
 		btns.addWidget(b_cancel)
 		lay.addLayout(btns)
-		if dlg.exec() != QDialog.DialogCode.Accepted or not picked["path"]:
+		if dlg.exec() != QDialog.DialogCode.Accepted:
 			return
-		stage = str(stage_combo.currentData())
-		kind = str(type_combo.currentData())
-		path = picked["path"]
+		if picked["smart"]:
+			self._smart_load_ct_att_folder()
+			return
+		if not picked["path"]:
+			return
+		self._load_ct_att_for_stage(str(stage_combo.currentData()), picked["path"], str(type_combo.currentData()))
+
+	def _load_ct_att_for_stage(self, stage: str, path: str, kind: str, *,
+							   series_uid: str | None = None, mu_only: bool = False) -> bool:
+		"""Carga CT o ATT en la etapa. mu_only: solo pisa el μ-map (conserva el CT display ya cargado)."""
+		from core.ct_fusion import (
+			load_attenuation_map_from_path,
+			load_ct_volume_from_path,
+			mu_map_from_ct_hu,
+			validate_mu_map,
+		)
+
+		stage = "rest" if str(stage) == "rest" else "stress"
 		stage_txt = "ESFUERZO" if stage == "stress" else "REPOSO"
 		try:
 			conv_notes: list[str] = []
 			if kind == "ct":
-				res = load_ct_volume_from_path(path)
+				res = load_ct_volume_from_path(path, series_uid=series_uid)
 				mu, conv_notes = mu_map_from_ct_hu(np.asarray(res.volume, dtype=np.float64))
 				source = "ct_bilineal"
 			else:
@@ -13983,18 +14024,19 @@ class MainWindow(QMainWindow):
 					"El μ-map cargado no pasó el QC (ver log — posible export vacío/roto).\n"
 					"Probá cargando el CT y usá la conversión bilineal.",
 				)
-				return
+				return False
 			st = self._dual_session().stage(stage)
-			st.ct_path = str(path)
 			st.mu_map_native = mu
-			st.ct_volume_native = np.asarray(res.volume, dtype=np.float64)
-			st.ct_affine_ijk_to_lps = getattr(res, "affine_ijk_to_lps", None)
-			st.ct_spacing_zyx = getattr(res, "spacing_zyx", None)
 			st.mu_map_spacing_zyx = getattr(res, "spacing_zyx", None)
 			st.mu_map_source = source
 			st.mu_map_description = str(getattr(res, "series_description", "") or "")
 			st.mu_map_recon_grid = None
 			st.mu_map_shift_zyx = None
+			if not mu_only:
+				st.ct_path = str(path)
+				st.ct_volume_native = np.asarray(res.volume, dtype=np.float64)
+				st.ct_affine_ijk_to_lps = getattr(res, "affine_ijk_to_lps", None)
+				st.ct_spacing_zyx = getattr(res, "spacing_zyx", None)
 			if getattr(self, "cine_crudo_ac_check", None) is not None:
 				self.cine_crudo_ac_check.setEnabled(True)
 				self.cine_crudo_ac_check.setChecked(True)
@@ -14003,11 +14045,166 @@ class MainWindow(QMainWindow):
 			src_txt = "ATTMAP export" if source == "att_export" else "CT→μ bilineal (140 keV)"
 			self._log(
 				f"[AC] μ-map cargado para {stage_txt}: {mu.shape}, fuente={src_txt}, "
-				f"spacing={st.mu_map_spacing_zyx}, serie='{st.mu_map_description}'. AC habilitada "
-				"(el check 'AC' la prende/apaga sin descargar el CT)."
+				f"spacing={st.mu_map_spacing_zyx}, serie='{st.mu_map_description}'."
+				+ (" (solo μ: el CT display de la etapa se conserva)" if mu_only else "")
 			)
+			return True
 		except Exception as exc:
 			QMessageBox.warning(self, "SINCRO", f"No se pudo cargar CT/ATTMAP ({stage_txt}):\n{exc}")
+			return False
+
+	@staticmethod
+	def _stage_from_dicom_text(text: str) -> str | None:
+		t = str(text or "").lower()
+		stress_kw = ("stress", "esfuerzo", "ejercicio", "exercise", "dipirid", "dipyrid", "adenos", "dobutam", "regaden", "persantin", "_str", "str_")
+		rest_kw = ("rest", "reposo", "basal", "resting")
+		has_s = any(k in t for k in stress_kw)
+		has_r = any(k in t for k in rest_kw)
+		if has_s and not has_r:
+			return "stress"
+		if has_r and not has_s:
+			return "rest"
+		return None
+
+	def _smart_load_ct_att_folder(self):
+		"""Escanea una carpeta y carga SPECT crudo + ATT + CT de cada etapa de una sola vez."""
+		import pydicom
+
+		folder = QFileDialog.getExistingDirectory(self, "Carpeta con SPECT + CT/ATT del paciente")
+		if not folder:
+			return
+		self._log(f"[SMART] Escaneando {folder} ...")
+		series: dict[str, dict] = {}
+		for base, _dirs, files in os.walk(folder):
+			for fn in files:
+				if fn.lower().endswith((".png", ".jpg", ".txt", ".pdf", ".json", ".xml", ".csv")):
+					continue
+				fp = os.path.join(base, fn)
+				try:
+					ds = pydicom.dcmread(fp, stop_before_pixels=True, force=True)
+					uid = str(getattr(ds, "SeriesInstanceUID", "") or "")
+					if not uid:
+						continue
+					info = series.setdefault(uid, {
+						"files": [], "modality": str(getattr(ds, "Modality", "") or ""),
+						"desc": str(getattr(ds, "SeriesDescription", "") or ""),
+						"protocol": str(getattr(ds, "ProtocolName", "") or ""),
+						"image_type": " ".join(str(x) for x in (getattr(ds, "ImageType", None) or [])),
+						"frames": int(getattr(ds, "NumberOfFrames", 1) or 1),
+					})
+					info["files"].append(fp)
+				except Exception:
+					continue
+		if not series:
+			QMessageBox.information(self, "SINCRO", "No se encontraron DICOMs en la carpeta.")
+			return
+
+		def _classify(info) -> str | None:
+			text = f"{info['desc']} {info['protocol']} {info['image_type']} {os.path.basename(info['files'][0])}".lower()
+			base_up = os.path.basename(info['files'][0]).upper()
+			stem_up = os.path.splitext(base_up)[0]
+			if "localizer" in text or "scout" in text:
+				return None
+			if any(k in text for k in ("atten", "attmap", "att map", "att_", "_att", "mu map", "mumap", "umap", "transmission")):
+				return "att"
+			if info["modality"].upper() == "CT":
+				return "ct"
+			if info["modality"].upper() == "NM" and "tomo" in text and "recon" not in text:
+				# Ventana de scatter hermana (token _SC_ / _SC): rama propia.
+				if "_SC_" in base_up or stem_up.endswith("_SC") or "scatter" in text:
+					return "sc"
+				return "raw"
+			return None
+
+		detected: dict[tuple, dict] = {}  # (kind, stage) -> info
+		unresolved = []
+		for uid, info in series.items():
+			kind = _classify(info)
+			if kind is None:
+				continue
+			info["uid"] = uid
+			text = f"{info['desc']} {info['protocol']} {os.path.basename(info['files'][0])}"
+			stage = self._stage_from_dicom_text(text)
+			if stage is None:
+				unresolved.append((kind, info))
+				continue
+			key = (kind, stage)
+			# Ante duplicados: la serie con más cortes/frames gana.
+			prev = detected.get(key)
+			if prev is None or len(info["files"]) * info["frames"] > len(prev["files"]) * prev["frames"]:
+				detected[key] = info
+		# Resolver etapa por descarte: si de un tipo hay una etapa ocupada y una serie sin etapa.
+		for kind, info in unresolved:
+			for stage in ("stress", "rest"):
+				if (kind, stage) not in detected:
+					detected[(kind, stage)] = info
+					self._log(f"[SMART] '{info['desc']}' sin etapa clara: asignada a {stage} por descarte.")
+					break
+
+		if not detected:
+			QMessageBox.information(self, "SINCRO", "No se reconocieron series SPECT/ATT/CT en la carpeta (ver log).")
+			return
+		nombres = {"raw": "SPECT crudo", "att": "ATT map", "ct": "CT", "sc": "Scatter (SC)"}
+		lines = []
+		for (kind, stage), info in sorted(detected.items()):
+			stage_txt = "Esfuerzo" if stage == "stress" else "Reposo"
+			lines.append(f"• {nombres[kind]} {stage_txt}: '{info['desc'] or os.path.basename(info['files'][0])}' ({len(info['files'])} arch, {info['frames']} frames)")
+		resp = QMessageBox.question(
+			self, "SINCRO — Carpeta inteligente",
+			"Se detectó:\n\n" + "\n".join(lines) + "\n\n¿Cargar todo?",
+			QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+			QMessageBox.StandardButton.Yes,
+		)
+		if resp != QMessageBox.StandardButton.Yes:
+			return
+
+		# 1) SPECT crudos (solo si aún no hay estudio cargado: no pisar trabajo hecho).
+		raw_s = detected.get(("raw", "stress"))
+		raw_r = detected.get(("raw", "rest"))
+		if self.study is None and (raw_s or raw_r):
+			primary = raw_s or raw_r
+			self.file_edit.setText(primary["files"][0])
+			self.process_current()
+			if raw_s and raw_r and self.study is not None and not bool(getattr(self.study, "reconstructed", True)):
+				self._load_compare_raw_study_from_path(raw_r["files"][0])
+		elif raw_s or raw_r:
+			self._log("[SMART] Ya hay estudio cargado: los SPECT crudos detectados NO se recargan.")
+
+		# 1b) Scatter: el loader lo adjunta solo si sigue el patrón _EM_/_SC_; si no,
+		# adjuntarlo acá a mano y dejar la corrección ACTIVADA.
+		for stage, study_obj in (("stress", self.study), ("rest", self._secondary_cine_crudo_study())):
+			sc = detected.get(("sc", stage))
+			if sc is None or study_obj is None:
+				continue
+			if getattr(study_obj, "scatter_projections", None) is not None:
+				continue
+			try:
+				from core.raw_projections import load_raw_projections
+				sc_raw = load_raw_projections(sc["files"][0], _skip_scatter=True)
+				if np.asarray(sc_raw.projections).shape == np.asarray(study_obj.cube).shape:
+					study_obj.scatter_projections = np.asarray(sc_raw.projections, dtype=np.float64)
+					study_obj.scatter_path = sc["files"][0]
+					self._log(f"[SMART] Scatter adjuntado a {stage}: {os.path.basename(sc['files'][0])}.")
+				else:
+					self._log(f"[SMART][WARN] SC de {stage} con shape distinto al EM: no se adjunta.")
+			except Exception as exc:
+				self._log(f"[SMART][WARN] No pude adjuntar SC de {stage}: {exc}")
+		if any(detected.get(("sc", s)) for s in ("stress", "rest")) and getattr(self, "cine_crudo_scatter_check", None) is not None:
+			if getattr(self.study, "scatter_projections", None) is not None or getattr(self._secondary_cine_crudo_study(), "scatter_projections", None) is not None:
+				self.cine_crudo_scatter_check.setEnabled(True)
+				self.cine_crudo_scatter_check.setChecked(True)
+				self.cine_crudo_scatter_k_spin.setEnabled(True)
+				self._log("[SMART] Corrección de scatter ACTIVADA (P = EM − k×SC).")
+
+		# 2) CT y ATT por etapa: CT da display alta res; ATT (si existe) pisa el μ oficial.
+		for stage in ("stress", "rest"):
+			ct = detected.get(("ct", stage))
+			att = detected.get(("att", stage))
+			if ct is not None:
+				self._load_ct_att_for_stage(stage, ct["files"][0], "ct", series_uid=ct["uid"])
+			if att is not None:
+				self._load_ct_att_for_stage(stage, att["files"][0], "att", mu_only=ct is not None)
+		self.statusBar().showMessage("✓ Carpeta inteligente cargada (ver log para el detalle).", 10000)
 
 	def _cine_crudo_active_stage_or_default(self) -> str:
 		stage = str(getattr(self, "_cine_crudo_active_stage", "stress") or "stress")
@@ -14101,11 +14298,13 @@ class MainWindow(QMainWindow):
 			return None, None
 
 	def _show_ac_qc(self):
-		"""QC visual de alineación μ-map ↔ recon. Toggle: 2do click restaura la vista anterior."""
+		"""QC visual DUAL de alineación μ-map ↔ recon (esfuerzo+reposo). Toggle: 2do click restaura."""
 		if getattr(self, "cine_crudo_preview_mode", None) == "ac_qc":
 			prev = getattr(self, "_ac_qc_prev_state", None) or {}
 			self._ac_qc_prev_state = None
 			self.cine_crudo_preview_mode = prev.get("mode")
+			self._ac_qc_active = False
+			self._refresh_ac_qc_btn_state()
 			pix = prev.get("pix")
 			if pix is not None and not pix.isNull() and "cine_crudo" in self.preview_labels:
 				self.preview_pixmaps["cine_crudo"] = pix
@@ -14114,65 +14313,91 @@ class MainWindow(QMainWindow):
 			else:
 				self._refresh_cine_crudo_view()
 			return
-		stage = str(getattr(self, "_cine_crudo_recon_stage", None) or self._cine_crudo_active_stage_or_default())
-		if stage not in ("stress", "rest"):
-			stage = "stress"
-		st = self._dual_session().stage(stage)
-		result = getattr(st, "recon_result", None) or getattr(self, "cine_crudo_recon_result", None)
-		if result is None:
-			QMessageBox.information(self, "SINCRO", "Primero reconstruí con 'Recon raw' para tener el volumen de referencia.")
+		# Reunir las etapas que tienen recon + μ-map (dual si ambas están listas).
+		panels = []
+		for stage in ("stress", "rest"):
+			st = self._dual_session().stage(stage)
+			result = getattr(st, "recon_result", None)
+			if result is None:
+				continue
+			ung = np.asarray(result.ungated_volume, dtype=np.float64)
+			mu = getattr(st, "mu_map_recon_grid", None)
+			if mu is None or np.asarray(mu).shape != ung.shape:
+				mu, _ = self._stage_mu_map_to_grid(stage, ung.shape, refine_to=ung)
+			if mu is None:
+				continue
+			panels.append((stage, ung, np.asarray(mu, dtype=np.float64)))
+		if not panels:
+			QMessageBox.information(self, "SINCRO", "Primero reconstruí con 'Recon raw' y cargá CT/ATT para tener QC.")
 			return
-		ung = np.asarray(result.ungated_volume, dtype=np.float64)
-		mu = getattr(st, "mu_map_recon_grid", None)
-		if mu is None or np.asarray(mu).shape != ung.shape:
-			mu, _ = self._stage_mu_map_to_grid(stage, ung.shape, refine_to=ung)
-		if mu is None:
-			QMessageBox.information(self, "SINCRO", "No hay μ-map utilizable para esta etapa (cargá CT/ATT).")
+		self._ac_qc_panels = panels
+		self._ac_qc_frac = float(getattr(self, "_ac_qc_frac", 0.5))
+		self._ac_qc_active = True
+		self._render_ac_qc()
+		self._refresh_ac_qc_btn_state()
+		self._select_tab_by_title("cine_crudo")
+		self._log(f"[AC] QC DUAL generado ({len(panels)} etapa/s). Rueda del mouse = navegar cortes.")
+
+	def _refresh_ac_qc_btn_state(self):
+		btn = getattr(self, "cine_crudo_ac_qc_btn", None)
+		if btn is None:
+			return
+		active = bool(getattr(self, "_ac_qc_active", False))
+		btn.setStyleSheet("background-color:#15803d; color:white; font-weight:bold;" if active else "")
+
+	def _render_ac_qc(self):
+		"""Dibuja el QC AC de todas las etapas al frac de corte actual (navegable con rueda)."""
+		panels = getattr(self, "_ac_qc_panels", None)
+		if not panels:
 			return
 		try:
 			import matplotlib.pyplot as plt
-			mu = np.asarray(mu, dtype=np.float64)
-			zc, yc, xc = [s // 2 for s in ung.shape]
-			views = [
-				("Axial", ung[zc], mu[zc]),
-				("Coronal", ung[:, yc, :], mu[:, yc, :]),
-				("Sagital", ung[:, :, xc], mu[:, :, xc]),
-			]
-			fig, axes = plt.subplots(1, 3, figsize=(12, 4.2))
+			frac = float(np.clip(getattr(self, "_ac_qc_frac", 0.5), 0.02, 0.98))
+			nrows = len(panels)
+			fig, axes = plt.subplots(nrows, 3, figsize=(12, 4.2 * nrows), squeeze=False)
 			fig.patch.set_facecolor("#0b1220")
-			for ax, (title, sp_sl, mu_sl) in zip(axes, views):
-				sp_n = sp_sl / max(float(np.percentile(sp_sl, 99.5)), 1e-9)
-				ax.imshow(np.clip(sp_n, 0, 1), cmap="gray", interpolation="bicubic")
-				# Contornos del μ-map: cuerpo (μ>0.05/cm) y denso/hueso (μ>0.13/cm).
-				ax.contour(mu_sl, levels=[0.05], colors=["cyan"], linewidths=1.0)
-				ax.contour(mu_sl, levels=[0.13], colors=["orange"], linewidths=0.8)
-				ax.set_title(title, color="white", fontsize=10)
-				ax.axis("off")
-			shift = getattr(st, "mu_map_shift_zyx", None)
-			shift_txt = f" · ΔNCC z/y/x=({shift[0]:.0f},{shift[1]:.0f},{shift[2]:.0f}) vox" if shift else " · sin registro fino aún"
-			stage_txt = "ESFUERZO" if stage == "stress" else "REPOSO"
+			for r, (stage, ung, mu) in enumerate(panels):
+				zc = int(np.clip(round(frac * (ung.shape[0] - 1)), 0, ung.shape[0] - 1))
+				yc = int(np.clip(round(frac * (ung.shape[1] - 1)), 0, ung.shape[1] - 1))
+				xc = int(np.clip(round(frac * (ung.shape[2] - 1)), 0, ung.shape[2] - 1))
+				views = [
+					("Axial", ung[zc], mu[zc]),
+					("Coronal", ung[:, yc, :], mu[:, yc, :]),
+					("Sagital", ung[:, :, xc], mu[:, :, xc]),
+				]
+				st = self._dual_session().stage(stage)
+				shift = getattr(st, "mu_map_shift_zyx", None)
+				stage_txt = "ESFUERZO" if stage == "stress" else "REPOSO"
+				for c, (title, sp_sl, mu_sl) in enumerate(views):
+					ax = axes[r][c]
+					sp_n = sp_sl / max(float(np.percentile(sp_sl, 99.5)), 1e-9)
+					ax.imshow(np.clip(sp_n, 0, 1), cmap="gray", interpolation="bicubic")
+					ax.contour(mu_sl, levels=[0.05], colors=["cyan"], linewidths=1.0)
+					ax.contour(mu_sl, levels=[0.13], colors=["orange"], linewidths=0.8)
+					lbl = f"{stage_txt} · {title}" if c == 0 else title
+					ax.set_title(lbl, color="white", fontsize=10)
+					ax.axis("off")
 			fig.suptitle(
-				f"QC AC · {stage_txt}: contornos μ-map (cian=cuerpo, naranja=denso) sobre recon ungated{shift_txt}",
+				f"QC AC · contornos μ-map (cian=cuerpo, naranja=denso) sobre recon ungated · corte {int(frac * 100)}% "
+				"— rueda del mouse para navegar",
 				color="white", fontsize=11,
 			)
-			fig.tight_layout(rect=[0, 0, 1, 0.93])
-			out_png = os.path.join(self.output_dir, f"ac_qc_{stage}.png")
-			fig.savefig(out_png, dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
+			fig.tight_layout(rect=[0, 0, 1, 0.95])
+			out_png = os.path.join(self.output_dir, "ac_qc_dual.png")
+			fig.savefig(out_png, dpi=120, bbox_inches="tight", facecolor=fig.get_facecolor())
 			plt.close(fig)
 			if "cine_crudo" in self.preview_labels:
-				# Estado previo para que el 2do click del botón QC AC vuelva atrás.
-				self._ac_qc_prev_state = {
-					"mode": getattr(self, "cine_crudo_preview_mode", None),
-					"pix": self.preview_pixmaps.get("cine_crudo"),
-				}
+				if getattr(self, "cine_crudo_preview_mode", None) != "ac_qc":
+					self._ac_qc_prev_state = {
+						"mode": getattr(self, "cine_crudo_preview_mode", None),
+						"pix": self.preview_pixmaps.get("cine_crudo"),
+					}
 				pix = QPixmap(out_png)
 				self.preview_pixmaps["cine_crudo"] = pix
 				self.preview_base_sizes["cine_crudo"] = pix.size()
 				self.cine_crudo_preview_mode = "ac_qc"
 				self._set_preview_zoom("cine_crudo", 1.0)
 				self._apply_preview_zoom("cine_crudo")
-				self._select_tab_by_title("cine_crudo")
-			self._log(f"[AC] QC de alineación generado: {out_png}")
 		except Exception as exc:
 			self._log(f"[AC][WARN] QC AC falló: {exc}")
 
@@ -14444,10 +14669,12 @@ class MainWindow(QMainWindow):
 			)
 			# La AC física vive DENTRO del motor iterativo: FBP la ignoraría y "no pasa nada".
 			try:
-				combo = getattr(self, "cine_crudo_recon_method_combo", None)
-				if combo is not None and str(combo.currentText()).strip().lower() == "fbp":
-					combo.setCurrentText("OSEM")
-					self._log("[AC] Método ungated FBP no modela AC: cambiado automáticamente a OSEM.")
+				for _cname in ("cine_crudo_recon_method_combo", "cine_crudo_gated_method_combo"):
+					combo = getattr(self, _cname, None)
+					if combo is not None and str(combo.currentText()).strip().lower() == "fbp":
+						combo.setCurrentText("OSEM")
+						_rama = "gated" if "gated" in _cname else "ungated"
+						self._log(f"[AC] Método {_rama} FBP no modela AC: cambiado automáticamente a OSEM.")
 			except Exception:
 				pass
 			try:
@@ -14459,6 +14686,28 @@ class MainWindow(QMainWindow):
 				self.statusBar().showMessage(
 					f"✓ AC aplicada a {stage_txt}: recon OSEM con μ-map registrado en la fusión.", 15000
 				)
+				# Si la OTRA etapa está lista y aún sin AC: volver al panel apuntando ahí.
+				other = "rest" if stage == "stress" else "stress"
+				ost = self._dual_session().stage(other)
+				other_ready = getattr(ost, "recon_result", None) is not None and (
+					getattr(ost, "ct_volume_native", None) is not None
+					or getattr(ost, "mu_map_native", None) is not None
+				)
+				applied = getattr(panel, "_perfusion_ac_applied", None) or set()
+				try:
+					if other_ready and other not in applied:
+						idx = panel._perfusion_stage_combo.findData(other)
+						if idx >= 0:
+							panel._perfusion_stage_combo.setCurrentIndex(idx)
+						panel.show()
+						panel.raise_()
+						panel.activateWindow()
+						other_txt = "REPOSO" if other == "rest" else "ESFUERZO"
+						panel._status.setText(f"Etapa {other_txt}: registrá/verificá la fusión y aplicá el paso 7 acá también.")
+					else:
+						panel.close()
+				except Exception:
+					pass
 		except Exception as exc:
 			QMessageBox.warning(self, "SINCRO", f"No se pudo importar el registro:\n{exc}")
 
@@ -14616,6 +14865,66 @@ class MainWindow(QMainWindow):
 			self._apply_preview_zoom("cine_crudo")
 			self._select_tab_by_title("cine_crudo")
 		self._log(f"[FUSION] Fusión SA generada: {out_png}")
+
+	def _open_iter_config_dialog(self):
+		"""Iteraciones/subsets POR ESTUDIO: ungated/gated × esfuerzo/reposo."""
+		cfgs = getattr(self, "_iter_cfg_by_stage", None)
+		if cfgs is None:
+			g_it = int(self.cine_crudo_iter_spin.value()) if hasattr(self, "cine_crudo_iter_spin") else 8
+			g_su = int(self.cine_crudo_osem_subsets_spin.value()) if hasattr(self, "cine_crudo_osem_subsets_spin") else 4
+			cfgs = {(s, b): [g_it, g_su] for s in ("stress", "rest") for b in ("ungated", "gated")}
+			self._iter_cfg_by_stage = cfgs
+		dlg = QDialog(self)
+		dlg.setWindowTitle("SINCRO — Iteraciones por estudio (OSEM/MLEM)")
+		grid = QGridLayout(dlg)
+		grid.addWidget(QLabel("<b>Estudio</b>"), 0, 0)
+		grid.addWidget(QLabel("<b>Iter</b>"), 0, 1)
+		grid.addWidget(QLabel("<b>Subsets</b>"), 0, 2)
+		rows = [
+			("stress", "ungated", "Esfuerzo · Ungated"),
+			("stress", "gated", "Esfuerzo · Gated"),
+			("rest", "ungated", "Reposo · Ungated"),
+			("rest", "gated", "Reposo · Gated"),
+		]
+		spins = {}
+		for r, (s, b, label) in enumerate(rows, start=1):
+			grid.addWidget(QLabel(label), r, 0)
+			it_spin = QSpinBox(); it_spin.setRange(1, 30); it_spin.setValue(int(cfgs[(s, b)][0]))
+			su_spin = QSpinBox(); su_spin.setRange(1, 16); su_spin.setValue(int(cfgs[(s, b)][1]))
+			grid.addWidget(it_spin, r, 1)
+			grid.addWidget(su_spin, r, 2)
+			spins[(s, b)] = (it_spin, su_spin)
+		btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+		btns.accepted.connect(dlg.accept)
+		btns.rejected.connect(dlg.reject)
+		grid.addWidget(btns, len(rows) + 1, 0, 1, 3)
+		if dlg.exec() != QDialog.DialogCode.Accepted:
+			return
+		for key, (it_spin, su_spin) in spins.items():
+			cfgs[key] = [int(it_spin.value()), int(su_spin.value())]
+		resumen = " · ".join(
+			f"{'Esf' if s == 'stress' else 'Rep'}-{b[:3]}={cfgs[(s, b)][0]}it/{cfgs[(s, b)][1]}ss"
+			for s, b, _ in rows
+		)
+		self._log(f"[RECON] Iteraciones por estudio: {resumen}")
+
+	def _apply_stage_iter_overrides(self, cfg, stage: str):
+		"""Pisa iter/subsets del cfg con la config por estudio (si el usuario la definió)."""
+		cfgs = getattr(self, "_iter_cfg_by_stage", None)
+		if not cfgs:
+			return cfg
+		from dataclasses import replace as _dc_replace
+		s = "rest" if str(stage) == "rest" else "stress"
+		ung = cfgs.get((s, "ungated"))
+		gat = cfgs.get((s, "gated"))
+		kwargs = {}
+		if ung:
+			kwargs["iterative_iterations"] = int(ung[0])
+			kwargs["osem_subsets"] = int(ung[1])
+		if gat:
+			kwargs["gated_iterations"] = int(gat[0])
+			kwargs["gated_osem_subsets"] = int(gat[1])
+		return _dc_replace(cfg, **kwargs) if kwargs else cfg
 
 	def _cine_crudo_recon_config(self, study=None):
 		from core.raw_reconstruction import RawReconConfig
@@ -15112,6 +15421,14 @@ class MainWindow(QMainWindow):
 		)
 		return res.image
 
+	def _on_recon_raw_clicked(self):
+		"""Recon raw según el selector Esfuerzo/Reposo/Ambas de la toolbar."""
+		combo = getattr(self, "cine_crudo_recon_stage_combo", None)
+		stage = str(combo.currentData()) if combo is not None else "stress"
+		if stage in ("stress", "rest", "both"):
+			self._set_active_cine_crudo_stage(stage, refresh_view=False, force=True)
+		return self._reconstruct_cine_crudo_raw()
+
 	def _reconstruct_cine_crudo_raw(self, feta_only: bool = False, _force_stage: str | None = None):
 		"""Reconstruye desde crudo la etapa seleccionada (Esfuerzo=primario / Reposo=secundario).
 
@@ -15149,6 +15466,7 @@ class MainWindow(QMainWindow):
 			projections = self._apply_raw_bg_to_recon_cube(projections, stage)
 			angles = getattr(raw_study, "angles_deg", None)
 			cfg = self._cine_crudo_recon_config(raw_study)
+			cfg = self._apply_stage_iter_overrides(cfg, stage)
 			feta_txt = ""
 			if feta_only:
 				# La feta se define con los markers Base/Ápex de ESTA pantalla, que
@@ -19186,6 +19504,14 @@ class MainWindow(QMainWindow):
 				lbl = source_label or (event.widget() if hasattr(event, "widget") else None)
 				name = "cine_crudo" if lbl is self.preview_labels.get("cine_crudo") else "comparacion_ejes"
 				self._set_preview_zoom(name, self.preview_zoom.get(name, 0.5) + step)
+				event.accept()
+			return
+		# QC AC dual: la rueda navega los cortes (frac 0..1) de todas las etapas.
+		if getattr(self, "cine_crudo_preview_mode", None) == "ac_qc" and getattr(self, "_ac_qc_panels", None):
+			delta = int(event.angleDelta().y()) if hasattr(event, "angleDelta") else 0
+			if delta != 0:
+				self._ac_qc_frac = float(np.clip(getattr(self, "_ac_qc_frac", 0.5) + (0.03 if delta > 0 else -0.03), 0.02, 0.98))
+				self._render_ac_qc()
 				event.accept()
 			return
 		if self.cine_crudo_preview_mode != "sa_montage":

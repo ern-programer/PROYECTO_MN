@@ -8155,6 +8155,23 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         for name in self._PERFUSION_SESSION_ATTRS:
             if name in sess:
                 setattr(self, name, sess[name])
+        # Re-sincronizar los CHECKBOXES de flips con los flags restaurados: si no,
+        # el checkbox visible queda con el valor de la OTRA etapa y el próximo
+        # toggle del usuario invierte el estado (flip Y "fantasma" al navegar).
+        try:
+            for chk, attr in (
+                (self._spect_flipx_check, "_spect_flip_x_test"),
+                (self._spect_flipy_check, "_spect_flip_y_test"),
+                (self._spect_flipz_check, "_spect_flip_z_test"),
+                (self._ct_flipx_check, "_ct_flip_x_test"),
+                (self._ct_flipy_check, "_ct_flip_y_test"),
+                (self._ct_flipz_check, "_ct_flip_z_test"),
+            ):
+                chk.blockSignals(True)
+                chk.setChecked(bool(getattr(self, attr, False)))
+                chk.blockSignals(False)
+        except Exception:
+            pass
         try:
             for spin, val in zip((self._nudge_z, self._nudge_y, self._nudge_x), sess.get("__nudge", (0.0, 0.0, 0.0))):
                 spin.blockSignals(True)
