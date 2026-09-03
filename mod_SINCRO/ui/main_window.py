@@ -14224,9 +14224,21 @@ class MainWindow(QMainWindow):
 		"""Escanea una carpeta y carga SPECT crudo + ATT + CT de cada etapa de una sola vez."""
 		import pydicom
 
-		folder = QFileDialog.getExistingDirectory(self, "Carpeta con SPECT + CT/ATT del paciente")
+		start_dir = ""
+		settings = getattr(self, "_ui_settings", None)
+		if settings is not None:
+			try:
+				start_dir = str(settings.value("smart_load/last_folder", "", type=str) or "")
+			except Exception:
+				start_dir = ""
+		folder = QFileDialog.getExistingDirectory(self, "Carpeta con SPECT + CT/ATT del paciente", start_dir)
 		if not folder:
 			return
+		if settings is not None:
+			try:
+				settings.setValue("smart_load/last_folder", folder)
+			except Exception:
+				pass
 		self._log(f"[SMART] Escaneando {folder} ...")
 		series: dict[str, dict] = {}
 		for base, _dirs, files in os.walk(folder):
