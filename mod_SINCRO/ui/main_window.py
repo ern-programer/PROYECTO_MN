@@ -935,22 +935,23 @@ class MainWindow(QMainWindow):
 			report_cmap_layout.addWidget(label, row, 0)
 			report_cmap_layout.addWidget(combo, row, 1)
 
-		_add_cmap_row(1, "[1] slices_fase", self.report_cmap_slices, "Afecta la imagen de la pestaña slices_fase (slice/gate, máscara y superposición).")
-		_add_cmap_row(2, "[2] comparacion_ejes (SA/HLA/VLA)", self.report_cmap_axes, "Afecta las imágenes de ejes ortogonales SA/HLA/VLA para informe.")
-		_add_cmap_row(3, "[3] comparacion_ejes (grilla)", self.report_cmap_compare, "Afecta la grilla multicorte de comparación entre estudios.")
-		_add_cmap_row(4, "[4] panel_funcional_gated (ED/ES)", self.report_cmap_panel_axes, "Afecta las imágenes ED/ES del panel funcional gated.")
-		_add_cmap_row(5, "[5] fase (overlay/polar)", self.report_cmap_phase, "Afecta mapas de fase (overlay y polar de fase).")
-		_add_cmap_row(6, "[6] polar_clinico", self.report_cmap_polar_clinico, "Afecta el panel polar clínico (histograma + bullseye de fase).")
-		_add_cmap_row(7, "[7] panel_funcional_gated (amplitud)", self.report_cmap_amp, "Afecta el mapa de amplitud en el panel funcional gated.")
-		_add_cmap_row(8, "[8] bullseye_directo", self.report_cmap_bullseye, "Afecta el bullseye directo de perfusión segmentaria AHA.")
-		_add_cmap_row(9, "[9] polar_perfusion_directa", self.report_cmap_polar_perf, "Afecta el mapa polar continuo de perfusión (apex-centro, base-borde).")
-		_add_cmap_row(10, "[10] ungated (desgatillado)", self.report_cmap_ungated, "Afecta la grilla de cortes desgatillados (UngRaw / perfusión total).")
-		_add_cmap_row(11, "[11] cine_crudo (proyecciones)", self.report_cmap_cine_crudo, "Afecta el cine de proyecciones crudas SPECT (gated y UngGat).")
-		_add_cmap_row(12, "[12] histograma", self.report_cmap_histograma, "Afecta el histograma de fase (barras y fondo).")
-		_add_cmap_row(13, "[13] polar_combo", self.report_cmap_polar_combo, "Afecta el panel combinado polar AHA + clínico.")
-		_add_cmap_row(14, "[14] delta_combo", self.report_cmap_delta_combo, "Afecta los mapas delta stress/rest (signed y abs).")
-		_add_cmap_row(15, "[15] stress_vs_rest", self.report_cmap_stress_rest, "Afecta el panel resumen de métricas stress vs rest.")
-		_add_cmap_row(16, "[16] polar_cine_montaje", self.report_cmap_polar_cine, "Afecta el cine polar gatillado (montaje por gate).")
+		# 'slices_fase' ya no es pestaña visible: su combo (self.report_cmap_slices)
+		# sigue vivo para colorear slices_fase.png del informe, pero no se lista acá.
+		_add_cmap_row(1, "[1] comparacion_ejes (SA/HLA/VLA)", self.report_cmap_axes, "Afecta las imágenes de ejes ortogonales SA/HLA/VLA para informe.")
+		_add_cmap_row(2, "[2] comparacion_ejes (grilla)", self.report_cmap_compare, "Afecta la grilla multicorte de comparación entre estudios.")
+		_add_cmap_row(3, "[3] panel_funcional_gated (ED/ES)", self.report_cmap_panel_axes, "Afecta las imágenes ED/ES del panel funcional gated.")
+		_add_cmap_row(4, "[4] fase (overlay/polar)", self.report_cmap_phase, "Afecta mapas de fase (overlay y polar de fase).")
+		_add_cmap_row(5, "[5] polar_clinico", self.report_cmap_polar_clinico, "Afecta el panel polar clínico (histograma + bullseye de fase).")
+		_add_cmap_row(6, "[6] panel_funcional_gated (amplitud)", self.report_cmap_amp, "Afecta el mapa de amplitud en el panel funcional gated.")
+		_add_cmap_row(7, "[7] bullseye_directo", self.report_cmap_bullseye, "Afecta el bullseye directo de perfusión segmentaria AHA.")
+		_add_cmap_row(8, "[8] polar_perfusion_directa", self.report_cmap_polar_perf, "Afecta el mapa polar continuo de perfusión (apex-centro, base-borde).")
+		_add_cmap_row(9, "[9] ungated (desgatillado)", self.report_cmap_ungated, "Afecta la grilla de cortes desgatillados (UngRaw / perfusión total).")
+		_add_cmap_row(10, "[10] cine_crudo (proyecciones)", self.report_cmap_cine_crudo, "Afecta el cine de proyecciones crudas SPECT (gated y UngGat).")
+		_add_cmap_row(11, "[11] histograma", self.report_cmap_histograma, "Afecta el histograma de fase (barras y fondo).")
+		_add_cmap_row(12, "[12] polar_combo", self.report_cmap_polar_combo, "Afecta el panel combinado polar AHA + clínico.")
+		_add_cmap_row(13, "[13] delta_combo", self.report_cmap_delta_combo, "Afecta los mapas delta stress/rest (signed y abs).")
+		_add_cmap_row(14, "[14] stress_vs_rest", self.report_cmap_stress_rest, "Afecta el panel resumen de métricas stress vs rest.")
+		_add_cmap_row(15, "[15] polar_cine_montaje", self.report_cmap_polar_cine, "Afecta el cine polar gatillado (montaje por gate).")
 
 		# El grid de escalas del informe ya no vive en el sidebar: se aloja en el
 		# diálogo de Configuración (declutter). Estos selectores definen SOLO el
@@ -4508,6 +4509,22 @@ class MainWindow(QMainWindow):
 		dlg.setWindowTitle("Configuración")
 		root = QVBoxLayout(dlg)
 
+		# Configuración organizada en pestañas por utilidad.
+		tabs = QTabWidget()
+		tab_interfaz = QWidget()
+		tab_interfaz_l = QVBoxLayout(tab_interfaz)
+		tab_analisis = QWidget()
+		tab_analisis_l = QVBoxLayout(tab_analisis)
+		tab_informe = QWidget()
+		tab_informe_l = QVBoxLayout(tab_informe)
+		tab_investigacion = QWidget()
+		tab_investigacion_l = QVBoxLayout(tab_investigacion)
+		tabs.addTab(tab_interfaz, "Interfaz")
+		tabs.addTab(tab_analisis, "Análisis")
+		tabs.addTab(tab_informe, "Informe")
+		tabs.addTab(tab_investigacion, "Investigación")
+		root.addWidget(tabs)
+
 		# --- Apariencia: selector de tema ---
 		appearance_box = QGroupBox("Apariencia")
 		appearance_l = QFormLayout(appearance_box)
@@ -4527,7 +4544,7 @@ class MainWindow(QMainWindow):
 		theme_note.setWordWrap(True)
 		theme_note.setStyleSheet("color:#6b7280; font-size:8pt;")
 		appearance_l.addRow(theme_note)
-		root.addWidget(appearance_box)
+		tab_interfaz_l.addWidget(appearance_box)
 
 		# --- Interfaz: helpers, tooltips, modo compacto ---
 		ui_box = QGroupBox("Interfaz")
@@ -4551,8 +4568,7 @@ class MainWindow(QMainWindow):
 		ui_l.addWidget(show_helpers)
 		ui_l.addWidget(enable_tooltips)
 		ui_l.addWidget(compact_controls)
-		ui_l.addWidget(dual_pipeline_auto)
-		root.addWidget(ui_box)
+		tab_interfaz_l.addWidget(ui_box)
 
 		# --- Análisis: fuente de perfusión segmentaria ---
 		analysis_box = QGroupBox("Análisis")
@@ -4573,7 +4589,9 @@ class MainWindow(QMainWindow):
 		perfusion_note.setWordWrap(True)
 		perfusion_note.setStyleSheet("color:#6b7280; font-size:8pt;")
 		analysis_l.addRow(perfusion_note)
-		root.addWidget(analysis_box)
+		# 'Procesar Ambas automáticamente' es comportamiento de procesamiento: vive acá.
+		analysis_l.addRow(dual_pipeline_auto)
+		tab_analisis_l.addWidget(analysis_box)
 
 		# --- Escalas de color de las imágenes del informe ---
 		# El grid (16 combos) vive en self._report_cmap_box; se aloja acá dentro de
@@ -4583,7 +4601,7 @@ class MainWindow(QMainWindow):
 		report_cmap_scroll.setMinimumHeight(220)
 		self._report_cmap_box.setVisible(True)
 		report_cmap_scroll.setWidget(self._report_cmap_box)
-		root.addWidget(report_cmap_scroll)
+		tab_informe_l.addWidget(report_cmap_scroll)
 		dlg.finished.connect(
 			lambda _=0: (self._report_cmap_box.setParent(None), self._report_cmap_box.setVisible(False))
 		)
@@ -4595,7 +4613,7 @@ class MainWindow(QMainWindow):
 		output_btn.clicked.connect(self.open_output_folder)
 		output_btn.setToolTip("Abre el explorador en la carpeta donde se guardan los PNG, PDF y demás salidas.")
 		output_l.addWidget(output_btn)
-		root.addWidget(output_box)
+		tab_informe_l.addWidget(output_box)
 
 		# --- Integridad de informes HTML ---
 		integrity_box = QGroupBox("Integridad de informes HTML")
@@ -4621,7 +4639,7 @@ class MainWindow(QMainWindow):
 		)
 		hash_info.setStyleSheet("color:#6b7280; font-size:8pt;")
 		integrity_l.addRow(hash_info)
-		root.addWidget(integrity_box)
+		tab_informe_l.addWidget(integrity_box)
 
 		# --- Datos experimentales / investigación ---
 		research_box = QGroupBox("Datos experimentales / investigación")
@@ -4659,7 +4677,7 @@ class MainWindow(QMainWindow):
 		export_btn.setToolTip("Vuelca todos los casos acumulados a un CSV para procesarlos afuera.")
 		export_btn.clicked.connect(self._export_research_cases)
 		research_l.addWidget(export_btn)
-		root.addWidget(research_box)
+		tab_investigacion_l.addWidget(research_box)
 
 		# --- Zoom por defecto de cada pestaña ---
 		# Cada vista arranca en un nivel de zoom pensado para mostrarla bien. Acá se
@@ -4676,10 +4694,10 @@ class MainWindow(QMainWindow):
 		zoom_outer.addWidget(zoom_msg)
 		zoom_labels = {
 			"cine_crudo": "PROCESAMIENTO (cine crudo)",
-			"slices_fase": "Slices / fase",
 			"polar_combo": "Polar (combo)",
 			"delta_combo": "Delta polar",
 			"histograma": "Histograma",
+			"comparacion_stress_rest": "Stress vs Rest",
 			"ungated": "QC (desgatillado)",
 			"polar_perfusion_directa": "Polar perfusión directa",
 			"comparacion_ejes": "Montaje clínico",
@@ -4704,7 +4722,7 @@ class MainWindow(QMainWindow):
 		zoom_scroll.setMinimumHeight(200)
 		zoom_scroll.setWidget(zoom_form_host)
 		zoom_outer.addWidget(zoom_scroll)
-		root.addWidget(zoom_box)
+		tab_interfaz_l.addWidget(zoom_box)
 
 		# Aplicar el tema en vivo al cambiar el combo (aunque se cancele el diálogo,
 		# ya queda aplicado el tema elegido; se persiste solo al Aceptar).
@@ -4714,6 +4732,9 @@ class MainWindow(QMainWindow):
 			if app is not None and tid:
 				theme_manager.apply_theme(app, tid)
 		theme_combo.currentIndexChanged.connect(_on_theme_changed)
+
+		for _tab_l in (tab_interfaz_l, tab_analisis_l, tab_informe_l, tab_investigacion_l):
+			_tab_l.addStretch(1)
 
 		buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
 		buttons.accepted.connect(dlg.accept)
