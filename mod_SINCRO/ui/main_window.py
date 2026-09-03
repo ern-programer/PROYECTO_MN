@@ -14650,6 +14650,7 @@ class MainWindow(QMainWindow):
 			self._perfusion_fusion_panel = panel
 		panel._perfusion_apply_cb = self._import_amylo_fusion_registration
 		panel._perfusion_stage_change_cb = self._on_fusion_panel_stage_changed
+		panel._perfusion_feta_from_mask_cb = self._suggest_feta_limits_from_fusion
 		raw_study = st.raw_study_for_recon or st.raw_study or self.study
 		ps = getattr(raw_study, "pixel_spacing", None) if raw_study is not None else None
 		px_mm = float(ps[0]) if ps else 6.4
@@ -14758,16 +14759,18 @@ class MainWindow(QMainWindow):
 		except Exception as exc:
 			self._log(f"[FUSION][WARN] Cambio de etapa falló: {exc}")
 
-	def _suggest_feta_limits_from_fusion(self, stage: str, margin: int = 2) -> None:
+	def _suggest_feta_limits_from_fusion(self, stage: str, margin: int = 2) -> bool:
 		"""Pre-carga los límites Base/Ápex de la feta desde la máscara del corazón
 		ya fusionada (rango axial Z + margen). Es una sugerencia editable: no
-		reconstruye ni pisa una selección que el usuario haya tocado a mano."""
+		reconstruye ni pisa una selección que el usuario haya tocado a mano.
+
+		Devuelve True si pudo derivar y setear límites válidos desde la máscara."""
 		panel = getattr(self, "_perfusion_fusion_panel", None)
 		if panel is None or not hasattr(panel, "get_heart_axial_bounds"):
-			return
+			return False
 		bounds = panel.get_heart_axial_bounds()
 		if not bounds:
-			return
+			return False
 		z_min, z_max = int(bounds[0]), int(bounds[1])
 		try:
 			res = self._dual_session().stage(stage).recon_result
@@ -14796,6 +14799,7 @@ class MainWindow(QMainWindow):
 			f"[FETA] Sugerencia de límites Base/Ápex para {stage_txt} desde la máscara "
 			f"fusionada: z=[{b},{a}] (margen ±{margin}). Editable; no re-reconstruye solo."
 		)
+		return True
 
 	def _import_amylo_fusion_registration(self, stage: str | None = None):
 		"""Trae el CT/ATT registrado en el panel de fusión a la etapa indicada (para AC)."""
@@ -14866,8 +14870,9 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_ac_check.setChecked(True)
 			# Sugerir límites Base/Ápex de la feta desde la máscara ya fusionada
 			# (editable; no fuerza re-recon). Solo con CT/fusión presente.
+			feta_ok = False
 			try:
-				self._suggest_feta_limits_from_fusion(stage)
+				feta_ok = bool(self._suggest_feta_limits_from_fusion(stage))
 			except Exception as exc:
 				self._log(f"[FETA][WARN] No pude sugerir límites desde la fusión: {exc}")
 			if unchanged:
@@ -14888,7 +14893,12 @@ class MainWindow(QMainWindow):
 			except Exception:
 				pass
 			try:
-				self._reconstruct_cine_crudo_raw(_force_stage=stage)
+				# Con máscara + feta sugerida y una recon base ya existente, reconstruir
+				# SOLO la banda Base/Ápex (feta): OSEM con AC sobre la selección es mucho
+				# más rápido y más útil que reconstruir todo el volumen. Si no hay feta
+				# disponible, recon completa como antes (sin regresión).
+				use_feta = bool(feta_ok) and getattr(st, "recon_result", None) is not None
+				self._reconstruct_cine_crudo_raw(feta_only=use_feta, _force_stage=stage)
 			except Exception as exc:
 				self._log(f"[AC][WARN] Re-recon automática falló ({exc}): tocá 'Recon raw' manualmente.")
 			else:

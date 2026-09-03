@@ -1259,6 +1259,8 @@ class PerfusionFusionPanel(QDialog):
         # PERFUSIÓN: el paso 7 envía el registro CT↔SPECT a la etapa (AC en Recon raw).
         self._perfusion_apply_cb = None
         self._perfusion_stage_change_cb = None
+        # Sugerencia de límites Base/Ápex de la feta desde la máscara (opcional).
+        self._perfusion_feta_from_mask_cb = None
         # Sesiones POR ETAPA: registro, máscara, nudges y vistas de cada etapa
         # viven en memoria — navegar Esfuerzo↔Reposo NO recalcula nada.
         self._perfusion_stage_sessions: dict[str, dict] = {}
@@ -1594,6 +1596,14 @@ class PerfusionFusionPanel(QDialog):
         )
         self._btn_localization_cross.toggled.connect(self._on_localization_cross_toggled)
         loc_btns_row.addWidget(self._btn_localization_cross)
+        self._btn_markers_from_mask = QPushButton("Ubicar markers desde máscara")
+        self._btn_markers_from_mask.setToolTip(
+            "Ubica automáticamente la cruz/ancla del corazón en el centroide de la máscara "
+            "CT segmentada y sugiere los límites Base/Ápex de la feta desde su extensión "
+            "axial. Es una sugerencia editable: no reconstruye ni pisa un ajuste manual."
+        )
+        self._btn_markers_from_mask.clicked.connect(self._place_markers_from_mask)
+        loc_btns_row.addWidget(self._btn_markers_from_mask)
         self._btn_loc_anchor = QPushButton("Fijar ancla A")
         self._btn_loc_anchor.setToolTip("Guarda la posición actual como punto A (corazón) para HMR-SPECT. Re-fijar corrige el punto.")
         self._btn_loc_anchor.clicked.connect(self._on_set_localization_anchor)
@@ -4611,6 +4621,50 @@ class PerfusionFusionPanel(QDialog):
         self._temp_voi_mediastinum = None
         self._status.setText("Puntos A y B limpiados.")
         self._render_selected_view()
+
+    def _place_markers_from_mask(self) -> None:
+        """Ubica la cruz/ancla del corazón en el centroide de la máscara CT y sugiere la feta."""
+        seg = getattr(self, "_ct_segmentation", None)
+        mask = getattr(seg, "mask_3d", None) if seg is not None else None
+        if mask is None:
+            self._status.setText("No hay máscara CT segmentada: primero calculá la máscara.")
+            return
+        coords = np.argwhere(np.asarray(mask, dtype=bool))
+        if coords.size == 0:
+            self._status.setText("La máscara CT está vacía: no hay centroide para ubicar los markers.")
+            return
+        cz, cy, cx = (int(round(float(v))) for v in coords.mean(axis=0))
+        self._localization_point_zyx = (cz, cy, cx)
+        self._localization_anchor_zyx = (cz, cy, cx)
+        heart_radius = float(self._heart_radius_spin.value()) if hasattr(self, "_heart_radius_spin") else 30.0
+        self._temp_voi_heart = VOISphere(cz=cz, cy=cy, cx=cx, radius_mm=heart_radius)
+        # Encender la cruz de localización para que el marker sea visible.
+        try:
+            self._btn_localization_cross.blockSignals(True)
+            self._btn_localization_cross.setChecked(True)
+            self._btn_localization_cross.blockSignals(False)
+            self._localization_cross_enabled = True
+        except Exception:
+            pass
+        # Navegar los cortes al centroide para verlo de una.
+        self._slice_idx["axial"] = cz
+        self._slice_idx["coronal"] = cy
+        self._slice_idx["sagittal"] = cx
+        self._update_slice_controls()
+        # Opción 2: sugerir límites Base/Ápex de la feta (editable) para la etapa activa.
+        cb = getattr(self, "_perfusion_feta_from_mask_cb", None)
+        feta_txt = ""
+        if cb is not None:
+            try:
+                cb(str(self._perfusion_current_stage or "stress"))
+                feta_txt = " · límites Base/Ápex sugeridos desde la máscara"
+            except Exception as exc:
+                self._metrics.append(f"[MASK->MARKERS][WARN] sugerencia de feta no aplicada: {exc}")
+        self._render_selected_view()
+        self._status.setText(
+            f"Markers ubicados desde la máscara: centro corazón en Z/Y/X = {cz + 1}/{cy + 1}/{cx + 1}"
+            f"{feta_txt}. Ajustable a mano."
+        )
 
     def get_localization_points(self) -> list[dict]:
         """Exporta ancla y punto de localización para informes."""
