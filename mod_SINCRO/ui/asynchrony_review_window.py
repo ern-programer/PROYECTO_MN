@@ -87,7 +87,7 @@ class AsynchronyReviewWindow(QWidget):
 		# Decisión: qué geometría alimenta realmente el análisis de fase.
 		self.apply_combo = QComboBox()
 		self.apply_combo.addItem("Anillo (ROI clásica) — panel izquierdo", "ring")
-		self.apply_combo.addItem("Pared irregular según bordes detectados — panel derecho", "ectb_wall")
+		self.apply_combo.addItem("Pared irregular según bordes (considera PVE) — panel derecho", "ectb_wall")
 		self.apply_btn = QPushButton("Aplicar y reprocesar")
 		self.apply_btn.setToolTip(
 			"Usa la geometría elegida como ROI del análisis de fase y vuelve a procesar el estudio."
