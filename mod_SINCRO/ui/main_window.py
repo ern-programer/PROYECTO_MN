@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 	QGroupBox,
 	QHBoxLayout,
 	QGridLayout,
+	QInputDialog,
 	QLabel,
 	QLineEdit,
 	QMainWindow,
@@ -116,6 +117,27 @@ from version import __version__
 RAW_PHASE_QC_AMP_FILTER = 0.10
 CLINICAL_PHASE_AMP_FILTER_DEFAULT = 0.40
 LOW_CONFIDENCE_TAIL_DEG = 120.0
+
+#: Claves de _collect_processing_params que un preset de estudio SÍ guarda:
+#: solo lo anatómico/específico del estudio cargado. El resto (colormaps,
+#: estilo, informe, polar, DB normal, opciones de render, auto-run, UI) es
+#: configuración global de la casa y vive en el diálogo de Configuración.
+PRESET_STUDY_KEYS = frozenset({
+	"seg_method", "roi_source", "cavity_center", "threshold", "smooth_sigma",
+	"gate_dropout_correction", "fevi_method",
+	"ectb_wall_mm", "ectb_valve_plane", "ectb_valve_offset_mm",
+	"manual_rois_text", "auto_roi_method",
+	"intestinal_attenuation_pct", "intestinal_feather_px", "intestinal_scope",
+	"intestinal_apply_enabled", "intestinal_roi_state", "gate_roi_state",
+	"auto_center_gain", "auto_inner_delta", "auto_outer_delta", "auto_adjust_range",
+	"compare_gate", "compare_slice_pct", "compare_slice_offset_sa",
+	"compare_slice_offset_hla", "compare_slice_offset_vla",
+	"compare_fast_drag", "compare_window_top", "compare_window_base",
+	"compare_show_mask", "compare_axes_zoom_pct", "compare_axes_use_intestinal_mask",
+	"ecg_ritmo", "ecg_fc", "ecg_qrs", "ecg_qt", "ecg_bri", "ecg_brd",
+	"ecg_marcapasos", "ecg_observaciones", "ecg_file_path",
+	"cine_crudo_visual_config", "updated_at",
+})
 LOW_CONFIDENCE_TAIL_WARN_PCT = 5.0
 
 
@@ -562,6 +584,43 @@ class MainWindow(QMainWindow):
 		file_box = QGroupBox("Estudio")
 		file_box_layout = QVBoxLayout(file_box)
 		file_box_layout.addLayout(file_row)
+
+		# Config del estudio: presets de parámetros específicos del estudio cargado,
+		# indexados por StudyInstanceUID (identidad DICOM estable). Se muestran en un
+		# menú compacto al pie de Estudio; guardan solo lo anatómico (ver
+		# PRESET_STUDY_KEYS), los globales viven en Configuración.
+		self.preset_study_label = QLabel("Sin estudio cargado.")
+		self.preset_study_label.setWordWrap(True)
+		self.preset_study_label.setStyleSheet("color:#35506a;")
+		self.preset_combo = QComboBox()
+		self.preset_combo.setToolTip("Presets guardados para el estudio actual.")
+		self.save_preset_btn = QPushButton("Guardar")
+		self.save_preset_btn.clicked.connect(self.save_current_preset)
+		self.load_preset_btn = QPushButton("Cargar")
+		self.load_preset_btn.clicked.connect(self.load_selected_preset)
+		self.delete_preset_btn = QPushButton("Borrar")
+		self.delete_preset_btn.clicked.connect(self.delete_selected_preset)
+		preset_row_label = QHBoxLayout()
+		preset_row_label.setContentsMargins(0, 0, 0, 0)
+		preset_row_label.addWidget(self.preset_study_label, 1)
+		preset_row_combo = QHBoxLayout()
+		preset_row_combo.setContentsMargins(0, 0, 0, 0)
+		preset_row_combo.addWidget(QLabel("Presets"))
+		preset_row_combo.addWidget(self.preset_combo, 1)
+		preset_row_actions = QHBoxLayout()
+		preset_row_actions.setContentsMargins(0, 0, 0, 0)
+		preset_row_actions.addWidget(self.save_preset_btn)
+		preset_row_actions.addWidget(self.load_preset_btn)
+		preset_row_actions.addWidget(self.delete_preset_btn)
+		config_estudio_row = QHBoxLayout()
+		config_estudio_row.setContentsMargins(0, 0, 0, 0)
+		config_estudio_row.addStretch(1)
+		config_estudio_row.addWidget(self._build_toolbar_group_menu(
+			"⚙ Config del estudio ▾", [preset_row_label, preset_row_combo, preset_row_actions],
+			key="config_estudio_presets",
+			tooltip="Guardar/cargar/borrar presets de parámetros específicos del estudio (ROI, centro, threshold, intestinal, ECG, offsets de comparación). Indexados por StudyInstanceUID.",
+		))
+		file_box_layout.addLayout(config_estudio_row)
 		self._sidebar_layout.addWidget(file_box)
 
 		controls_box = QGroupBox("Procesamiento")
@@ -974,36 +1033,6 @@ class MainWindow(QMainWindow):
 		# color de cada imagen del informe PDF. Se mantiene la referencia viva.
 		self._report_cmap_box = report_cmap_box
 		report_cmap_box.setVisible(False)
-
-		preset_box = QGroupBox("Presets por paciente")
-		preset_layout = QVBoxLayout(preset_box)
-		preset_layout.setContentsMargins(6, 6, 6, 6)
-		preset_layout.setSpacing(4)
-		self.preset_patient_edit = QLineEdit()
-		self.preset_patient_edit.setPlaceholderText("Paciente (auto si está vacío)")
-		self.preset_name_edit = QLineEdit()
-		self.preset_name_edit.setPlaceholderText("Nombre del preset (ej: stress_base)")
-		self.preset_combo = QComboBox()
-		self.preset_combo.setToolTip("Presets guardados para el paciente actual.")
-		preset_layout.addWidget(QLabel("Paciente"))
-		preset_layout.addWidget(self.preset_patient_edit)
-		preset_layout.addWidget(QLabel("Nombre preset"))
-		preset_layout.addWidget(self.preset_name_edit)
-		preset_layout.addWidget(QLabel("Presets guardados"))
-		preset_layout.addWidget(self.preset_combo)
-
-		preset_actions = QHBoxLayout()
-		self.save_preset_btn = QPushButton("Guardar")
-		self.save_preset_btn.clicked.connect(self.save_current_preset)
-		self.load_preset_btn = QPushButton("Cargar")
-		self.load_preset_btn.clicked.connect(self.load_selected_preset)
-		self.delete_preset_btn = QPushButton("Borrar")
-		self.delete_preset_btn.clicked.connect(self.delete_selected_preset)
-		preset_actions.addWidget(self.save_preset_btn)
-		preset_actions.addWidget(self.load_preset_btn)
-		preset_actions.addWidget(self.delete_preset_btn)
-		preset_layout.addLayout(preset_actions)
-		self._sidebar_layout.addWidget(preset_box)
 
 		self.helper_box = QGroupBox("Ayuda rápida")
 		helper_layout = QVBoxLayout(self.helper_box)
@@ -2772,7 +2801,6 @@ class MainWindow(QMainWindow):
 		self.tabs.currentChanged.connect(self._on_preview_tab_changed)
 		self.polar_cine_speed_spin.valueChanged.connect(self._on_polar_cine_speed_changed)
 		self.cmap_combo.currentTextChanged.connect(self._on_phase_cmap_changed)
-		self.preset_patient_edit.textChanged.connect(lambda _=None: self._refresh_presets_for_current_patient())
 		self._on_phase_cmap_changed(self.cmap_combo.currentText())
 		self._refresh_presets_for_current_patient()
 		self._capture_global_tooltips()
@@ -4900,24 +4928,34 @@ class MainWindow(QMainWindow):
 		with open(self.presets_path, "w", encoding="utf-8") as fh:
 			json.dump(self._presets_data, fh, ensure_ascii=False, indent=2)
 
-	def _current_patient_key(self) -> str:
-		manual = self.preset_patient_edit.text().strip()
-		if manual:
-			return manual
+	def _current_study_key(self) -> str:
+		"""Identidad estable del estudio para indexar presets: StudyInstanceUID si
+		hay estudio cargado; si no, el nombre de archivo; si no, un placeholder."""
 		if self.study is not None:
-			desc = str(getattr(self.study, "study_description", "") or "").strip()
-			if desc:
-				return desc
+			uid = str(getattr(self.study, "study_instance_uid", "") or "").strip()
+			if uid:
+				return uid
 		path = self.file_edit.text().strip()
 		if path:
 			return os.path.splitext(os.path.basename(path))[0]
-		return "paciente_sin_nombre"
+		return "sin_estudio"
+
+	def _current_patient_label(self) -> str:
+		"""Texto de contexto (paciente + UID corto) para el menú de presets."""
+		if self.study is None:
+			return "Sin estudio cargado."
+		name = str(getattr(self.study, "patient_name", "") or "").strip().replace("^", " ") or "Paciente N/D"
+		pid = str(getattr(self.study, "patient_id", "") or "").strip() or "N/D"
+		uid = str(getattr(self.study, "study_instance_uid", "") or "").strip()
+		uid_short = f"…{uid[-12:]}" if uid else "sin UID"
+		return f"{name} (ID {pid}) · UID {uid_short}"
 
 	def _refresh_presets_for_current_patient(self):
-		patient = self._current_patient_key()
+		key = self._current_study_key()
+		self.preset_study_label.setText(self._current_patient_label())
 		self.preset_combo.blockSignals(True)
 		self.preset_combo.clear()
-		presets = sorted((self._presets_data.get(patient) or {}).keys())
+		presets = sorted((self._presets_data.get(key) or {}).keys())
 		self.preset_combo.addItems(presets)
 		self.preset_combo.blockSignals(False)
 
@@ -5213,49 +5251,50 @@ class MainWindow(QMainWindow):
 				self._apply_cine_crudo_visual_config(cfg, refresh=True)
 
 	def save_current_preset(self):
-		patient = self._current_patient_key()
-		name = self.preset_name_edit.text().strip()
-		if not name:
-			QMessageBox.information(self, "SINCRO", "Ingresá un nombre de preset.")
+		key = self._current_study_key()
+		name, ok = QInputDialog.getText(self, "Guardar preset del estudio", "Nombre del preset:")
+		name = (name or "").strip()
+		if not ok or not name:
 			return
-		self._presets_data.setdefault(patient, {})[name] = self._collect_processing_params()
+		full = self._collect_processing_params()
+		params = {k: v for k, v in full.items() if k in PRESET_STUDY_KEYS}
+		self._presets_data.setdefault(key, {})[name] = params
 		self._save_presets_store()
 		self._refresh_presets_for_current_patient()
 		self.preset_combo.setCurrentText(name)
-		self._log(f"Preset guardado: paciente={patient}, preset={name}")
-		self.statusBar().showMessage(f"Preset '{name}' guardado para '{patient}'.")
+		self._log(f"Preset guardado: estudio={key}, preset={name}")
+		self.statusBar().showMessage(f"Preset '{name}' guardado para el estudio.")
 
 	def load_selected_preset(self):
-		patient = self._current_patient_key()
+		key = self._current_study_key()
 		name = self.preset_combo.currentText().strip()
 		if not name:
 			QMessageBox.information(self, "SINCRO", "No hay preset seleccionado.")
 			return
-		params = ((self._presets_data.get(patient) or {}).get(name) or None)
+		params = ((self._presets_data.get(key) or {}).get(name) or None)
 		if params is None:
-			QMessageBox.warning(self, "SINCRO", "No se encontró el preset para este paciente.")
+			QMessageBox.warning(self, "SINCRO", "No se encontró el preset para este estudio.")
 			return
 		self._apply_processing_params(params)
-		self.preset_name_edit.setText(name)
-		self._log(f"Preset cargado: paciente={patient}, preset={name}")
+		self._log(f"Preset cargado: estudio={key}, preset={name}")
 		self.statusBar().showMessage(f"Preset '{name}' cargado.")
 
 	def delete_selected_preset(self):
-		patient = self._current_patient_key()
+		key = self._current_study_key()
 		name = self.preset_combo.currentText().strip()
 		if not name:
 			QMessageBox.information(self, "SINCRO", "No hay preset seleccionado.")
 			return
-		patient_presets = self._presets_data.get(patient) or {}
-		if name not in patient_presets:
+		study_presets = self._presets_data.get(key) or {}
+		if name not in study_presets:
 			QMessageBox.warning(self, "SINCRO", "No se encontró el preset para borrar.")
 			return
-		del patient_presets[name]
-		if not patient_presets and patient in self._presets_data:
-			del self._presets_data[patient]
+		del study_presets[name]
+		if not study_presets and key in self._presets_data:
+			del self._presets_data[key]
 		self._save_presets_store()
 		self._refresh_presets_for_current_patient()
-		self._log(f"Preset borrado: paciente={patient}, preset={name}")
+		self._log(f"Preset borrado: estudio={key}, preset={name}")
 		self.statusBar().showMessage(f"Preset '{name}' borrado.")
 
 	def _on_phase_cmap_changed(self, name: str):
@@ -5343,8 +5382,7 @@ class MainWindow(QMainWindow):
 		)
 		if paths:
 			self.file_edit.setText(paths[0])
-			if not self.preset_patient_edit.text().strip():
-				self._refresh_presets_for_current_patient()
+			self._refresh_presets_for_current_patient()
 			if self.auto_run_check.isChecked():
 				self.process_auto()
 
@@ -5516,8 +5554,7 @@ class MainWindow(QMainWindow):
 		)
 		if paths:
 			self.file_edit.setText(paths[0])
-			if not self.preset_patient_edit.text().strip():
-				self._refresh_presets_for_current_patient()
+			self._refresh_presets_for_current_patient()
 			if self.auto_run_check.isChecked():
 				self.process_auto()
 
@@ -7740,8 +7777,7 @@ class MainWindow(QMainWindow):
 			if self.axis_companions:
 				loaded = ", ".join(sorted(self.axis_companions.keys()))
 				self._log(f"Series originales detectadas para comparación: {loaded}.")
-			if not self.preset_patient_edit.text().strip():
-				self._refresh_presets_for_current_patient()
+			self._refresh_presets_for_current_patient()
 
 			seg_method = str(self.seg_method.currentText())
 			roi_text_autogenerated = bool(self.primary_manual_rois_autogenerated)
