@@ -517,9 +517,6 @@ class MainWindow(QMainWindow):
 			"bullseye_directo",
 			"guia_fase_vi",
 		]
-		# Fase 1 fusión: cuando la ventana de Preparación aloja el panel cine_crudo,
-		# la pestaña se saca del QTabWidget y vuelve al cerrar la ventana (reversible).
-		self._cine_crudo_reparented = False
 
 		self.output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output_demo")
 		os.makedirs(self.output_dir, exist_ok=True)
@@ -1087,13 +1084,6 @@ class MainWindow(QMainWindow):
 		self.load_one_or_two_btn = QPushButton("Cargar 1/2 estudios")
 		self.load_one_or_two_btn.clicked.connect(self.load_one_or_two_studies)
 		self.load_one_or_two_btn.setToolTip("Carga una o dos fases (stress/rest). Opción 'Carpeta inteligente': marcás una carpeta y lee/carga todo (Esfuerzo y Reposo con sus EM, ATT, CT y Scatter).")
-		self.preparacion_btn = QPushButton("Preparar / Reconstruir…")
-		self.preparacion_btn.clicked.connect(self.open_preparacion_window)
-		self.preparacion_btn.setToolTip(
-			"Abre la ventana de preparación dual (Esfuerzo | Reposo) con MIP rotatorio en vivo. "
-			"Corrección de movimiento, reconstrucción y reorientación por etapa, independientes. "
-			"Es no modal: se puede dejar abierta al costado."
-		)
 		self.ui_config_btn = QPushButton("Configuración")
 		self.ui_config_btn.clicked.connect(self.open_ui_preferences_dialog)
 		self.ui_config_btn.setToolTip(
@@ -1151,30 +1141,29 @@ class MainWindow(QMainWindow):
 		compare_load_row.addWidget(self.compare_stress_rest_btn, 1)
 		compare_load_row.addWidget(self.load_one_or_two_btn, 1)
 		button_row.addLayout(compare_load_row, 1, 0, 1, 4)
-		button_row.addWidget(self.preparacion_btn, 2, 0, 1, 4)
 		ungated_config_row = QHBoxLayout()
 		ungated_config_row.setContentsMargins(0, 0, 0, 0)
 		ungated_config_row.setSpacing(4)
 		ungated_config_row.addWidget(self.export_ungated_btn, 1)
 		ungated_config_row.addWidget(self.ui_config_btn, 1)
-		button_row.addLayout(ungated_config_row, 3, 0, 1, 4)
+		button_row.addLayout(ungated_config_row, 2, 0, 1, 4)
 		# ECTb ("Cuantificación Avanzada") y GQC ("Control de calidad del gating") ya no
 		# viven en el sidebar: se reubicaron en la toolbar de la pestaña PROCESAMIENTO.
 		# "Vista asincronía" también se movió: ahora vive en la banda Cine/Resultados/Curvas.
-		button_row.addWidget(self.lv_3d_btn, 4, 0, 1, 4)
+		button_row.addWidget(self.lv_3d_btn, 3, 0, 1, 4)
 		self.amyloid_btn = QPushButton("Amyloidosis Planar")
 		self.amyloid_btn.clicked.connect(self.open_amyloid_window)
 		self.amyloid_btn.setToolTip(
 			"Módulo planar de amiloidosis cardíaca: ROIs, HMR, Perugini, washout y reporte."
 		)
-		button_row.addWidget(self.amyloid_btn, 5, 0, 1, 4)
+		button_row.addWidget(self.amyloid_btn, 4, 0, 1, 4)
 		self.amyloid_spect_btn = QPushButton("Amyloidosis SPECT/CT")
 		self.amyloid_spect_btn.clicked.connect(self.open_amyloid_spect_window)
 		self.amyloid_spect_btn.setToolTip(
 			"Abre directamente el flujo AMYLO SPECT / SPECT-CT: reconstrucción, cortes, CT, registro, "
 			"sustracción ósea visual y exportación."
 		)
-		button_row.addWidget(self.amyloid_spect_btn, 6, 0, 1, 4)
+		button_row.addWidget(self.amyloid_spect_btn, 5, 0, 1, 4)
 
 		# Ubicar Acciones justo debajo de la versión y la barra de progreso.
 		insert_at = self._sidebar_layout.indexOf(self._progress_bar) + 1
@@ -2076,6 +2065,17 @@ class MainWindow(QMainWindow):
 					"de TODA la imagen, incluido el VI. Aumenta el contraste cavidad/pared. "
 					"Default OFF.")
 				toolbar6_r2.addWidget(self.cine_crudo_bg_check)
+				# Sustracción de fondo MANUAL con ROI (popup): dibuja la zona SIN
+				# corazón sobre el crudo. Complementa el "Fondo" automático de al lado.
+				self.cine_crudo_bg_roi_btn = QPushButton("Fondo (ROI)")
+				self.cine_crudo_bg_roi_btn.setMaximumWidth(90)
+				self.cine_crudo_bg_roi_btn.setToolTip(
+					"Sustracción de fondo MANUAL: abre un popup con el MIP crudo para dibujar la "
+					"ROI de fondo (zona SIN corazón) y restar el piso medido ahí. Métodos "
+					"constante/localizado e impacto solo-visual/toda-la-cadena. Distinto del "
+					"'Fondo' automático de al lado.")
+				self.cine_crudo_bg_roi_btn.clicked.connect(self.open_background_subtraction_window)
+				toolbar6_r2.addWidget(self.cine_crudo_bg_roi_btn)
 				# --- Descuento de SCATTER (EM − k×SC): preprocesado de las
 				# proyecciones crudas ANTES de reconstruir. Como Fondo, es COMÚN a
 				# todo el estudio (afecta AMBAS ramas: ungated + gated). Por eso va
@@ -2990,14 +2990,6 @@ class MainWindow(QMainWindow):
 		tab = self._STEP_TABS.get(key)
 		if not tab:
 			self.statusBar().showMessage(f"Paso: {label}")
-			return
-		# cine_crudo puede estar reubicada en la ventana de Preparación.
-		if tab == "cine_crudo" and getattr(self, "_cine_crudo_reparented", False):
-			try:
-				self.open_preparacion_window()
-				self.statusBar().showMessage(f"Paso: {label} — en ventana de Preparación")
-			except Exception:
-				self.statusBar().showMessage(f"'{label}': ventana de Preparación no disponible")
 			return
 		if self._select_tab_by_title(tab):
 			self.statusBar().showMessage(f"Paso: {label}")
@@ -4148,53 +4140,23 @@ class MainWindow(QMainWindow):
 		if window is not None:
 			window.sync_from_main()
 
-	def open_preparacion_window(self):
-		"""Abre (o trae al frente) la ventana de preparación dual (Esfuerzo/Reposo).
+	def open_background_subtraction_window(self):
+		"""Abre (o trae al frente) el popup de sustracción de fondo manual (ROI).
 
-		Ventana no modal, en vivo/en memoria, con MIP rotatorio por etapa. Reutiliza
-		el flujo probado de corrección de movimiento / reconstrucción / reorientación.
+		Ventana no modal, en vivo/en memoria, con el MIP crudo de la etapa activa para
+		dibujar la ROI de fondo. El motor que alimenta la recon vive en este main
+		(``set_raw_background_subtraction`` / ``_apply_raw_bg_to_recon_cube``).
 		"""
-		window = getattr(self, "_preparacion_window", None)
+		window = getattr(self, "_background_subtraction_window", None)
 		if window is None:
-			from ui.preparacion_window import PreparacionWindow
+			from ui.background_subtraction_window import BackgroundSubtractionWindow
 
-			window = PreparacionWindow(self)
-			self._preparacion_window = window
+			window = BackgroundSubtractionWindow(self)
+			self._background_subtraction_window = window
 		window.show()
 		window.raise_()
 		window.activateWindow()
-		# Fase 1 fusión: la ventana aloja el panel cine_crudo completo (motor real).
-		if hasattr(window, "attach_cine_crudo_panel"):
-			window.attach_cine_crudo_panel()
 		window.refresh()
-
-	def take_cine_crudo_panel(self):
-		"""Saca la pestaña cine_crudo del QTabWidget para alojarla en otra ventana
-		(ventana de Preparación). Reversible con restore_cine_crudo_panel()."""
-		widget = self._tab_widgets.get("cine_crudo")
-		if widget is None:
-			return None
-		self._cine_crudo_reparented = True
-		idx = self.tabs.indexOf(widget)
-		if idx >= 0:
-			self.tabs.removeTab(idx)
-		return widget
-
-	def restore_cine_crudo_panel(self):
-		"""Devuelve la pestaña cine_crudo al QTabWidget (tras cerrar la ventana host)."""
-		if not getattr(self, "_cine_crudo_reparented", False):
-			return
-		self._cine_crudo_reparented = False
-		widget = self._tab_widgets.get("cine_crudo")
-		if widget is not None:
-			widget.setParent(None)
-		self._rebuild_tabs_for_mode()
-
-	def _refresh_preparacion_window(self):
-		"""Refresca el MIP de la ventana de preparación si está abierta."""
-		window = getattr(self, "_preparacion_window", None)
-		if window is not None and window.isVisible():
-			window.refresh()
 
 	def _prep_mip_source_for_stage(self, stage: str):
 		"""Fuente para el MIP de una etapa: ('vol', vol3D, status) o ('proj', proj, status).
@@ -20150,10 +20112,6 @@ class MainWindow(QMainWindow):
 		order = list(self._basic_tab_order)
 		order.extend(self._advanced_extra_tab_order)
 		for name in order:
-			# Si el panel cine_crudo está reubicado en la ventana de Preparación,
-			# no lo agregamos como pestaña (vive allá hasta que se cierre esa ventana).
-			if name == "cine_crudo" and getattr(self, "_cine_crudo_reparented", False):
-				continue
 			widget = self._tab_widgets.get(name)
 			if widget is None:
 				continue
@@ -20452,7 +20410,6 @@ class MainWindow(QMainWindow):
 			st_bot = self._cine_crudo_stage_display(comp_study)
 			if st_top or st_bot:
 				self._log(f"Etapa detectada por metadata → arriba: {st_top or 'indeterminada'} · abajo: {st_bot or 'indeterminada'} (el selector Etapa sigue mandando).")
-			self._refresh_preparacion_window()
 		except Exception as exc:
 			self._log(f"[ERROR compare raw] {exc}")
 			QMessageBox.critical(self, "Error de comparación cruda", str(exc))
