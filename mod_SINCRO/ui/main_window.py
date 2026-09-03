@@ -4700,6 +4700,51 @@ class MainWindow(QMainWindow):
 		research_l.addWidget(export_btn)
 		root.addWidget(research_box)
 
+		# --- Zoom por defecto de cada pestaña ---
+		# Cada vista arranca en un nivel de zoom pensado para mostrarla bien. Acá se
+		# puede sobreescribir por pestaña; el valor se guarda en QSettings y se usa al
+		# cargar/limpiar un estudio (y se aplica en vivo a las pestañas abiertas).
+		zoom_box = QGroupBox("Zoom por defecto (por pestaña)")
+		zoom_outer = QVBoxLayout(zoom_box)
+		zoom_msg = QLabel(
+			"Nivel de zoom inicial de cada vista (0.20×–5.00×). Se puede seguir "
+			"cambiando en vivo con +/− en cada pestaña; esto fija el punto de partida."
+		)
+		zoom_msg.setWordWrap(True)
+		zoom_msg.setStyleSheet("color:#6b7280; font-size:8pt;")
+		zoom_outer.addWidget(zoom_msg)
+		zoom_labels = {
+			"cine_crudo": "PROCESAMIENTO (cine crudo)",
+			"slices_fase": "Slices / fase",
+			"polar_combo": "Polar (combo)",
+			"delta_combo": "Delta polar",
+			"histograma": "Histograma",
+			"ungated": "QC (desgatillado)",
+			"polar_perfusion_directa": "Polar perfusión directa",
+			"comparacion_ejes": "Montaje clínico",
+			"panel_funcional_gated": "Panel funcional gated",
+			"bullseye_directo": "Bull's-eye directo",
+			"guia_fase_vi": "Guía para fase VI",
+		}
+		zoom_form_host = QWidget()
+		zoom_form = QFormLayout(zoom_form_host)
+		zoom_spins: dict[str, QDoubleSpinBox] = {}
+		for _key, _lbl in zoom_labels.items():
+			spin = QDoubleSpinBox()
+			spin.setRange(0.20, 5.00)
+			spin.setSingleStep(0.10)
+			spin.setDecimals(2)
+			spin.setSuffix("×")
+			spin.setValue(float(self._default_preview_zoom(_key)))
+			zoom_spins[_key] = spin
+			zoom_form.addRow(_lbl, spin)
+		zoom_scroll = QScrollArea()
+		zoom_scroll.setWidgetResizable(True)
+		zoom_scroll.setMinimumHeight(200)
+		zoom_scroll.setWidget(zoom_form_host)
+		zoom_outer.addWidget(zoom_scroll)
+		root.addWidget(zoom_box)
+
 		# Aplicar el tema en vivo al cambiar el combo (aunque se cancele el diálogo,
 		# ya queda aplicado el tema elegido; se persiste solo al Aceptar).
 		def _on_theme_changed(_idx: int):
@@ -4752,6 +4797,16 @@ class MainWindow(QMainWindow):
 			settings.setValue("integrity/hash_max_days", int(hash_max_days.value()))
 			settings.setValue("research/show_experimental", bool(show_experimental.isChecked()))
 			settings.setValue("research/collect_data", bool(collect_data.isChecked()))
+			settings.sync()
+
+		# Zoom por defecto de cada pestaña.
+		if settings:
+			for _key, _spin in zoom_spins.items():
+				_val = max(0.20, min(5.00, float(_spin.value())))
+				settings.setValue(f"zoom_defaults/{_key}", _val)
+				# Aplicar en vivo a la pestaña abierta (actualiza label y escalado).
+				if _key in getattr(self, "preview_labels", {}):
+					self._set_preview_zoom(_key, _val)
 			settings.sync()
 
 		self.statusBar().showMessage("Configuración aplicada")
@@ -12371,23 +12426,36 @@ class MainWindow(QMainWindow):
 		if vb is not None:
 			vb.setValue(int(anchor[1]))
 
+	# Zoom de fabrica por pestaña (fallback si el usuario no configuro nada en preferencias).
+	_FACTORY_PREVIEW_ZOOMS = {
+		"slices_fase": 0.5,
+		"polar_combo": 0.3,
+		"delta_combo": 0.5,
+		"histograma": 0.7,
+		"ungated": 0.6,
+		"cine_crudo": 5.0,
+		"polar_perfusion_directa": 0.8,
+		"comparacion_ejes": 0.2,
+		"panel_funcional_gated": 0.5,
+		"bullseye_directo": 0.5,
+		"guia_fase_vi": 0.5,
+	}
+
 	def _default_preview_zoom(self, name: str) -> float:
 		"""Zoom inicial por pestaña. Cada vista arranca en el nivel que mejor la
-		muestra; siempre se puede cambiar en vivo con +/- o el slider."""
-		defaults = {
-			"slices_fase": 0.5,
-			"polar_combo": 0.3,
-			"delta_combo": 0.5,
-			"histograma": 0.7,
-			"ungated": 0.6,
-			"cine_crudo": 5.0,
-			"polar_perfusion_directa": 0.8,
-			"comparacion_ejes": 0.2,
-			"panel_funcional_gated": 0.5,
-			"bullseye_directo": 0.5,
-			"guia_fase_vi": 0.5,
-		}
-		return defaults.get(str(name), 0.5)
+		muestra; siempre se puede cambiar en vivo con +/- o el slider. El valor
+		de fabrica se puede sobreescribir por pestaña en Preferencias -> Zoom."""
+		key = str(name)
+		factory = self._FACTORY_PREVIEW_ZOOMS.get(key, 0.5)
+		settings = getattr(self, "_ui_settings", None)
+		if settings is not None:
+			raw = settings.value(f"zoom_defaults/{key}", None)
+			if raw is not None:
+				try:
+					return max(0.20, min(5.00, float(raw)))
+				except (TypeError, ValueError):
+					pass
+		return factory
 
 	def _zoom_preview(self, name: str, delta: float):
 		current = self.preview_zoom.get(name, 1.0)
