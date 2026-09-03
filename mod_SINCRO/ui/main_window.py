@@ -504,7 +504,6 @@ class MainWindow(QMainWindow):
 		self.advanced_mode_enabled = False
 		self._basic_tab_order = [
 			"cine_crudo",
-			"slices_fase",
 			"polar_combo",
 			"delta_combo",
 			"histograma",
@@ -2897,7 +2896,7 @@ class MainWindow(QMainWindow):
 	_STEP_TABS = {
 		"crudo": "cine_crudo", "motion": "cine_crudo", "recon": "cine_crudo",
 		"reorient": "cine_crudo", "cuts": "comparacion_ejes", "render": "comparacion_ejes",
-		"segment": "slices_fase", "phase": "slices_fase",
+		"segment": "polar_combo", "phase": "histograma",
 	}
 
 	def _build_pipeline_step_bar(self) -> QWidget:

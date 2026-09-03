@@ -552,13 +552,12 @@ def _scaled_image(path: str, max_width: float, max_height: float) -> RLImage:
     return RLImage(path, width=width, height=height)
 
 img_files = [
-    ("slices_fase.png", "Figura 1 — Slice medio con máscara miocárdica y fase superpuesta (colormap HSV)."),
-    ("polar_map.png", "Figura 2 — Bullseye AHA 17 segmentos. Cada cuña muestra el ID y fase en grados."),
-    ("histograma.png", "Figura 3 — Histograma de fase. Línea roja: media circular. Naranja: P5/P95."),
-    ("ejes_ortogonales.png", "Figura 4 — Ejes SA/HLA/VLA en gate medio. HLA y VLA reconstruidos desde el stack SA cuando no hay series originales."),
-    ("curva_tac.png", "Figura 5 — Curva de actividad miocárdica por gate (izq.) y radar de fase por segmento AHA (der.)."),
-    ("panel_clinico_convencion.png", "Figura 6 — Panel clínico por convención con ejes ortogonales en diástole/sístole (A/B)."),
-    ("comparacion_ejes.png", "Figura 7 — Comparación HLA/VLA original vs reconstruido desde SA en el mismo gate."),
+    ("polar_map.png", "Figura 1 — Bullseye AHA 17 segmentos. Cada cuña muestra el ID y fase en grados."),
+    ("histograma.png", "Figura 2 — Histograma de fase. Línea roja: media circular. Naranja: P5/P95."),
+    ("ejes_ortogonales.png", "Figura 3 — Ejes SA/HLA/VLA en gate medio. HLA y VLA reconstruidos desde el stack SA cuando no hay series originales."),
+    ("curva_tac.png", "Figura 4 — Curva de actividad miocárdica por gate (izq.) y radar de fase por segmento AHA (der.)."),
+    ("panel_clinico_convencion.png", "Figura 5 — Panel clínico por convención con ejes ortogonales en diástole/sístole (A/B)."),
+    ("comparacion_ejes.png", "Figura 6 — Comparación HLA/VLA original vs reconstruido desde SA en el mismo gate."),
 ]
 
 for fname, caption in img_files:
