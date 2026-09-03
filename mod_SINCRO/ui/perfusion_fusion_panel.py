@@ -1264,6 +1264,10 @@ class PerfusionFusionPanel(QDialog):
         # Sesiones POR ETAPA: registro, máscara, nudges y vistas de cada etapa
         # viven en memoria — navegar Esfuerzo↔Reposo NO recalcula nada.
         self._perfusion_stage_sessions: dict[str, dict] = {}
+        # Etapas "grabadas" (congeladas) por el usuario: el paso 7 transfiere
+        # TODAS estas de una. El auto-guardado sigue como red de seguridad.
+        self._perfusion_recorded_stages: set[str] = set()
+        self._perfusion_batch_apply = False
         self._perfusion_current_stage: str | None = None
         self._perfusion_stage_headers: dict[str, str] = {}
         self._perfusion_stage_combo = QComboBox()
@@ -1271,6 +1275,16 @@ class PerfusionFusionPanel(QDialog):
         self._perfusion_stage_combo.addItem("Reposo", "rest")
         self._perfusion_stage_combo.setToolTip("Etapa de perfusión: cambia el estudio mostrado y el destino del registro.")
         self._perfusion_stage_combo.currentIndexChanged.connect(self._on_perfusion_stage_changed)
+        self._btn_record_stage = QPushButton("Grabar etapa")
+        self._btn_record_stage.clicked.connect(self._record_current_stage)
+        self._btn_record_stage.setEnabled(False)
+        self._btn_record_stage.setToolTip(
+            "Graba (congela) el registro/máscara/markers de ESTA etapa. Grabá las dos y "
+            "el paso 7 las transfiere a AC de una. El auto-guardado sigue como respaldo."
+        )
+        self._btn_record_stage.setStyleSheet(
+            "background-color:#b45309; color:white; font-weight:bold; padding:6px 12px; border-radius:4px;"
+        )
         self._btn_fusion_layout = QPushButton("7. → Registro a AC")
         self._btn_fusion_layout.clicked.connect(self._apply_registration_to_ac)
         self._btn_fusion_layout.setEnabled(False)
@@ -1287,6 +1301,7 @@ class PerfusionFusionPanel(QDialog):
         _reg_lay.setContentsMargins(0, 0, 0, 0)
         _reg_lay.setSpacing(4)
         _reg_lay.addWidget(self._perfusion_stage_combo)
+        _reg_lay.addWidget(self._btn_record_stage)
         _reg_lay.addWidget(self._btn_fusion_layout, 1)
         self._btn_perfusion_cancel = QPushButton("Cerrar")
         self._btn_perfusion_cancel.setToolTip("Cierra el panel (el registro/máscara de cada etapa queda en memoria).")
@@ -8192,6 +8207,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._btn_vrt.setEnabled(True)
         # Botón 7: en AMYLO lo habilitaba la recon propia (acá bypasseada).
         self._btn_fusion_layout.setEnabled(self._current_volume is not None)
+        self._btn_record_stage.setEnabled(self._current_volume is not None)
         # Presets de cámara: disponibles apenas hay SPECT precargado.
         if hasattr(self, "_btn_save_cam_preset"):
             self._btn_save_cam_preset.setEnabled(True)
@@ -8245,6 +8261,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         "_spect_spacing_zyx", "_current_spect_path",
         "_ct_volume", "_ct_spacing_zyx", "_ct_affine_ijk_to_lps", "_ct_path",
         "_ct_registered", "_ct_auto_registered", "_ct_registration_shift_zyx", "_ct_total_shift_zyx",
+        "_att_map_registered",
         "_ct_segmentation", "_hmr_result", "_mask_was_manually_edited", "_auto_cube_bbox_cached",
         "_temp_voi_heart", "_temp_voi_mediastinum",
         "_localization_point_zyx", "_localization_anchor_zyx", "_localization_point_b_zyx",
@@ -8414,8 +8431,40 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 "background-color:#0e7490; color:white; font-weight:bold; padding:6px 12px; border-radius:4px;"
             )
 
+    def _record_current_stage(self):
+        """Graba (congela) la etapa actual: guarda su sesión y la marca lista para
+        transferir a AC. El auto-guardado sigue como red de seguridad."""
+        stage = str(self._perfusion_stage_combo.currentData() or "stress")
+        if self._ct_registered is None and self._att_map_registered is None:
+            QMessageBox.information(self, "SINCRO", "Primero registrá el CT/ATT sobre el SPECT (paso 4).")
+            return
+        self._save_perfusion_stage_session(stage)
+        self._perfusion_recorded_stages.add(stage)
+        self._refresh_recorded_stages_ui()
+        txt = "ESFUERZO" if stage == "stress" else "REPOSO"
+        self._status.setText(
+            f"Etapa {txt} grabada (congelada). Grabá la otra y aplicá el paso 7 para transferir ambas."
+        )
+
+    def _refresh_recorded_stages_ui(self):
+        """Feedback visual de qué etapas están grabadas + contador en el botón 7."""
+        rec = getattr(self, "_perfusion_recorded_stages", set()) or set()
+        names = {"stress": "ESFUERZO", "rest": "REPOSO"}
+        if rec:
+            listado = ", ".join(names[s] for s in ("stress", "rest") if s in rec)
+            self._btn_record_stage.setText(f"✓ Grabada(s): {listado}")
+            self._btn_record_stage.setStyleSheet(
+                "background-color:#15803d; color:white; font-weight:bold; padding:6px 12px; border-radius:4px;"
+            )
+        else:
+            self._btn_record_stage.setText("Grabar etapa")
+            self._btn_record_stage.setStyleSheet(
+                "background-color:#b45309; color:white; font-weight:bold; padding:6px 12px; border-radius:4px;"
+            )
+
     def _apply_registration_to_ac(self):
-        """Envía el CT/ATT registrado a la etapa elegida (AC). NO cierra: repetir en la otra etapa."""
+        """Transfiere a AC TODAS las etapas grabadas (o la actual). Restaura la sesión
+        de cada etapa, la envía por el callback y vuelve a la etapa que estaba activa."""
         cb = getattr(self, "_perfusion_apply_cb", None)
         if cb is None:
             QMessageBox.information(
@@ -8423,21 +8472,58 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 "Abrí este panel desde el botón 'Fusión' del flujo de perfusión para habilitar el envío a AC.",
             )
             return
-        if self._ct_registered is None and self._att_map_registered is None:
+        current = str(self._perfusion_stage_combo.currentData() or "stress")
+        # Persistir el estado vivo de la etapa actual antes de conmutar sesiones.
+        self._save_perfusion_stage_session(current)
+        recorded = set(getattr(self, "_perfusion_recorded_stages", set()) or set())
+        recorded.add(current)  # la etapa activa siempre entra
+        # Solo etapas con registro real (CT o ATT), procesando la actual primero.
+        targets: list[str] = []
+        for stg in ("stress", "rest"):
+            if stg not in recorded:
+                continue
+            if stg == current:
+                has_reg = self._ct_registered is not None or self._att_map_registered is not None
+            else:
+                sess = self._perfusion_stage_sessions.get(stg) or {}
+                has_reg = sess.get("_ct_registered") is not None or sess.get("_att_map_registered") is not None
+            if has_reg:
+                targets.append(stg)
+        targets.sort(key=lambda s: 0 if s == current else 1)
+        if not targets:
             QMessageBox.information(self, "SINCRO", "Primero registrá el CT/ATT sobre el SPECT (paso 4).")
-            return
-        stage = str(self._perfusion_stage_combo.currentData() or "stress")
-        try:
-            cb(stage)
-        except Exception as exc:
-            QMessageBox.warning(self, "SINCRO", f"No se pudo aplicar el registro a AC:\n{exc}")
             return
         applied = getattr(self, "_perfusion_ac_applied", None)
         if applied is None:
             applied = set()
             self._perfusion_ac_applied = applied
-        applied.add(stage)
-        self._refresh_perfusion_ac_button(stage)
+        self._perfusion_batch_apply = True
+        try:
+            for stg in targets:
+                if stg != self._perfusion_current_stage:
+                    self._restore_perfusion_stage_session(stg)
+                    self._perfusion_current_stage = stg
+                try:
+                    cb(stg)
+                except Exception as exc:
+                    QMessageBox.warning(self, "SINCRO", f"No se pudo aplicar el registro a AC ({stg}):\n{exc}")
+                    continue
+                applied.add(stg)
+        finally:
+            self._perfusion_batch_apply = False
+        # Volver a la etapa que estaba activa al iniciar.
+        if self._perfusion_current_stage != current:
+            self._restore_perfusion_stage_session(current)
+            self._perfusion_current_stage = current
+            idx = self._perfusion_stage_combo.findData(current)
+            if idx >= 0:
+                self._perfusion_stage_combo.blockSignals(True)
+                self._perfusion_stage_combo.setCurrentIndex(idx)
+                self._perfusion_stage_combo.blockSignals(False)
+        self._refresh_perfusion_ac_button(current)
+        # Con ambas etapas aplicadas, el panel ya cumplió su función: se puede cerrar.
+        if len(targets) > 1 and all(s in applied for s in targets):
+            self.close()
         stage_txt = "ESFUERZO" if stage == "stress" else "REPOSO"
         other = "rest" if stage == "stress" else "stress"
         if other in applied:
@@ -8605,6 +8691,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._btn_bone.setEnabled(True)
             self._btn_recon_pipeline.setEnabled(True)
             self._btn_fusion_layout.setEnabled(True)
+            self._btn_record_stage.setEnabled(True)
             self._btn_load_ct.setEnabled(True)
             self._btn_load_ct_dir.setEnabled(True)
             self._btn_load_att.setEnabled(True)
@@ -8852,6 +8939,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._btn_bone.setEnabled(self._current_volume is not None)
             self._btn_recon_pipeline.setEnabled(self._analysis is not None)
             self._btn_fusion_layout.setEnabled(self._current_volume is not None)
+            self._btn_record_stage.setEnabled(self._current_volume is not None)
             self._btn_export_axes_dcm.setEnabled(self._recon_bundle is not None and bool(self._recon_bundle.cardiac_axes))
             self._btn_cancel_recon.setEnabled(False)
 

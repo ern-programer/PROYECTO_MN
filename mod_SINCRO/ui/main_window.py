@@ -14906,6 +14906,10 @@ class MainWindow(QMainWindow):
 				self.statusBar().showMessage(
 					f"✓ AC aplicada a {stage_txt}: recon OSEM con μ-map registrado en la fusión.", 15000
 				)
+				# En modo batch (paso 7 transfiere ambas), el panel maneja la
+				# navegación/cierre al terminar el loop: no tocar acá.
+				if getattr(panel, "_perfusion_batch_apply", False):
+					return
 				# Si la OTRA etapa está lista y aún sin AC: volver al panel apuntando ahí.
 				other = "rest" if stage == "stress" else "stress"
 				ost = self._dual_session().stage(other)
