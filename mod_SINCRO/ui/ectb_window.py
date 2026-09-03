@@ -1221,11 +1221,30 @@ class ECTbWindow(QDialog):
 		self.sync_from_main()
 		self.recompute()
 
+	def _resolve_stage_study_seg(self):
+		"""Devuelve (study, seg) de la etapa elegida en PROCESAMIENTO.
+
+		Si el selector apunta a una etapa con datos procesados en el DualSession,
+		cuantifica esa etapa; si no, cae al study/seg activo del main (flujo simple).
+		"""
+		main = self._main
+		stage = str(getattr(main, "_ectb_target_stage", "") or "")
+		if stage in ("stress", "rest") and hasattr(main, "_dual_session"):
+			try:
+				st = main._dual_session().stage(stage)
+			except Exception:
+				st = None
+			if st is not None:
+				study = getattr(st, "cut_study", None)
+				seg = getattr(st, "seg", None)
+				if study is not None and seg is not None:
+					return study, seg
+		return getattr(main, "study", None), getattr(main, "seg", None)
+
 	def recompute(self):
 		"""Recalcula con los parámetros actuales y refresca toda la ventana."""
 		main = self._main
-		study = getattr(main, "study", None)
-		seg = getattr(main, "seg", None)
+		study, seg = self._resolve_stage_study_seg()
 		if study is None or seg is None:
 			self._show_unavailable("Cargá y procesá un estudio en la ventana principal para cuantificar.")
 			return

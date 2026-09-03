@@ -503,13 +503,13 @@ class MainWindow(QMainWindow):
 		self._last_browse_dir = ""
 		self.advanced_mode_enabled = False
 		self._basic_tab_order = [
+			"cine_crudo",
 			"slices_fase",
 			"polar_combo",
 			"delta_combo",
 			"histograma",
 			"comparacion_stress_rest",
 			"ungated",
-			"cine_crudo",
 		]
 		self._advanced_extra_tab_order = [
 			"polar_perfusion_directa",
@@ -1104,8 +1104,8 @@ class MainWindow(QMainWindow):
 		self.export_ungated_btn = QPushButton("Ungated DCM")
 		self.export_ungated_btn.clicked.connect(self._export_ungated_dicom)
 		self.export_ungated_btn.setToolTip("Exporta el desgatillado (suma de gates = perfusión total) como DICOM NM no-gated para compartir o releer.")
-		self.ectb_window_btn = QPushButton("Cuantificación ECTb")
-		self.ectb_window_btn.clicked.connect(self.open_ectb_window)
+		self.ectb_window_btn = QPushButton("Cuantificación Avanzada")
+		self.ectb_window_btn.clicked.connect(self._open_ectb_for_selected_stage)
 		self.ectb_window_btn.setToolTip(
 			"Abre la ventana de cuantificación del Emory Cardiac Toolbox: FEVI por máximo de cuentas, "
 			"volúmenes, masa miocárdica y engrosamiento.\n"
@@ -1159,23 +1159,23 @@ class MainWindow(QMainWindow):
 		ungated_config_row.addWidget(self.export_ungated_btn, 1)
 		ungated_config_row.addWidget(self.ui_config_btn, 1)
 		button_row.addLayout(ungated_config_row, 3, 0, 1, 4)
-		button_row.addWidget(self.ectb_window_btn, 4, 0, 1, 4)
-		button_row.addWidget(self.gqc_window_btn, 5, 0, 1, 4)
-		button_row.addWidget(self.asynchrony_review_btn, 6, 0, 1, 4)
-		button_row.addWidget(self.lv_3d_btn, 7, 0, 1, 4)
+		# ECTb ("Cuantificación Avanzada") y GQC ("Control de calidad del gating") ya no
+		# viven en el sidebar: se reubicaron en la toolbar de la pestaña PROCESAMIENTO.
+		# "Vista asincronía" también se movió: ahora vive en la banda Cine/Resultados/Curvas.
+		button_row.addWidget(self.lv_3d_btn, 4, 0, 1, 4)
 		self.amyloid_btn = QPushButton("Amyloidosis Planar")
 		self.amyloid_btn.clicked.connect(self.open_amyloid_window)
 		self.amyloid_btn.setToolTip(
 			"Módulo planar de amiloidosis cardíaca: ROIs, HMR, Perugini, washout y reporte."
 		)
-		button_row.addWidget(self.amyloid_btn, 8, 0, 1, 4)
+		button_row.addWidget(self.amyloid_btn, 5, 0, 1, 4)
 		self.amyloid_spect_btn = QPushButton("Amyloidosis SPECT/CT")
 		self.amyloid_spect_btn.clicked.connect(self.open_amyloid_spect_window)
 		self.amyloid_spect_btn.setToolTip(
 			"Abre directamente el flujo AMYLO SPECT / SPECT-CT: reconstrucción, cortes, CT, registro, "
 			"sustracción ósea visual y exportación."
 		)
-		button_row.addWidget(self.amyloid_spect_btn, 9, 0, 1, 4)
+		button_row.addWidget(self.amyloid_spect_btn, 6, 0, 1, 4)
 
 		# Ubicar Acciones justo debajo de la versión y la barra de progreso.
 		insert_at = self._sidebar_layout.indexOf(self._progress_bar) + 1
@@ -1542,7 +1542,7 @@ class MainWindow(QMainWindow):
 			"bullseye_directo": "bullseye_directo",
 			"guia_fase_vi": "Guía para fase VI",
 			"ungated": "QC",
-			"cine_crudo": "cine_crudo",
+			"cine_crudo": "PROCESAMIENTO",
 		}
 		preview_help_texts = {
 			"slices_fase": "Vista de referencia del slice/gate medio con máscara y fase superpuesta. Útil para control de calidad de segmentación.",
@@ -1666,6 +1666,11 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_stage_combo.setToolTip("Con dos fases crudas cargadas, elegí qué etapa procesan las herramientas (corrección, offset, etc.): solo Esfuerzo, solo Reposo, o Ambas. También: CLICK sobre una imagen selecciona esa etapa; CTRL+CLICK selecciona ambas.")
 				self.cine_crudo_stage_combo.currentTextChanged.connect(self._on_cine_crudo_stage_combo_changed)
 				toolbar.addWidget(self.cine_crudo_stage_combo)
+				# Cuantificación Avanzada (ex-ECTb) y Control de calidad del gating:
+				# reubicados aquí desde el sidebar. La cuantificación opera sobre la
+				# etapa elegida en el selector de arriba.
+				toolbar.addWidget(self.ectb_window_btn)
+				toolbar.addWidget(self.gqc_window_btn)
 				self.cine_crudo_frame_label = QLabel("--/--")
 				self.cine_crudo_frame_label.setStyleSheet("color:#444;")
 				self.cine_crudo_frame_label.setFixedWidth(180)
@@ -2679,9 +2684,16 @@ class MainWindow(QMainWindow):
 		self.lower_cine_collapse_btn.setToolTip("Colapsar/expandir la banda inferior (cine, resultados y curvas).")
 		self.lower_cine_collapse_btn.clicked.connect(self._toggle_lower_cine_band)
 		lower_band_header.addWidget(self.lower_cine_collapse_btn)
-		lower_band_header.addWidget(QLabel("Cine / Resultados / Curvas"))
+		lower_band_header.addWidget(QLabel("ASINCRONÍA -> Cine / Resultados / Curvas"))
 		lower_band_header.addStretch(1)
 		lower_cine_layout.addLayout(lower_band_header)
+		# Vista de asincronía: reubicada del sidebar a esta banda, debajo del título
+		# y encima de las imágenes de cine/resultados/curvas.
+		async_btn_row = QHBoxLayout()
+		async_btn_row.setContentsMargins(4, 0, 4, 0)
+		async_btn_row.addWidget(self.asynchrony_review_btn)
+		async_btn_row.addStretch(1)
+		lower_cine_layout.addLayout(async_btn_row)
 		lower_cine_layout.addWidget(self.bottom_hsplit)
 		self._lower_cine_collapsed = False
 		self._right_splitter_saved_sizes = None
@@ -4088,6 +4100,24 @@ class MainWindow(QMainWindow):
 			compact_controls=bool(self._ui_compact_controls),
 		)
 		self._apply_global_tooltips()
+
+	def _open_ectb_for_selected_stage(self):
+		"""Abre Cuantificación Avanzada apuntando a la etapa elegida en el selector.
+
+		El botón vive en la toolbar de PROCESAMIENTO junto al selector de etapa: la
+		cuantificación se hace sobre esa etapa (Esfuerzo/Reposo). En "Ambas" cae a la
+		etapa de recon vigente.
+		"""
+		combo = getattr(self, "cine_crudo_stage_combo", None)
+		stage = "stress"
+		if combo is not None:
+			t = str(combo.currentText()).lower()
+			if "repos" in t or "rest" in t:
+				stage = "rest"
+			elif "amb" in t:
+				stage = str(getattr(self, "_cine_crudo_recon_stage", "stress") or "stress")
+		self._ectb_target_stage = stage if stage in ("stress", "rest") else "stress"
+		self.open_ectb_window()
 
 	def open_ectb_window(self):
 		"""Abre (o trae al frente) la ventana de cuantificación ECTb.
