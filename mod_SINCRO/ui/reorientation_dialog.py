@@ -92,8 +92,8 @@ class CardiacReorientationDialog(QDialog):
             | Qt.WindowType.WindowMinMaxButtonsHint
         )
         self.setModal(True)
-        self.resize(1060, 720)
-        self.setMinimumSize(920, 600)
+        self.resize(1340, 900)
+        self.setMinimumSize(1120, 740)
         self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
 
         # Tamaño de vóxel isotrópico (mm) del volumen reconstruido, para expresar
@@ -590,7 +590,7 @@ class CardiacReorientationDialog(QDialog):
         info.setWordWrap(True)
         root.addWidget(info)
 
-        self.fig = Figure(figsize=(11.4, 6.6), facecolor="#0b1220")
+        self.fig = Figure(figsize=(13.2, 8.0), facecolor="#0b1220")
         self.canvas = FigureCanvas(self.fig)
         canvas_row = QHBoxLayout()
         canvas_row.setContentsMargins(0, 0, 0, 0)

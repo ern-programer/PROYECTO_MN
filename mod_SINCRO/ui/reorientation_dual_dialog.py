@@ -33,7 +33,7 @@ def _embed_panel(dlg: CardiacReorientationDialog, title: str, color: str) -> QWi
     """Convierte un CardiacReorientationDialog en panel embebible con título."""
     dlg.setWindowFlags(Qt.WindowType.Widget)
     dlg.setModal(False)
-    dlg.setMinimumSize(520, 460)
+    dlg.setMinimumSize(640, 560)
     # Ocultar los botones propios del diálogo (los reemplaza la botonera dual).
     for btn in dlg.findChildren(QPushButton):
         if btn.text().strip() in _EMBED_HIDE_BUTTONS:

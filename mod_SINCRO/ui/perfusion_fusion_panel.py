@@ -1598,7 +1598,7 @@ class PerfusionFusionPanel(QDialog):
         self._btn_triangulation_cross.toggled.connect(self._on_triangulation_cross_toggled)
         self._btn_triangulation_cross.setVisible(False)  # PERFUSIÓN: oculto
         loc_btns_row.addWidget(self._btn_triangulation_cross)
-        self._btn_localization_cross = QPushButton("Localización")
+        self._btn_localization_cross = QPushButton("Centro de Masa")
         self._btn_localization_cross.setCheckable(True)
         self._btn_localization_cross.setChecked(False)
         self._btn_localization_cross.setToolTip(

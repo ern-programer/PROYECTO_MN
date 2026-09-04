@@ -14900,6 +14900,7 @@ class MainWindow(QMainWindow):
 		panel = getattr(self, "_perfusion_fusion_panel", None)
 		if panel is None:
 			# Top-level SIN parent: minimiza normal en Windows (regla Qt owned-window).
+			self._set_progress(15, "Abriendo Fusión SPECT/CT...")
 			panel = PerfusionFusionPanel(None)
 			self._perfusion_fusion_panel = panel
 		panel._perfusion_apply_cb = self._import_amylo_fusion_registration
@@ -14933,6 +14934,7 @@ class MainWindow(QMainWindow):
 		else:
 			try:
 				_t0 = perf_counter()
+				self._set_progress(45, "Cargando SPECT + CT y registrando...")
 				panel.set_perfusion_inputs(
 					spect_volume=result.ungated_volume,
 					spect_spacing_zyx=(px_mm, px_mm, px_mm),
@@ -14961,9 +14963,11 @@ class MainWindow(QMainWindow):
 			panel.set_perfusion_header(stage, self._patient_banner_text(stage=stage))
 		except Exception:
 			pass
+		self._set_progress(90, "Mostrando fusión...")
 		panel.show()
 		panel.raise_()
 		panel.activateWindow()
+		self._set_progress(100, "Fusión lista")
 
 	def _on_fusion_panel_stage_changed(self, stage: str):
 		"""El combo Etapa del panel de fusión pidió cargar la otra etapa."""
@@ -14990,6 +14994,8 @@ class MainWindow(QMainWindow):
 			raw_study = st.raw_study_for_recon or st.raw_study or self.study
 			ps = getattr(raw_study, "pixel_spacing", None) if raw_study is not None else None
 			px_mm = float(ps[0]) if ps else 6.4
+			stage_txt = "REPOSO" if stage == "rest" else "ESFUERZO"
+			self._set_progress(30, f"Fusión: cargando etapa {stage_txt}...")
 			panel.set_perfusion_inputs(
 				spect_volume=result.ungated_volume,
 				spect_spacing_zyx=(px_mm, px_mm, px_mm),
@@ -15009,6 +15015,7 @@ class MainWindow(QMainWindow):
 				panel.set_perfusion_header(stage, self._patient_banner_text(stage=stage))
 			except Exception:
 				pass
+			self._set_progress(100, f"Fusión: etapa {stage_txt} lista")
 			self._log(f"[FUSION] Panel cambiado a etapa {stage}: SPECT+CT cargados y registrados (primera vez).")
 		except Exception as exc:
 			self._log(f"[FUSION][WARN] Cambio de etapa falló: {exc}")
