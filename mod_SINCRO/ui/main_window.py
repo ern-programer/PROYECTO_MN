@@ -1697,14 +1697,14 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_mode_combo.setFixedWidth(100)
 				self.cine_crudo_mode_combo.setToolTip("Continuo: loop 1→N→1. Rebote: 1→N→1→N (ping-pong).")
 				toolbar.addWidget(self.cine_crudo_mode_combo)
-				toolbar.addWidget(QLabel("Etapa"))
+				# El selector de Etapa se movió a la barra de flujo (abajo); acá solo
+				# se crea el combo y se agrega a flow_row más adelante.
 				self.cine_crudo_stage_combo = QComboBox()
 				self.cine_crudo_stage_combo.addItems(["Esfuerzo", "Reposo", "Ambas"])
 				self.cine_crudo_stage_combo.setCurrentText("Esfuerzo")
 				self.cine_crudo_stage_combo.setFixedWidth(100)
 				self.cine_crudo_stage_combo.setToolTip("Con dos fases crudas cargadas, elegí qué etapa procesan las herramientas (corrección, offset, etc.): solo Esfuerzo, solo Reposo, o Ambas. También: CLICK sobre una imagen selecciona esa etapa; CTRL+CLICK selecciona ambas.")
 				self.cine_crudo_stage_combo.currentTextChanged.connect(self._on_cine_crudo_stage_combo_changed)
-				toolbar.addWidget(self.cine_crudo_stage_combo)
 				# Cuantificación Avanzada (ex-ECTb) y Control de calidad del gating:
 				# reubicados aquí desde el sidebar. La cuantificación opera sobre la
 				# etapa elegida en el selector de arriba.
@@ -2186,8 +2186,7 @@ class MainWindow(QMainWindow):
 					"Segundo click: vuelve a la vista anterior.")
 				self.cine_crudo_ac_qc_btn.clicked.connect(self._show_ac_qc)
 				toolbar6_r2.addWidget(self.cine_crudo_ac_qc_btn)
-				self.cine_crudo_fusion_btn = QPushButton("Fusión")
-				self.cine_crudo_fusion_btn.setMaximumWidth(60)
+				self.cine_crudo_fusion_btn = QPushButton("Fusión SPECT/CT")
 				self.cine_crudo_fusion_btn.setEnabled(False)
 				self.cine_crudo_fusion_btn.setToolTip(
 					"Abre el panel de fusión SPECT/CT de PERFUSIÓN (adaptado del de AMYLO) "
@@ -2195,7 +2194,7 @@ class MainWindow(QMainWindow):
 					"registrar (Ctrl/Shift/medio), fusionar en cortes tomo o cardiacos. "
 					"Después 'Reg→AC' trae el registro acá.")
 				self.cine_crudo_fusion_btn.clicked.connect(self._show_ct_fusion_preview)
-				toolbar6_r2.addWidget(self.cine_crudo_fusion_btn)
+				# Se agrega a la barra de flujo (abajo), no al popup de reconstrucción.
 				self.cine_crudo_import_reg_btn = QPushButton("Reg→AC")
 				self.cine_crudo_import_reg_btn.setMaximumWidth(64)
 				self.cine_crudo_import_reg_btn.setToolTip(
@@ -2404,29 +2403,27 @@ class MainWindow(QMainWindow):
 					lambda v: self.cine_crudo_denoise_plus_gated_lbl.setText(f"{v/100.0:.2f}"))
 				toolbar6_r_filters_g.addStretch(1)
 				# Selector de etapa para 'Recon raw': Esfuerzo / Reposo / Ambas.
+				# Queda OCULTO (no se agrega a ningún layout): lo gobierna por índice el
+				# selector "Etapa" de la barra de flujo (mismo orden de items).
 				self.cine_crudo_recon_stage_combo = QComboBox()
 				self.cine_crudo_recon_stage_combo.addItem("Esfuerzo", "stress")
 				self.cine_crudo_recon_stage_combo.addItem("Reposo", "rest")
 				self.cine_crudo_recon_stage_combo.addItem("Ambas", "both")
 				self.cine_crudo_recon_stage_combo.setMaximumWidth(86)
-				self.cine_crudo_recon_stage_combo.setToolTip("Qué etapa(s) reconstruye 'Recon raw'.")
-				toolbar6_r2.addWidget(self.cine_crudo_recon_stage_combo)
+				self.cine_crudo_recon_stage_combo.setToolTip("Qué etapa(s) reconstruye '1 · Reconstruir'.")
 				self.cine_crudo_recon_btn = QToolButton()
-				self.cine_crudo_recon_btn.setText("Recon raw")
-				self.cine_crudo_recon_btn.setToolTip("Reconstruye desde crudo gated la(s) etapa(s) del selector con la corrección actual y muestra QC: UngGat + gates.")
+				self.cine_crudo_recon_btn.setText("1 · Reconstruir")
+				self.cine_crudo_recon_btn.setToolTip("Paso 1. Reconstruye desde crudo gated la(s) etapa(s) del selector con la corrección actual y muestra QC: UngGat + gates.")
 				self.cine_crudo_recon_btn.clicked.connect(self._on_recon_raw_clicked)
-				toolbar6_r2.addWidget(self.cine_crudo_recon_btn)
 				self.cine_crudo_recon_feta_btn = QToolButton()
-				self.cine_crudo_recon_feta_btn.setText("Reconstruir selección")
-				self.cine_crudo_recon_feta_btn.setToolTip("Reconstruye SOLO la banda axial (feta) entre las líneas Base/Ápex de esta pantalla. Flujo: 1) 'Recon raw' (FBP rápido) para ver el corazón; 2) ajustá Base/Ápex sobre las líneas rojas; 3) 'Reconstruir selección'. Excluye la actividad extracardíaca de arriba/abajo, es más rápido, y es el volumen con el que se reorienta y analiza de aquí en más.")
+				self.cine_crudo_recon_feta_btn.setText("2 · Recortar VI")
+				self.cine_crudo_recon_feta_btn.setToolTip("Paso 2. Reconstruye SOLO la banda axial (feta) entre las líneas Base/Ápex de esta pantalla. Flujo: 1) 'Reconstruir' (FBP rápido) para ver el corazón; 2) ajustá Base/Ápex sobre las líneas rojas; 3) 'Recortar VI'. Excluye la actividad extracardíaca de arriba/abajo, es más rápido, y es el volumen con el que se reorienta y analiza de aquí en más.")
 				self.cine_crudo_recon_feta_btn.clicked.connect(lambda: self._reconstruct_cine_crudo_raw(feta_only=True))
-				toolbar6_r2.addWidget(self.cine_crudo_recon_feta_btn)
 				self.cine_crudo_reorient_btn = QToolButton()
-				self.cine_crudo_reorient_btn.setText("Reorientar")
-				self.cine_crudo_reorient_btn.setToolTip("Abre la reorientación oblicua interactiva (Rec/Ref estilo Xeleris): definí eje largo del VI en vistas anterior/lateral, ROI y límites Base/Ápex, con preview SA/HLA/VLA en vivo.")
+				self.cine_crudo_reorient_btn.setText("3 · Reorientar")
+				self.cine_crudo_reorient_btn.setToolTip("Paso 3. Abre la reorientación oblicua interactiva (Rec/Ref estilo Xeleris): definí eje largo del VI en vistas anterior/lateral, ROI y límites Base/Ápex, con preview SA/HLA/VLA en vivo.")
 				self.cine_crudo_reorient_btn.clicked.connect(self._open_cine_crudo_reorientation)
 				self.cine_crudo_reorient_btn.setEnabled(False)
-				toolbar6_r2.addWidget(self.cine_crudo_reorient_btn)
 				toolbar6_r2.addWidget(QLabel("Base"))
 				self.cine_crudo_cut_base_spin = QSpinBox()
 				self.cine_crudo_cut_base_spin.setRange(1, 1)
@@ -2501,11 +2498,11 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_save_axes_dcm_btn.setEnabled(False)
 				toolbar6_r3.addWidget(self.cine_crudo_save_axes_dcm_btn)
 				self.cine_crudo_process_recon_btn = QToolButton()
-				self.cine_crudo_process_recon_btn.setText("Procesar recon")
-				self.cine_crudo_process_recon_btn.setToolTip("Procesa fase/FEVI desde cortes SA. Con Esfuerzo+Reposo generados, procesa automáticamente AMBAS etapas y arma la comparación.")
+				self.cine_crudo_process_recon_btn.setText("4 · Procesar")
+				self.cine_crudo_process_recon_btn.setToolTip("Paso 4. Procesa fase/FEVI desde cortes SA. Con Esfuerzo+Reposo generados, procesa automáticamente AMBAS etapas y arma la comparación.")
 				self.cine_crudo_process_recon_btn.clicked.connect(self._process_cine_crudo_reconstruction)
 				self.cine_crudo_process_recon_btn.setEnabled(False)
-				toolbar6_r3.addWidget(self.cine_crudo_process_recon_btn)
+				# Se agrega a la barra de flujo (abajo), no al popup r3.
 				self.cine_crudo_copy_rois_to_rest_btn = QToolButton()
 				self.cine_crudo_copy_rois_to_rest_btn.setText("ROI E→R")
 				self.cine_crudo_copy_rois_to_rest_btn.setToolTip("Copia los ROI manuales de Esfuerzo a Reposo como punto inicial. Después podés ajustar Reposo fino en el cine.")
@@ -2525,6 +2522,43 @@ class MainWindow(QMainWindow):
 				# reconstrucción, montaje) vive en un botón con menú. A
 				# diferencia de un panel colapsable, el menú es un popup que
 				# flota por encima y NUNCA cambia el tamaño de la imagen.
+				# Barra de flujo: los pasos en orden (izquierda→derecha). Las acciones
+				# se movieron acá desde los popups; los popups quedan para ajuste fino
+				# (método de recon, filtros, corrección de movimiento, Base/Ápex). El
+				# selector "Etapa" gobierna por índice el combo oculto de Recon raw.
+				flow_row = QHBoxLayout()
+				flow_row.setContentsMargins(0, 0, 0, 0)
+				flow_row.setSpacing(6)
+				flow_row.addWidget(QLabel("Etapa"))
+				flow_row.addWidget(self.cine_crudo_stage_combo)
+				self.cine_crudo_stage_combo.currentIndexChanged.connect(
+					self.cine_crudo_recon_stage_combo.setCurrentIndex)
+				# Fusión va justo después de 'Reconstruir': cuando hay CT presente,
+				# una de sus funciones es marcar los límites de la feta. Solo se
+				# activa si hay CT (setEnabled lo gobierna en otra parte).
+				flow_row.addWidget(self.cine_crudo_recon_btn)
+				flow_row.addWidget(self.cine_crudo_fusion_btn)
+				flow_row.addWidget(self.cine_crudo_recon_feta_btn)
+				flow_row.addWidget(self.cine_crudo_reorient_btn)
+				flow_row.addWidget(self.cine_crudo_process_recon_btn)
+				flow_row.addStretch(1)
+				# Color por paso: ayuda a memorizar la secuencia de un vistazo.
+				def _flow_btn_style(bg: str) -> str:
+					return (
+						f"QToolButton, QPushButton {{ background-color: {bg}; color: white;"
+						f" border: 1px solid {bg}; border-radius: 4px; padding: 3px 8px; font-weight: bold; }}"
+						f"QToolButton:disabled, QPushButton:disabled {{ background-color: #3a3a3a; color: #888; border-color: #3a3a3a; }}"
+						f"QToolButton:hover, QPushButton:hover {{ border: 1px solid #ffffff; }}"
+					)
+				self.cine_crudo_stage_combo.setStyleSheet(
+					"QComboBox { border: 2px solid #6b7280; border-radius: 4px; padding: 2px 6px; font-weight: bold; }")
+				self.cine_crudo_recon_btn.setStyleSheet(_flow_btn_style("#2563eb"))
+				self.cine_crudo_fusion_btn.setStyleSheet(_flow_btn_style("#0891b2"))
+				self.cine_crudo_recon_feta_btn.setStyleSheet(_flow_btn_style("#16a34a"))
+				self.cine_crudo_reorient_btn.setStyleSheet(_flow_btn_style("#ea580c"))
+				self.cine_crudo_process_recon_btn.setStyleSheet(_flow_btn_style("#7c3aed"))
+				tab_layout.addLayout(flow_row)
+
 				groups_row = QHBoxLayout()
 				groups_row.addWidget(self._build_toolbar_group_menu(
 					"Corrección de movimiento ▾", [toolbar2, toolbar3, toolbar_export],
@@ -2533,7 +2567,7 @@ class MainWindow(QMainWindow):
 					side_widget=self.cine_crudo_correct_side,
 				))
 				groups_row.addWidget(self._build_toolbar_group_menu(
-					"Reconstrucción desde crudo ▾", [toolbar6_r1, toolbar6_r2, toolbar6_r_filters, toolbar6_r_filters_g, toolbar6_r3],
+					"Panel de control de filtros ▾", [toolbar6_r1, toolbar6_r2, toolbar6_r_filters, toolbar6_r_filters_g, toolbar6_r3],
 					key="cine_crudo_reconstruccion",
 					tooltip="Reconstrucción FBP/MLEM/OSEM, filtros de ungated/gated, reorientación y generación de cortes de eje.",
 				))
@@ -13337,6 +13371,17 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_stage_combo.blockSignals(True)
 				self.cine_crudo_stage_combo.setCurrentText(label)
 				self.cine_crudo_stage_combo.blockSignals(False)
+		# El selector visible "Etapa" gobierna por índice el combo oculto de
+		# Recon raw. En cambios por señal ya se sincroniza solo, pero en cambios
+		# programáticos (dual load, orquestador) la señal va bloqueada arriba, así
+		# que lo alineo explícitamente acá.
+		recon_combo = getattr(self, "cine_crudo_recon_stage_combo", None)
+		if recon_combo is not None:
+			recon_idx = {"stress": 0, "rest": 1, "both": 2}[stage]
+			if recon_combo.currentIndex() != recon_idx:
+				recon_combo.blockSignals(True)
+				recon_combo.setCurrentIndex(recon_idx)
+				recon_combo.blockSignals(False)
 		if changed:
 			etapa = {"stress": "Esfuerzo", "rest": "Reposo", "both": "Ambas (esfuerzo + reposo)"}[stage]
 			self._log(f"Etapa activa del crudo: {etapa} — las herramientas actúan sobre esa(s) etapa(s).")
