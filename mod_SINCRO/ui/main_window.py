@@ -1215,24 +1215,26 @@ class MainWindow(QMainWindow):
 		insert_at = self._sidebar_layout.indexOf(self._progress_bar) + 1
 		self._sidebar_layout.insertWidget(insert_at, button_box)
 
-		roi_box = QGroupBox("ROI manual por slice")
-		roi_layout = QVBoxLayout(roi_box)
-		roi_layout.setContentsMargins(6, 6, 6, 6)
-		roi_layout.setSpacing(4)
+		# ROI manual por slice: reubicado del sidebar a un popup flotante anclado
+		# a la banda ASINCRONÍA (junto a "vista asincronía"), donde vive el visor
+		# en el que se dibujan los ROI. Las filas se arman como layouts para
+		# alimentar el group-menu flotante (mismo patrón que Procesamiento).
 		roi_note = QLabel("Editá ROI en el visor o pegá líneas slice,cy,cx,r_inner,r_outer.")
 		roi_note.setWordWrap(True)
 		roi_note.setStyleSheet("color:#555;")
-		roi_layout.addWidget(roi_note)
-		roi_layout.addWidget(self.manual_rois)
+		roi_note_row = QHBoxLayout()
+		roi_note_row.addWidget(roi_note)
+		roi_editor_row = QHBoxLayout()
+		roi_editor_row.addWidget(self.manual_rois)
 		roi_actions_top = QHBoxLayout()
 		roi_actions_top.addWidget(self.apply_roi_all_btn)
 		roi_actions_top.addStretch(1)
-		roi_layout.addLayout(roi_actions_top)
 
 		roi_adjust_note = QLabel("Ajuste Auto ROI desde slice actual: propagá centro/radios al volumen.")
 		roi_adjust_note.setWordWrap(True)
 		roi_adjust_note.setStyleSheet("color:#555;")
-		roi_layout.addWidget(roi_adjust_note)
+		roi_adjust_note_row = QHBoxLayout()
+		roi_adjust_note_row.addWidget(roi_adjust_note)
 
 		roi_delta_grid = QGridLayout()
 		roi_delta_grid.setHorizontalSpacing(4)
@@ -1266,7 +1268,6 @@ class MainWindow(QMainWindow):
 		self.reset_roi_deltas_btn = QPushButton("Reset")
 		self.reset_roi_deltas_btn.clicked.connect(self.reset_roi_adjust_deltas)
 		roi_delta_grid.addWidget(self.reset_roi_deltas_btn, 3, 1)
-		roi_layout.addLayout(roi_delta_grid)
 		self._update_roi_adjust_labels()
 
 		roi_range_row = QHBoxLayout()
@@ -1278,7 +1279,6 @@ class MainWindow(QMainWindow):
 		self.auto_adjust_range_spin.setToolTip("Cuántos slices a cada lado del slice de referencia se ajustan. 'todos' aplica al volumen completo.")
 		roi_range_row.addWidget(self.auto_adjust_range_spin)
 		roi_range_row.addStretch(1)
-		roi_layout.addLayout(roi_range_row)
 
 		roi_adjust_actions = QGridLayout()
 		roi_adjust_actions.setHorizontalSpacing(4)
@@ -1295,7 +1295,6 @@ class MainWindow(QMainWindow):
 		roi_adjust_actions.addWidget(self.adjust_auto_inner_btn, 0, 1)
 		roi_adjust_actions.addWidget(self.adjust_auto_outer_btn, 1, 0)
 		roi_adjust_actions.addWidget(self.adjust_auto_full_btn, 1, 1)
-		roi_layout.addLayout(roi_adjust_actions)
 
 		roi_actions_mid = QGridLayout()
 		roi_actions_mid.setHorizontalSpacing(4)
@@ -1323,9 +1322,15 @@ class MainWindow(QMainWindow):
 		roi_actions_bottom.addWidget(self.clear_centers_btn, 0, 1)
 		roi_actions_bottom.addWidget(self.reset_file_btn, 1, 0, 1, 2)
 
-		roi_layout.addLayout(roi_actions_mid)
-		roi_layout.addLayout(roi_actions_bottom)
-		self._sidebar_layout.addWidget(roi_box)
+		# Group-menu flotante "ROI manual": el botón se ancla luego en la banda
+		# ASINCRONÍA (async_btn_row), junto al botón "vista asincronía".
+		self._roi_manual_btn = self._build_toolbar_group_menu(
+			"⚙ ROI manual ▾",
+			[roi_note_row, roi_editor_row, roi_actions_top, roi_adjust_note_row,
+			 roi_delta_grid, roi_range_row, roi_adjust_actions, roi_actions_mid, roi_actions_bottom],
+			key="roi_manual_por_slice",
+			tooltip="Editor de ROI manual por slice, auto-ajuste y borrado. Se abre junto al visor de asincronía.",
+		)
 
 		compare_box = QGroupBox("Comparación ejes")
 		compare_layout = QVBoxLayout(compare_box)
@@ -2765,6 +2770,7 @@ class MainWindow(QMainWindow):
 		async_btn_row = QHBoxLayout()
 		async_btn_row.setContentsMargins(4, 0, 4, 0)
 		async_btn_row.addWidget(self.asynchrony_review_btn)
+		async_btn_row.addWidget(self._roi_manual_btn)
 		async_btn_row.addStretch(1)
 		lower_cine_layout.addLayout(async_btn_row)
 		lower_cine_layout.addWidget(self.bottom_hsplit)
