@@ -170,6 +170,42 @@ def _recon_stage_prop(field: str) -> property:
 	return property(fget, fset)
 
 
+class _AspectPixmapLabel(QLabel):
+	"""QLabel que guarda su pixmap original y lo escala manteniendo aspect ratio
+	dentro del área disponible, re-escalando al redimensionar. Evita que las
+	curvas salgan 'con zoom' por escalar solo al ancho con el tamaño de un
+	instante (timing de layout, dual vs simple)."""
+
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self._source_pixmap: QPixmap | None = None
+
+	def setSourcePixmap(self, pix: QPixmap | None) -> None:
+		self._source_pixmap = pix if (pix is not None and not pix.isNull()) else None
+		if self._source_pixmap is None:
+			super().setPixmap(QPixmap())
+			return
+		self.setText("")
+		self._rescale_source()
+
+	def clearSourcePixmap(self) -> None:
+		self._source_pixmap = None
+		super().setPixmap(QPixmap())
+
+	def _rescale_source(self) -> None:
+		if self._source_pixmap is None:
+			return
+		w = max(1, self.width() - 4)
+		h = max(1, self.height() - 4)
+		super().setPixmap(self._source_pixmap.scaled(
+			w, h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+		))
+
+	def resizeEvent(self, event):
+		super().resizeEvent(event)
+		self._rescale_source()
+
+
 class MainWindow(QMainWindow):
 	# Registro de layouts de presentación del montaje SA/VLA/HLA.
 	# per_strip = cortes visibles por tira/eje (None = todos). panel_in = pulgadas por panel.
@@ -3230,7 +3266,7 @@ class MainWindow(QMainWindow):
 		lay.setContentsMargins(3, 3, 3, 3)
 		lay.setSpacing(3)
 		def _curve_label(text: str) -> QLabel:
-			label = QLabel(text)
+			label = _AspectPixmapLabel(text)
 			label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 			label.setMinimumHeight(96)
 			label.setStyleSheet("color:#5b6470; background:#0b1220; border:1px solid #26324a;")
@@ -3250,39 +3286,51 @@ class MainWindow(QMainWindow):
 		self.curves_panel = panel
 		return panel
 
+	def _set_curve_pixmap(self, label: QLabel, pix: QPixmap) -> None:
+		"""Asigna un pixmap de curva preservando aspect ratio. Si el label soporta
+		re-escalado en resize (_AspectPixmapLabel), delega en él; si no, cae al
+		escalado por ancho."""
+		setter = getattr(label, "setSourcePixmap", None)
+		if callable(setter):
+			setter(pix)
+			return
+		label.setText("")
+		label.setPixmap(pix.scaledToWidth(max(240, label.width() - 4), Qt.TransformationMode.SmoothTransformation))
+
+	def _clear_curve_pixmap(self, label: QLabel, placeholder: str = "") -> None:
+		clr = getattr(label, "clearSourcePixmap", None)
+		if callable(clr):
+			clr()
+		else:
+			label.setPixmap(QPixmap())
+		label.setText(placeholder)
+
 	def _load_curve_pixmap(self, label: QLabel, filename: str, placeholder: str) -> None:
-		"""Carga un PNG ya renderizado (desde output_dir) en un QLabel escalado al
-		ancho disponible. Si el archivo no existe, deja un placeholder."""
+		"""Carga un PNG ya renderizado (desde output_dir) en un QLabel escalado
+		manteniendo aspect ratio. Si el archivo no existe, deja un placeholder."""
 		try:
 			path = os.path.join(self.output_dir, filename)
 		except Exception:
 			path = ""
 		if not path or not os.path.isfile(path):
-			label.setPixmap(QPixmap())
-			label.setText(placeholder)
+			self._clear_curve_pixmap(label, placeholder)
 			return
 		pix = QPixmap(path)
 		if pix.isNull():
-			label.setPixmap(QPixmap())
-			label.setText(placeholder)
+			self._clear_curve_pixmap(label, placeholder)
 			return
-		target_w = max(240, label.width() - 4)
-		label.setText("")
-		label.setPixmap(pix.scaledToWidth(target_w, Qt.TransformationMode.SmoothTransformation))
+		self._set_curve_pixmap(label, pix)
 
 	def _load_curve_pixmap_from_path(self, label: QLabel, path: str, placeholder: str) -> None:
 		"""Carga una curva desde una ruta explícita (salida de la 2da etapa)."""
 		if not path or not os.path.isfile(path):
-			label.setPixmap(QPixmap())
-			label.setText(placeholder)
+			self._clear_curve_pixmap(label, placeholder)
 			return
 		pix = QPixmap(path)
 		if pix.isNull():
-			label.setPixmap(QPixmap())
-			label.setText(placeholder)
+			self._clear_curve_pixmap(label, placeholder)
 			return
-		label.setText("")
-		label.setPixmap(pix.scaledToWidth(max(200, label.width() - 4), Qt.TransformationMode.SmoothTransformation))
+		self._set_curve_pixmap(label, pix)
 
 	def _render_empty_curve(self, label: QLabel, xlabel: str, ylabel: str, filename: str) -> None:
 		"""Dibuja unos ejes X/Y vacíos (sin datos) en `label`, para no dejar
@@ -3308,12 +3356,9 @@ class MainWindow(QMainWindow):
 			fig.savefig(out, dpi=140, facecolor=bg, bbox_inches="tight")
 			plt.close(fig)
 			pix = QPixmap(out)
-			target_w = max(240, label.width() - 4)
-			label.setText("")
-			label.setPixmap(pix.scaledToWidth(target_w, Qt.TransformationMode.SmoothTransformation))
+			self._set_curve_pixmap(label, pix)
 		except Exception:
-			label.setPixmap(QPixmap())
-			label.setText("")
+			self._clear_curve_pixmap(label)
 
 	def _visual_style_dict(self) -> dict:
 		"""Paleta de los paneles clínicos (curva FEVI, panel funcional gated,
@@ -3400,9 +3445,7 @@ class MainWindow(QMainWindow):
 			fig.savefig(out, dpi=140, facecolor=style["fig_bg"], bbox_inches="tight")
 			plt.close(fig)
 			pix = QPixmap(out)
-			target_w = max(240, label.width() - 4)
-			label.setText("")
-			label.setPixmap(pix.scaledToWidth(target_w, Qt.TransformationMode.SmoothTransformation))
+			self._set_curve_pixmap(label, pix)
 			return True
 		except Exception:
 			return False
@@ -5423,7 +5466,26 @@ class MainWindow(QMainWindow):
 			"QProgressBar { border: 1px solid #555; border-radius: 4px; text-align: center; background: #222; height: 16px; }"
 			" QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0066cc, stop:1 #00cc88); border-radius: 3px; }"
 		)
-		self._sidebar_layout.addWidget(self._progress_bar)
+		# Mascota (Rockford) como indicador de actividad: corre mientras procesa.
+		self._progress_gif = QLabel()
+		self._progress_gif.setFixedSize(22, 22)
+		self._progress_gif.setStyleSheet("background: transparent; border: none;")
+		self._progress_movie = None
+		gif_path = os.path.join(assets_dir, "rockford-boulder-dash_sidebar.gif")
+		if os.path.exists(gif_path):
+			movie = QMovie(gif_path)
+			movie.setScaledSize(QSize(22, 22))
+			self._progress_gif.setMovie(movie)
+			movie.start()
+			self._progress_movie = movie
+		progress_row = QWidget()
+		progress_row.setStyleSheet("background: transparent;")
+		_prow = QHBoxLayout(progress_row)
+		_prow.setContentsMargins(0, 0, 0, 0)
+		_prow.setSpacing(5)
+		_prow.addWidget(self._progress_gif, 0)
+		_prow.addWidget(self._progress_bar, 1)
+		self._sidebar_layout.addWidget(progress_row)
 
 		scroll.setWidget(container)
 		layout = QVBoxLayout(sidebar)
@@ -15136,11 +15198,15 @@ class MainWindow(QMainWindow):
 			pass
 		_fus_progress(90, "Mostrando fusión…")
 		panel.show()
-		panel.raise_()
-		panel.activateWindow()
 		_fus_progress(100, "Fusión lista")
+		# Cerrar el diálogo modal ANTES de elevar el panel: al cerrarse reactiva a
+		# su parent (la ventana principal) y taparía la fusión. El singleShot gana
+		# esa reactivación asíncrona y deja el panel al frente.
 		fus_dialog.close()
 		fus_dialog.deleteLater()
+		panel.raise_()
+		panel.activateWindow()
+		QTimer.singleShot(0, lambda: (panel.raise_(), panel.activateWindow()))
 
 	def _on_fusion_panel_stage_changed(self, stage: str):
 		"""El combo Etapa del panel de fusión pidió cargar la otra etapa."""
@@ -15266,6 +15332,14 @@ class MainWindow(QMainWindow):
 		try:
 			att = getattr(panel, "_att_map_registered", None)
 			ct = getattr(panel, "_ct_registered", None)
+			# La CT registrada se hornea en la orientación del registro; el panel le
+			# suma como delta VISUAL los flips que el usuario tocó DESPUÉS de registrar.
+			# El µ-map para AC debe salir con ese delta ya aplicado, o la fusión se ve
+			# bien en pantalla pero la AC/QC queda espejada respecto del SPECT.
+			if ct is not None:
+				_vt = getattr(panel, "_ct_registered_visual_transform", None)
+				if callable(_vt):
+					ct = np.asarray(_vt(np.asarray(ct, dtype=np.float64)), dtype=np.float64)
 			conv_notes: list[str] = []
 			if att is not None:
 				mu = np.clip(np.asarray(att, dtype=np.float64), 0.0, None)

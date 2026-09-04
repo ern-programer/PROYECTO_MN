@@ -1041,6 +1041,11 @@ class PerfusionFusionPanel(QDialog):
         self._ct_flip_x_test = False
         self._ct_flip_y_test = False
         self._ct_flip_z_test = False
+        # Flips (x,y,z) horneados en la CT/SPECT al momento del registro. La vista
+        # aplica solo el DELTA contra los flips vigentes; deben persistir por etapa
+        # o al volver a una etapa el delta sale con la firma de la otra (CT girada).
+        self._ct_registered_flip_signature = (False, False, False)
+        self._spect_registered_flip_signature = (False, False, False)
         self._ct_window = "bone"
         # Ventana CT manual (WL/WW en HU) — se sincroniza con presets y con
         # el ventaneo interactivo por botón del medio.
@@ -1052,6 +1057,7 @@ class PerfusionFusionPanel(QDialog):
         self._ct_opacity_pct = 100
         self._ct_visual_trial_mode = True
         self._ct_grid_trial_mode = False
+        self._ct_native_factor = 2  # multiplicador de resolución de la grilla CT nativa (2..5)
         self._trial_cache_signature = None
         self._trial_spect_on_ct = None
         self._trial_ct_native = None
@@ -2510,6 +2516,19 @@ class PerfusionFusionPanel(QDialog):
         self._ct_grid_trial_check.setStyleSheet("font-size:10px; color:#f59e0b; font-weight:600;")
         self._ct_grid_trial_check.toggled.connect(self._on_ct_grid_trial_toggled)
         trial_grid_row.addWidget(self._ct_grid_trial_check)
+        self._ct_native_factor_combo = QComboBox()
+        for _f in (2, 3, 4, 5):
+            self._ct_native_factor_combo.addItem(f"{_f}\u00d7", _f)
+        self._ct_native_factor_combo.setCurrentIndex(0)
+        self._ct_native_factor_combo.setFixedWidth(52)
+        self._ct_native_factor_combo.setToolTip(
+            "Resolución de la grilla CT nativa (2\u00d7 a 5\u00d7 la del SPECT).\n"
+            "Más resolución = CT más nítida pero más lento. La coregistración\n"
+            "no cambia: registrá en 2\u00d7 y subí el factor para inspeccionar."
+        )
+        self._ct_native_factor_combo.setStyleSheet("font-size:10px;")
+        self._ct_native_factor_combo.currentIndexChanged.connect(self._on_ct_native_factor_changed)
+        trial_grid_row.addWidget(self._ct_native_factor_combo)
         trial_grid_row.addStretch()
         # Botón info CT (i en círculo)
         self._ct_info_btn = QPushButton("\u2139\ufe0f")
@@ -3762,7 +3781,7 @@ class PerfusionFusionPanel(QDialog):
 
     def _ct_registered_visual_transform(self, volume: np.ndarray) -> np.ndarray:
         vol = np.asarray(volume, dtype=np.float64)
-        registered = getattr(self, "_ct_registered_flip_signature", (False, False, False))
+        registered = getattr(self, "_ct_registered_flip_signature", None) or (False, False, False)
         current = (
             bool(getattr(self, "_ct_flip_x_test", False)),
             bool(getattr(self, "_ct_flip_y_test", False)),
@@ -6003,15 +6022,17 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         # CT nítido + SPECT bien dimensionado en grilla 2x del SPECT.
         spect_sp = self._spect_spacing_zyx or (6.8, 6.8, 6.8)
         ct_sp = self._ct_spacing_zyx or (1.0, 1.0, 1.0)
-        target_shape = tuple(int(spect_tx.shape[i] * 2) for i in range(3))
-        target_spacing = tuple(float(spect_sp[i]) / 2.0 for i in range(3))
+        nf = int(getattr(self, "_ct_native_factor", 2))
+        nf = max(2, min(5, nf))
+        target_shape = tuple(int(spect_tx.shape[i] * nf) for i in range(3))
+        target_spacing = tuple(float(spect_sp[i]) / float(nf) for i in range(3))
 
         spect_affine_2x = None
         if self._spect_affine_ijk_to_lps is not None:
             sa = np.asarray(self._spect_affine_ijk_to_lps, dtype=np.float64).copy()
-            sa[0, 0] /= 2.0
-            sa[1, 1] /= 2.0
-            sa[2, 2] /= 2.0
+            sa[0, 0] /= float(nf)
+            sa[1, 1] /= float(nf)
+            sa[2, 2] /= float(nf)
             spect_affine_2x = sa
 
         ct_native, _ct_notes = resample_volume_to_spect_grid(
@@ -6025,9 +6046,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             order=1,
         )
 
-        # SPECT → grilla objetivo: zoom exacto ×2 (el affine de adquisición
+        # SPECT → grilla objetivo: zoom exacto ×nf (el affine de adquisición
         # deformaba el SPECT en estos crudos).
-        spect_on_ct = ndi.zoom(spect_tx, 2.0, order=1, prefilter=False)
+        spect_on_ct = ndi.zoom(spect_tx, float(nf), order=1, prefilter=False)
         if spect_on_ct.shape != tuple(target_shape):
             pad = np.full(target_shape, float(np.min(spect_tx)) if spect_tx.size else 0.0, dtype=np.float64)
             sl = tuple(slice(0, min(spect_on_ct.shape[d], target_shape[d])) for d in range(3))
@@ -6071,10 +6092,10 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                     )
 
         if hasattr(self, '_metrics'):
-            self._metrics.append("[CT-NATIVE] SPECT remuestreado a grilla 2x por zoom exacto (sin affine).")
+            self._metrics.append(f"[CT-NATIVE] SPECT remuestreado a grilla {nf}x por zoom exacto (sin affine).")
             self._metrics.append(
                 f"[CT-NATIVE] SPECT {spect_tx.shape} → grid {spect_on_ct.shape} | "
-                f"CT {ct_tx.shape} → {ct_native.shape} (2x SPECT res)"
+                f"CT {ct_tx.shape} → {ct_native.shape} ({nf}x SPECT res)"
             )
             sp_nonzero = np.argwhere(spect_on_ct > float(np.percentile(spect_on_ct, 90)))
             if len(sp_nonzero) > 0:
@@ -6118,6 +6139,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             float(self._rot_z.value()) if hasattr(self, '_rot_z') else 0.0,  # rot Z nudge
             float(self._rot_y.value()) if hasattr(self, '_rot_y') else 0.0,  # rot Y nudge
             float(self._rot_x.value()) if hasattr(self, '_rot_x') else 0.0,  # rot X nudge
+            int(getattr(self, '_ct_native_factor', 2)),  # factor de resolución de la grilla CT nativa
         )
         if sig == self._trial_cache_signature and self._trial_spect_on_ct is not None and self._trial_ct_native is not None:
             return True
@@ -6137,6 +6159,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 tuple(np.asarray(self._ct_affine_ijk_to_lps).ravel()) if self._ct_affine_ijk_to_lps is not None else None,
                 tuple(self._spect_spacing_zyx) if self._spect_spacing_zyx is not None else None,
                 tuple(self._ct_spacing_zyx) if self._ct_spacing_zyx is not None else None,
+                int(getattr(self, '_ct_native_factor', 2)),  # el factor cambia la grilla base
             )
             if (
                 base_sig != getattr(self, "_trial_base_sig", None)
@@ -6175,16 +6198,17 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             resid = getattr(self, '_trial_reg_residual_zyx', (0.0, 0.0, 0.0))
             eff_shift = tuple(float(t) + float(r) for t, r in zip(total_shift, resid))
             if any(abs(s) > 0.01 for s in eff_shift):
+                nf = float(max(2, min(5, int(getattr(self, '_ct_native_factor', 2)))))
                 shift_target = (
-                    float(eff_shift[0]) * 2.0,
-                    float(eff_shift[1]) * 2.0,
-                    float(eff_shift[2]) * 2.0,
+                    float(eff_shift[0]) * nf,
+                    float(eff_shift[1]) * nf,
+                    float(eff_shift[2]) * nf,
                 )
                 ct_native = ndi.shift(ct_native, shift=shift_target, order=1, mode='nearest')
                 if hasattr(self, '_metrics'):
                     self._metrics.append(
                         f"[CT-NATIVE] Shift registro aplicado: "
-                        f"Δ(z,y,x)=({shift_target[0]:.1f},{shift_target[1]:.1f},{shift_target[2]:.1f}) px (grid 2x)"
+                        f"Δ(z,y,x)=({shift_target[0]:.1f},{shift_target[1]:.1f},{shift_target[2]:.1f}) px (grid {int(nf)}x)"
                     )
             
             # Mismos DELTAS de flips que la CT registrada → coordinación exacta
@@ -6215,6 +6239,24 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             if hasattr(self, "_metrics"):
                 self._metrics.append("[PRUEBA/BETA] CT nativa + SPECT escalado a CT desactivado (rollback aplicado).")
         self._render_current_with_overlay()
+
+    def _on_ct_native_factor_changed(self, _index: int):
+        data = self._ct_native_factor_combo.currentData()
+        nf = int(data) if data is not None else 2
+        nf = max(2, min(5, nf))
+        if nf == int(getattr(self, "_ct_native_factor", 2)):
+            return
+        self._ct_native_factor = nf
+        # Cambia la grilla base: hay que reconstruirla (resample + auto-flip).
+        self._invalidate_ct_grid_trial_cache()
+        if hasattr(self, "_metrics"):
+            self._metrics.append(f"[CT-NATIVE] Factor de resolución cambiado a {nf}x (reconstruye grilla).")
+        if nf >= 4:
+            self._status.setText(f"CT nativa a {nf}× · reconstruyendo grilla (puede tardar)…")
+        else:
+            self._status.setText(f"CT nativa a {nf}× aplicado.")
+        if bool(getattr(self, "_ct_grid_trial_mode", False)):
+            self._render_current_with_overlay()
 
     # ─────────────────────────────────────────────
     # Diálogo: Rol del CT en amiloidosis cardíaca
@@ -6668,6 +6710,17 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         target = self._drag_state.get("target")
         if target == "ct" and self._ct_auto_registered is not None:
             dz, dyw, dxw = self._drag_delta_to_world_zyx(axis, dx, dy)
+            # El nudge se aplica sobre la CT en la orientación del REGISTRO; la vista
+            # le suma los flips como delta. Si un eje está flippeado respecto de esa
+            # firma, el arrastre en pantalla va al revés → invertir ese componente
+            # para que la CT siga al mouse con o sin flips activos.
+            sig = getattr(self, "_ct_registered_flip_signature", None) or (False, False, False)
+            if bool(getattr(self, "_ct_flip_z_test", False)) != bool(sig[2]):
+                dz = -dz
+            if bool(getattr(self, "_ct_flip_y_test", False)) != bool(sig[1]):
+                dyw = -dyw
+            if bool(getattr(self, "_ct_flip_x_test", False)) != bool(sig[0]):
+                dxw = -dxw
             self._nudge_z.setValue(float(np.clip(self._nudge_z.value() + dz, -64.0, 64.0)))
             self._nudge_y.setValue(float(np.clip(self._nudge_y.value() + dyw, -64.0, 64.0)))
             self._nudge_x.setValue(float(np.clip(self._nudge_x.value() + dxw, -64.0, 64.0)))
@@ -7433,6 +7486,50 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         self._metrics.append("[CT-STATE] Reinicio completo de segmentación CT.")
         self._render_selected_view()
 
+    def _clean_stage_mask_and_center(self):
+        """Deja la etapa lista para empezar de cero: borra la máscara/segmentación
+        CT y desactiva el Centro de Masa. Versión silenciosa de 'Borrar máscara'
+        (_restart_ct_state), pensada para el cambio de etapa cuando la etapa previa
+        ya está grabada (así el operador no tiene que limpiar a mano)."""
+        self._ct_segmentation = None
+        self._hmr_result = None
+        self._pve_result = None
+        self._bone_mask = None
+        self._pre_bone_volume = None
+        self._mask_edit_active = False
+        self._mask_edit_original = None
+        if hasattr(self, "_mask_edit_undo_stack"):
+            self._mask_edit_undo_stack.clear()
+        self._mask_edit_has_changes = False
+        self._reuse_edited_segmentation = False
+        self._mask_was_manually_edited = False
+        self._auto_cube_bbox_cached = None
+        for _btn_name in (
+            "_btn_toggle_mask_edit", "_btn_undo_mask", "_btn_reset_mask",
+            "_btn_apply_mask_edit", "_btn_export_mask_nifti",
+            "_btn_save_ct_state", "_btn_restart_ct",
+        ):
+            _b = getattr(self, _btn_name, None)
+            if _b is not None:
+                _b.setEnabled(False)
+        if hasattr(self, "_mask_edit_status"):
+            self._mask_edit_status.setText("Modo manual estable: VOIs esféricas ancladas en A/B")
+        if hasattr(self, "_lbl_hmr_result"):
+            self._lbl_hmr_result.setText("HMR-SPECT = N/D · recalcular")
+            self._lbl_hmr_result.setStyleSheet(
+                "font-size:14px; font-weight:700; color:#ffffff; "
+                "background:#000000; padding:6px 12px;"
+            )
+        if hasattr(self, "_ct_anatomical_check"):
+            self._ct_anatomical_check.setChecked(True)
+        # Desactivar Centro de Masa: setChecked dispara _on_localization_cross_toggled,
+        # que apaga la cruz de localización y re-renderiza.
+        btn_com = getattr(self, "_btn_localization_cross", None)
+        if btn_com is not None:
+            btn_com.setChecked(False)
+        else:
+            self._localization_cross_enabled = False
+
     def _axis_label(self, axis: str) -> QLabel:
         if axis == "axial":
             return self._axial_lbl
@@ -7686,86 +7783,112 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         """Configura el widget MIP rotatorio con el volumen y VOIs actuales."""
         if not hasattr(self, "_mip_widget"):
             return
-        
-        # === Optimización: cachear el volumen transformado para no recalcular en cada scroll ===
-        vol_id = id(self._current_volume)
-        flip_sig = (
-            bool(getattr(self, "_spect_flip_x_test", False)),
-            bool(getattr(self, "_spect_flip_y_test", False)),
-            bool(getattr(self, "_spect_flip_z_test", False)),
-        )
-        cache_sig = (vol_id, flip_sig)
-        if cache_sig != getattr(self, "_mip_vol_cache_sig", None):
-            # Solo recalcular si cambió el volumen o los flips
-            if self._current_volume is not None:
-                spacing = getattr(self, "_voxel_spacing_mm", (4.0, 4.0, 4.0))
-                vol_tx = self._spect_transform_3d(np.asarray(self._current_volume, dtype=np.float64))
-                self._mip_widget.set_volume(vol_tx, spacing)
-            else:
-                self._mip_widget.set_volume(None)
-            # Volumen sin filtro
-            _uf = getattr(self, "_unfiltered_volume", None)
-            if _uf is not None:
-                _uf_tx = self._spect_transform_3d(np.asarray(_uf, dtype=np.float64))
-                self._mip_widget.set_volume_unfiltered(_uf_tx)
-            else:
-                self._mip_widget.set_volume_unfiltered(None)
-            self._mip_vol_cache_sig = cache_sig
-        
+
+        # Preferir CT de alta resolución (grilla nativa 2x) para el MIP CT/fusión:
+        # la CT remuestreada a la grilla SPECT se ve con barrido/escalones. El
+        # SPECT se sube a la misma grilla 2x para que la fusión siga alineada.
+        hires = False
+        try:
+            if self._ct_registered is not None and self._ensure_ct_grid_trial_cache():
+                _sp = getattr(self, "_trial_spect_on_ct", None)
+                _ct = getattr(self, "_trial_ct_native", None)
+                if _sp is not None and _ct is not None and np.asarray(_sp).shape == np.asarray(_ct).shape:
+                    hires = True
+        except Exception:
+            hires = False
+
+        if hires:
+            cache_sig = ("hires", id(self._trial_spect_on_ct), id(self._trial_ct_native))
+            if cache_sig != getattr(self, "_mip_vol_cache_sig", None):
+                spacing = getattr(self, "_trial_ct_native_spacing", None) or getattr(self, "_voxel_spacing_mm", (4.0, 4.0, 4.0))
+                self._mip_widget.set_volume(np.asarray(self._trial_spect_on_ct, dtype=np.float64), spacing)
+                self._mip_widget.set_volume_unfiltered(None)  # no hay versión sin filtro en grilla 2x
+                self._mip_widget.set_ct_volume(np.asarray(self._trial_ct_native, dtype=np.float64))
+                self._mip_vol_cache_sig = cache_sig
+        else:
+            # === Optimización: cachear el volumen transformado para no recalcular en cada scroll ===
+            vol_id = id(self._current_volume)
+            flip_sig = (
+                bool(getattr(self, "_spect_flip_x_test", False)),
+                bool(getattr(self, "_spect_flip_y_test", False)),
+                bool(getattr(self, "_spect_flip_z_test", False)),
+            )
+            cache_sig = (vol_id, flip_sig)
+            if cache_sig != getattr(self, "_mip_vol_cache_sig", None):
+                # Solo recalcular si cambió el volumen o los flips
+                if self._current_volume is not None:
+                    spacing = getattr(self, "_voxel_spacing_mm", (4.0, 4.0, 4.0))
+                    vol_tx = self._spect_transform_3d(np.asarray(self._current_volume, dtype=np.float64))
+                    self._mip_widget.set_volume(vol_tx, spacing)
+                else:
+                    self._mip_widget.set_volume(None)
+                # Volumen sin filtro
+                _uf = getattr(self, "_unfiltered_volume", None)
+                if _uf is not None:
+                    _uf_tx = self._spect_transform_3d(np.asarray(_uf, dtype=np.float64))
+                    self._mip_widget.set_volume_unfiltered(_uf_tx)
+                else:
+                    self._mip_widget.set_volume_unfiltered(None)
+                self._mip_vol_cache_sig = cache_sig
+
         # Pasar colormap (siempre, por si cambió)
         self._mip_widget.set_colormap(self._apply_cmap)
-        
-        # Pasar VOIs si existen
-        voi_heart = None
-        voi_med = None
-        if self._hmr_result is not None:
-            voi_heart = getattr(self._hmr_result, "voi_heart", None)
-            voi_med = getattr(self._hmr_result, "voi_mediastinum", None)
-        # Fallback: VOIs temporales (mientras se colocan, antes de calcular H/M)
-        if voi_heart is None:
-            voi_heart = getattr(self, "_temp_voi_heart", None)
-        if voi_med is None:
-            voi_med = getattr(self, "_temp_voi_mediastinum", None)
+
         # PERFUSIÓN: los círculos de VOI no aportan (solo máscara sobre el MIP).
         self._mip_widget.set_vois(None, None)
-        
+
         # === Pasar máscara CT y cubo automático al MIP ===
         ct_seg = getattr(self, "_ct_segmentation", None)
         if ct_seg is not None:
             mask_3d = getattr(ct_seg, "mask_3d", None)
-            if mask_3d is not None:
-                # La máscara ya vive en la grilla de display (se segmentó sobre
-                # la CT registrada transformada): pasar tal cual. Aplicarle
-                # _spect_transform_3d otra vez la espejaba en el MIP.
-                self._mip_widget.set_mask_3d(np.asarray(mask_3d, dtype=bool))
-            else:
-                self._mip_widget.set_mask_3d(None)
-            
             # Cubo automático: guardar bbox la primera vez que se segmenta
             # (antes de edición manual)
             auto_bbox = getattr(self, "_auto_cube_bbox_cached", None)
-            if auto_bbox is None and not getattr(self, "_mask_was_manually_edited", False):
-                # Calcular bbox de la máscara actual (es la auto, no editada aún)
-                if mask_3d is not None:
-                    coords = np.argwhere(np.asarray(mask_3d, dtype=bool))
-                    if coords.size > 0:
-                        auto_bbox = (
-                            int(coords[:, 0].min()), int(coords[:, 0].max()),
-                            int(coords[:, 1].min()), int(coords[:, 1].max()),
-                            int(coords[:, 2].min()), int(coords[:, 2].max()),
-                        )
-                        self._auto_cube_bbox_cached = auto_bbox
-            self._mip_widget.set_auto_cube_bbox(auto_bbox)
+            if auto_bbox is None and not getattr(self, "_mask_was_manually_edited", False) and mask_3d is not None:
+                coords = np.argwhere(np.asarray(mask_3d, dtype=bool))
+                if coords.size > 0:
+                    auto_bbox = (
+                        int(coords[:, 0].min()), int(coords[:, 0].max()),
+                        int(coords[:, 1].min()), int(coords[:, 1].max()),
+                        int(coords[:, 2].min()), int(coords[:, 2].max()),
+                    )
+                    self._auto_cube_bbox_cached = auto_bbox
+            if mask_3d is not None:
+                # La máscara vive en la grilla de display. En hi-res se sube a la
+                # grilla 2x para que coincida con el volumen del MIP (si no, el
+                # widget la descarta por shape distinto).
+                mask_arr = np.asarray(mask_3d, dtype=bool)
+                bbox_out = auto_bbox
+                if hires:
+                    target_shape = np.asarray(self._trial_ct_native).shape
+                    if mask_arr.shape != target_shape:
+                        factors = tuple(t / max(1, s) for t, s in zip(target_shape, mask_arr.shape))
+                        mask_arr = ndi.zoom(mask_arr.astype(np.float32), factors, order=0) > 0.5
+                        if auto_bbox is not None:
+                            fz, fy, fx = factors
+                            z0, z1, y0, y1, x0, x1 = auto_bbox
+                            bbox_out = (
+                                int(z0 * fz), int(z1 * fz),
+                                int(y0 * fy), int(y1 * fy),
+                                int(x0 * fx), int(x1 * fx),
+                            )
+                self._mip_widget.set_mask_3d(mask_arr)
+                self._mip_widget.set_auto_cube_bbox(bbox_out)
+            else:
+                self._mip_widget.set_mask_3d(None)
+                self._mip_widget.set_auto_cube_bbox(None)
         else:
             self._mip_widget.set_mask_3d(None)
             self._mip_widget.set_auto_cube_bbox(None)
 
-        # CT registrada en grilla display para MIP CT/fusión (misma grilla que vol_tx).
-        if self._ct_registered is not None:
-            ct_mip = self._ct_registered_visual_transform(np.asarray(self._ct_registered, dtype=np.float64))
-            self._mip_widget.set_ct_volume(ct_mip)
-        else:
-            self._mip_widget.set_ct_volume(None)
+        # CT registrada (grilla display) para el MIP CT/fusión cuando NO hay
+        # hi-res disponible; en hi-res ya se pasó la CT nativa arriba.
+        if not hires:
+            if self._ct_registered is not None:
+                ct_mip = self._ct_registered_visual_transform(np.asarray(self._ct_registered, dtype=np.float64))
+                self._mip_widget.set_ct_volume(ct_mip)
+            else:
+                self._mip_widget.set_ct_volume(None)
 
     def _open_vrt_window(self):
         """Abre la ventana VRT 3D con CT en alta resolución + SPECT en su grilla."""
@@ -8270,6 +8393,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         "_ct_wl", "_ct_ww", "_ct_window",
         "_spect_flip_x_test", "_spect_flip_y_test", "_spect_flip_z_test",
         "_ct_flip_x_test", "_ct_flip_y_test", "_ct_flip_z_test",
+        "_ct_registered_flip_signature", "_spect_registered_flip_signature",
         "_slice_idx",
     )
 
@@ -8399,6 +8523,12 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         cb = getattr(self, "_perfusion_stage_change_cb", None)
         if cb is None:
             return
+        # Si la etapa previa ya está grabada (congelada y a salvo en memoria), la
+        # nueva empieza limpia: sin la máscara heredada y con el Centro de Masa
+        # apagado, para no tener que borrarlo a mano en cada cambio.
+        recorded = getattr(self, "_perfusion_recorded_stages", set()) or set()
+        if prev and prev != new_stage and prev in recorded:
+            self._clean_stage_mask_and_center()
         try:
             cb(new_stage)
         except Exception as exc:
