@@ -14464,8 +14464,8 @@ class MainWindow(QMainWindow):
 	@staticmethod
 	def _stage_from_dicom_text(text: str) -> str | None:
 		t = str(text or "").lower()
-		stress_kw = ("stress", "esfuerzo", "ejercicio", "exercise", "dipirid", "dipyrid", "adenos", "dobutam", "regaden", "persantin", "_str", "str_")
-		rest_kw = ("rest", "reposo", "basal", "resting")
+		stress_kw = ("stress", "esfuerzo", "ejercicio", "exercise", "dipirid", "dipyrid", "adenos", "dobutam", "regaden", "persantin", "_str", "str_", "sgate")
+		rest_kw = ("rest", "reposo", "basal", "resting", "rgate")
 		has_s = any(k in t for k in stress_kw)
 		has_r = any(k in t for k in rest_kw)
 		if has_s and not has_r:
@@ -14530,6 +14530,10 @@ class MainWindow(QMainWindow):
 			if info["modality"].upper() == "CT":
 				return "ct"
 			if info["modality"].upper() == "NM" and "tomo" in text and "recon" not in text:
+				# Series procesadas (Myometrix Results, reformats) llegan como DERIVED:
+				# no son proyecciones crudas aunque digan 'tomo'.
+				if "derived" in info["image_type"].lower():
+					return None
 				# Ventana de scatter hermana (token _SC_ / _SC): rama propia.
 				if "_SC_" in base_up or stem_up.endswith("_SC") or "scatter" in text:
 					return "sc"
@@ -14554,6 +14558,9 @@ class MainWindow(QMainWindow):
 			if prev is None or len(info["files"]) * info["frames"] > len(prev["files"]) * prev["frames"]:
 				detected[key] = info
 		# Resolver etapa por descarte: si de un tipo hay una etapa ocupada y una serie sin etapa.
+		# Ordenar por tamaño (frames×archivos) desc: la serie más grande (el crudo
+		# gated real) gana el slot libre, no la primera que devuelva os.walk.
+		unresolved.sort(key=lambda ki: len(ki[1]["files"]) * ki[1]["frames"], reverse=True)
 		for kind, info in unresolved:
 			for stage in ("stress", "rest"):
 				if (kind, stage) not in detected:
@@ -14897,10 +14904,30 @@ class MainWindow(QMainWindow):
 				"1) Recon raw  2) botón CT/ATT. Con ambos cargados se habilita Fusión.",
 			)
 			return
+		# Diálogo modal en primer plano: la barra del sidebar queda tapada por la
+		# ventana de fusión, así que el progreso se muestra encima.
+		fus_dialog = QProgressDialog("Abriendo Fusión SPECT/CT…", None, 0, 100, self)
+		fus_dialog.setWindowTitle("SINCRO · Fusión SPECT/CT")
+		fus_dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+		fus_dialog.setMinimumWidth(420)
+		fus_dialog.setMinimumDuration(0)
+		fus_dialog.setAutoClose(False)
+		fus_dialog.setAutoReset(False)
+		fus_dialog.setCancelButton(None)
+		fus_dialog.setValue(0)
+		fus_dialog.show()
+		QApplication.processEvents()
+
+		def _fus_progress(pct: int, msg: str) -> None:
+			self._set_progress(min(100, int(pct)), msg)
+			fus_dialog.setLabelText(msg)
+			fus_dialog.setValue(min(100, int(pct)))
+			QApplication.processEvents()
+
 		panel = getattr(self, "_perfusion_fusion_panel", None)
 		if panel is None:
 			# Top-level SIN parent: minimiza normal en Windows (regla Qt owned-window).
-			self._set_progress(15, "Abriendo Fusión SPECT/CT...")
+			_fus_progress(15, "Abriendo ventana de fusión…")
 			panel = PerfusionFusionPanel(None)
 			self._perfusion_fusion_panel = panel
 		panel._perfusion_apply_cb = self._import_amylo_fusion_registration
@@ -14934,7 +14961,7 @@ class MainWindow(QMainWindow):
 		else:
 			try:
 				_t0 = perf_counter()
-				self._set_progress(45, "Cargando SPECT + CT y registrando...")
+				_fus_progress(45, "Cargando SPECT + CT y registrando…")
 				panel.set_perfusion_inputs(
 					spect_volume=result.ungated_volume,
 					spect_spacing_zyx=(px_mm, px_mm, px_mm),
@@ -14963,11 +14990,13 @@ class MainWindow(QMainWindow):
 			panel.set_perfusion_header(stage, self._patient_banner_text(stage=stage))
 		except Exception:
 			pass
-		self._set_progress(90, "Mostrando fusión...")
+		_fus_progress(90, "Mostrando fusión…")
 		panel.show()
 		panel.raise_()
 		panel.activateWindow()
-		self._set_progress(100, "Fusión lista")
+		_fus_progress(100, "Fusión lista")
+		fus_dialog.close()
+		fus_dialog.deleteLater()
 
 	def _on_fusion_panel_stage_changed(self, stage: str):
 		"""El combo Etapa del panel de fusión pidió cargar la otra etapa."""
@@ -14990,12 +15019,25 @@ class MainWindow(QMainWindow):
 			panel._status.setText(f"Etapa {stage_txt}: falta {' y '.join(faltan)} en el flujo de perfusión.")
 			self._log(f"[FUSION] Cambio a {stage_txt} rechazado: falta {' y '.join(faltan)}.")
 			return
+		stage_txt = "REPOSO" if stage == "rest" else "ESFUERZO"
+		fus_dialog = QProgressDialog(f"Fusión: cargando etapa {stage_txt}…", None, 0, 100, panel)
+		fus_dialog.setWindowTitle("SINCRO · Fusión SPECT/CT")
+		fus_dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+		fus_dialog.setMinimumWidth(420)
+		fus_dialog.setMinimumDuration(0)
+		fus_dialog.setAutoClose(False)
+		fus_dialog.setAutoReset(False)
+		fus_dialog.setCancelButton(None)
+		fus_dialog.setValue(0)
+		fus_dialog.show()
+		QApplication.processEvents()
 		try:
 			raw_study = st.raw_study_for_recon or st.raw_study or self.study
 			ps = getattr(raw_study, "pixel_spacing", None) if raw_study is not None else None
 			px_mm = float(ps[0]) if ps else 6.4
-			stage_txt = "REPOSO" if stage == "rest" else "ESFUERZO"
 			self._set_progress(30, f"Fusión: cargando etapa {stage_txt}...")
+			fus_dialog.setValue(30)
+			QApplication.processEvents()
 			panel.set_perfusion_inputs(
 				spect_volume=result.ungated_volume,
 				spect_spacing_zyx=(px_mm, px_mm, px_mm),
@@ -15019,6 +15061,9 @@ class MainWindow(QMainWindow):
 			self._log(f"[FUSION] Panel cambiado a etapa {stage}: SPECT+CT cargados y registrados (primera vez).")
 		except Exception as exc:
 			self._log(f"[FUSION][WARN] Cambio de etapa falló: {exc}")
+		finally:
+			fus_dialog.close()
+			fus_dialog.deleteLater()
 
 	def _suggest_feta_limits_from_fusion(self, stage: str, margin: int = 2) -> bool:
 		"""Pre-carga los límites Base/Ápex de la feta desde la máscara del corazón
