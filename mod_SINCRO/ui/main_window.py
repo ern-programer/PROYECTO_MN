@@ -2787,26 +2787,37 @@ class MainWindow(QMainWindow):
 		# Header delgado con toggle para colapsar la banda (cine + resultados +
 		# curvas) y dar todo el alto a las pestañas. El right_splitter no colapsa
 		# por drag (setChildrenCollapsible(False)); el toggle lo hace por botón.
-		lower_band_header = QHBoxLayout()
-		lower_band_header.setContentsMargins(4, 0, 4, 0)
+		# Header con el mismo color que el colapsable de la ventana de fusión.
+		lower_band_header_widget = QWidget()
+		lower_band_header_widget.setObjectName("asyncBandHeader")
+		lower_band_header_widget.setStyleSheet(
+			"#asyncBandHeader { background:#4E86B7; border:1px solid #3b6d99; border-radius:3px; }"
+		)
+		lower_band_header_widget.setCursor(Qt.CursorShape.PointingHandCursor)
+		# La barra no crece en vertical: colapsada queda una franja fina.
+		lower_band_header_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+		self._lower_band_header_widget = lower_band_header_widget
+		# Un clic en cualquier parte de la barra colapsa/expande la banda.
+		lower_band_header_widget.mousePressEvent = lambda ev: self._toggle_lower_cine_band()
+		lower_band_header = QHBoxLayout(lower_band_header_widget)
+		lower_band_header.setContentsMargins(4, 2, 4, 2)
 		lower_band_header.setSpacing(6)
 		self.lower_cine_collapse_btn = QToolButton()
 		self.lower_cine_collapse_btn.setText("▾")
 		self.lower_cine_collapse_btn.setAutoRaise(True)
+		self.lower_cine_collapse_btn.setStyleSheet("color:white; font-weight:bold; border:none; background:transparent;")
 		self.lower_cine_collapse_btn.setToolTip("Colapsar/expandir la banda inferior (cine, resultados y curvas).")
 		self.lower_cine_collapse_btn.clicked.connect(self._toggle_lower_cine_band)
 		lower_band_header.addWidget(self.lower_cine_collapse_btn)
-		lower_band_header.addWidget(QLabel("ASINCRONÍA -> Cine / Resultados / Curvas"))
+		_lower_band_title = QLabel("ASINCRONÍA -> Cine / Resultados / Curvas")
+		_lower_band_title.setStyleSheet("color:white; font-size:10px; font-weight:600; background:transparent;")
+		lower_band_header.addWidget(_lower_band_title)
 		lower_band_header.addStretch(1)
-		lower_cine_layout.addLayout(lower_band_header)
-		# Vista de asincronía: reubicada del sidebar a esta banda, debajo del título
-		# y encima de las imágenes de cine/resultados/curvas.
-		async_btn_row = QHBoxLayout()
-		async_btn_row.setContentsMargins(4, 0, 4, 0)
-		async_btn_row.addWidget(self.asynchrony_review_btn)
-		async_btn_row.addWidget(self._roi_manual_btn)
-		async_btn_row.addStretch(1)
-		lower_cine_layout.addLayout(async_btn_row)
+		# Accesos dentro de la propia barra azul, para que quede una sola franja
+		# prolija (título a la izquierda, accesos a la derecha).
+		lower_band_header.addWidget(self.asynchrony_review_btn)
+		lower_band_header.addWidget(self._roi_manual_btn)
+		lower_cine_layout.addWidget(lower_band_header_widget)
 		lower_cine_layout.addWidget(self.bottom_hsplit)
 		self._lower_cine_collapsed = False
 		self._right_splitter_saved_sizes = None
@@ -2828,9 +2839,14 @@ class MainWindow(QMainWindow):
 		self.bottom_hsplit.setSizes([250, 750])
 		self.main_splitter = splitter
 		self.right_splitter = right_splitter
+		self._right_splitter_saved_sizes = [840, 220]
 		self._ui_settings = QSettings("Gammasys", "GammaSync")
 		self._load_global_ui_preferences()
 		self._restore_window_layout()
+		# Banda de asincronía colapsada por defecto DESPUÉS de restaurar el layout,
+		# para que el estado guardado de la sesión anterior no la reabra ni estire
+		# el header (queda solo la barra azul fina con título + accesos).
+		self._collapse_lower_cine_band_initial()
 		self._restore_sidebar_sections_state()
 		self._restore_fevi_settings()
 		self._rebuild_recent_dirs_menu()
@@ -14462,38 +14478,68 @@ class MainWindow(QMainWindow):
 			return False
 
 	@staticmethod
-	def _stage_from_dicom_text(text: str) -> str | None:
+	def _default_smart_load_keywords() -> dict:
+		"""Palabras clave por defecto que la carga inteligente busca en la metadata.
+
+		Configurables por el usuario (persisten en QSettings) para reconocer nombres
+		de series de cualquier fabricante. Todo se compara en minúsculas.
+		"""
+		return {
+			"stress": ["stress", "esfuerzo", "ejercicio", "exercise", "dipirid", "dipyrid", "adenos", "dobutam", "regaden", "persantin", "_str", "str_", "sgate"],
+			"rest": ["rest", "reposo", "basal", "resting", "rgate"],
+			"raw": ["tomo"],
+			"sa_recon": ["_sa", "sa_", " sa ", "short axis", "shortaxis", "short_axis", "eje corto", "eje_corto", "sax", "sa cuts", "gated sa", "myovation", "qgs"],
+			"att": ["atten", "attmap", "att map", "att_", "_att", "mu map", "mumap", "umap", "transmission"],
+			"scatter": ["_sc_", "scatter"],
+		}
+
+	def _smart_load_keywords(self) -> dict:
+		"""Keywords efectivos = defaults, pisados por los del usuario (si guardó)."""
+		cfg = self._default_smart_load_keywords()
+		settings = getattr(self, "_ui_settings", None)
+		if settings is not None:
+			try:
+				import json
+				raw = str(settings.value("smart_load/keywords_json", "", type=str) or "")
+				if raw:
+					user = json.loads(raw)
+					for key in cfg:
+						if isinstance(user.get(key), list):
+							vals = [str(x).strip().lower() for x in user[key] if str(x).strip()]
+							if vals:
+								cfg[key] = vals
+			except Exception:
+				pass
+		return cfg
+
+	def _save_smart_load_keywords(self, cfg: dict):
+		"""Persiste los keywords editados por el usuario (JSON en QSettings)."""
+		settings = getattr(self, "_ui_settings", None)
+		if settings is None:
+			return
+		import json
+		clean = {}
+		for key in self._default_smart_load_keywords():
+			vals = cfg.get(key, [])
+			clean[key] = [str(x).strip().lower() for x in vals if str(x).strip()]
+		settings.setValue("smart_load/keywords_json", json.dumps(clean, ensure_ascii=False))
+		settings.sync()
+
+	def _stage_from_dicom_text(self, text: str) -> str | None:
 		t = str(text or "").lower()
-		stress_kw = ("stress", "esfuerzo", "ejercicio", "exercise", "dipirid", "dipyrid", "adenos", "dobutam", "regaden", "persantin", "_str", "str_", "sgate")
-		rest_kw = ("rest", "reposo", "basal", "resting", "rgate")
-		has_s = any(k in t for k in stress_kw)
-		has_r = any(k in t for k in rest_kw)
+		kw = self._smart_load_keywords()
+		has_s = any(k in t for k in kw.get("stress", ()))
+		has_r = any(k in t for k in kw.get("rest", ()))
 		if has_s and not has_r:
 			return "stress"
 		if has_r and not has_s:
 			return "rest"
 		return None
 
-	def _smart_load_ct_att_folder(self):
-		"""Escanea una carpeta y carga SPECT crudo + ATT + CT de cada etapa de una sola vez."""
+	def _scan_dicom_series(self, folder: str) -> dict[str, dict]:
+		"""Escanea una carpeta leyendo solo headers y agrupa archivos por serie."""
 		import pydicom
 
-		start_dir = ""
-		settings = getattr(self, "_ui_settings", None)
-		if settings is not None:
-			try:
-				start_dir = str(settings.value("smart_load/last_folder", "", type=str) or "")
-			except Exception:
-				start_dir = ""
-		folder = QFileDialog.getExistingDirectory(self, "Carpeta con SPECT + CT/ATT del paciente", start_dir)
-		if not folder:
-			return
-		if settings is not None:
-			try:
-				settings.setValue("smart_load/last_folder", folder)
-			except Exception:
-				pass
-		self._log(f"[SMART] Escaneando {folder} ...")
 		series: dict[str, dict] = {}
 		for base, _dirs, files in os.walk(folder):
 			for fn in files:
@@ -14511,13 +14557,79 @@ class MainWindow(QMainWindow):
 						"protocol": str(getattr(ds, "ProtocolName", "") or ""),
 						"image_type": " ".join(str(x) for x in (getattr(ds, "ImageType", None) or [])),
 						"frames": int(getattr(ds, "NumberOfFrames", 1) or 1),
+						"rows": int(getattr(ds, "Rows", 0) or 0),
+						"cols": int(getattr(ds, "Columns", 0) or 0),
+						"has_slice_vec": (0x0054, 0x0080) in ds,
+						"has_angular_vec": (0x0054, 0x0090) in ds,
+						"has_time_vec": (0x0054, 0x0070) in ds,
+						"n_time_slots": int(getattr(ds, "NumberOfTimeSlots", 0) or getattr(ds, "NumberOfTimeSlices", 0) or 0),
 					})
 					info["files"].append(fp)
 				except Exception:
 					continue
+		return series
+
+	def _info_looks_sa_recon(self, info: dict, kw: dict) -> bool:
+		"""¿La serie son cortes SA gatillados YA reconstruidos (cualquier fabricante)?
+
+		NM no-crudo (no proyecciones angulares), con señal de gatillado
+		(NumberOfTimeSlots>=3 o vector temporal, o montage con >=3 frames) y señal de
+		reconstruido (vector de cortes, geometría montage, RECON/DERIVED, o alguno de
+		los nombres configurados para SA). Excluye ejes largos HLA/VLA salvo que el
+		nombre diga SA. La validación real la hace dicom_loader.load al cargar.
+		"""
+		if info["modality"].upper() != "NM":
+			return False
+		# Proyecciones angulares crudas (vector angular sin vector de cortes): NO.
+		if bool(info.get("has_angular_vec")) and not bool(info.get("has_slice_vec")):
+			return False
+		txt = f"{info['desc']} {info['protocol']} {info['image_type']} {os.path.basename(info['files'][0])}".lower()
+		# Imágenes de resultados/procesamiento (QGS/Myometrix/polar/bullseye), no cine SA.
+		if any(t in txt for t in ("myometrix", "results", "polar", "bullseye", "bull's", "screen", "summary", "report")):
+			return False
+		is_sa_named = any(k in txt for k in kw.get("sa_recon", ()))
+		# Ejes largos (HLA/VLA) no sirven para fase/FEVI: descartarlos si no dicen SA.
+		if not is_sa_named and any(t in txt for t in ("hla", "vla", "horizontal long", "vertical long", "long axis", "eje largo")):
+			return False
+		rows = int(info.get("rows", 0) or 0)
+		cols = int(info.get("cols", 0) or 0)
+		montage = rows > 0 and cols > 0 and cols % rows == 0 and (cols // rows) > 1
+		n_slots = int(info.get("n_time_slots", 0) or 0)
+		frames = int(info.get("frames", 1) or 1)
+		gated = n_slots >= 3 or bool(info.get("has_time_vec")) or (montage and frames >= 3)
+		recon = (
+			bool(info.get("has_slice_vec")) or montage or "recon" in txt
+			or "derived" in info["image_type"].lower() or is_sa_named
+		)
+		return bool(gated and recon)
+
+	def _smart_load_ct_att_folder(self):
+		"""Escanea una carpeta y carga SPECT crudo + ATT + CT de cada etapa de una sola vez."""
+		start_dir = ""
+		settings = getattr(self, "_ui_settings", None)
+		if settings is not None:
+			try:
+				start_dir = str(settings.value("smart_load/last_folder", "", type=str) or "")
+			except Exception:
+				start_dir = ""
+		folder = QFileDialog.getExistingDirectory(self, "Carpeta con SPECT + CT/ATT del paciente", start_dir)
+		if not folder:
+			return
+		if settings is not None:
+			try:
+				settings.setValue("smart_load/last_folder", folder)
+			except Exception:
+				pass
+		self._log(f"[SMART] Escaneando {folder} ...")
+		series = self._scan_dicom_series(folder)
 		if not series:
 			QMessageBox.information(self, "SINCRO", "No se encontraron DICOMs en la carpeta.")
 			return
+
+		kw = self._smart_load_keywords()
+
+		def _looks_sa_recon(info) -> bool:
+			return self._info_looks_sa_recon(info, kw)
 
 		def _classify(info) -> str | None:
 			text = f"{info['desc']} {info['protocol']} {info['image_type']} {os.path.basename(info['files'][0])}".lower()
@@ -14525,19 +14637,20 @@ class MainWindow(QMainWindow):
 			stem_up = os.path.splitext(base_up)[0]
 			if "localizer" in text or "scout" in text:
 				return None
-			if any(k in text for k in ("atten", "attmap", "att map", "att_", "_att", "mu map", "mumap", "umap", "transmission")):
+			if any(k in text for k in kw.get("att", ())):
 				return "att"
 			if info["modality"].upper() == "CT":
 				return "ct"
-			if info["modality"].upper() == "NM" and "tomo" in text and "recon" not in text:
-				# Series procesadas (Myometrix Results, reformats) llegan como DERIVED:
-				# no son proyecciones crudas aunque digan 'tomo'.
-				if "derived" in info["image_type"].lower():
+			if info["modality"].upper() == "NM":
+				# Cortes SA/HLA/VLA ya reconstruidos y demás procesamientos: NO acá
+				# (para eso está el botón 'Cortes SA ya reconstruidos').
+				if _looks_sa_recon(info):
 					return None
-				# Ventana de scatter hermana (token _SC_ / _SC): rama propia.
-				if "_SC_" in base_up or stem_up.endswith("_SC") or "scatter" in text:
-					return "sc"
-				return "raw"
+				# Proyecciones crudas (gated o no) → raw o su ventana scatter.
+				if any(k in text for k in kw.get("raw", ())) and "recon" not in text and "derived" not in info["image_type"].lower():
+					if "_SC_" in base_up or stem_up.endswith("_SC") or any(k in text for k in kw.get("scatter", ())):
+						return "sc"
+					return "raw"
 			return None
 
 		detected: dict[tuple, dict] = {}  # (kind, stage) -> info
@@ -14569,33 +14682,64 @@ class MainWindow(QMainWindow):
 					break
 
 		if not detected:
-			QMessageBox.information(self, "SINCRO", "No se reconocieron series SPECT/ATT/CT en la carpeta (ver log).")
+			QMessageBox.information(self, "SINCRO", "No se reconocieron series SPECT crudas / ATT / CT en la carpeta (ver log).")
 			return
 		nombres = {"raw": "SPECT crudo", "att": "ATT map", "ct": "CT", "sc": "Scatter (SC)"}
-		lines = []
-		for (kind, stage), info in sorted(detected.items()):
-			stage_txt = "Esfuerzo" if stage == "stress" else "Reposo"
-			lines.append(f"• {nombres[kind]} {stage_txt}: '{info['desc'] or os.path.basename(info['files'][0])}' ({len(info['files'])} arch, {info['frames']} frames)")
-		resp = QMessageBox.question(
-			self, "SINCRO — Carpeta inteligente",
-			"Se detectó:\n\n" + "\n".join(lines) + "\n\n¿Cargar todo?",
-			QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-			QMessageBox.StandardButton.Yes,
-		)
-		if resp != QMessageBox.StandardButton.Yes:
-			return
 
-		# 1) SPECT crudos (solo si aún no hay estudio cargado: no pisar trabajo hecho).
+		# Selector: mostrar lo detectado (crudo/CT/ATT/scatter) y dejar destildar.
+		from PyQt6.QtWidgets import (
+			QDialog, QVBoxLayout, QLabel, QListWidget, QListWidgetItem, QDialogButtonBox,
+		)
+		dlg = QDialog(self)
+		dlg.setWindowTitle("SINCRO — Carpeta inteligente")
+		lay = QVBoxLayout(dlg)
+		lay.addWidget(QLabel("Series detectadas para cargar (destildá lo que no quieras):"))
+		lst = QListWidget()
+		for (kind, stage) in sorted(detected.keys()):
+			info = detected[(kind, stage)]
+			stage_txt = "Esfuerzo" if stage == "stress" else "Reposo"
+			label = (
+				f"{nombres.get(kind, kind)} · {stage_txt}: "
+				f"{info['desc'] or os.path.basename(info['files'][0])}  "
+				f"({len(info['files'])} arch, {info['frames']} frames)"
+			)
+			it = QListWidgetItem(label)
+			it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+			it.setCheckState(Qt.CheckState.Checked)
+			it.setData(Qt.ItemDataRole.UserRole, (kind, stage))
+			it.setToolTip(info["files"][0])
+			lst.addItem(it)
+		lst.setMinimumWidth(540)
+		lay.addWidget(lst)
+		bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+		bb.accepted.connect(dlg.accept)
+		bb.rejected.connect(dlg.reject)
+		lay.addWidget(bb)
+		if dlg.exec() != QDialog.DialogCode.Accepted:
+			return
+		chosen = {}
+		for i in range(lst.count()):
+			it = lst.item(i)
+			if it.checkState() == Qt.CheckState.Checked:
+				key = it.data(Qt.ItemDataRole.UserRole)
+				chosen[key] = detected[key]
+		if not chosen:
+			return
+		detected = chosen
+
+		# 1) SPECT crudos (solo si aún no hay estudio: no pisar trabajo hecho).
 		raw_s = detected.get(("raw", "stress"))
 		raw_r = detected.get(("raw", "rest"))
-		if self.study is None and (raw_s or raw_r):
+		have_raw = bool(raw_s or raw_r)
+
+		if self.study is None and have_raw:
 			primary = raw_s or raw_r
 			self.file_edit.setText(primary["files"][0])
 			self.process_current()
 			if raw_s and raw_r and self.study is not None and not bool(getattr(self.study, "reconstructed", True)):
 				self._load_compare_raw_study_from_path(raw_r["files"][0])
-		elif raw_s or raw_r:
-			self._log("[SMART] Ya hay estudio cargado: los SPECT crudos detectados NO se recargan.")
+		elif have_raw:
+			self._log("[SMART] Ya hay estudio cargado: los SPECT detectados NO se recargan.")
 
 		# 1b) Scatter: el loader lo adjunta solo si sigue el patrón _EM_/_SC_; si no,
 		# adjuntarlo acá a mano y dejar la corrección ACTIVADA.
@@ -20342,13 +20486,28 @@ class MainWindow(QMainWindow):
 			self.bottom_hsplit.setVisible(False)
 			self.lower_cine_collapse_btn.setText("▸")
 			total = sum(splitter.sizes())
-			header_h = max(28, self._lower_cine_panel.sizeHint().height())
+			header_h = max(28, self._lower_band_header_widget.sizeHint().height())
 			splitter.setSizes([max(0, total - header_h), header_h])
 		else:
 			self.bottom_hsplit.setVisible(True)
 			self.lower_cine_collapse_btn.setText("▾")
 			if self._right_splitter_saved_sizes:
 				splitter.setSizes(self._right_splitter_saved_sizes)
+
+	def _collapse_lower_cine_band_initial(self):
+		"""Fuerza la banda de asincronía a su estado colapsado inicial (barra azul
+		fina), sin importar el layout restaurado de la sesión anterior."""
+		splitter = getattr(self, "right_splitter", None)
+		if splitter is None:
+			return
+		self._lower_cine_collapsed = True
+		if not getattr(self, "_right_splitter_saved_sizes", None):
+			self._right_splitter_saved_sizes = [840, 220]
+		self.bottom_hsplit.setVisible(False)
+		self.lower_cine_collapse_btn.setText("▸")
+		header_h = max(28, self._lower_band_header_widget.sizeHint().height())
+		total = sum(splitter.sizes()) or 1060
+		splitter.setSizes([max(0, total - header_h), header_h])
 
 	def _rebuild_tabs_for_mode(self):
 		current_title = self.tabs.tabText(self.tabs.currentIndex()) if self.tabs.count() > 0 else ""
@@ -20523,16 +20682,28 @@ class MainWindow(QMainWindow):
 		box.setInformativeText(
 			"• Carpeta inteligente: marcás una carpeta y lee/carga todo lo que haya "
 			"(Esfuerzo y Reposo, con sus EM, ATT, CT y Scatter).\n"
+			"• Cortes SA ya reconstruidos: si ya tenés el estudio preprocesado (cualquier "
+			"fabricante), salta la reconstrucción y calcula asincronía/FEVI directo.\n"
 			"• Elegir archivos: seleccionás 1 o 2 estudios a mano."
 		)
 		btn_smart = box.addButton("🔍 Carpeta inteligente", QMessageBox.ButtonRole.AcceptRole)
+		btn_sa = box.addButton("Cortes SA ya reconstruidos", QMessageBox.ButtonRole.ActionRole)
 		btn_files = box.addButton("Elegir archivos", QMessageBox.ButtonRole.ActionRole)
+		btn_names = box.addButton("⚙ Nombres…", QMessageBox.ButtonRole.HelpRole)
 		box.addButton("Cancelar", QMessageBox.ButtonRole.RejectRole)
 		box.setDefaultButton(btn_smart)
 		box.exec()
 		clicked = box.clickedButton()
 		if clicked is btn_smart:
 			self._smart_load_ct_att_folder()
+			return
+		if clicked is btn_sa:
+			self._load_sa_recon_direct()
+			return
+		if clicked is btn_names:
+			# Configurar los nombres de series y reabrir el selector de carga.
+			self._edit_smart_load_keywords_dialog()
+			self.load_one_or_two_studies()
 			return
 		if clicked is not btn_files:
 			return
@@ -20618,6 +20789,192 @@ class MainWindow(QMainWindow):
 			return
 		if self.metrics is not None:
 			self._load_compare_study_from_path(compare_path)
+
+	def _load_sa_recon_direct(self):
+		"""Carga cortes SA gatillados YA reconstruidos (cualquier fabricante) para
+		calcular asincronía/FEVI directo, sin reconstruir ni reorientar.
+
+		Pide una carpeta, escanea headers y muestra SOLO los cortes SA gatillados
+		(filtra CT, ejes largos HLA/VLA y proyecciones crudas). El usuario elige 1
+		(una etapa) o 2 (esfuerzo/reposo).
+		"""
+		settings = getattr(self, "_ui_settings", None)
+		start_dir = ""
+		if settings is not None:
+			try:
+				start_dir = str(settings.value("smart_load/last_folder", "", type=str) or "")
+			except Exception:
+				start_dir = ""
+		folder = QFileDialog.getExistingDirectory(self, "Carpeta con los cortes SA gatillados reconstruidos", start_dir)
+		if not folder:
+			return
+		if settings is not None:
+			try:
+				settings.setValue("smart_load/last_folder", folder)
+			except Exception:
+				pass
+		import pydicom
+		kw = self._smart_load_keywords()
+		# Escaneo por ARCHIVO (no por SeriesInstanceUID): en exports GE varias series
+		# lógicas (SA/HLA/VLA, filtros, esfuerzo/reposo) comparten UID, así que
+		# agrupar por UID mezclaría todo. Cada .dcm multiframe es un candidato.
+		candidates = []  # (label, path, stage)
+		for base, _dirs, files in os.walk(folder):
+			for fn in files:
+				if fn.lower().endswith((".png", ".jpg", ".txt", ".pdf", ".json", ".xml", ".csv")):
+					continue
+				fp = os.path.join(base, fn)
+				try:
+					ds = pydicom.dcmread(fp, stop_before_pixels=True, force=True)
+				except Exception:
+					continue
+				info = {
+					"files": [fp],
+					"modality": str(getattr(ds, "Modality", "") or ""),
+					"desc": str(getattr(ds, "SeriesDescription", "") or ""),
+					"protocol": str(getattr(ds, "ProtocolName", "") or ""),
+					"image_type": " ".join(str(x) for x in (getattr(ds, "ImageType", None) or [])),
+					"frames": int(getattr(ds, "NumberOfFrames", 1) or 1),
+					"rows": int(getattr(ds, "Rows", 0) or 0),
+					"cols": int(getattr(ds, "Columns", 0) or 0),
+					"has_slice_vec": (0x0054, 0x0080) in ds,
+					"has_angular_vec": (0x0054, 0x0090) in ds,
+					"has_time_vec": (0x0054, 0x0070) in ds,
+					"n_time_slots": int(getattr(ds, "NumberOfTimeSlots", 0) or getattr(ds, "NumberOfTimeSlices", 0) or 0),
+				}
+				if not self._info_looks_sa_recon(info, kw):
+					continue
+				# Exigir orientación eje corto en el nombre: el ImageType no distingue
+				# SA de transaxial/HLA/VLA (todos 'RECON GATED TOMO'), solo el nombre.
+				txt = f"{info['desc']} {info['protocol']} {fn}".lower()
+				if not any(k in txt for k in kw.get("sa_recon", ())):
+					continue
+				stage = self._stage_from_dicom_text(f"{info['desc']} {info['protocol']} {fn}")
+				stage_txt = "Esfuerzo" if stage == "stress" else ("Reposo" if stage == "rest" else "sin etapa")
+				label = f"{fn}  ·  {stage_txt}"
+				candidates.append((label, fp, stage))
+		if not candidates:
+			QMessageBox.warning(
+				self, "SINCRO",
+				"No se detectaron cortes SA gatillados reconstruidos en la carpeta.\n\n"
+				"Verificá que estén reconstruidos y gatillados (≥3 gates), o ajustá los "
+				"nombres en '⚙ Nombres…'.",
+			)
+			return
+		# Esfuerzo primero, luego reposo, luego el resto.
+		order = {"stress": 0, "rest": 1}
+		candidates.sort(key=lambda c: order.get(c[2], 2))
+
+		from PyQt6.QtWidgets import (
+			QDialog, QVBoxLayout, QLabel, QListWidget, QListWidgetItem,
+			QDialogButtonBox, QAbstractItemView,
+		)
+		dlg = QDialog(self)
+		dlg.setWindowTitle("Cortes SA gatillados reconstruidos")
+		lay = QVBoxLayout(dlg)
+		lay.addWidget(QLabel("Elegí 1 corte SA (una etapa) o 2 (esfuerzo/reposo):"))
+		lst = QListWidget()
+		lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+		for label, path, _stage in candidates:
+			it = QListWidgetItem(label)
+			it.setData(Qt.ItemDataRole.UserRole, path)
+			it.setToolTip(path)
+			lst.addItem(it)
+		lst.setCurrentRow(0)
+		lst.setMinimumWidth(460)
+		lay.addWidget(lst)
+		bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+		bb.accepted.connect(dlg.accept)
+		bb.rejected.connect(dlg.reject)
+		lay.addWidget(bb)
+		if dlg.exec() != QDialog.DialogCode.Accepted:
+			return
+		sel = [lst.item(i).data(Qt.ItemDataRole.UserRole) for i in range(lst.count()) if lst.item(i).isSelected()]
+		if not sel:
+			return
+		sel = sel[:2]
+		primary = sel[0]
+		try:
+			probe = dicom_loader.load(primary, verbose=False)
+		except Exception as exc:
+			QMessageBox.critical(self, "SINCRO", f"No se pudo leer el DICOM:\n{exc}")
+			return
+		if not bool(getattr(probe, "reconstructed", True)) or int(np.asarray(probe.cube).shape[0]) < 3:
+			QMessageBox.warning(
+				self, "SINCRO",
+				"El corte elegido no parece SA gatillado reconstruido "
+				"(se requiere estar reconstruido y con ≥3 gates).",
+			)
+			return
+		self.file_edit.setText(primary)
+		self.process_current()
+		if self.study is None:
+			return
+		if len(sel) > 1 and self.metrics is not None:
+			self._load_compare_study_from_path(sel[1])
+		self._log(f"[SA] Cortes SA reconstruidos cargados directo: {os.path.basename(primary)}.")
+
+	def _edit_smart_load_keywords_dialog(self):
+		"""Editor de nombres/keywords que la carga inteligente usa para clasificar series.
+
+		Permite agregar/mapear nombres propios (p. ej. '_SA') a lo que necesita SINCRO
+		(cortes SA, crudo, ATT, scatter, etapa esfuerzo/reposo). Persiste en QSettings.
+		"""
+		from PyQt6.QtWidgets import (
+			QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
+			QDialogButtonBox, QLabel, QPushButton,
+		)
+		cfg = self._smart_load_keywords()
+		labels = {
+			"sa_recon": "Cortes SA reconstruidos",
+			"raw": "SPECT crudo (proyecciones)",
+			"att": "Mapa de atenuación (ATT)",
+			"scatter": "Ventana de scatter (SC)",
+			"stress": "Etapa Esfuerzo",
+			"rest": "Etapa Reposo",
+		}
+		dlg = QDialog(self)
+		dlg.setWindowTitle("Nombres de series para la carga")
+		root = QVBoxLayout(dlg)
+		info = QLabel(
+			"Palabras clave (separadas por coma) que SINCRO busca en la descripción, "
+			"protocolo, ImageType y nombre de archivo para reconocer cada tipo de serie. "
+			"No distingue mayúsculas. Los cortes SA además requieren señal de gatillado/"
+			"reconstrucción en el DICOM (es una ayuda, no fuerza el tipo)."
+		)
+		info.setWordWrap(True)
+		root.addWidget(info)
+		form = QFormLayout()
+		edits = {}
+		for key in ("sa_recon", "raw", "att", "scatter", "stress", "rest"):
+			edit = QLineEdit(", ".join(cfg.get(key, [])))
+			edit.setMinimumWidth(480)
+			edits[key] = edit
+			form.addRow(labels[key] + ":", edit)
+		root.addLayout(form)
+
+		btn_restore = QPushButton("Restaurar por defecto")
+
+		def _restore():
+			defaults = self._default_smart_load_keywords()
+			for key, edit in edits.items():
+				edit.setText(", ".join(defaults.get(key, [])))
+
+		btn_restore.clicked.connect(_restore)
+		buttons = QDialogButtonBox(
+			QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+		)
+		buttons.accepted.connect(dlg.accept)
+		buttons.rejected.connect(dlg.reject)
+		bottom = QHBoxLayout()
+		bottom.addWidget(btn_restore)
+		bottom.addStretch(1)
+		bottom.addWidget(buttons)
+		root.addLayout(bottom)
+		if dlg.exec() == QDialog.DialogCode.Accepted:
+			new_cfg = {key: [p.strip() for p in edit.text().split(",") if p.strip()] for key, edit in edits.items()}
+			self._save_smart_load_keywords(new_cfg)
+			self._log("[SMART] Nombres de series actualizados.")
 
 	def _load_compare_raw_study_from_path(self, path: str):
 		"""Carga un segundo estudio CRUDO para edición/comparación en cine, sin pipeline de fase."""

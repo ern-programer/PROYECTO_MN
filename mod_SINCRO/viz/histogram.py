@@ -48,7 +48,7 @@ def build_phase_histogram(
 	p5_abs = (mean_phase + p5) % 360.0
 	p95_abs = (mean_phase + p95) % 360.0
 
-	fig, ax = plt.subplots(figsize=(9.0, 4.8))
+	fig, ax = plt.subplots(figsize=(9.0, 5.6))
 	if comparison_phases is not None:
 		ax.hist(
 			phases,
@@ -78,7 +78,9 @@ def build_phase_histogram(
 	ax.axvline(p95_abs, color="#fdae61", linestyle="--", linewidth=1.8, label=f"P95 {p95_abs:.1f}°")
 
 	cls = metrics.get("classification", "N/A")
-	ax.set_title(title or f"Phase Histogram — {cls}", fontsize=13, fontweight="bold", pad=12)
+	# Título como suptitle: el cuadro de métricas se ubica en una banda superior
+	# reservada (fuera del área de barras) para que no se superpongan.
+	fig.suptitle(title or f"Phase Histogram — {cls}", fontsize=13, fontweight="bold", y=0.985)
 	ax.set_xlabel("Fase (°)")
 	ax.set_ylabel("Frecuencia")
 	ax.set_xlim(0.0, 360.0)
@@ -103,10 +105,10 @@ def build_phase_histogram(
 		f"Peak Phase: {metrics.get('peak_phase', np.nan)}°\n"
 		f"Class: {cls}"
 		)
-	fig.subplots_adjust(left=0.15, right=0.86, top=0.86, bottom=0.16)
+	fig.subplots_adjust(left=0.11, right=0.86, top=0.70, bottom=0.12)
 	fig.text(
-		0.015,
-		0.94,
+		0.012,
+		0.905,
 		txt,
 		ha="left",
 		va="top",

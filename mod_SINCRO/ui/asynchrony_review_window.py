@@ -6,11 +6,9 @@ Vista de inspección asincrónica lado a lado:
 """
 from __future__ import annotations
 
-import os
-
 import numpy as np
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QPixmap
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
 	QCheckBox,
 	QComboBox,
@@ -20,7 +18,6 @@ from PyQt6.QtWidgets import (
 	QHBoxLayout,
 	QLabel,
 	QPushButton,
-	QScrollArea,
 	QSpinBox,
 	QSplitter,
 	QVBoxLayout,
@@ -29,6 +26,13 @@ from PyQt6.QtWidgets import (
 
 from core.ectb_lv import analyze_lv_ectb
 from ui.cine_widget import CineWidget
+
+try:
+	from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+	from matplotlib.figure import Figure
+	_MPL_OK = True
+except Exception:  # pragma: no cover
+	_MPL_OK = False
 
 
 class AsynchronyReviewWindow(QWidget):
@@ -154,22 +158,28 @@ class AsynchronyReviewWindow(QWidget):
 		splitter.setSizes([650, 650])
 		self.splitter = splitter
 
-		# Mapa de fase coloreado (resultado real de asincronía): se muestra el PNG
-		# que la main renderiza (polar_clinico.png = bullseye + histograma + métricas).
-		# Es el "mapa de fase" que el usuario quiere ver acá, no en la principal.
-		self.phase_map_view = QLabel("Sin mapa de fase: procesá un estudio.")
-		self.phase_map_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-		self.phase_map_view.setStyleSheet("color:#5b6470; background:#0b1220;")
-		self._phase_map_pixmap = None
-		phase_map_scroll = QScrollArea(self)
-		phase_map_scroll.setWidgetResizable(True)
-		phase_map_scroll.setWidget(self.phase_map_view)
-		phase_map_scroll.setMinimumHeight(160)
-		self.phase_map_scroll = phase_map_scroll
+		# Gráfico de fase EN VIVO: histograma de fase (0-360°) embebido en un canvas
+		# de matplotlib que se redibuja con cada reproceso, en lugar de renderizar
+		# y leer un PNG (polar_clinico.png).
+		if _MPL_OK:
+			self._phase_fig = Figure(figsize=(6.2, 3.0))
+			self._phase_fig.patch.set_facecolor("#0b1220")
+			self._phase_ax = self._phase_fig.add_subplot(111)
+			self._phase_canvas = FigureCanvas(self._phase_fig)
+			self._phase_canvas.setMinimumHeight(170)
+			phase_graph_widget = self._phase_canvas
+		else:
+			self._phase_fig = None
+			self._phase_ax = None
+			self._phase_canvas = None
+			phase_graph_widget = QLabel("matplotlib no disponible: sin gráfico de fase.")
+			phase_graph_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+			phase_graph_widget.setStyleSheet("color:#5b6470; background:#0b1220;")
+		self._phase_graph_widget = phase_graph_widget
 
 		viewers_split = QSplitter(Qt.Orientation.Vertical, self)
 		viewers_split.addWidget(splitter)
-		viewers_split.addWidget(phase_map_scroll)
+		viewers_split.addWidget(phase_graph_widget)
 		viewers_split.setStretchFactor(0, 3)
 		viewers_split.setStretchFactor(1, 2)
 		viewers_split.setSizes([460, 300])
@@ -484,35 +494,75 @@ class AsynchronyReviewWindow(QWidget):
 			f"PSD técnico: {cls} (no dx)"
 		)
 
-	def _refresh_phase_map_view(self):
-		"""Muestra el mapa de fase coloreado que renderiza la main (polar_clinico.png)."""
+	def _refresh_live_phase_graph(self):
+		"""Dibuja EN VIVO el histograma de fase del estudio ya procesado.
+
+		Lee directamente main.phase_result.phases_deg (no un PNG) y se redibuja en
+		cada sync_from_main, así se actualiza con cada reproceso/cambio de ROI.
+		"""
+		if not _MPL_OK or self._phase_ax is None:
+			return
+		ax = self._phase_ax
+		ax.clear()
+		self._phase_fig.patch.set_facecolor("#0b1220")
+		ax.set_facecolor("#0b1220")
+		for spine in ax.spines.values():
+			spine.set_color("#3a4658")
+		ax.tick_params(colors="#9fb0c4", labelsize=8)
+
 		main = self._main
-		out_dir = getattr(main, "output_dir", None) if main is not None else None
-		path = os.path.join(out_dir, "polar_clinico.png") if out_dir else ""
-		if not path or not os.path.exists(path):
-			self._phase_map_pixmap = None
-			self.phase_map_view.setText("Sin mapa de fase: procesá un estudio.")
-			return
-		pix = QPixmap(path)
-		if pix.isNull():
-			self._phase_map_pixmap = None
-			self.phase_map_view.setText("No se pudo leer el mapa de fase.")
-			return
-		self._phase_map_pixmap = pix
-		self._apply_phase_map_scale()
+		phase_result = getattr(main, "phase_result", None) if main is not None else None
+		phases = getattr(phase_result, "phases_deg", None) if phase_result is not None else None
+		if phases is None:
+			phases = np.asarray([], dtype=np.float64)
+		else:
+			phases = np.asarray(phases, dtype=np.float64)
+			phases = phases[np.isfinite(phases)]
 
-	def _apply_phase_map_scale(self):
-		"""Escala el mapa de fase al ancho disponible manteniendo proporción."""
-		pix = self._phase_map_pixmap
-		if pix is None:
+		if phases.size == 0:
+			ax.text(
+				0.5, 0.5, "Sin datos de fase: procesá un estudio.",
+				ha="center", va="center", color="#5b6470", fontsize=10,
+				transform=ax.transAxes,
+			)
+			ax.set_xticks([])
+			ax.set_yticks([])
+			self._phase_canvas.draw_idle()
 			return
-		vp = self.phase_map_scroll.viewport().width() if hasattr(self, "phase_map_scroll") else 0
-		target_w = max(320, vp - 4) if vp > 0 else 800
-		self.phase_map_view.setPixmap(pix.scaledToWidth(int(target_w), Qt.TransformationMode.SmoothTransformation))
 
-	def resizeEvent(self, event):
-		super().resizeEvent(event)
-		self._apply_phase_map_scale()
+		metrics = getattr(main, "metrics", None) or {}
+		ax.hist(
+			phases % 360.0, bins=72, range=(0.0, 360.0),
+			color="#2c7fb8", alpha=0.85, edgecolor="#0b1220", linewidth=0.4,
+		)
+		try:
+			from core.metrics import circular_mean_deg
+			mean_phase = float(circular_mean_deg(phases))
+			ax.axvline(mean_phase, color="#d7191c", linewidth=2.0, label=f"Media {mean_phase:.0f}°")
+		except Exception:
+			pass
+
+		ax.set_xlim(0.0, 360.0)
+		ax.set_xticks([0, 60, 120, 180, 240, 300, 360])
+		ax.set_xlabel("Fase (°)", color="#9fb0c4", fontsize=9)
+		ax.set_ylabel("Frecuencia", color="#9fb0c4", fontsize=9)
+
+		def _f(val):
+			try:
+				return f"{float(val):.1f}"
+			except (TypeError, ValueError):
+				return "N/D"
+
+		ax.set_title(
+			f"Fase en vivo · PSD {_f(metrics.get('phase_sd'))}°  BW {_f(metrics.get('bandwidth'))}°",
+			color="#e6edf3", fontsize=10, fontweight="bold",
+		)
+		leg = ax.legend(loc="upper right", fontsize=8, framealpha=0.25)
+		if leg is not None:
+			for t in leg.get_texts():
+				t.set_color("#e6edf3")
+		self._phase_fig.subplots_adjust(left=0.12, right=0.97, top=0.84, bottom=0.20)
+		self._phase_canvas.draw_idle()
 
 	def _apply_selected_roi_source(self):
 		"""Fija la geometría elegida en la ventana principal y reprocesa."""
@@ -575,7 +625,7 @@ class AsynchronyReviewWindow(QWidget):
 		self._sync_manual_center_checks()
 		self._sync_phase_controls_from_main()
 		self._refresh_metrics_readout()
-		self._refresh_phase_map_view()
+		self._refresh_live_phase_graph()
 		self._apply_ui_preferences()
 
 	def _apply_ui_preferences(self):
