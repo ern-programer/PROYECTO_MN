@@ -1279,6 +1279,25 @@ class AmyloidSpectPanel(QDialog):
             "background-color:#7c3aed; color:white; font-weight:bold; padding:6px 12px; border-radius:4px;"
         )
         flow.addWidget(self._btn_smart_load, 4, 0, 1, 4)
+
+        # Indicador en vivo del HMR planar publicado por AMYLO Planar (vía puente).
+        self._lbl_planar_hmr = QLabel("HMR planar: —")
+        self._lbl_planar_hmr.setToolTip(
+            "HMR/Perugini/washout del módulo AMYLO Planar, leído del puente compartido.\n"
+            "Se actualiza al pulsar ↻ o cuando el planar genera su informe."
+        )
+        self._lbl_planar_hmr.setStyleSheet(
+            "color:#94a3b8; background:#0b1220; border:1px solid #334155; "
+            "border-radius:4px; padding:4px 8px; font-size:11px;"
+        )
+        flow.addWidget(self._lbl_planar_hmr, 4, 4, 1, 4)
+
+        self._btn_refresh_planar = QPushButton("↻ HMR planar")
+        self._btn_refresh_planar.clicked.connect(self._refresh_planar_hmr_indicator)
+        self._btn_refresh_planar.setToolTip(
+            "Vuelve a leer el puente y muestra el HMR planar publicado por AMYLO Planar."
+        )
+        flow.addWidget(self._btn_refresh_planar, 4, 8)
         flow.setColumnStretch(9, 1)
 
         # ═══════════════════════════════════════════════════════════════════
@@ -7816,6 +7835,42 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         except Exception:
             return None
 
+    def _refresh_planar_hmr_indicator(self):
+        """Re-lee el puente y actualiza el indicador en vivo del HMR planar."""
+        lbl = getattr(self, "_lbl_planar_hmr", None)
+        if lbl is None:
+            return
+        neutral = ("color:#94a3b8; background:#0b1220; border:1px solid #334155; "
+                   "border-radius:4px; padding:4px 8px; font-size:11px;")
+        data = self._read_planar_bridge()
+        if not data:
+            lbl.setText("HMR planar: — (sin datos del planar)")
+            lbl.setStyleSheet(neutral)
+            return
+        hmr = data.get("hmr")
+        perugini = data.get("perugini")
+        washout = data.get("washout_pct")
+        parts = []
+        if hmr is not None:
+            parts.append(f"HMR {float(hmr):.2f}")
+        if perugini is not None:
+            parts.append(f"Perugini {int(perugini)}")
+        if washout is not None:
+            parts.append(f"WO {float(washout):.0f}%")
+        src = str(data.get("source", "") or "planar")
+        lbl.setText(f"Planar ({src}): " + (" · ".join(parts) if parts else "sin métricas"))
+        color = "#22c55e"
+        if hmr is not None:
+            h = float(hmr)
+            if h >= 1.5:
+                color = "#ef4444"
+            elif h >= 1.0:
+                color = "#f59e0b"
+        lbl.setStyleSheet(
+            f"color:{color}; background:#0b1220; border:1px solid {color}; "
+            "border-radius:4px; padding:4px 8px; font-size:11px; font-weight:bold;"
+        )
+
     def _build_amylo_report_data(self):
         """Arma el AmyloReportData con métricas, paciente, parámetros y advertencias."""
         from report.amylo_spect_report import AmyloReportData
@@ -8449,39 +8504,21 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         # NM 2D sin señales tomográficas ni temporales y pocos frames.
         return int(info.get("frames", 1) or 1) <= 4 and not info.get("has_time_vec")
 
-    def _amylo_2d_image_from_study(self, study):
-        """Extrae una imagen 2D de un estudio planar cargado (para AMYLO Planar)."""
-        cube = np.asarray(study.cube, dtype=np.float64)
-        if cube.ndim != 4:
-            return None
-        n_gates, n_slices, _rows, _cols = cube.shape
-        if n_gates == 1 and n_slices == 1:
-            return cube[0, 0]
-        if n_slices > 1:
-            return cube.max(axis=1)
-        if n_gates > 1 and n_slices == 1:
-            return cube[:, 0].sum(axis=0)
-        return None
+    def _open_amylo_planar_from_folder(self, folder: str):
+        """Abre AMYLO Planar apuntando a la carpeta del paciente.
 
-    def _open_amylo_planar_from_path(self, path: str):
-        """Abre el visor AMYLO Planar con la imagen planar detectada."""
+        No pre-carga ninguna imagen: el usuario elige dentro qué serie es 1h y
+        cuál es 3h con los botones 'Cargar imágenes 1h/3h' (que arrancan en esta
+        carpeta). El puente sincroniza las métricas con el informe SPECT.
+        """
         try:
-            from core.dicom_loader import load
             from ui.amyloid_window import AmyloidWindow
-            study = load(path, verbose=False)
-            if study is None:
-                QMessageBox.warning(self, "AMYLO", "No se pudo cargar la imagen planar.")
-                return
-            img = self._amylo_2d_image_from_study(study)
-            if img is None:
-                QMessageBox.information(self, "AMYLO", "La serie no contiene una imagen planar 2D válida.")
-                return
-            dlg = AmyloidWindow(self, image=img, study=study)
+            dlg = AmyloidWindow(self, initial_folder=folder)
             dlg.show()
             dlg.raise_()
             dlg.activateWindow()
             self._amyloid_planar_window = dlg
-            self._metrics.append(f"[SMART] AMYLO Planar abierto: {study.series_description or os.path.basename(path)}")
+            self._metrics.append(f"[SMART] AMYLO Planar abierto sobre carpeta: {folder}")
         except Exception as exc:
             QMessageBox.critical(self, "AMYLO", f"No se pudo abrir AMYLO Planar:\n{exc}")
 
@@ -8614,18 +8651,18 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             )
         self._status.setText("✓ Carpeta inteligente cargada (ver métricas para el detalle).")
 
-        # 5) Planar: ofrecer abrir AMYLO Planar (el consumo directo de carpeta es trabajo futuro).
+        # 5) Planar: ofrecer abrir AMYLO Planar sobre la carpeta del paciente.
         if planars:
             best = max(planars, key=lambda i: len(i["files"]) * i["frames"])
             resp = QMessageBox.question(
                 self, "AMYLO Planar",
                 f"Se detectaron {len(planars)} serie(s) planar(es) en la carpeta.\n"
-                f"¿Abrir el visor AMYLO Planar con:\n"
-                f"{best['desc'] or os.path.basename(best['files'][0])}?",
+                f"¿Abrir el visor AMYLO Planar sobre esta carpeta para elegir 1h/3h?\n"
+                f"(sugerida: {best['desc'] or os.path.basename(best['files'][0])})",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if resp == QMessageBox.StandardButton.Yes:
-                self._open_amylo_planar_from_path(best["files"][0])
+                self._open_amylo_planar_from_folder(folder)
 
     def _apply_ac_prototype(self):
         if self._base_spect_volume is None:

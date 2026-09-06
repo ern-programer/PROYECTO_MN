@@ -374,7 +374,7 @@ class AmyloidWindow(QDialog):
         16: layout_16q,
     }
 
-    def __init__(self, parent=None, image=None, study=None):
+    def __init__(self, parent=None, image=None, study=None, initial_folder=None):
         super().__init__(parent)
         self.setWindowTitle("SINCRO — Amiloidosis")
         self.setWindowFlags(
@@ -389,6 +389,9 @@ class AmyloidWindow(QDialog):
         self._image = image          # imagen renderizada (puede ser RGB)
         self._original_image = image  # imagen original 2D para análisis ROI
         self._study = study
+        # Carpeta del paciente cuando se abre desde la «carpeta inteligente» del
+        # panel SPECT: los diálogos de carga 1h/3h arrancan aquí.
+        self._smart_folder = str(initial_folder) if initial_folder and os.path.isdir(str(initial_folder)) else None
         self._metadata = {
             "patient": str(getattr(study, "patient_name", "") or "N/D"),
             "date": str(getattr(study, "study_date", "") or "N/D"),
@@ -2083,6 +2086,9 @@ class AmyloidWindow(QDialog):
         self._amyloid_spect_panel = dlg
 
     def _planar_start_dir(self) -> str:
+        sf = getattr(self, "_smart_folder", None)
+        if sf and os.path.isdir(sf):
+            return sf
         settings = QSettings("GAMMASYS", "SINCRO_AMYLO")
         last = str(settings.value("last_planar_dir", "") or "")
         if last and os.path.isdir(last):
