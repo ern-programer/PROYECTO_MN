@@ -1051,11 +1051,16 @@ class AmyloidSpectPanel(QDialog):
         self._ct_opacity_pct = 100
         self._ct_visual_trial_mode = True
         self._ct_grid_trial_mode = False
+        self._ct_native_factor = 2  # factor de resolución de la grilla CT nativa (2..5)
         self._trial_cache_signature = None
         self._trial_spect_on_ct = None
         self._trial_ct_native = None
         self._trial_ct_native_spacing = None
         self._trial_ref_shape = None
+        self._trial_base_sig = None
+        self._trial_ct_native_base = None
+        self._trial_spect_on_ct_base = None
+        self._trial_ct_native_spacing_base = None
         self._mip_vol_cache_sig = None  # Caché para evitar recalcular transform en cada scroll
         self._workflow_tag = "perf_spect_ct"
         self._dicom_profile_info = {}
@@ -1263,6 +1268,17 @@ class AmyloidSpectPanel(QDialog):
             "background-color:#0e7490; color:white; font-weight:bold; padding:6px 12px; border-radius:4px;"
         )
         flow.addWidget(self._btn_fusion_layout, 3, 8)
+
+        self._btn_smart_load = QPushButton("🔍 Carpeta inteligente (SPECT + CT + ATT + SC)")
+        self._btn_smart_load.clicked.connect(self._smart_load_folder)
+        self._btn_smart_load.setToolTip(
+            "Escanea una carpeta y detecta/carga automáticamente SPECT crudo, CT, ATT map y scatter.\n"
+            "Si hay imágenes planares, ofrece abrirlas en el visor AMYLO Planar."
+        )
+        self._btn_smart_load.setStyleSheet(
+            "background-color:#7c3aed; color:white; font-weight:bold; padding:6px 12px; border-radius:4px;"
+        )
+        flow.addWidget(self._btn_smart_load, 4, 0, 1, 4)
         flow.setColumnStretch(9, 1)
 
         # ═══════════════════════════════════════════════════════════════════
@@ -2392,6 +2408,19 @@ class AmyloidSpectPanel(QDialog):
         self._ct_grid_trial_check.setStyleSheet("font-size:10px; color:#f59e0b; font-weight:600;")
         self._ct_grid_trial_check.toggled.connect(self._on_ct_grid_trial_toggled)
         trial_grid_row.addWidget(self._ct_grid_trial_check)
+        self._ct_native_factor_combo = QComboBox()
+        for _f in (2, 3, 4, 5):
+            self._ct_native_factor_combo.addItem(f"{_f}\u00d7", _f)
+        self._ct_native_factor_combo.setCurrentIndex(0)
+        self._ct_native_factor_combo.setFixedWidth(52)
+        self._ct_native_factor_combo.setToolTip(
+            "Resolución de la grilla CT nativa (2\u00d7 a 5\u00d7 la del SPECT).\n"
+            "Más resolución = CT más nítida pero más lento. El registro no cambia:\n"
+            "registrá/ajustá en 2\u00d7 y subí el factor para inspeccionar."
+        )
+        self._ct_native_factor_combo.setStyleSheet("font-size:10px;")
+        self._ct_native_factor_combo.currentIndexChanged.connect(self._on_ct_native_factor_changed)
+        trial_grid_row.addWidget(self._ct_native_factor_combo)
         trial_grid_row.addStretch()
         # Botón info CT (i en círculo)
         self._ct_info_btn = QPushButton("\u2139\ufe0f")
@@ -5658,6 +5687,97 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         self._trial_ct_native = None
         self._trial_ct_native_spacing = None
         self._trial_ref_shape = None
+        # Base pesada (resample Nx + auto-flip): también se descarta.
+        self._trial_base_sig = None
+        self._trial_ct_native_base = None
+        self._trial_spect_on_ct_base = None
+        self._trial_ct_native_spacing_base = None
+
+    def _invalidate_ct_grid_trial_view(self):
+        """Solo la vista final (flips/rot/shift): conserva la base pesada ya resuelta."""
+        self._trial_cache_signature = None
+        self._trial_spect_on_ct = None
+        self._trial_ct_native = None
+        self._trial_ct_native_spacing = None
+        self._trial_ref_shape = None
+
+    def _build_ct_grid_trial_base(self, base_sig) -> None:
+        """Parte PESADA (resample CT a grilla Nx + auto-flip), cacheada una sola vez.
+
+        Separa el resample/auto-flip (caro) del nudge/rot/shift (barato): arrastrar
+        durante el registro deja de reconstruir toda la grilla en cada movimiento.
+        """
+        spect_tx = self._spect_transform_3d(np.asarray(self._current_volume, dtype=np.float64))
+        ct_tx = np.asarray(self._ct_volume, dtype=np.float64)
+        spect_sp = self._spect_spacing_zyx or (6.8, 6.8, 6.8)
+        ct_sp = self._ct_spacing_zyx or (1.0, 1.0, 1.0)
+        nf = int(getattr(self, "_ct_native_factor", 2))
+        nf = max(2, min(5, nf))
+        target_shape = tuple(int(spect_tx.shape[i] * nf) for i in range(3))
+        target_spacing = tuple(float(spect_sp[i]) / float(nf) for i in range(3))
+
+        spect_affine_nx = None
+        if self._spect_affine_ijk_to_lps is not None:
+            sa = np.asarray(self._spect_affine_ijk_to_lps, dtype=np.float64).copy()
+            sa[0, 0] /= float(nf)
+            sa[1, 1] /= float(nf)
+            sa[2, 2] /= float(nf)
+            spect_affine_nx = sa
+
+        ct_native, _ct_notes = resample_volume_to_spect_grid(
+            ct_tx,
+            np.zeros(target_shape),  # solo usa el shape
+            source_spacing_zyx=ct_sp,
+            spect_spacing_zyx=target_spacing,
+            source_affine_ijk_to_lps=self._ct_affine_ijk_to_lps,
+            spect_affine_ijk_to_lps=spect_affine_nx,
+            fill_value=-1024.0,
+            order=1,
+        )
+
+        # SPECT → grilla objetivo: zoom exacto ×nf (el affine de adquisición
+        # deformaba el SPECT en estos crudos).
+        spect_on_ct = ndi.zoom(spect_tx, float(nf), order=1, prefilter=False)
+        if spect_on_ct.shape != tuple(target_shape):
+            pad = np.full(target_shape, float(np.min(spect_tx)) if spect_tx.size else 0.0, dtype=np.float64)
+            sl = tuple(slice(0, min(spect_on_ct.shape[d], target_shape[d])) for d in range(3))
+            pad[sl] = spect_on_ct[sl]
+            spect_on_ct = pad
+
+        from core.amyloid_spect import _auto_flip_ct_to_spect
+        ct_native, flip_note, flip_score = _auto_flip_ct_to_spect(ct_native, spect_on_ct)
+        if hasattr(self, '_metrics'):
+            self._metrics.append(f"[CT-NATIVE] {flip_note}")
+        if flip_score < 0.30:
+            cand, _ = resample_volume_to_spect_grid(
+                ct_tx,
+                np.zeros(target_shape),
+                source_spacing_zyx=ct_sp,
+                spect_spacing_zyx=target_spacing,
+                source_affine_ijk_to_lps=None,
+                spect_affine_ijk_to_lps=None,
+                fill_value=-1024.0,
+                order=1,
+            )
+            cand, cand_note, cand_score = _auto_flip_ct_to_spect(cand, spect_on_ct)
+            if cand_score > flip_score:
+                ct_native = cand
+                if hasattr(self, '_metrics'):
+                    self._metrics.append(
+                        f"[CT-NATIVE] Acuerdo affine pobre (NCC={flip_score:.3f}): "
+                        f"candidato físico adoptado (NCC={cand_score:.3f}). {cand_note}"
+                    )
+        if hasattr(self, '_metrics'):
+            self._metrics.append(f"[CT-NATIVE] SPECT remuestreado a grilla {nf}x por zoom exacto (sin affine).")
+            self._metrics.append(
+                f"[CT-NATIVE] SPECT {spect_tx.shape} → grid {spect_on_ct.shape} | "
+                f"CT {ct_tx.shape} → {ct_native.shape} ({nf}x SPECT res)"
+            )
+
+        self._trial_base_sig = base_sig
+        self._trial_ct_native_base = np.ascontiguousarray(np.asarray(ct_native, dtype=np.float32))
+        self._trial_spect_on_ct_base = np.ascontiguousarray(np.asarray(spect_on_ct, dtype=np.float32))
+        self._trial_ct_native_spacing_base = tuple(float(v) for v in target_spacing)
 
     def _ensure_ct_grid_trial_cache(self) -> bool:
         if self._ct_volume is None or self._current_volume is None:
@@ -5681,94 +5801,43 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             float(self._rot_z.value()) if hasattr(self, '_rot_z') else 0.0,  # rot Z nudge
             float(self._rot_y.value()) if hasattr(self, '_rot_y') else 0.0,  # rot Y nudge
             float(self._rot_x.value()) if hasattr(self, '_rot_x') else 0.0,  # rot X nudge
+            int(getattr(self, '_ct_native_factor', 2)),  # factor de resolución grilla CT nativa
         )
         if sig == self._trial_cache_signature and self._trial_spect_on_ct is not None and self._trial_ct_native is not None:
             return True
 
         try:
-            spect_tx = self._spect_transform_3d(np.asarray(self._current_volume, dtype=np.float64))
-            # CT sin flips de usuario: la orientación base la resuelve el auto-flip
-            # y los checkboxes CT se aplican DESPUÉS (si se aplicaran antes, el
-            # auto-flip los desharía y parecerían muertos).
-            ct_tx = np.asarray(self._ct_volume, dtype=np.float64)
-            
-            # === Estrategia: CT nativo recortado al FOV del SPECT ===
-            # En vez de expandir el SPECT al FOV completo del CT (que deja el corazón
-            # pequeño y al borde), recortamos el CT al FOV del SPECT pero a mayor
-            # resolución (2x o 3x la grilla SPECT original).
-            # Esto da CT nítido + SPECT bien dimensionado.
-            spect_sp = self._spect_spacing_zyx or (6.8, 6.8, 6.8)
-            ct_sp = self._ct_spacing_zyx or (1.0, 1.0, 1.0)
-            
-            # Grilla objetivo: 2x la resolución SPECT en cada eje (128³ si SPECT es 64³)
-            target_shape = tuple(int(spect_tx.shape[i] * 2) for i in range(3))
-            target_spacing = tuple(float(spect_sp[i]) / 2.0 for i in range(3))
-            
-            # Crear affine del SPECT escalada 2x (mismo FOV, spacing/2)
-            spect_affine_2x = None
-            if self._spect_affine_ijk_to_lps is not None:
-                sa = np.asarray(self._spect_affine_ijk_to_lps, dtype=np.float64).copy()
-                # Dividir spacing (elementos diagonales) por 2, mantener origen
-                sa[0, 0] /= 2.0
-                sa[1, 1] /= 2.0
-                sa[2, 2] /= 2.0
-                spect_affine_2x = sa
-            
-            # Remuestrear CT a la grilla objetivo (mayor resolución, mismo FOV que SPECT)
-            ct_native, ct_notes = resample_volume_to_spect_grid(
-                ct_tx,
-                np.zeros(target_shape),  # solo usa el shape
-                source_spacing_zyx=ct_sp,
-                spect_spacing_zyx=target_spacing,
-                source_affine_ijk_to_lps=self._ct_affine_ijk_to_lps,
-                spect_affine_ijk_to_lps=spect_affine_2x,
-                fill_value=-1024.0,
-                order=1,
+            # Cache de 2 niveles: la BASE (resample Nx + auto-flip) se reutiliza; el
+            # drag/nudge solo re-aplica flips de usuario + rot + shift (barato).
+            base_sig = (
+                id(self._current_volume),
+                id(self._ct_volume),
+                bool(getattr(self, "_spect_flip_x_test", False)),
+                bool(getattr(self, "_spect_flip_y_test", False)),
+                bool(getattr(self, "_spect_flip_z_test", False)),
+                tuple(np.asarray(self._spect_affine_ijk_to_lps).ravel()) if self._spect_affine_ijk_to_lps is not None else None,
+                tuple(np.asarray(self._ct_affine_ijk_to_lps).ravel()) if self._ct_affine_ijk_to_lps is not None else None,
+                tuple(self._spect_spacing_zyx) if self._spect_spacing_zyx is not None else None,
+                tuple(self._ct_spacing_zyx) if self._ct_spacing_zyx is not None else None,
+                int(getattr(self, '_ct_native_factor', 2)),
             )
-            ct_native_spacing = target_spacing
-            
-            # SPECT → grilla objetivo: la grilla 2x es por construcción el mismo
-            # FOV con spacing/2, así que el remuestreo exacto es zoom ×2. Usar el
-            # affine de adquisición aquí deformaba el SPECT (no describe la
-            # grilla reconstruida en estos crudos).
-            spect_on_ct = ndi.zoom(spect_tx, 2.0, order=1, prefilter=False)
-            if spect_on_ct.shape != tuple(target_shape):
-                pad = np.full(target_shape, float(np.min(spect_tx)) if spect_tx.size else 0.0, dtype=np.float64)
-                sl = tuple(slice(0, min(spect_on_ct.shape[d], target_shape[d])) for d in range(3))
-                pad[sl] = spect_on_ct[sl]
-                spect_on_ct = pad
+            if (
+                base_sig != getattr(self, "_trial_base_sig", None)
+                or getattr(self, "_trial_ct_native_base", None) is None
+                or getattr(self, "_trial_spect_on_ct_base", None) is None
+            ):
+                self._build_ct_grid_trial_base(base_sig)
 
-            # Misma estandarización de orientación que el registro (v1.66.5):
-            # el camino affine de estos equipos puede dejar ejes permutados.
-            from core.amyloid_spect import _auto_flip_ct_to_spect
-            ct_native, flip_note, flip_score = _auto_flip_ct_to_spect(ct_native, spect_on_ct)
-            if hasattr(self, '_metrics'):
-                self._metrics.append(f"[CT-NATIVE] {flip_note}")
-            if flip_score < 0.30:
-                cand, _ = resample_volume_to_spect_grid(
-                    ct_tx,
-                    np.zeros(target_shape),
-                    source_spacing_zyx=ct_sp,
-                    spect_spacing_zyx=target_spacing,
-                    source_affine_ijk_to_lps=None,
-                    spect_affine_ijk_to_lps=None,
-                    fill_value=-1024.0,
-                    order=1,
-                )
-                cand, cand_note, cand_score = _auto_flip_ct_to_spect(cand, spect_on_ct)
-                if cand_score > flip_score:
-                    ct_native = cand
-                    if hasattr(self, '_metrics'):
-                        self._metrics.append(
-                            f"[CT-NATIVE] Acuerdo affine pobre (NCC={flip_score:.3f}): "
-                            f"candidato físico adoptado (NCC={cand_score:.3f}). {cand_note}"
-                        )
+            ct_native = np.asarray(self._trial_ct_native_base, dtype=np.float64)
+            spect_on_ct = self._trial_spect_on_ct_base
+            ct_native_spacing = self._trial_ct_native_spacing_base
+            nf = float(max(2, min(5, int(getattr(self, '_ct_native_factor', 2)))))
 
             # Flips manuales del usuario: relativos a la orientación auto-resuelta.
             ct_native = self._ct_transform_3d(ct_native)
 
             # === Aplicar rotaciones del nudge (igual que _apply_ct_nudge) ===
-            # Las rotaciones están en grados y se aplican sobre la grilla 2x.
+            # Las rotaciones están en grados y se aplican sobre la grilla Nx.
             rot_z = float(self._rot_z.value()) if hasattr(self, '_rot_z') else 0.0
             rot_y = float(self._rot_y.value()) if hasattr(self, '_rot_y') else 0.0
             rot_x = float(self._rot_x.value()) if hasattr(self, '_rot_x') else 0.0
@@ -5786,40 +5855,21 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             
             # === Aplicar shift de registro (alineación CT↔SPECT) ===
             # El shift total está en píxeles de la grilla SPECT original (64³).
-            # Convertir a píxeles de la grilla objetivo (128³): multiplicar por 2.
+            # Convertir a píxeles de la grilla objetivo (Nx): multiplicar por nf.
             total_shift = getattr(self, '_ct_total_shift_zyx', (0.0, 0.0, 0.0))
             if any(abs(s) > 0.01 for s in total_shift):
                 shift_target = (
-                    float(total_shift[0]) * 2.0,
-                    float(total_shift[1]) * 2.0,
-                    float(total_shift[2]) * 2.0,
+                    float(total_shift[0]) * nf,
+                    float(total_shift[1]) * nf,
+                    float(total_shift[2]) * nf,
                 )
                 ct_native = ndi.shift(ct_native, shift=shift_target, order=1, mode='nearest')
                 if hasattr(self, '_metrics'):
                     self._metrics.append(
                         f"[CT-NATIVE] Shift registro aplicado: "
-                        f"Δ(z,y,x)=({shift_target[0]:.1f},{shift_target[1]:.1f},{shift_target[2]:.1f}) px (grid 2x)"
+                        f"Δ(z,y,x)=({shift_target[0]:.1f},{shift_target[1]:.1f},{shift_target[2]:.1f}) px (grid {nf:g}x)"
                     )
-            
-            # SPECT ya remuestreado arriba (antes de resolver orientación CT).
-            # Diagnóstico de registro
-            if hasattr(self, '_metrics'):
-                self._metrics.append("[CT-NATIVE] SPECT remuestreado a grilla 2x por zoom exacto (sin affine).")
-                self._metrics.append(
-                    f"[CT-NATIVE] SPECT {spect_tx.shape} → grid {spect_on_ct.shape} | "
-                    f"CT {ct_tx.shape} → {ct_native.shape} (2x SPECT res)"
-                )
-                # Detectar si el corazón está al borde
-                sp_nonzero = np.argwhere(spect_on_ct > float(np.percentile(spect_on_ct, 90)))
-                if len(sp_nonzero) > 0:
-                    z_min, y_min, x_min = sp_nonzero.min(axis=0)
-                    z_max, y_max, x_max = sp_nonzero.max(axis=0)
-                    self._metrics.append(
-                        f"[CT-NATIVE] SPECT 90% percentile bbox: "
-                        f"z=[{z_min}-{z_max}/{spect_on_ct.shape[0]}] "
-                        f"y=[{y_min}-{y_max}/{spect_on_ct.shape[1]}] "
-                        f"x=[{x_min}-{x_max}/{spect_on_ct.shape[2]}]"
-                    )
+
             self._trial_spect_on_ct = np.ascontiguousarray(np.asarray(spect_on_ct, dtype=np.float32))  # float32 ahorra memoria
             self._trial_ct_native = np.ascontiguousarray(np.asarray(ct_native, dtype=np.float32))
             self._trial_ct_native_spacing = ct_native_spacing
@@ -5842,6 +5892,26 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             if hasattr(self, "_metrics"):
                 self._metrics.append("[PRUEBA/BETA] CT nativa + SPECT escalado a CT desactivado (rollback aplicado).")
         self._render_current_with_overlay()
+
+    def _on_ct_native_factor_changed(self, _index: int):
+        combo = getattr(self, "_ct_native_factor_combo", None)
+        if combo is None:
+            return
+        data = combo.currentData()
+        try:
+            nf = int(data)
+        except (TypeError, ValueError):
+            nf = 2
+        nf = max(2, min(5, nf))
+        if nf == int(getattr(self, "_ct_native_factor", 2)):
+            return
+        self._ct_native_factor = nf
+        # El factor cambia la grilla base: hay que reconstruir todo.
+        self._invalidate_ct_grid_trial_cache()
+        if nf >= 4 and hasattr(self, "_status"):
+            self._status.setText(f"Reconstruyendo grilla CT nativa a {nf}\u00d7 (puede tardar)…")
+        if getattr(self, "_ct_grid_trial_mode", False):
+            self._render_current_with_overlay()
 
     # ─────────────────────────────────────────────
     # Diálogo: Rol del CT en amiloidosis cardíaca
@@ -8263,6 +8333,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         if not path:
             return
         self._remember_path(path)
+        self._load_att_map_path(path)
+
+    def _load_att_map_path(self, path: str):
         try:
             self._task_progress_start("Cargando ATT MAP...")
             att = load_attenuation_map_from_path(path)
@@ -8294,6 +8367,265 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         except Exception as exc:
             self._progress.setFormat("Error")
             self._status.setText(f"Error cargando ATT MAP: {exc}")
+
+    # ─────────────────────────────────────────────
+    # Carga inteligente de carpeta (SPECT + CT + ATT + SC + detección planar)
+    # ─────────────────────────────────────────────
+    @staticmethod
+    def _default_smart_load_keywords() -> dict:
+        """Palabras clave (minúsculas) que la carga inteligente busca en la metadata."""
+        return {
+            "raw": ["tomo"],
+            "att": ["atten", "attmap", "att map", "att_", "_att", "mu map", "mumap", "umap", "transmission"],
+            "scatter": ["_sc_", "scatter"],
+            "planar": ["planar", "static", "estatic", "whole body", "wholebody", "cuerpo entero", "corporal", "spot"],
+        }
+
+    def _smart_load_keywords(self) -> dict:
+        """Keywords efectivos = defaults, pisados por los del usuario (si guardó)."""
+        cfg = self._default_smart_load_keywords()
+        settings = getattr(self, "_settings", None)
+        if settings is not None:
+            try:
+                raw = str(settings.value("smart_load/keywords_json", "", type=str) or "")
+                if raw:
+                    user = json.loads(raw)
+                    for key in cfg:
+                        if isinstance(user.get(key), list):
+                            vals = [str(x).strip().lower() for x in user[key] if str(x).strip()]
+                            if vals:
+                                cfg[key] = vals
+            except Exception:
+                pass
+        return cfg
+
+    def _scan_dicom_series(self, folder: str) -> dict:
+        """Escanea una carpeta leyendo solo headers y agrupa archivos por serie."""
+        import pydicom
+
+        series: dict = {}
+        for base, _dirs, files in os.walk(folder):
+            for fn in files:
+                if fn.lower().endswith((".png", ".jpg", ".jpeg", ".txt", ".pdf", ".json", ".xml", ".csv")):
+                    continue
+                fp = os.path.join(base, fn)
+                try:
+                    ds = pydicom.dcmread(fp, stop_before_pixels=True, force=True)
+                    uid = str(getattr(ds, "SeriesInstanceUID", "") or "")
+                    if not uid:
+                        continue
+                    info = series.setdefault(uid, {
+                        "files": [], "modality": str(getattr(ds, "Modality", "") or ""),
+                        "desc": str(getattr(ds, "SeriesDescription", "") or ""),
+                        "protocol": str(getattr(ds, "ProtocolName", "") or ""),
+                        "image_type": " ".join(str(x) for x in (getattr(ds, "ImageType", None) or [])),
+                        "frames": int(getattr(ds, "NumberOfFrames", 1) or 1),
+                        "rows": int(getattr(ds, "Rows", 0) or 0),
+                        "cols": int(getattr(ds, "Columns", 0) or 0),
+                        "has_slice_vec": (0x0054, 0x0080) in ds,
+                        "has_angular_vec": (0x0054, 0x0090) in ds,
+                        "has_time_vec": (0x0054, 0x0070) in ds,
+                    })
+                    info["files"].append(fp)
+                except Exception:
+                    continue
+        return series
+
+    def _info_looks_planar(self, info: dict) -> bool:
+        """¿La serie NM es una imagen planar/estática (no proyecciones ni cortes)?"""
+        if info["modality"].upper() != "NM":
+            return False
+        if info.get("has_angular_vec") or info.get("has_slice_vec"):
+            return False
+        text = f"{info['desc']} {info['protocol']} {info['image_type']} {os.path.basename(info['files'][0])}".lower()
+        if "tomo" in text:
+            return False
+        it = info["image_type"].upper()
+        if "STATIC" in it or "WHOLE BODY" in it:
+            return True
+        kw = self._smart_load_keywords()
+        if any(k in text for k in kw.get("planar", ())):
+            return True
+        # NM 2D sin señales tomográficas ni temporales y pocos frames.
+        return int(info.get("frames", 1) or 1) <= 4 and not info.get("has_time_vec")
+
+    def _amylo_2d_image_from_study(self, study):
+        """Extrae una imagen 2D de un estudio planar cargado (para AMYLO Planar)."""
+        cube = np.asarray(study.cube, dtype=np.float64)
+        if cube.ndim != 4:
+            return None
+        n_gates, n_slices, _rows, _cols = cube.shape
+        if n_gates == 1 and n_slices == 1:
+            return cube[0, 0]
+        if n_slices > 1:
+            return cube.max(axis=1)
+        if n_gates > 1 and n_slices == 1:
+            return cube[:, 0].sum(axis=0)
+        return None
+
+    def _open_amylo_planar_from_path(self, path: str):
+        """Abre el visor AMYLO Planar con la imagen planar detectada."""
+        try:
+            from core.dicom_loader import load
+            from ui.amyloid_window import AmyloidWindow
+            study = load(path, verbose=False)
+            if study is None:
+                QMessageBox.warning(self, "AMYLO", "No se pudo cargar la imagen planar.")
+                return
+            img = self._amylo_2d_image_from_study(study)
+            if img is None:
+                QMessageBox.information(self, "AMYLO", "La serie no contiene una imagen planar 2D válida.")
+                return
+            dlg = AmyloidWindow(self, image=img, study=study)
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+            self._amyloid_planar_window = dlg
+            self._metrics.append(f"[SMART] AMYLO Planar abierto: {study.series_description or os.path.basename(path)}")
+        except Exception as exc:
+            QMessageBox.critical(self, "AMYLO", f"No se pudo abrir AMYLO Planar:\n{exc}")
+
+    def _smart_load_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Carpeta con SPECT + CT/ATT/SC del paciente", self._last_dir()
+        )
+        if not folder:
+            return
+        self._remember_path(folder)
+        self._metrics.append(f"\n[SMART] Escaneando {folder} ...")
+        series = self._scan_dicom_series(folder)
+        if not series:
+            QMessageBox.information(self, "AMYLO", "No se encontraron DICOMs en la carpeta.")
+            return
+
+        kw = self._smart_load_keywords()
+
+        def _classify(info) -> str | None:
+            text = f"{info['desc']} {info['protocol']} {info['image_type']} {os.path.basename(info['files'][0])}".lower()
+            base_up = os.path.basename(info['files'][0]).upper()
+            stem_up = os.path.splitext(base_up)[0]
+            if "localizer" in text or "scout" in text:
+                return None
+            if any(k in text for k in kw.get("att", ())):
+                return "att"
+            mod = info["modality"].upper()
+            if mod == "CT":
+                return "ct"
+            if mod == "NM":
+                if self._info_looks_planar(info):
+                    return "planar"
+                # Proyecciones crudas: vector angular sin vector de cortes, o nombre 'tomo'.
+                raw_like = (
+                    (bool(info.get("has_angular_vec")) and not bool(info.get("has_slice_vec")))
+                    or (any(k in text for k in kw.get("raw", ())) and "recon" not in text
+                        and "derived" not in info["image_type"].lower())
+                )
+                if raw_like:
+                    if "_SC_" in base_up or stem_up.endswith("_SC") or any(k in text for k in kw.get("scatter", ())):
+                        return "sc"
+                    return "raw"
+                # Cortes reconstruidos (SA/tomo): se omiten (el crudo es primario).
+                return None
+            return None
+
+        detected: dict = {}  # kind -> info
+        planars: list = []
+        for uid, info in series.items():
+            kind = _classify(info)
+            if kind is None:
+                continue
+            info["uid"] = uid
+            if kind == "planar":
+                planars.append(info)
+                continue
+            prev = detected.get(kind)
+            if prev is None or len(info["files"]) * info["frames"] > len(prev["files"]) * prev["frames"]:
+                detected[kind] = info
+
+        if not detected and not planars:
+            QMessageBox.information(
+                self, "AMYLO",
+                "No se reconocieron series SPECT crudas / CT / ATT / SC ni planares (ver métricas).",
+            )
+            return
+
+        nombres = {"raw": "SPECT crudo", "att": "ATT map", "ct": "CT", "sc": "Scatter (SC)"}
+        from PyQt6.QtWidgets import QListWidget, QListWidgetItem, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("AMYLO — Carpeta inteligente")
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("Series detectadas para cargar (destildá lo que no quieras):"))
+        lst = QListWidget()
+        for kind in ("raw", "ct", "att", "sc"):
+            info = detected.get(kind)
+            if info is None:
+                continue
+            label = (
+                f"{nombres[kind]}: {info['desc'] or os.path.basename(info['files'][0])}  "
+                f"({len(info['files'])} arch, {info['frames']} frames)"
+            )
+            it = QListWidgetItem(label)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked)
+            it.setData(Qt.ItemDataRole.UserRole, kind)
+            it.setToolTip(info["files"][0])
+            lst.addItem(it)
+        lst.setMinimumWidth(540)
+        lay.addWidget(lst)
+        if planars:
+            lay.addWidget(QLabel(f"🩻 {len(planars)} serie(s) planar(es) detectada(s): se ofrecerá abrir AMYLO Planar."))
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        chosen: dict = {}
+        for i in range(lst.count()):
+            it = lst.item(i)
+            if it.checkState() == Qt.CheckState.Checked:
+                k = it.data(Qt.ItemDataRole.UserRole)
+                chosen[k] = detected[k]
+
+        # 1) SPECT crudo (solo si aún no hay estudio: no pisar trabajo hecho).
+        raw = chosen.get("raw")
+        if raw is not None:
+            if self._analysis is None:
+                self._load_spect_path(raw["files"][0])
+            else:
+                self._metrics.append("[SMART] Ya hay SPECT cargado: no se recarga.")
+        # 2) CT (da display alta res + máscara ósea).
+        ct = chosen.get("ct")
+        if ct is not None:
+            self._load_ct_path(ct["files"][0])
+        # 3) ATT map (habilita AC).
+        att = chosen.get("att")
+        if att is not None:
+            self._load_att_map_path(att["files"][0])
+        # 4) Scatter: activar la corrección (el loader adjunta el _SC_ hermano en la recon).
+        sc = chosen.get("sc")
+        if sc is not None and getattr(self, "_scatter_check", None) is not None:
+            self._scatter_check.setEnabled(True)
+            self._scatter_check.setChecked(True)
+            self._metrics.append(
+                f"[SMART] Scatter detectado ({os.path.basename(sc['files'][0])}): "
+                "corrección SC activada para la próxima reconstrucción."
+            )
+        self._status.setText("✓ Carpeta inteligente cargada (ver métricas para el detalle).")
+
+        # 5) Planar: ofrecer abrir AMYLO Planar (el consumo directo de carpeta es trabajo futuro).
+        if planars:
+            best = max(planars, key=lambda i: len(i["files"]) * i["frames"])
+            resp = QMessageBox.question(
+                self, "AMYLO Planar",
+                f"Se detectaron {len(planars)} serie(s) planar(es) en la carpeta.\n"
+                f"¿Abrir el visor AMYLO Planar con:\n"
+                f"{best['desc'] or os.path.basename(best['files'][0])}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if resp == QMessageBox.StandardButton.Yes:
+                self._open_amylo_planar_from_path(best["files"][0])
 
     def _apply_ac_prototype(self):
         if self._base_spect_volume is None:
@@ -8451,8 +8783,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         shift = (float(self._nudge_z.value()), float(self._nudge_y.value()), float(self._nudge_x.value()))
         rot = (float(self._rot_z.value()), float(self._rot_y.value()), float(self._rot_x.value()))
         ct = np.asarray(self._ct_auto_registered, dtype=np.float64)
-        # Invalidar caché del modo CT nativa (el nudge cambia la alineación)
-        self._invalidate_ct_grid_trial_cache()
+        # Invalidar solo la VISTA del modo CT nativa (nudge cambia rot/shift, no la
+        # base pesada): conserva el resample Nx + auto-flip para respuesta rápida.
+        self._invalidate_ct_grid_trial_view()
         if abs(rot[0]) > 1e-6:
             ct = ndi.rotate(ct, angle=rot[0], axes=(1, 2), reshape=False, order=1, mode="nearest")
         if abs(rot[1]) > 1e-6:
@@ -8482,7 +8815,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             self._ct_registered = np.asarray(self._ct_auto_registered, dtype=np.float64)
             # Resetear shift total al shift de registro solo
             self._ct_total_shift_zyx = self._ct_registration_shift_zyx
-        self._invalidate_ct_grid_trial_cache()
+        self._invalidate_ct_grid_trial_view()
         if update_view:
             self._render_current_with_overlay()
             self._persist_ui_state()
