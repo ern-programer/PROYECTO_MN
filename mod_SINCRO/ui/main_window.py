@@ -206,6 +206,10 @@ class _AspectPixmapLabel(QLabel):
 		self._rescale_source()
 
 
+class ReconCancelled(Exception):
+	"""El usuario canceló la reconstrucción desde el diálogo de progreso."""
+
+
 class MainWindow(QMainWindow):
 	# Registro de layouts de presentación del montaje SA/VLA/HLA.
 	# per_strip = cortes visibles por tira/eje (None = todos). panel_in = pulgadas por panel.
@@ -16461,7 +16465,7 @@ class MainWindow(QMainWindow):
 			recon_dialog.setMinimumDuration(0)
 			recon_dialog.setAutoClose(False)
 			recon_dialog.setAutoReset(False)
-			recon_dialog.setCancelButton(None)
+			recon_dialog.setCancelButtonText("Cancelar")
 			recon_dialog.setValue(0)
 			recon_dialog.show()
 			QApplication.processEvents()
@@ -16469,6 +16473,8 @@ class MainWindow(QMainWindow):
 			def _recon_progress(fraction: float, message: str = "") -> None:
 				# Mapea el avance interno (0..1) del pipeline al tramo 45-99% de la barra
 				# lateral y al diálogo modal en primer plano.
+				if recon_dialog.wasCanceled():
+					raise ReconCancelled()
 				frac = max(0.0, min(1.0, float(fraction)))
 				pct = int(round(45 + 54 * frac))
 				msg = message or f"Reconstruyendo raw ({cfg.reconstruction_method.upper()})..."
@@ -16601,6 +16607,10 @@ class MainWindow(QMainWindow):
 			except Exception:
 				pass
 			return True
+		except ReconCancelled:
+			self._log("Reconstrucción cancelada por el usuario.")
+			self._set_progress(100, "Reconstrucción cancelada")
+			return False
 		except Exception as exc:
 			self._log(f"[ERROR] Recon raw falló: {exc}")
 			self._set_progress(100, "Recon raw falló")

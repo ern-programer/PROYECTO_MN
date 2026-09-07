@@ -8657,8 +8657,8 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         # Con ambas etapas aplicadas, el panel ya cumplió su función: se puede cerrar.
         if len(targets) > 1 and all(s in applied for s in targets):
             self.close()
-        stage_txt = "ESFUERZO" if stage == "stress" else "REPOSO"
-        other = "rest" if stage == "stress" else "stress"
+        stage_txt = "ESFUERZO" if current == "stress" else "REPOSO"
+        other = "rest" if current == "stress" else "stress"
         if other in applied:
             self._status.setText("✓ AC aplicada a AMBAS etapas — podés cerrar el panel (botón Cerrar).")
         else:
