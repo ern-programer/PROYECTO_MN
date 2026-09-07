@@ -3852,6 +3852,39 @@ class MainWindow(QMainWindow):
 			return None
 		return self._tab_name_from_title(self.tabs.tabText(idx))
 
+	def _tab_has_content(self, name: str) -> bool:
+		"""Una pestaña 'tiene algo para mostrar' según el estado del pipeline."""
+		name = str(name)
+		if name == "cine_crudo":
+			return True  # PROCESAMIENTO: pestaña de trabajo/entrada, siempre activa
+		study_loaded = getattr(self, "study", None) is not None
+		if name == "ungated":
+			return study_loaded  # QC del crudo: basta con tener estudio cargado
+		# Resto (fase/perfusión, montaje de ejes): requieren pipeline procesado.
+		return (
+			study_loaded
+			and getattr(self, "seg", None) is not None
+			and getattr(self, "phase_result", None) is not None
+		)
+
+	def _refresh_tab_enabled_states(self) -> None:
+		"""Habilita/deshabilita cada pestaña según si ya puede mostrar contenido."""
+		tabs = getattr(self, "tabs", None)
+		if tabs is None:
+			return
+		for i in range(tabs.count()):
+			name = self._tab_name_from_title(tabs.tabText(i))
+			if name is None:
+				continue
+			tabs.setTabEnabled(i, self._tab_has_content(name))
+		# Si la pestaña activa quedó deshabilitada, saltar a la primera habilitada.
+		cur = tabs.currentIndex()
+		if cur >= 0 and not tabs.isTabEnabled(cur):
+			for i in range(tabs.count()):
+				if tabs.isTabEnabled(i):
+					tabs.setCurrentIndex(i)
+					break
+
 	def _default_preview_tabs(self) -> set[str]:
 		tabs = {"slices_fase", "polar_combo", "delta_combo", "histograma", "comparacion_stress_rest", "ungated"}
 		active = self._active_tab_name()
@@ -7412,6 +7445,7 @@ class MainWindow(QMainWindow):
 		self.aha = None
 		self.phase_by_seg = None
 		self.territory = None
+		self._refresh_tab_enabled_states()
 
 		# --- ROIs manuales y centros ---
 		self.primary_manual_rois_text = ""
@@ -7957,6 +7991,8 @@ class MainWindow(QMainWindow):
 				self._preload_acquisition_ecg()
 				# Estudio nuevo en memoria ⇒ resetear pila de undo y estados de pasos.
 				self.pipeline_history.reset()
+			# Estudio ya en memoria ⇒ habilitar QC aunque falte el resto del pipeline.
+			self._refresh_tab_enabled_states()
 			# --- Modo crudo: proyecciones (no reconstruido) → panel QC + cine + gating ---
 			self._apply_gated_controls_state()
 			if not bool(getattr(self.study, "reconstructed", True)):
@@ -12273,11 +12309,13 @@ class MainWindow(QMainWindow):
 	def _load_previews(self):
 		for name in self.preview_labels:
 			self._load_preview(name)
+		self._refresh_tab_enabled_states()
 
 	def _load_previews_selected(self, names):
 		for name in names:
 			if name in self.preview_labels:
 				self._load_preview(name)
+		self._refresh_tab_enabled_states()
 
 	def _load_polar_cine_preview(self):
 		name = "polar_perfusion_directa"
@@ -13457,13 +13495,14 @@ class MainWindow(QMainWindow):
 				frames.append(self._rgb_frame_to_qpixmap_raw(img))
 		return frames, counts, matrix_txt
 
-	def _stack_cine_crudo_dual_pixmaps(self, top_pix: QPixmap, bottom_pix: QPixmap, top_label: str, bottom_label: str, active_stage: str = "stress", render_scale: int = 1) -> QPixmap:
+	def _stack_cine_crudo_dual_pixmaps(self, top_pix: QPixmap, bottom_pix: QPixmap, top_label: str, bottom_label: str, active_stage: str = "stress", render_scale: int = 1, label_scale: float = 1.0) -> QPixmap:
 		"""Compone dos paneles en vertical con títulos: stress arriba / rest abajo.
 
 		Resalta la etapa activa. ``render_scale`` supersamplea todo el compuesto
 		(imagen + barras + texto) para que las etiquetas se vean nítidas al mostrar
 		el preview con zoom alto; el llamador ajusta el ``base_size`` para que el
-		porcentaje de zoom no cambie.
+		porcentaje de zoom no cambie. ``label_scale`` agranda solo la barra de
+		título (rótulos ESFUERZO/REPOSO) sin tocar la imagen.
 		"""
 		ss = max(1, int(render_scale))
 		# El identificador de selección se dibuja aparte como punto verde, así que
@@ -13472,6 +13511,8 @@ class MainWindow(QMainWindow):
 		bottom_label = str(bottom_label).replace("●", "").rstrip()
 		top_h0, bottom_h0 = int(top_pix.height()), int(bottom_pix.height())
 		base_fs = int(max(7, min(11, round(min(top_h0, bottom_h0) / 9.0))))
+		if label_scale != 1.0:
+			base_fs = int(max(base_fs, round(base_fs * float(label_scale))))
 		if ss > 1:
 			top_pix = top_pix.scaled(int(top_pix.width()) * ss, top_h0 * ss, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 			bottom_pix = bottom_pix.scaled(int(bottom_pix.width()) * ss, bottom_h0 * ss, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
@@ -16895,14 +16936,9 @@ class MainWindow(QMainWindow):
 			ax.axis("on")
 			ax.set_xticks([])
 			ax.set_yticks([])
-			col_base = "#ffd84d" if active_marker == "base" else "#ff4040"
-			col_apex = "#ffd84d" if active_marker == "apex" else "#ff4040"
-			lw_base = 2.4 if active_marker == "base" else 1.8
-			lw_apex = 2.4 if active_marker == "apex" else 1.8
-			ax.axhline(int(z0), color=col_base, linewidth=lw_base)
-			ax.axhline(int(z1), color=col_apex, linewidth=lw_apex)
-			ax.axhline(mid_z, color="#66ff66", linewidth=1.2, linestyle="--")
-			ax.text(0.02, 0.05, f"Base {z0 + 1}  Ápex {z1 + 1}  Esp {thickness_px}px", transform=ax.transAxes, color="#7cf29a", fontsize=8, fontweight="bold")
+		# Las líneas Base/Ápex/media y el rótulo se dibujan como capa QPainter
+		# encima (_draw_cut_limits_overlay), no horneadas en matplotlib: así el
+		# arrastre es fluido sin re-renderizar la figura.
 
 		sa_panels = [
 			(axes[1, 0], "SA Base", ung_sa_base, z0), (axes[1, 1], "SA medio", ung_sa_mid, mid_z), (axes[1, 2], "SA Ápex", ung_sa_apex, z1),
@@ -16951,6 +16987,58 @@ class MainWindow(QMainWindow):
 		plt.close(fig)
 		return out_png, meta
 
+	def _draw_cut_limits_overlay(self, base_pix: QPixmap, meta: dict, z0: int, z1: int, thickness: int, active_marker: str | None) -> QPixmap:
+		"""Dibuja Base/Ápex/media + rótulo como capa QPainter sobre el fondo limpio.
+
+		Usa la geometría de los 4 paneles longitudinales (``meta['top_axes']``, en
+		fracciones de figura matplotlib) para posicionar las líneas por slice, de
+		modo que moverlas no requiere re-renderizar la figura.
+		"""
+		if base_pix is None or base_pix.isNull() or not isinstance(meta, dict):
+			return base_pix
+		top = meta.get("top_axes", {}) or {}
+		if not top:
+			return base_pix
+		nz = max(2, int(meta.get("n_slices", 2)))
+		pw = int(base_pix.width()); ph = int(base_pix.height())
+		mid = (float(z0) + float(z1)) / 2.0
+		out = QPixmap(base_pix)
+		painter = QPainter(out)
+		try:
+			painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+			painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+			def _y(ax_b, z):
+				y0 = float(ax_b.get("y0", 0.0)); h = float(ax_b.get("h", 0.0))
+				zr = float(np.clip(z, 0, nz - 1)) / float(max(1, nz - 1))
+				yb_fig = (y0 + h) - zr * h  # matplotlib: y=0 abajo, 1 arriba
+				return (1.0 - yb_fig) * ph
+
+			for _k, b in top.items():
+				x0 = float(b.get("x0", 0.0)); w = float(b.get("w", 0.0))
+				h = float(b.get("h", 0.0)); y0 = float(b.get("y0", 0.0))
+				xL = int(round(x0 * pw)); xR = int(round((x0 + w) * pw))
+				# Línea media (verde punteada)
+				pen = QPen(QColor("#66ff66")); pen.setWidthF(1.2); pen.setStyle(Qt.PenStyle.DashLine)
+				painter.setPen(pen)
+				ym = int(round(_y(b, mid))); painter.drawLine(xL, ym, xR, ym)
+				# Base / Ápex (rojo; amarillo grueso si es el marcador en edición)
+				for mk, zz in (("base", z0), ("apex", z1)):
+					is_act = (active_marker == mk)
+					pen = QPen(QColor("#ffd84d") if is_act else QColor("#ff4040"))
+					pen.setWidthF(2.8 if is_act else 1.8); pen.setStyle(Qt.PenStyle.SolidLine)
+					painter.setPen(pen)
+					yy = int(round(_y(b, zz))); painter.drawLine(xL, yy, xR, yy)
+				# Rótulo Base/Ápex/Esp abajo-izquierda del panel
+				tx = int(round((x0 + 0.02 * w) * pw))
+				ty = int(round((1.0 - (y0 + 0.06 * h)) * ph))
+				font = painter.font(); font.setPointSizeF(max(6.5, ph * 0.011)); font.setBold(True)
+				painter.setFont(font)
+				painter.setPen(QColor("#7cf29a"))
+				painter.drawText(tx, ty, f"Base {int(z0) + 1}  Ápex {int(z1) + 1}  Esp {int(thickness)}px")
+		finally:
+			painter.end()
+		return out
 
 	def _preview_cine_crudo_cut_limits(self, active_marker: str | None = None, fast: bool = False):
 		if self.cine_crudo_recon_result is None:
@@ -16970,10 +17058,11 @@ class MainWindow(QMainWindow):
 			rest_res = sess.stage("rest").recon_result
 			dual_view = stress_res is not None and rest_res is not None
 			out_pix = None
-			# Fast-pass interactivo (drag de markers): renderiza SOLO la etapa
-			# activa a DPI bajo y reutiliza el pixmap cacheado de la otra etapa.
-			# Al soltar (o tras una pausa) se re-renderiza en HQ.
-			render_dpi = 80 if fast else 150
+			# Fast-pass interactivo (drag): reutiliza el fondo limpio cacheado (sin
+			# re-render matplotlib) y solo mueve la capa de líneas QPainter; el HQ
+			# real (con SA actualizados) se hace al soltar. render_ss supersamplea
+			# el compuesto dual para que los rótulos se vean nítidos.
+			render_ss = 1
 			pix_cache = getattr(self, "_limits_stage_pix_cache", None)
 			meta_cache = getattr(self, "_limits_stage_meta_cache", None)
 			if not isinstance(pix_cache, dict):
@@ -16991,62 +17080,77 @@ class MainWindow(QMainWindow):
 					active = str(active_stage)
 				else:
 					active = "stress"
-				stage_pix: dict[str, QPixmap] = {}
+				stage_bg: dict[str, QPixmap] = {}
 				stage_meta: dict[str, dict] = {}
 				try:
 					for st, res in (("stress", stress_res), ("rest", rest_res)):
-						# Fast: la etapa NO activa se sirve del caché (no cambió).
-						if fast and st != active and st in pix_cache and st in meta_cache:
-							stage_pix[st] = pix_cache[st]
+						# Arrastre (fast): reutilizar el fondo limpio cacheado sin
+						# re-renderizar matplotlib (SA congelado; las líneas se mueven
+						# como capa QPainter). HQ (no-fast) siempre re-renderiza fresco
+						# para no arrastrar imágenes viejas tras re-reconstruir.
+						if fast and st in pix_cache and st in meta_cache:
+							stage_bg[st] = pix_cache[st]
 							stage_meta[st] = dict(meta_cache[st])
 							continue
 						self._cine_crudo_recon_stage = st
 						zz0, zz1 = self._cine_crudo_cut_bounds(int(np.asarray(res.gated_volume).shape[1]))
-						png_st, meta_st = self._write_cine_crudo_limits_qc(
-							res, zz0, zz1, thickness,
-							active_marker=active_marker if st == active else None,
-							dpi=render_dpi if st == active else 150,
-						)
-						stage_pix[st] = QPixmap(png_st)
+						png_st, meta_st = self._write_cine_crudo_limits_qc(res, zz0, zz1, thickness, dpi=150)
+						stage_bg[st] = QPixmap(png_st)
 						stage_meta[st] = dict(meta_st)
-						# Cachear solo renders HQ (los fast son transitorios).
-						if not fast or st != active:
-							pix_cache[st] = stage_pix[st]
-							meta_cache[st] = dict(meta_st)
+						pix_cache[st] = stage_bg[st]
+						meta_cache[st] = dict(meta_st)
 				finally:
 					self._cine_crudo_recon_stage = prev_stage
-				# En fast, el pixmap activo puede tener otra resolución que el
-				# cacheado; igualar ancho para que el stacking no "salte".
-				if fast:
-					ref = stage_pix["stress" if active == "rest" else "rest"]
-					act = stage_pix[active]
-					if not ref.isNull() and not act.isNull() and act.width() != ref.width():
-						stage_pix[active] = act.scaledToWidth(ref.width(), Qt.TransformationMode.FastTransformation)
+				# Capa de líneas Base/Ápex sobre cada fondo limpio. La etapa activa
+				# usa los límites ACTUALES (z0/z1 del arrastre en vivo) y resalta el
+				# marcador en edición; la inactiva, sus propios límites cacheados.
+				stage_pix: dict[str, QPixmap] = {}
+				for st in ("stress", "rest"):
+					m = stage_meta[st]
+					if st == active:
+						zA, zB, thk = int(z0), int(z1), int(thickness)
+						m["z0"], m["z1"] = zA, zB
+					else:
+						zA, zB, thk = int(m.get("z0", 0)), int(m.get("z1", 0)), int(m.get("thickness", thickness))
+					stage_pix[st] = self._draw_cut_limits_overlay(
+						stage_bg[st], m, zA, zB, thk,
+						active_marker if st == active else None,
+					)
 				top_pix, bottom_pix = stage_pix["stress"], stage_pix["rest"]
 				top_label = "ESFUERZO — límites" + (" ●" if active == "stress" else "")
 				bottom_label = "REPOSO — límites" + (" ●" if active == "rest" else "")
-				out_pix = self._stack_cine_crudo_dual_pixmaps(top_pix, bottom_pix, top_label, bottom_label, active_stage=active)
+				# Arrastre: sin supersampling (fluido). Al soltar (HQ): ×2 nítido.
+				# label_scale agranda los rótulos ESFUERZO/REPOSO (antes ilegibles).
+				render_ss = 1 if fast else 2
+				out_pix = self._stack_cine_crudo_dual_pixmaps(top_pix, bottom_pix, top_label, bottom_label, active_stage=active, render_scale=render_ss, label_scale=2.6)
 				dmeta = dict(getattr(self, "_cine_crudo_dual_render_meta", None) or {})
 				meta = dict(stage_meta[active])
 				bar_h = float(dmeta.get("bar_h", 22))
 				canvas_w = float(max(1, out_pix.width()))
 				canvas_h = float(max(1, out_pix.height()))
 				split_y = float(dmeta.get("split_y", 0))
+				# Dimensiones de cada sub-imagen en PÍXELES DEL CANVAS (ya
+				# supersampleadas por el stacker). Usar top_pix/bottom_pix directo
+				# sería 1× y rompería el mapeo cuando render_ss>1.
+				top_w_c = float(dmeta.get("top_w", top_pix.width()))
+				top_h_c = float(dmeta.get("top_h", top_pix.height()))
+				bot_w_c = float(dmeta.get("bottom_w", bottom_pix.width()))
+				bot_h_c = float(dmeta.get("bottom_h", bottom_pix.height()))
 				# Regiones en FRACCIONES del canvas (independientes del zoom con el
 				# que se muestre el pixmap): fx/fy = esquina sup-izq, fw/fh = tamaño.
 				regions = {
 					"stress": {
-						"fx": ((canvas_w - float(top_pix.width())) / 2.0) / canvas_w,
+						"fx": ((canvas_w - top_w_c) / 2.0) / canvas_w,
 						"fy": bar_h / canvas_h,
-						"fw": float(top_pix.width()) / canvas_w,
-						"fh": float(top_pix.height()) / canvas_h,
+						"fw": top_w_c / canvas_w,
+						"fh": top_h_c / canvas_h,
 						"fy_bar": 0.0,  # su barra de título arranca en 0
 					},
 					"rest": {
-						"fx": ((canvas_w - float(bottom_pix.width())) / 2.0) / canvas_w,
+						"fx": ((canvas_w - bot_w_c) / 2.0) / canvas_w,
 						"fy": (split_y + bar_h) / canvas_h,
-						"fw": float(bottom_pix.width()) / canvas_w,
-						"fh": float(bottom_pix.height()) / canvas_h,
+						"fw": bot_w_c / canvas_w,
+						"fh": bot_h_c / canvas_h,
 						"fy_bar": split_y / canvas_h,
 					},
 				}
@@ -17059,9 +17163,19 @@ class MainWindow(QMainWindow):
 				}
 				self._cine_crudo_cut_limits_meta = meta
 			else:
-				out_png, meta = self._write_cine_crudo_limits_qc(result, z0, z1, thickness, active_marker=active_marker)
+				# Fondo limpio (cacheado en arrastre) + capa de líneas QPainter.
+				single_bg = getattr(self, "_limits_single_bg", None)
+				single_meta = getattr(self, "_limits_single_bg_meta", None)
+				if fast and single_bg is not None and single_meta is not None:
+					bg = single_bg
+					meta = dict(single_meta)
+				else:
+					out_png, meta = self._write_cine_crudo_limits_qc(result, z0, z1, thickness, dpi=150)
+					bg = QPixmap(out_png)
+					self._limits_single_bg = bg
+					self._limits_single_bg_meta = dict(meta)
 				self._cine_crudo_cut_limits_meta = dict(meta)
-				out_pix = QPixmap(out_png)
+				out_pix = self._draw_cut_limits_overlay(bg, meta, int(z0), int(z1), int(thickness), active_marker)
 			self.cine_crudo_preview_mode = "cut_limits"
 			# Al entrar a la pantalla de markers (Base/Ápex) la mostramos a zoom 40%,
 			# para ver el volumen completo y colocar las líneas sin paneo. No pisa un
@@ -17074,7 +17188,10 @@ class MainWindow(QMainWindow):
 				if tab_name in self.preview_labels:
 					pix = QPixmap(out_pix)
 					self.preview_pixmaps[tab_name] = pix
-					self.preview_base_sizes[tab_name] = pix.size()
+					if render_ss > 1:
+						self.preview_base_sizes[tab_name] = QSize(round(pix.width() / render_ss), round(pix.height() / render_ss))
+					else:
+						self.preview_base_sizes[tab_name] = pix.size()
 					self.preview_labels[tab_name].setToolTip(
 						"Montaje interactivo:\n"
 						"• Click: selecciona tira activa (roja).\n"
@@ -20762,6 +20879,7 @@ class MainWindow(QMainWindow):
 				if self.tabs.tabText(i) == current_title:
 					self.tabs.setCurrentIndex(i)
 					break
+		self._refresh_tab_enabled_states()
 
 	def toggle_advanced_mode(self):
 		# Opción A: el modo avanzado se eliminó. Las pestañas están siempre visibles
