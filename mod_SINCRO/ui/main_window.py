@@ -21049,7 +21049,7 @@ class MainWindow(QMainWindow):
 		btn_smart = box.addButton("🔍 Carpeta inteligente", QMessageBox.ButtonRole.AcceptRole)
 		btn_sa = box.addButton("Cortes SA ya reconstruidos", QMessageBox.ButtonRole.ActionRole)
 		btn_files = box.addButton("Elegir archivos", QMessageBox.ButtonRole.ActionRole)
-		btn_names = box.addButton("⚙ Nombres…", QMessageBox.ButtonRole.HelpRole)
+		btn_names = box.addButton("⚙ MAPEO…", QMessageBox.ButtonRole.HelpRole)
 		box.addButton("Cancelar", QMessageBox.ButtonRole.RejectRole)
 		box.setDefaultButton(btn_smart)
 		box.exec()
@@ -21218,7 +21218,7 @@ class MainWindow(QMainWindow):
 				self, "SINCRO",
 				"No se detectaron cortes SA gatillados reconstruidos en la carpeta.\n\n"
 				"Verificá que estén reconstruidos y gatillados (≥3 gates), o ajustá los "
-				"nombres en '⚙ Nombres…'.",
+				"nombres en '⚙ MAPEO…'.",
 			)
 			return
 		# Esfuerzo primero, luego reposo, luego el resto.
@@ -21294,7 +21294,7 @@ class MainWindow(QMainWindow):
 			"rest": "Etapa Reposo",
 		}
 		dlg = QDialog(self)
-		dlg.setWindowTitle("Nombres de series para la carga")
+		dlg.setWindowTitle("MAPEO de series para la carga")
 		root = QVBoxLayout(dlg)
 		info = QLabel(
 			"Palabras clave (separadas por coma) que SINCRO busca en la descripción, "
