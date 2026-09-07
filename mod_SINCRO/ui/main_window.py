@@ -562,18 +562,17 @@ class MainWindow(QMainWindow):
 		self.advanced_mode_enabled = False
 		self._basic_tab_order = [
 			"cine_crudo",
-			"polar_combo",
-			"delta_combo",
-			"histograma",
-			"comparacion_stress_rest",
-			"ungated",
-		]
-		self._advanced_extra_tab_order = [
-			"polar_perfusion_directa",
 			"comparacion_ejes",
 			"panel_funcional_gated",
+			"polar_perfusion_directa",
+			"delta_combo",
+			"histograma",
+			"polar_combo",
+		]
+		self._advanced_extra_tab_order = [
 			"bullseye_directo",
 			"guia_fase_vi",
+			"ungated",
 		]
 
 		self.output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output_demo")
@@ -1048,19 +1047,19 @@ class MainWindow(QMainWindow):
 
 		# 'slices_fase' ya no es pestaña visible: su combo (self.report_cmap_slices)
 		# sigue vivo para colorear slices_fase.png del informe, pero no se lista acá.
-		_add_cmap_row(1, "[1] comparacion_ejes (SA/HLA/VLA)", self.report_cmap_axes, "Afecta las imágenes de ejes ortogonales SA/HLA/VLA para informe.")
-		_add_cmap_row(2, "[2] comparacion_ejes (grilla)", self.report_cmap_compare, "Afecta la grilla multicorte de comparación entre estudios.")
-		_add_cmap_row(3, "[3] panel_funcional_gated (ED/ES)", self.report_cmap_panel_axes, "Afecta las imágenes ED/ES del panel funcional gated.")
+		_add_cmap_row(1, "[1] MONTAJE CLINICO (SA/HLA/VLA)", self.report_cmap_axes, "Afecta las imágenes de ejes ortogonales SA/HLA/VLA para informe.")
+		_add_cmap_row(2, "[2] MONTAJE CLINICO (grilla)", self.report_cmap_compare, "Afecta la grilla multicorte de comparación entre estudios.")
+		_add_cmap_row(3, "[3] PANEL FUNCIONAL GATED (ED/ES)", self.report_cmap_panel_axes, "Afecta las imágenes ED/ES del panel funcional gated.")
 		_add_cmap_row(4, "[4] fase (overlay/polar)", self.report_cmap_phase, "Afecta mapas de fase (overlay y polar de fase).")
 		_add_cmap_row(5, "[5] polar_clinico", self.report_cmap_polar_clinico, "Afecta el panel polar clínico (histograma + bullseye de fase).")
-		_add_cmap_row(6, "[6] panel_funcional_gated (amplitud)", self.report_cmap_amp, "Afecta el mapa de amplitud en el panel funcional gated.")
-		_add_cmap_row(7, "[7] bullseye_directo", self.report_cmap_bullseye, "Afecta el bullseye directo de perfusión segmentaria AHA.")
-		_add_cmap_row(8, "[8] polar_perfusion_directa", self.report_cmap_polar_perf, "Afecta el mapa polar continuo de perfusión (apex-centro, base-borde).")
-		_add_cmap_row(9, "[9] ungated (desgatillado)", self.report_cmap_ungated, "Afecta la grilla de cortes desgatillados (UngRaw / perfusión total).")
-		_add_cmap_row(10, "[10] cine_crudo (proyecciones)", self.report_cmap_cine_crudo, "Afecta el cine de proyecciones crudas SPECT (gated y UngGat).")
-		_add_cmap_row(11, "[11] histograma", self.report_cmap_histograma, "Afecta el histograma de fase (barras y fondo).")
-		_add_cmap_row(12, "[12] polar_combo", self.report_cmap_polar_combo, "Afecta el panel combinado polar AHA + clínico.")
-		_add_cmap_row(13, "[13] delta_combo", self.report_cmap_delta_combo, "Afecta los mapas delta stress/rest (signed y abs).")
+		_add_cmap_row(6, "[6] PANEL FUNCIONAL GATED (amplitud)", self.report_cmap_amp, "Afecta el mapa de amplitud en el panel funcional gated.")
+		_add_cmap_row(7, "[7] Bull's-eye directo", self.report_cmap_bullseye, "Afecta el bullseye directo de perfusión segmentaria AHA.")
+		_add_cmap_row(8, "[8] PERFUSIÓN POLAR", self.report_cmap_polar_perf, "Afecta el mapa polar continuo de perfusión (apex-centro, base-borde).")
+		_add_cmap_row(9, "[9] QC (desgatillado)", self.report_cmap_ungated, "Afecta la grilla de cortes desgatillados (UngRaw / perfusión total).")
+		_add_cmap_row(10, "[10] PROCESAMIENTO (proyecciones)", self.report_cmap_cine_crudo, "Afecta el cine de proyecciones crudas SPECT (gated y UngGat).")
+		_add_cmap_row(11, "[11] HISTOGRAMA de FASE", self.report_cmap_histograma, "Afecta el histograma de fase (barras y fondo).")
+		_add_cmap_row(12, "[12] COMPARATIVA POLAR (FASE)", self.report_cmap_polar_combo, "Afecta el panel combinado polar AHA + clínico.")
+		_add_cmap_row(13, "[13] DELTA POLAR", self.report_cmap_delta_combo, "Afecta los mapas delta stress/rest (signed y abs).")
 		_add_cmap_row(14, "[14] stress_vs_rest", self.report_cmap_stress_rest, "Afecta el panel resumen de métricas stress vs rest.")
 		_add_cmap_row(15, "[15] polar_cine_montaje", self.report_cmap_polar_cine, "Afecta el cine polar gatillado (montaje por gate).")
 
@@ -1607,13 +1606,13 @@ class MainWindow(QMainWindow):
 		self._tab_tooltips: dict[str, str] = {}
 		preview_titles = {
 			"slices_fase": "slices_fase",
-			"polar_combo": "polar",
-			"delta_combo": "delta_polar",
-			"histograma": "histograma",
-			"polar_perfusion_directa": "polar_perfusion_directa",
-			"comparacion_ejes": "Montaje clínico",
+			"polar_combo": "COMPARATIVA POLAR (FASE)",
+			"delta_combo": "DELTA POLAR",
+			"histograma": "HISTOGRAMA de FASE",
+			"polar_perfusion_directa": "PERFUSIÓN POLAR",
+			"comparacion_ejes": "MONTAJE CLINICO",
 			"comparacion_stress_rest": "stress_vs_rest",
-			"panel_funcional_gated": "Panel funcional gated",
+			"panel_funcional_gated": "PANEL FUNCIONAL GATED",
 			"bullseye_directo": "bullseye_directo",
 			"guia_fase_vi": "Guía para fase VI",
 			"ungated": "QC",
@@ -2446,17 +2445,17 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_recon_stage_combo.addItem("Reposo", "rest")
 				self.cine_crudo_recon_stage_combo.addItem("Ambas", "both")
 				self.cine_crudo_recon_stage_combo.setMaximumWidth(86)
-				self.cine_crudo_recon_stage_combo.setToolTip("Qué etapa(s) reconstruye '1 · Reconstruir'.")
+				self.cine_crudo_recon_stage_combo.setToolTip("Qué etapa(s) reconstruye '1 · PROCESAR'.")
 				self.cine_crudo_recon_btn = QToolButton()
-				self.cine_crudo_recon_btn.setText("1 · Reconstruir")
+				self.cine_crudo_recon_btn.setText("1 · PROCESAR")
 				self.cine_crudo_recon_btn.setToolTip("Paso 1. Reconstruye desde crudo gated la(s) etapa(s) del selector con la corrección actual y muestra QC: UngGat + gates.")
 				self.cine_crudo_recon_btn.clicked.connect(self._on_recon_raw_clicked)
 				self.cine_crudo_recon_feta_btn = QToolButton()
-				self.cine_crudo_recon_feta_btn.setText("2 · Recortar VI")
+				self.cine_crudo_recon_feta_btn.setText("2 · RECONSTRUIR y FILTRAR")
 				self.cine_crudo_recon_feta_btn.setToolTip("Paso 2. Reconstruye SOLO la banda axial (feta) entre las líneas Base/Ápex de esta pantalla. Flujo: 1) 'Reconstruir' (FBP rápido) para ver el corazón; 2) ajustá Base/Ápex sobre las líneas rojas; 3) 'Recortar VI'. Excluye la actividad extracardíaca de arriba/abajo, es más rápido, y es el volumen con el que se reorienta y analiza de aquí en más.")
 				self.cine_crudo_recon_feta_btn.clicked.connect(lambda: self._reconstruct_cine_crudo_raw(feta_only=True))
 				self.cine_crudo_reorient_btn = QToolButton()
-				self.cine_crudo_reorient_btn.setText("3 · Reorientar")
+				self.cine_crudo_reorient_btn.setText("3 · REORIENTAR")
 				self.cine_crudo_reorient_btn.setToolTip("Paso 3. Abre la reorientación oblicua interactiva (Rec/Ref estilo Xeleris): definí eje largo del VI en vistas anterior/lateral, ROI y límites Base/Ápex, con preview SA/HLA/VLA en vivo.")
 				self.cine_crudo_reorient_btn.clicked.connect(self._open_cine_crudo_reorientation)
 				self.cine_crudo_reorient_btn.setEnabled(False)
@@ -2576,7 +2575,8 @@ class MainWindow(QMainWindow):
 				flow_row.addWidget(self.cine_crudo_fusion_btn)
 				flow_row.addWidget(self.cine_crudo_recon_feta_btn)
 				flow_row.addWidget(self.cine_crudo_reorient_btn)
-				flow_row.addWidget(self.cine_crudo_process_recon_btn)
+				# El paso 'Procesar' ya no es un botón manual: se dispara automáticamente
+				# al terminar Reorientar. La cadena visible termina en '3 · REORIENTAR'.
 				flow_row.addStretch(1)
 				# Color por paso: ayuda a memorizar la secuencia de un vistazo.
 				def _flow_btn_style(bg: str) -> str:
@@ -2877,6 +2877,15 @@ class MainWindow(QMainWindow):
 		self.right_splitter = right_splitter
 		self._right_splitter_saved_sizes = [840, 220]
 		self._ui_settings = QSettings("Gammasys", "GammaSync")
+		# preview_zoom se pobló al construir las pestañas, antes de existir
+		# _ui_settings, por lo que quedó con los valores de fábrica. Ahora que las
+		# settings están disponibles, releer el zoom por defecto guardado por el
+		# usuario para que persista al reiniciar.
+		for _pz_name in list(self.preview_zoom.keys()):
+			_pz = self._default_preview_zoom(_pz_name)
+			self.preview_zoom[_pz_name] = _pz
+			if _pz_name in self.preview_zoom_labels:
+				self.preview_zoom_labels[_pz_name].setText(f"{int(_pz * 100)}%")
 		self._load_global_ui_preferences()
 		self._restore_window_layout()
 		# Banda de asincronía colapsada por defecto DESPUÉS de restaurar el layout,
@@ -4878,17 +4887,16 @@ class MainWindow(QMainWindow):
 		zoom_msg.setStyleSheet("color:#6b7280; font-size:8pt;")
 		zoom_outer.addWidget(zoom_msg)
 		zoom_labels = {
-			"cine_crudo": "PROCESAMIENTO (cine crudo)",
-			"polar_combo": "Polar (combo)",
-			"delta_combo": "Delta polar",
-			"histograma": "Histograma",
-			"comparacion_stress_rest": "Stress vs Rest",
-			"ungated": "QC (desgatillado)",
-			"polar_perfusion_directa": "Polar perfusión directa",
-			"comparacion_ejes": "Montaje clínico",
-			"panel_funcional_gated": "Panel funcional gated",
+			"cine_crudo": "PROCESAMIENTO",
+			"comparacion_ejes": "MONTAJE CLINICO",
+			"panel_funcional_gated": "PANEL FUNCIONAL GATED",
+			"polar_perfusion_directa": "PERFUSIÓN POLAR",
+			"delta_combo": "DELTA POLAR",
+			"histograma": "HISTOGRAMA de FASE",
+			"polar_combo": "COMPARATIVA POLAR (FASE)",
 			"bullseye_directo": "Bull's-eye directo",
 			"guia_fase_vi": "Guía para fase VI",
+			"ungated": "QC",
 		}
 		zoom_form_host = QWidget()
 		zoom_form = QFormLayout(zoom_form_host)
@@ -5439,18 +5447,7 @@ class MainWindow(QMainWindow):
 		self._sidebar_layout.setContentsMargins(5, 5, 5, 5)
 		self._sidebar_layout.setSpacing(4)
 
-		banner = QLabel()
-		banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
-		banner.setStyleSheet("background: transparent; border: none;")
 		assets_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
-		banner_path = os.path.join(assets_dir, "logo_gammasync_banner.png")
-		if os.path.exists(banner_path):
-			pix = QPixmap(banner_path)
-			banner.setPixmap(pix.scaledToWidth(230, Qt.TransformationMode.SmoothTransformation))
-		else:
-			banner.setText("GammaSync")
-			banner.setStyleSheet("font-size: 18px; font-weight: 700; color: #1f3b5b;")
-		self._sidebar_layout.addWidget(banner)
 		version_label = QLabel(f"Versión v{__version__}")
 		version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 		version_label.setStyleSheet("color:#4b5563; font-size:10px; font-weight:600;")
@@ -5740,6 +5737,133 @@ class MainWindow(QMainWindow):
 			if w is not None:
 				w.setEnabled(gated)
 
+	def _build_raw_qc_figure(self, study, ctx_label: str, stage_banner: str, fc):
+		"""Construye la figura QC 2x3 (sinogramas + proyecciones + COM tracking) de un
+		estudio crudo. Devuelve (fig, ty, tx). El caller la guarda y cierra."""
+		import matplotlib
+		matplotlib.use("Agg")
+		import matplotlib.pyplot as plt
+		from core.raw_projections import build_sinograms, center_of_mass_tracking
+
+		projections = np.asarray(study.cube, dtype=np.float64)  # (gates, angles, H, W)
+		n_gates, n_angles = int(projections.shape[0]), int(projections.shape[1])
+		sh, sv = build_sinograms(projections)
+		ty = center_of_mass_tracking(projections, axis="y")
+		tx = center_of_mass_tracking(projections, axis="x")
+
+		fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+		fig.patch.set_facecolor("#0b1220")
+		axes[0, 0].imshow(sh, cmap="gray", aspect="auto")
+		axes[0, 0].set_title("Sinograma VERTICAL (perfil axial)", color="white")
+		axes[0, 0].set_xlabel("posición axial (px)", color="white")
+		axes[0, 0].set_ylabel("ángulo de proyección", color="white")
+		axes[1, 0].imshow(sv.T, cmap="gray", aspect="auto")
+		axes[1, 0].set_title("Sinograma HORIZONTAL (perfil transversal)", color="white")
+		axes[1, 0].set_xlabel("ángulo de proyección", color="white")
+		axes[1, 0].set_ylabel("posición horizontal (px)", color="white")
+
+		summed = projections.sum(axis=0)
+		pos = [(0, 1, 0), (0, 2, n_angles // 3), (1, 1, 2 * n_angles // 3)]
+		for r, c, a in pos:
+			axes[r, c].imshow(summed[a], cmap="gray")
+			axes[r, c].set_title(f"Proyeccion ang {a}", color="white")
+			axes[r, c].axis("off")
+
+		axc = axes[1, 2]
+		ang = np.arange(n_angles)
+		axc.plot(ang, ty["com_series"], "o-", color="cyan", label="COM Y", ms=4)
+		axc.plot(ang, tx["com_series"], "s-", color="orange", label="COM X", ms=4)
+		out_y = np.where(ty["outliers"])[0]
+		if out_y.size:
+			axc.plot(out_y, ty["com_series"][out_y], "r*", ms=13, label=f"outliers Y ({ty['n_outliers']})")
+		axc.set_title(f"COM tracking: mov Y={ty['motion_suspected']} (max {ty['max_shift_px']}px)", color="white", fontsize=10)
+		axc.set_xlabel("angulo"); axc.set_ylabel("centro de masa (px)")
+		axc.legend(fontsize=8); axc.grid(alpha=0.3)
+
+		for ax in axes.ravel():
+			ax.set_facecolor("#0b1220")
+			ax.tick_params(colors="white")
+			for s in ax.spines.values():
+				s.set_color("#334155")
+
+		fig.suptitle(
+			f"{stage_banner}  ·  QC Crudo Gated — {ctx_label} | {n_gates} gates × {n_angles} ángulos | FC {fc} lpm",
+			color="#fbbf24", fontsize=13, fontweight="bold",
+		)
+		fig.tight_layout(rect=[0, 0, 1, 0.95])
+		self._stamp_export_figure(fig, None)
+		return fig, ty, tx
+
+	def _compose_stack_vertical(self, png_paths, out_path: str) -> str | None:
+		"""Apila verticalmente varios PNG (igualando anchos) sobre fondo oscuro."""
+		try:
+			from PIL import Image
+			imgs = [Image.open(p).convert("RGB") for p in png_paths if p and os.path.exists(p)]
+			if not imgs:
+				return None
+			w = max(im.width for im in imgs)
+			scaled = []
+			for im in imgs:
+				if im.width != w:
+					h = int(round(im.height * w / im.width))
+					im = im.resize((w, h), Image.LANCZOS)
+				scaled.append(im)
+			total_h = sum(im.height for im in scaled)
+			canvas = Image.new("RGB", (w, total_h), (11, 18, 32))
+			y = 0
+			for im in scaled:
+				canvas.paste(im, (0, y))
+				y += im.height
+			canvas.save(out_path)
+			return out_path
+		except Exception as exc:
+			self._log(f"[WARN] No se pudo apilar QC dual: {exc}")
+			return None
+
+	def _compose_and_show_dual_qc(self):
+		"""Recompone el QC crudo dual (Esfuerzo arriba, Reposo abajo, rotulado por etapa)
+		en la pestaña QC. No hace nada si no hay 2da etapa cruda cargada."""
+		sec = self._secondary_cine_crudo_study()
+		if sec is None or self.study is None:
+			return
+		if bool(getattr(self.study, "reconstructed", True)) or bool(getattr(sec, "reconstructed", True)):
+			return
+		try:
+			import matplotlib
+			matplotlib.use("Agg")
+			import matplotlib.pyplot as plt
+
+			def _fc(study):
+				g = getattr(study, "gating_info", {}) or {}
+				return g.get("heart_rate") or g.get("heart_rate_est") or "N/D"
+
+			stage_prim = (self._cine_crudo_stage_display(self.study) or "Esfuerzo").upper()
+			fig1, _, _ = self._build_raw_qc_figure(
+				self.study, self._study_context_label(study_obj=self.study), stage_prim, _fc(self.study))
+			out1 = os.path.join(self.output_dir, "qc_crudo_proyecciones.png")
+			fig1.savefig(out1, dpi=130, bbox_inches="tight", facecolor=fig1.get_facecolor())
+			plt.close(fig1)
+
+			stage_sec = (self._cine_crudo_stage_display(sec) or "Reposo").upper()
+			fig2, _, _ = self._build_raw_qc_figure(
+				sec, self._study_context_label(study_obj=sec), stage_sec, _fc(sec))
+			out2 = os.path.join(self.output_dir, "qc_crudo_proyecciones_sec.png")
+			fig2.savefig(out2, dpi=130, bbox_inches="tight", facecolor=fig2.get_facecolor())
+			plt.close(fig2)
+
+			# Esfuerzo arriba / Reposo abajo según la etapa real de cada estudio.
+			prim_is_stress = stage_prim.startswith("ESF")
+			top, bottom = (out1, out2) if prim_is_stress else (out2, out1)
+			combined = os.path.join(self.output_dir, "qc_crudo_proyecciones_dual.png")
+			if self._compose_stack_vertical([top, bottom], combined) and "ungated" in self.preview_labels:
+				pix = QPixmap(combined)
+				self.preview_pixmaps["ungated"] = pix
+				self.preview_base_sizes["ungated"] = pix.size()
+				self._apply_preview_zoom("ungated")
+				self._log("QC dual recompuesto (Esfuerzo arriba, Reposo abajo).")
+		except Exception as exc:
+			self._log(f"[WARN] Recomposición QC dual falló: {exc}")
+
 	def _handle_raw_projections_loaded(self, path: str, t_total: float):
 		"""Maneja un estudio crudo (proyecciones gated): genera panel QC y muestra info/gating."""
 		import matplotlib
@@ -5792,57 +5916,10 @@ class MainWindow(QMainWindow):
 		gating = getattr(self.study, "gating_info", {}) or {}
 
 		self._set_progress(40, "Generando QC de proyecciones crudas...")
-		sh, sv = build_sinograms(projections)
-		ty = center_of_mass_tracking(projections, axis="y")
-		tx = center_of_mass_tracking(projections, axis="x")
-
-		fig, axes = plt.subplots(2, 3, figsize=(15, 8))
-		fig.patch.set_facecolor("#0b1220")
-		# Sinograma VERTICAL: ángulo en eje Y (vertical), posición axial en X.
-		# sh es (n_angles, H): filas=ángulos → se ve vertical (alto), como Odyssey/Xeleris.
-		axes[0, 0].imshow(sh, cmap="gray", aspect="auto")
-		axes[0, 0].set_title("Sinograma VERTICAL (perfil axial)", color="white")
-		axes[0, 0].set_xlabel("posición axial (px)", color="white")
-		axes[0, 0].set_ylabel("ángulo de proyección", color="white")
-		# Sinograma HORIZONTAL: ángulo en eje X, posición horizontal en Y.
-		# sv es (n_angles, W) → transponer para ángulo en X.
-		axes[1, 0].imshow(sv.T, cmap="gray", aspect="auto")
-		axes[1, 0].set_title("Sinograma HORIZONTAL (perfil transversal)", color="white")
-		axes[1, 0].set_xlabel("ángulo de proyección", color="white")
-		axes[1, 0].set_ylabel("posición horizontal (px)", color="white")
-
-		summed = projections.sum(axis=0)
-		pos = [(0, 1, 0), (0, 2, n_angles // 3), (1, 1, 2 * n_angles // 3)]
-		for r, c, a in pos:
-			axes[r, c].imshow(summed[a], cmap="gray")
-			axes[r, c].set_title(f"Proyeccion ang {a}", color="white")
-			axes[r, c].axis("off")
-
-		axc = axes[1, 2]
-		ang = np.arange(n_angles)
-		axc.plot(ang, ty["com_series"], "o-", color="cyan", label="COM Y", ms=4)
-		axc.plot(ang, tx["com_series"], "s-", color="orange", label="COM X", ms=4)
-		out_y = np.where(ty["outliers"])[0]
-		if out_y.size:
-			axc.plot(out_y, ty["com_series"][out_y], "r*", ms=13, label=f"outliers Y ({ty['n_outliers']})")
-		axc.set_title(f"COM tracking: mov Y={ty['motion_suspected']} (max {ty['max_shift_px']}px)", color="white", fontsize=10)
-		axc.set_xlabel("angulo"); axc.set_ylabel("centro de masa (px)")
-		axc.legend(fontsize=8); axc.grid(alpha=0.3)
-
-		for ax in axes.ravel():
-			ax.set_facecolor("#0b1220")
-			ax.tick_params(colors="white")
-			for s in ax.spines.values():
-				s.set_color("#334155")
-
 		ctx_label = self._study_context_label(path_override=path, study_obj=self.study)
 		fc = gating.get("heart_rate") or gating.get("heart_rate_est") or "N/D"
-		fig.suptitle(
-			f"QC Crudo Gated — {ctx_label} | {n_gates} gates × {n_angles} ángulos | FC {fc} lpm",
-			color="white", fontsize=12, fontweight="bold",
-		)
-		fig.tight_layout(rect=[0, 0, 1, 0.95])
-		self._stamp_export_figure(fig, None)
+		stage_primary = (self._cine_crudo_stage_display(self.study) or "Esfuerzo").upper()
+		fig, ty, tx = self._build_raw_qc_figure(self.study, ctx_label, stage_primary, fc)
 		out_png = os.path.join(self.output_dir, "qc_crudo_proyecciones.png")
 		fig.savefig(out_png, dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
 		plt.close(fig)
@@ -6994,6 +7071,10 @@ class MainWindow(QMainWindow):
 			return
 		title = self.tabs.tabText(index)
 		tab_name = self._tab_name_from_title(title)
+		# Al abandonar el montaje, pausar su cine si seguía corriendo (el usuario no
+		# lo paró): así no queda animando en una pestaña oculta.
+		if tab_name != "comparacion_ejes":
+			self._pause_montage_cine_if_playing()
 		# Montaje clínico: se renderiza al entrar (ya no hay botón "Ver montaje").
 		# El resto de acciones (layout, zoom, gates) ocurre en vivo. Va antes del
 		# guard study/seg porque el crudo puede tener cortes sin segmentación.
@@ -8144,7 +8225,7 @@ class MainWindow(QMainWindow):
 			t_stage = perf_counter()
 			self._load_previews_selected(self._default_preview_tabs())
 			self._log_timing_if_slow("Carga de previews", t_stage)
-			self._select_tab_by_title("histograma")
+			self._select_tab_by_title("comparacion_ejes")
 			self._set_progress(100, "Procesamiento completo")
 			self._log_timing_if_slow("Proceso total", t_total)
 			self._mark_step_done("render", output_sig)
@@ -12170,9 +12251,11 @@ class MainWindow(QMainWindow):
 		if name == "comparacion_ejes":
 			self._load_compare_axes_preview()
 			return
-		# QC (ex-ungated): conserva el panel QC crudo cargado al abrir el estudio;
-		# no se re-renderiza ni se sobrescribe con la grilla desgatillada.
-		if name == "ungated":
+		# QC (ungated) y PROCESAMIENTO (cine_crudo): visores en vivo cuyo contenido
+		# lo maneja el sistema de cine/montaje/QC, no un PNG en disco. No se
+		# re-renderizan acá para no borrar la última imagen mostrada (deja negra la
+		# pestaña al no existir un {name}.png).
+		if name in ("ungated", "cine_crudo"):
 			return
 		fname = f"{name}.png"
 		path = os.path.join(self.output_dir, fname)
@@ -13374,13 +13457,29 @@ class MainWindow(QMainWindow):
 				frames.append(self._rgb_frame_to_qpixmap_raw(img))
 		return frames, counts, matrix_txt
 
-	def _stack_cine_crudo_dual_pixmaps(self, top_pix: QPixmap, bottom_pix: QPixmap, top_label: str, bottom_label: str, active_stage: str = "stress") -> QPixmap:
-		"""Compone dos paneles en vertical con títulos: stress arriba / rest abajo. Resalta la etapa activa."""
+	def _stack_cine_crudo_dual_pixmaps(self, top_pix: QPixmap, bottom_pix: QPixmap, top_label: str, bottom_label: str, active_stage: str = "stress", render_scale: int = 1) -> QPixmap:
+		"""Compone dos paneles en vertical con títulos: stress arriba / rest abajo.
+
+		Resalta la etapa activa. ``render_scale`` supersamplea todo el compuesto
+		(imagen + barras + texto) para que las etiquetas se vean nítidas al mostrar
+		el preview con zoom alto; el llamador ajusta el ``base_size`` para que el
+		porcentaje de zoom no cambie.
+		"""
+		ss = max(1, int(render_scale))
+		# El identificador de selección se dibuja aparte como punto verde, así que
+		# quitamos cualquier ● que agregue el llamador para no duplicarlo.
+		top_label = str(top_label).replace("●", "").rstrip()
+		bottom_label = str(bottom_label).replace("●", "").rstrip()
+		top_h0, bottom_h0 = int(top_pix.height()), int(bottom_pix.height())
+		base_fs = int(max(7, min(11, round(min(top_h0, bottom_h0) / 9.0))))
+		if ss > 1:
+			top_pix = top_pix.scaled(int(top_pix.width()) * ss, top_h0 * ss, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+			bottom_pix = bottom_pix.scaled(int(bottom_pix.width()) * ss, bottom_h0 * ss, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 		top_w, top_h = int(top_pix.width()), int(top_pix.height())
 		bottom_w, bottom_h = int(bottom_pix.width()), int(bottom_pix.height())
-		gap = 8
-		fs = int(max(7, min(11, round(min(top_h, bottom_h) / 9.0))))
-		bar_h = fs + 8
+		gap = 8 * ss
+		fs = base_fs * ss
+		bar_h = fs + 8 * ss
 		w = max(top_w, bottom_w)
 		split_y = bar_h + top_h + gap
 		h = split_y + bar_h + bottom_h
@@ -13391,24 +13490,46 @@ class MainWindow(QMainWindow):
 		canvas = QPixmap(w, h)
 		canvas.fill(QColor("#050912"))
 		p = QPainter(canvas)
+		p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+		p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
 		f = p.font()
-		f.setPointSize(fs)
+		f.setPixelSize(fs)
 		p.setFont(f)
 		p.fillRect(0, 0, w, bar_h, QColor("#7f1d1d" if top_active else "#0f172a"))
 		p.fillRect(0, split_y, w, bar_h, QColor("#7f1d1d" if bottom_active else "#0f172a"))
+		pad = 6 * ss
+		text_y = fs + 4 * ss
 		p.setPen(QColor("#e2e8f0"))
-		p.drawText(6, fs + 4, top_label)
-		p.drawText(6, split_y + fs + 4, bottom_label)
+		p.drawText(pad, text_y, top_label)
+		p.drawText(pad, split_y + text_y, bottom_label)
+		fm = p.fontMetrics()
+		dot_r = max(2, int(round(fs * 0.30)))
+
+		def _draw_dot(label_text, bar_top):
+			cx = pad + fm.horizontalAdvance(label_text) + dot_r * 2
+			cy = bar_top + bar_h // 2
+			p.setBrush(QColor("#22c55e"))
+			p.setPen(Qt.PenStyle.NoPen)
+			p.drawEllipse(int(cx - dot_r), int(cy - dot_r), dot_r * 2, dot_r * 2)
+
+		if top_active:
+			_draw_dot(top_label, 0)
+		if bottom_active:
+			_draw_dot(bottom_label, split_y)
 		p.drawPixmap(top_x, bar_h, top_pix)
 		p.drawPixmap(bottom_x, split_y + bar_h, bottom_pix)
-		p.setPen(QPen(QColor("#ef4444"), 3))
+		# Borde de la etapa activa: fino (equivale a ~1px en pantalla tras el
+		# downscale del supersampling).
+		p.setBrush(Qt.BrushStyle.NoBrush)
+		p.setPen(QPen(QColor("#ef4444"), max(1, ss)))
 		if top_active:
-			p.drawRect(top_x + 1, bar_h + 1, max(1, top_w - 2), max(1, top_h - 2))
+			p.drawRect(top_x, bar_h, max(1, top_w - 1), max(1, top_h - 1))
 		if bottom_active:
-			p.drawRect(bottom_x + 1, split_y + bar_h + 1, max(1, bottom_w - 2), max(1, bottom_h - 2))
+			p.drawRect(bottom_x, split_y + bar_h, max(1, bottom_w - 1), max(1, bottom_h - 1))
 		p.end()
 		self._cine_crudo_dual_render_meta = {
 			"enabled": True,
+			"ss": int(ss),
 			"bar_h": int(bar_h),
 			"gap": int(gap),
 			"split_y": int(split_y),
@@ -13629,6 +13750,7 @@ class MainWindow(QMainWindow):
 		cy = (event.pos().y() - y0) / max(1e-6, scale)
 		meta = getattr(self, "_cine_crudo_dual_render_meta", None) or {}
 		if meta.get("enabled"):
+			ss = int(meta.get("ss", 1) or 1)
 			bar_h = int(meta.get("bar_h", 22))
 			split_y = int(meta.get("split_y", 0))
 			canvas_w = int(meta.get("canvas_w", pw))
@@ -13644,7 +13766,8 @@ class MainWindow(QMainWindow):
 				x_off = (canvas_w - int(meta.get("bottom_w", pw))) / 2.0
 			cube = np.asarray(study_obj.cube, dtype=np.float64)
 			H, W = int(cube.shape[2]), int(cube.shape[3])
-			return stage, float(np.clip(y_local, 0, H - 1)), float(np.clip(cx - x_off, 0, W - 1)), H, W
+			# El compuesto está supersampleado ×ss; volvemos a coords nativas del cubo.
+			return stage, float(np.clip(y_local / ss, 0, H - 1)), float(np.clip((cx - x_off) / ss, 0, W - 1)), H, W
 		cube = np.asarray(self.study.cube, dtype=np.float64)
 		H, W = int(cube.shape[2]), int(cube.shape[3])
 		return "stress", float(np.clip(cy, 0, H - 1)), float(np.clip(cx, 0, W - 1)), H, W
@@ -13657,6 +13780,7 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_frames = []
 		self.cine_crudo_index = 0
 		self._cine_crudo_dual_render_meta = {}
+		self._cine_crudo_frames_ss = 1
 		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
 			return
 		primary_frames, primary_counts, primary_txt = self._build_cine_crudo_frames_for_study(
@@ -13682,16 +13806,18 @@ class MainWindow(QMainWindow):
 			active = getattr(self, "_cine_crudo_active_stage", "stress")
 			top_name = self._cine_crudo_stage_display(self.study) or "Esfuerzo"
 			bottom_name = self._cine_crudo_stage_display(self._secondary_cine_crudo_study()) or "Reposo"
-			top_label = top_name + (" ●" if active in ("stress", "both") else "")
-			bottom_label = bottom_name + (" ●" if active in ("rest", "both") else "")
+			top_label = top_name
+			bottom_label = bottom_name
 			n = min(len(primary_frames), len(compare_frames))
 			stacked = []
 			for i in range(n):
-				stacked.append(self._stack_cine_crudo_dual_pixmaps(primary_frames[i], compare_frames[i], top_label, bottom_label, active_stage=active))
+				stacked.append(self._stack_cine_crudo_dual_pixmaps(primary_frames[i], compare_frames[i], top_label, bottom_label, active_stage=active, render_scale=3))
 			self.cine_crudo_frames = stacked
+			self._cine_crudo_frames_ss = 3
 			self.cine_crudo_matrix_txt = f"{primary_txt} || {compare_txt}"
 		else:
 			self.cine_crudo_frames = primary_frames
+			self._cine_crudo_frames_ss = 1
 		self.cine_crudo_timer.setInterval(max(40, int(self.cine_crudo_speed_spin.value() if hasattr(self, "cine_crudo_speed_spin") else 120)))
 		# Preservar el frame actual (el que el usuario eligió con las flechas) en vez de resetear a 0.
 		self._set_cine_crudo_frame(int(getattr(self, "_cine_crudo_current_frame", 0)))
@@ -17535,9 +17661,17 @@ class MainWindow(QMainWindow):
 		if ok_all:
 			self._log("[REORIENT-DUAL] Ambas etapas reorientadas con elipse igualada. Cortes generados.")
 			try:
-				self._show_cine_crudo_sa_montage()
+				# Renderizar el montaje pero SIN saltar de pestaña: tras reorientar
+				# el usuario sigue en PROCESAMIENTO (aún falta procesar).
+				self._show_cine_crudo_sa_montage(navigate=False)
 			except Exception as exc:
 				self._log(f"[WARN] Montaje dual post-reorientación falló: {exc}")
+			self._select_tab_by_title("cine_crudo")
+			# Reorientar (dual) encadena el procesado automáticamente: fin de la cadena.
+			try:
+				self._process_cine_crudo_reconstruction()
+			except Exception as exc:
+				self._log(f"[WARN] Auto-procesar dual post-reorientación falló: {exc}")
 		return ok_all
 
 	def _open_cine_crudo_reorientation(self, _force_stage: str | None = None):
@@ -17589,6 +17723,12 @@ class MainWindow(QMainWindow):
 			return False
 		ok = self._apply_reorientation_result(dlg, generate_cuts=True)
 		self._commit_undo("Reorientación", _undo_group, _undo_before, deep=False)
+		if ok:
+			# Reorientar encadena el procesado automáticamente: fin de la cadena.
+			try:
+				self._process_cine_crudo_reconstruction()
+			except Exception as exc:
+				self._log(f"[WARN] Auto-procesar post-reorientación falló: {exc}")
 		return ok
 
 	def _apply_reorientation_result(self, dlg, generate_cuts: bool = True) -> bool:
@@ -18389,6 +18529,17 @@ class MainWindow(QMainWindow):
 			self._montage_cine_timer.stop()
 		self._update_montage_cine_toggle_text()
 
+	def _pause_montage_cine_if_playing(self):
+		"""Pausa el cine del montaje si estaba corriendo, sin resetear la tira."""
+		if not bool(getattr(self, "cine_crudo_montage_cine_playing", False)):
+			return
+		self.cine_crudo_montage_cine_playing = False
+		try:
+			self._montage_cine_timer.stop()
+		except Exception:
+			pass
+		self._update_montage_cine_toggle_text()
+
 	def _montage_cine_signature(self):
 		"""Firma del estado que define los frames del cine: si cambia, hay que re-pre-renderizar."""
 		def _ids(d):
@@ -18551,7 +18702,7 @@ class MainWindow(QMainWindow):
 	def _on_montage_cine_speed_changed(self, value: int):
 		self._montage_cine_timer.setInterval(max(40, int(value)))
 
-	def _show_cine_crudo_sa_montage(self):
+	def _show_cine_crudo_sa_montage(self, navigate: bool = True):
 
 		"""Montaje clínico de TODOS los cortes SA/VLA/HLA (estilo MyoVation/Xeleris).
 
@@ -18847,7 +18998,8 @@ class MainWindow(QMainWindow):
 				# En fast-pass (interacción) escala rápido; el settle HQ 512 reescala nítido.
 				fast_display = int(getattr(self, "_montage_panel_px", 512)) < 512
 				self._apply_preview_zoom("comparacion_ejes", fast=fast_display)
-			self._select_tab_by_title("comparacion_ejes")
+			if navigate:
+				self._select_tab_by_title("comparacion_ejes")
 			self._log(
 				f"Montaje generado: SA {n_sa_stress} cortes · Esp {th_txt} · recorte {crop_txt} · gates {min(gate_from, gate_to)}→{max(gate_from, gate_to)} · template {template_mode}"
 				+ (" · doble fila ESFUERZO/REPOSO" if has_rest else "")
@@ -19799,7 +19951,13 @@ class MainWindow(QMainWindow):
 		self._cine_crudo_current_frame = self.cine_crudo_index
 		pix = self.cine_crudo_frames[self.cine_crudo_index]
 		self.preview_pixmaps["cine_crudo"] = pix
-		self.preview_base_sizes["cine_crudo"] = pix.size()
+		# En dual supersampleado, el base_size es el nativo (pix / ss) para que el
+		# porcentaje de zoom se mantenga y el texto quede nítido al hacer downscale.
+		ss = int(getattr(self, "_cine_crudo_frames_ss", 1) or 1)
+		if ss > 1:
+			self.preview_base_sizes["cine_crudo"] = QSize(max(1, round(pix.width() / ss)), max(1, round(pix.height() / ss)))
+		else:
+			self.preview_base_sizes["cine_crudo"] = pix.size()
 		self._apply_preview_zoom("cine_crudo")
 		if hasattr(self, "cine_crudo_frame_label"):
 			counts_txt = ""
@@ -21088,6 +21246,8 @@ class MainWindow(QMainWindow):
 			st_bot = self._cine_crudo_stage_display(comp_study)
 			if st_top or st_bot:
 				self._log(f"Etapa detectada por metadata → arriba: {st_top or 'indeterminada'} · abajo: {st_bot or 'indeterminada'} (el selector Etapa sigue mandando).")
+			# Con ambas etapas crudas cargadas, recomponer el QC dual (Esf | Rep).
+			self._compose_and_show_dual_qc()
 		except Exception as exc:
 			self._log(f"[ERROR compare raw] {exc}")
 			QMessageBox.critical(self, "Error de comparación cruda", str(exc))
@@ -21256,7 +21416,7 @@ class MainWindow(QMainWindow):
 			self.dual_mode_active = True
 			self._load_previews_selected(self._default_preview_tabs())
 			self._refresh_summary()
-			self._select_tab_by_title("histograma")
+			self._select_tab_by_title("comparacion_ejes")
 			self._schedule_deferred_hq_render(
 				"compare",
 				delay_ms=320,
@@ -21345,6 +21505,35 @@ class MainWindow(QMainWindow):
 				right_img = plt.imread(right_path)
 			except Exception:
 				continue
+			if name == "histograma":
+				# Histograma dual: los dos histogramas arriba y, debajo, el gráfico
+				# comparativo de disincronía (antes en la pestaña stress_vs_rest).
+				cmp_path = os.path.join(self.output_dir, "comparacion_stress_rest.png")
+				cmp_img = None
+				if os.path.exists(cmp_path):
+					try:
+						cmp_img = plt.imread(cmp_path)
+					except Exception:
+						cmp_img = None
+				if cmp_img is not None:
+					fig = plt.figure(figsize=(14, 11), facecolor="#0f172a")
+					gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 0.9])
+					ax_l = fig.add_subplot(gs[0, 0])
+					ax_r = fig.add_subplot(gs[0, 1])
+					ax_c = fig.add_subplot(gs[1, :])
+					for ax, img, title in ((ax_l, left_img, left_label), (ax_r, right_img, right_label)):
+						ax.imshow(img)
+						ax.set_xticks([])
+						ax.set_yticks([])
+						ax.set_title(title, color="#e2e8f0", fontsize=11, fontweight="bold")
+					ax_c.imshow(cmp_img)
+					ax_c.set_xticks([])
+					ax_c.set_yticks([])
+					fig.suptitle(f"Histograma de fase — {self._patient_banner_text(include_stage=False)}", color="#f8fafc", fontsize=12, fontweight="bold")
+					fig.tight_layout(rect=(0, 0, 1, 0.96))
+					fig.savefig(left_path, dpi=150, bbox_inches="tight")
+					plt.close(fig)
+					continue
 			fig, axes = plt.subplots(1, 2, figsize=(14, 6), facecolor="#0f172a")
 			for ax, img, title in (
 				(axes[0], left_img, left_label),
@@ -21433,14 +21622,16 @@ class MainWindow(QMainWindow):
 		# Re-generar salidas del estudio principal con compare_bundle activo para
 		# crear mapas delta (polar_map_Δsigned / polar_map_Δabs).
 		self._write_outputs(target_tabs=target_tabs)
+		# El gráfico comparativo debe existir ANTES de componer el histograma dual,
+		# porque ese compuesto lo apila debajo de los dos histogramas.
+		self._write_compare_stress_rest()
 		self._compose_dual_tab_images(left_label, right_label, target_tabs=target_tabs)
 		# polar_cine ya se genera compuesto dentro de _write_outputs cuando hay compare_bundle.
 		# Evitamos recomponer de nuevo para no duplicar paneles (p.ej. Reposo repetido).
-		self._write_compare_stress_rest()
 		self.dual_mode_active = True
 		self._load_previews_selected(self._default_preview_tabs())
 		self._refresh_summary()
-		self._select_tab_by_title("histograma")
+		self._select_tab_by_title("comparacion_ejes")
 		if deferred:
 			self.statusBar().showMessage(f"Render HQ de comparación completado: {self.compare_label}")
 		else:
@@ -21481,7 +21672,7 @@ class MainWindow(QMainWindow):
 				self.dual_mode_active = True
 				self._load_previews_selected(self._default_preview_tabs())
 				self._refresh_summary()
-				self._select_tab_by_title("histograma")
+				self._select_tab_by_title("comparacion_ejes")
 				self._set_progress(92, "Vista rápida lista (HQ diferido)...")
 				self._schedule_deferred_hq_render(
 					"compare",

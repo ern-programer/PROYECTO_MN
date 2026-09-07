@@ -56,6 +56,10 @@ class MipRotatorWidget(QWidget):
         self._mip_source = "spect"
         self._spacing_mm = (4.0, 4.0, 4.0)
         self._cmap_fn = None
+        # Ventaneo trasladado desde el panel (SPECT win_low/high, CT WL/WW/preset).
+        # Cada uno recibe un array 2D y devuelve [0,1]. Si None, se usa percentil.
+        self._spect_window_fn = None
+        self._ct_window_fn = None
         self._voi_heart = None
         self._voi_mediastinum = None
         
@@ -470,6 +474,16 @@ class MipRotatorWidget(QWidget):
         """Establecer función de colormap (debe aceptar array 2D normalizado y retornar RGB)."""
         self._cmap_fn = cmap_fn
         self._schedule_render()
+
+    def set_spect_window_fn(self, fn):
+        """Función de ventaneo SPECT del panel (array 2D → [0,1]). None = percentil."""
+        self._spect_window_fn = fn
+        self._schedule_render()
+
+    def set_ct_window_fn(self, fn):
+        """Función de ventaneo CT del panel (array 2D en HU → [0,1]). None = percentil óseo."""
+        self._ct_window_fn = fn
+        self._schedule_render()
         
     def set_vois(self, voi_heart=None, voi_mediastinum=None):
         """Establecer VOIs para dibujar sobre el MIP."""
@@ -563,16 +577,32 @@ class MipRotatorWidget(QWidget):
             if source in ("spect", "fusion"):
                 vol_rot = _rotate_3d(vol)
                 mip = np.max(vol_rot, axis=1)  # Proyección sobre Y → plano XZ
-                mip_norm = _norm_mip(mip)
+                if self._spect_window_fn is not None:
+                    try:
+                        mip_norm = np.clip(np.asarray(self._spect_window_fn(mip), dtype=np.float64), 0.0, 1.0)
+                    except Exception:
+                        mip_norm = _norm_mip(mip)
+                else:
+                    mip_norm = _norm_mip(mip)
 
             ct_norm = None
             if source in ("ct", "fusion"):
-                # Ventana ósea previa a la proyección: el hueso domina el MIP
-                # (proyección tipo radiografía rotatoria).
-                ct_prep = np.clip(np.asarray(self._ct_volume, dtype=np.float64), -200.0, 1600.0)
-                ct_rot = _rotate_3d(ct_prep, cval=-200.0)
-                ct_mip = np.max(ct_rot, axis=1)
-                ct_norm = _norm_mip(ct_mip, 1.0, 99.8)
+                ct_raw = np.asarray(self._ct_volume, dtype=np.float64)
+                if self._ct_window_fn is not None:
+                    # Padding con el HU mínimo → el fondo cae por debajo de la ventana.
+                    ct_rot = _rotate_3d(ct_raw, cval=float(np.min(ct_raw)))
+                    ct_mip = np.max(ct_rot, axis=1)
+                    try:
+                        ct_norm = np.clip(np.asarray(self._ct_window_fn(ct_mip), dtype=np.float64), 0.0, 1.0)
+                    except Exception:
+                        ct_norm = _norm_mip(ct_mip, 1.0, 99.8)
+                else:
+                    # Ventana ósea previa a la proyección: el hueso domina el MIP
+                    # (proyección tipo radiografía rotatoria).
+                    ct_prep = np.clip(ct_raw, -200.0, 1600.0)
+                    ct_rot = _rotate_3d(ct_prep, cval=-200.0)
+                    ct_mip = np.max(ct_rot, axis=1)
+                    ct_norm = _norm_mip(ct_mip, 1.0, 99.8)
                 if source == "ct":
                     vol_rot = ct_rot
                     mip = ct_mip

@@ -1040,6 +1040,10 @@ class AmyloidSpectPanel(QDialog):
         self._ct_flip_x_test = False
         self._ct_flip_y_test = False
         self._ct_flip_z_test = False
+        # Flips (x,y,z) horneados en la CT/SPECT al momento del registro. La vista
+        # aplica solo el DELTA contra los flips vigentes; deben persistir por etapa.
+        self._ct_registered_flip_signature = (False, False, False)
+        self._spect_registered_flip_signature = (False, False, False)
         self._ct_window = "bone"
         # Ventana CT manual (WL/WW en HU) — se sincroniza con presets y con
         # el ventaneo interactivo por botón del medio.
@@ -5609,7 +5613,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
 
     def _on_link_zoom_changed(self, state: int):
         """Handler cuando se ancla/desancalan los zooms."""
-        is_linked = (state == Qt.CheckState.Checked.value())
+        is_linked = (state == Qt.CheckState.Checked.value)
         # Si se acaba de anclar, sincronizar el valor del CT al SPECT
         if is_linked:
             spect_val = int(self._spect_zoom_spin.value())
@@ -6384,6 +6388,17 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         target = self._drag_state.get("target")
         if target == "ct" and self._ct_auto_registered is not None:
             dz, dyw, dxw = self._drag_delta_to_world_zyx(axis, dx, dy)
+            # El nudge se aplica sobre la CT en la orientación del REGISTRO; la vista
+            # le suma los flips como delta. Si un eje está flippeado respecto de esa
+            # firma, el arrastre en pantalla va al revés → invertir ese componente
+            # para que la CT siga al mouse con o sin flips activos.
+            sig = getattr(self, "_ct_registered_flip_signature", None) or (False, False, False)
+            if bool(getattr(self, "_ct_flip_z_test", False)) != bool(sig[2]):
+                dz = -dz
+            if bool(getattr(self, "_ct_flip_y_test", False)) != bool(sig[1]):
+                dyw = -dyw
+            if bool(getattr(self, "_ct_flip_x_test", False)) != bool(sig[0]):
+                dxw = -dxw
             self._nudge_z.setValue(float(np.clip(self._nudge_z.value() + dz, -64.0, 64.0)))
             self._nudge_y.setValue(float(np.clip(self._nudge_y.value() + dyw, -64.0, 64.0)))
             self._nudge_x.setValue(float(np.clip(self._nudge_x.value() + dxw, -64.0, 64.0)))
@@ -7396,6 +7411,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         
         # Pasar colormap (siempre, por si cambió)
         self._mip_widget.set_colormap(self._apply_cmap)
+        # Trasladar el ventaneo activo (SPECT win_low/high, CT WL/WW/preset) al MIP.
+        self._mip_widget.set_spect_window_fn(self._window_spect)
+        self._mip_widget.set_ct_window_fn(self._window_ct)
         
         # Pasar VOIs si existen
         voi_heart = None

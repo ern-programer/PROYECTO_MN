@@ -7833,6 +7833,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
 
         # Pasar colormap (siempre, por si cambió)
         self._mip_widget.set_colormap(self._apply_cmap)
+        # Trasladar el ventaneo activo (SPECT win_low/high, CT WL/WW/preset) al MIP.
+        self._mip_widget.set_spect_window_fn(self._window_spect)
+        self._mip_widget.set_ct_window_fn(self._window_ct)
 
         # PERFUSIÓN: los círculos de VOI no aportan (solo máscara sobre el MIP).
         self._mip_widget.set_vois(None, None)
