@@ -1849,7 +1849,7 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_accept_btn.clicked.connect(self._accept_cine_crudo_motion_correction)
 				self.cine_crudo_reject_btn = QToolButton()
 				self.cine_crudo_reject_btn.setText("Rechazar")
-				self.cine_crudo_reject_btn.setToolTip("Descarta la corrección: se vuelve al crudo original y el procesamiento seguirá sin corrección de movimiento.")
+				self.cine_crudo_reject_btn.setToolTip("Descarta la corrección: vuelve al crudo original y queda a la espera (no reconstruye solo). Podés reconstruir cuando quieras o probar otra corrección.")
 				self.cine_crudo_reject_btn.clicked.connect(self._reject_cine_crudo_motion_correction)
 				corr_side = QWidget()
 				corr_side_layout = QVBoxLayout(corr_side)
@@ -4729,7 +4729,12 @@ class MainWindow(QMainWindow):
 		# Configuración organizada en pestañas por utilidad.
 		tabs = QTabWidget()
 		tab_interfaz = QWidget()
-		tab_interfaz_l = QVBoxLayout(tab_interfaz)
+		tab_interfaz_l = QHBoxLayout(tab_interfaz)
+		# Dos columnas: izquierda (apariencia/interfaz/visual) y derecha (zoom por pestaña).
+		tab_interfaz_left = QVBoxLayout()
+		tab_interfaz_right = QVBoxLayout()
+		tab_interfaz_l.addLayout(tab_interfaz_left, 1)
+		tab_interfaz_l.addLayout(tab_interfaz_right, 1)
 		tab_analisis = QWidget()
 		tab_analisis_l = QVBoxLayout(tab_analisis)
 		tab_informe = QWidget()
@@ -4761,7 +4766,7 @@ class MainWindow(QMainWindow):
 		theme_note.setWordWrap(True)
 		theme_note.setStyleSheet("color:#6b7280; font-size:8pt;")
 		appearance_l.addRow(theme_note)
-		tab_interfaz_l.addWidget(appearance_box)
+		tab_interfaz_left.addWidget(appearance_box)
 
 		# --- Interfaz: helpers, tooltips, modo compacto ---
 		ui_box = QGroupBox("Interfaz")
@@ -4785,9 +4790,9 @@ class MainWindow(QMainWindow):
 		ui_l.addWidget(show_helpers)
 		ui_l.addWidget(enable_tooltips)
 		ui_l.addWidget(compact_controls)
-		tab_interfaz_l.addWidget(ui_box)
+		tab_interfaz_left.addWidget(ui_box)
 		self._cfg_visual_box.setVisible(True)
-		tab_interfaz_l.addWidget(self._cfg_visual_box)
+		tab_interfaz_left.addWidget(self._cfg_visual_box)
 
 		# --- Análisis: fuente de perfusión segmentaria ---
 		analysis_box = QGroupBox("Análisis")
@@ -4947,12 +4952,8 @@ class MainWindow(QMainWindow):
 			spin.setValue(float(self._default_preview_zoom(_key)))
 			zoom_spins[_key] = spin
 			zoom_form.addRow(_lbl, spin)
-		zoom_scroll = QScrollArea()
-		zoom_scroll.setWidgetResizable(True)
-		zoom_scroll.setMinimumHeight(200)
-		zoom_scroll.setWidget(zoom_form_host)
-		zoom_outer.addWidget(zoom_scroll)
-		tab_interfaz_l.addWidget(zoom_box)
+		zoom_outer.addWidget(zoom_form_host)
+		tab_interfaz_right.addWidget(zoom_box)
 
 		# Aplicar el tema en vivo al cambiar el combo (aunque se cancele el diálogo,
 		# ya queda aplicado el tema elegido; se persiste solo al Aceptar).
@@ -4963,13 +4964,17 @@ class MainWindow(QMainWindow):
 				theme_manager.apply_theme(app, tid)
 		theme_combo.currentIndexChanged.connect(_on_theme_changed)
 
-		for _tab_l in (tab_interfaz_l, tab_analisis_l, tab_informe_l, tab_investigacion_l):
+		tab_interfaz_left.addStretch(1)
+		tab_interfaz_right.addStretch(1)
+		for _tab_l in (tab_analisis_l, tab_informe_l, tab_investigacion_l):
 			_tab_l.addStretch(1)
 
 		buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
 		buttons.accepted.connect(dlg.accept)
 		buttons.rejected.connect(dlg.reject)
 		root.addWidget(buttons)
+		# El diálogo se ajusta al tamaño de su contenido (sin espacio sobrante).
+		root.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
 
 		prev_theme = cur_theme
 		if dlg.exec() != int(QDialog.DialogCode.Accepted):
@@ -14001,10 +14006,13 @@ class MainWindow(QMainWindow):
 		except Exception as exc:
 			self._log(f"[WARN] No se pudo recargar el cine crudo tras rechazar: {exc}")
 		try:
-			self.statusBar().showMessage("Corrección descartada · se sigue con el crudo original", 6000)
+			self.statusBar().showMessage(
+				"Corrección descartada · a la espera: reconstruí cuando quieras o probá otra corrección", 8000
+			)
 		except Exception:
 			pass
-		self._start_cine_crudo_recon_flow()
+		# No se reconstruye automáticamente al rechazar: queda a la espera de que el
+		# usuario reconstruya o intente otra corrección (la barra de corrección sigue abierta).
 
 	def _start_cine_crudo_recon_flow(self):
 		"""Tras Aplicar/Rechazar: cierra la barra de corrección, abre la de reconstrucción
@@ -14021,9 +14029,9 @@ class MainWindow(QMainWindow):
 		corr = menus.get("cine_crudo_correccion_movimiento")
 		if corr is not None:
 			corr[0].hide()
-		# Punto de partida: OSEM (fondo limpio, sin halo ni streaks del FBP), sin NÍTIDA.
+		# Punto de partida: FBP rápido estándar (el usuario luego elige el filtro que prefiera), sin NÍTIDA.
 		if hasattr(self, "cine_crudo_recon_method_combo") and self.cine_crudo_recon_method_combo is not None:
-			self.cine_crudo_recon_method_combo.setCurrentText("OSEM")
+			self.cine_crudo_recon_method_combo.setCurrentText("FBP")
 		if hasattr(self, "cine_crudo_nitida_check") and self.cine_crudo_nitida_check is not None:
 			self.cine_crudo_nitida_check.setChecked(False)
 		rec = menus.get("cine_crudo_reconstruccion")
@@ -21227,22 +21235,23 @@ class MainWindow(QMainWindow):
 			# Recortar al corazón (centra y llena los paneles), luego isotropizar el
 			# eje de cortes para que HLA/VLA no salgan aplastados.
 			crop = _heart_crop(arr)
+			# Cubo GE tiene el eje K (cortes) invertido vs. convencion crudo: reordenar apex->base.
+			# Con esto la tira SA va apex->base y HLA/VLA salen bien orientadas sin flips por-panel.
+			crop = np.ascontiguousarray(crop[:, ::-1, :, :])
 			iso = _isotropize(crop, study)
 			g_sa = anatomical_cuts_gated(crop)
 			g_lx = anatomical_cuts_gated(iso)
-			# Cubo GE tiene el eje K (cortes) invertido vs. convencion crudo. SA no usa K (queda OK);
-			# HLA (K vertical) -> flip filas; VLA (K horizontal) -> flip columnas.
 			gated = {
 				"SA": np.ascontiguousarray(g_sa["sa"]),
-				"HLA": np.ascontiguousarray(g_lx["hla"][..., ::-1, :]),
-				"VLA": np.ascontiguousarray(g_lx["vla"][..., ::-1]),
+				"HLA": np.ascontiguousarray(g_lx["hla"]),
+				"VLA": np.ascontiguousarray(g_lx["vla"]),
 			}
 			u_sa = anatomical_cuts_gated(crop.sum(axis=0, keepdims=True))
 			u_lx = anatomical_cuts_gated(iso.sum(axis=0, keepdims=True))
 			ungated = {
 				"SA": np.ascontiguousarray(u_sa["sa"]),
-				"HLA": np.ascontiguousarray(u_lx["hla"][..., ::-1, :]),
-				"VLA": np.ascontiguousarray(u_lx["vla"][..., ::-1]),
+				"HLA": np.ascontiguousarray(u_lx["hla"]),
+				"VLA": np.ascontiguousarray(u_lx["vla"]),
 			}
 			return gated, ungated
 
@@ -21451,6 +21460,9 @@ class MainWindow(QMainWindow):
 			if bool(getattr(self, "_lower_cine_collapsed", False)):
 				self._toggle_lower_cine_band()
 			self._select_tab_by_title("histograma")
+			# Re-hidratar los cines con la banda ya visible: el 2do visor (reposo) se
+			# pobló mientras la banda estaba colapsada y no repintaba hasta reasignarlo.
+			self._apply_cine_source("primary", preserve_position=False)
 
 	def _edit_smart_load_keywords_dialog(self):
 		"""Editor de nombres/keywords que la carga inteligente usa para clasificar series.

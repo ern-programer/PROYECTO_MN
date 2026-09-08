@@ -2820,18 +2820,8 @@ class AmyloidSpectPanel(QDialog):
     # --- Auto-continue system ---
 
     def _check_auto_continue_bar(self):
-        """Muestra/oculta la barra de auto-continue según si hay estado previo guardado."""
-        if not self._current_spect_path:
-            self._auto_continue_bar.setVisible(False)
-            return
-        prefix = self._study_settings_prefix()
-        saved_stage = int(self._settings.value(f"{prefix}/pipeline_stage", 0) or 0)
-        if saved_stage > self._STAGE_NONE:
-            stage_name = self._STAGE_NAMES.get(saved_stage, f"etapa {saved_stage}")
-            self._lbl_prev_state.setText(f"⏳ Estudio previo detectado — última etapa: {stage_name}")
-            self._auto_continue_bar.setVisible(True)
-        else:
-            self._auto_continue_bar.setVisible(False)
+        """Barra de auto-continue de último estudio deshabilitada: nunca se muestra."""
+        self._auto_continue_bar.setVisible(False)
 
     def _on_continue_pipeline(self):
         """▶ Continuar: reanuda el pipeline desde la etapa guardada."""
@@ -3054,17 +3044,8 @@ class AmyloidSpectPanel(QDialog):
         self._settings.setValue("global/right_controls_open", bool(visible))
 
     def _check_startup_auto_continue(self):
-        """Al abrir el panel: si el último estudio tiene estado guardado, ofrecer retomarlo."""
-        last = str(self._settings.value("global/last_spect_path", "") or "")
-        if not last or not os.path.isfile(last):
-            return
-        stage = int(self._settings.value(f"studies/{self._settings_id(last)}/pipeline_stage", 0) or 0)
-        if stage <= self._STAGE_NONE:
-            return
-        self._startup_resume_path = last
-        stage_name = self._STAGE_NAMES.get(stage, f"etapa {stage}")
-        self._lbl_prev_state.setText(f"⏳ Último estudio: {os.path.basename(last)} — {stage_name}")
-        self._auto_continue_bar.setVisible(True)
+        """Auto-continue de último estudio deshabilitado: no se ofrece retomar."""
+        self._auto_continue_bar.setVisible(False)
 
     def _resume_startup_study_if_needed(self) -> bool:
         """Carga el último estudio guardado si aún no hay SPECT en memoria."""
