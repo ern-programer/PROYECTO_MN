@@ -3864,12 +3864,13 @@ class MainWindow(QMainWindow):
 		study_loaded = getattr(self, "study", None) is not None
 		if name == "ungated":
 			return study_loaded  # QC del crudo: basta con tener estudio cargado
-		# Resto (fase/perfusión, montaje de ejes): requieren pipeline procesado.
-		return (
-			study_loaded
-			and getattr(self, "seg", None) is not None
-			and getattr(self, "phase_result", None) is not None
-		)
+		seg_ready = study_loaded and getattr(self, "seg", None) is not None
+		# Perfusión/montaje (comparación de ejes, bull's eye, mapa polar de perfusión)
+		# sólo requieren segmentación: sirven también en estudios NO gatillados.
+		if name in ("comparacion_ejes", "bullseye_directo", "polar_perfusion_directa"):
+			return seg_ready
+		# Resto (fase/FEVI/asincronía): requieren el pipeline de fase completo.
+		return seg_ready and getattr(self, "phase_result", None) is not None
 
 	def _refresh_tab_enabled_states(self) -> None:
 		"""Habilita/deshabilita cada pestaña según si ya puede mostrar contenido."""
@@ -3919,7 +3920,12 @@ class MainWindow(QMainWindow):
 		return all(os.path.exists(os.path.join(self.output_dir, fname)) for fname in files)
 
 	def _request_lazy_tab_render(self, tab_name: str, reason: str = ""):
-		if self.study is None or self.seg is None or self.phase_result is None:
+		if self.study is None or self.seg is None:
+			return
+		tab_name = str(tab_name or "")
+		perfusion_tabs = {"comparacion_ejes", "bullseye_directo", "polar_perfusion_directa"}
+		# Fase/FEVI necesitan phase_result; los de perfusión no.
+		if self.phase_result is None and tab_name not in perfusion_tabs:
 			return
 		heavy_tabs = {
 			"comparacion_ejes",
@@ -8007,15 +8013,11 @@ class MainWindow(QMainWindow):
 			if not bool(getattr(self.study, "reconstructed", True)):
 				self._handle_raw_projections_loaded(path, t_total)
 				return
-			if int(np.asarray(self.study.cube).shape[0]) < 3:
-				self._log("Estudio reconstruido sin gatillado suficiente (<3 gates): FEVI/asincronía/fase no disponibles.")
-				QMessageBox.information(
-					self, "SINCRO",
-					"Estudio sin gatillado suficiente (<3 gates).\n\n"
-					"FEVI, asincronía y análisis de fase no están disponibles para estudios ungated.\n"
-					"Reconstrucción, cine, QC y NITIDA sí están disponibles."
-				)
-				return
+			is_gated = int(np.asarray(self.study.cube).shape[0]) >= 3
+			if not is_gated:
+				# No-gatillado: se genera perfusión/montaje (comparación de ejes, bull's eye,
+				# mapa polar), pero se omiten FEVI, asincronía y análisis de fase.
+				self._log("Estudio no-gatillado (<3 gates): se generan perfusión/montaje; FEVI/asincronía/fase omitidos.")
 			self.compare_gate_spin.setRange(1, max(1, int(self.study.cube.shape[0])))
 			self.compare_gate_spin.setValue(max(1, int(self.study.cube.shape[0] // 2) + 1))
 			if self.axis_companions:
@@ -8144,7 +8146,18 @@ class MainWindow(QMainWindow):
 				"phase_passenger": bool(phase_passenger_active),
 			}
 			phase_sig = self._hash_payload(phase_payload)
-			if self.phase_result is None or phase_sig != self._cache_phase_sig:
+			if not is_gated:
+				# No-gatillado: sin fase/FEVI/asincronía. Sólo AHA para perfusión/montaje.
+				self.phase_result = None
+				self.phase_result_raw = None
+				self.metrics = None
+				self.metrics_raw = None
+				self.phase_qc = None
+				self.phase_by_seg = None
+				self.territory = None
+				self.aha = map_to_17_segments(self.seg)
+				self._cache_phase_sig = ""
+			elif self.phase_result is None or phase_sig != self._cache_phase_sig:
 				t_stage = perf_counter()
 				self._set_progress(50, "Análisis de fase crudo y clínico robusto...")
 				self.phase_result_raw = phase_analysis(
@@ -8235,9 +8248,14 @@ class MainWindow(QMainWindow):
 			visual_payload = self._collect_visual_signature_payload()
 			visual_payload["phase"] = self._cache_phase_sig
 			output_sig = self._hash_payload(visual_payload)
+			nongated_perfusion_tabs = {"comparacion_ejes", "bullseye_directo", "polar_perfusion_directa"}
 			if output_sig != self._cache_output_sig:
 				t_stage = perf_counter()
-				if bool(self.realtime_deferred_render_check.isChecked()) and bool(self.advanced_mode_enabled):
+				if not is_gated:
+					self._set_progress(80, "Generando perfusión/montaje (no-gatillado)...")
+					self._write_outputs(target_tabs=nongated_perfusion_tabs)
+					self._cache_output_sig = output_sig
+				elif bool(self.realtime_deferred_render_check.isChecked()) and bool(self.advanced_mode_enabled):
 					self._set_progress(80, "Generando vista rápida...")
 					prev_adv = bool(self.advanced_mode_enabled)
 					self.advanced_mode_enabled = False
@@ -8268,7 +8286,10 @@ class MainWindow(QMainWindow):
 			self._refresh_summary()
 			self._set_progress(90, "Cargando previews...")
 			t_stage = perf_counter()
-			self._load_previews_selected(self._default_preview_tabs())
+			if is_gated:
+				self._load_previews_selected(self._default_preview_tabs())
+			else:
+				self._load_previews_selected({"comparacion_ejes", "bullseye_directo", "polar_perfusion_directa", "ungated"})
 			self._log_timing_if_slow("Carga de previews", t_stage)
 			self._select_tab_by_title("comparacion_ejes")
 			self._set_progress(100, "Procesamiento completo")
@@ -10666,8 +10687,10 @@ class MainWindow(QMainWindow):
 			return "Comparación" if is_compare else "Estudio"
 
 	def _write_outputs(self, target_tabs: set[str] | None = None):
-		if self.study is None or self.phase_result is None:
+		if self.study is None or self.seg is None:
 			return
+		# No-gatillado: sin phase_result se generan sólo perfusión/montaje; las secciones
+		# de fase/FEVI se saltan con guards `if self.phase_result is not None`.
 		target_tabs_set = None if target_tabs is None else {str(x) for x in target_tabs}
 		active_cine_widget = getattr(self, "_output_cine_widget_override", None)
 		if active_cine_widget is None:
@@ -10839,15 +10862,16 @@ class MainWindow(QMainWindow):
 		axes[1].set_title("Máscara miocardio")
 
 		axes[2].imshow(frame_norm, cmap=cmap_slices)
-		phase_slice = self.phase_result.phase_map[mid_slice].copy()
-		valid = np.isfinite(phase_slice)
-		if valid.any():
-			from viz.colormaps import phase_to_rgb
-			rgb = phase_to_rgb(phase_slice[valid], cmap_name=cmap_phase_report)
-			pm_overlay = np.zeros((*phase_slice.shape, 4))
-			pm_overlay[valid, :3] = rgb
-			pm_overlay[valid, 3] = 0.75
-			axes[2].imshow(pm_overlay)
+		if self.phase_result is not None:
+			phase_slice = self.phase_result.phase_map[mid_slice].copy()
+			valid = np.isfinite(phase_slice)
+			if valid.any():
+				from viz.colormaps import phase_to_rgb
+				rgb = phase_to_rgb(phase_slice[valid], cmap_name=cmap_phase_report)
+				pm_overlay = np.zeros((*phase_slice.shape, 4))
+				pm_overlay[valid, :3] = rgb
+				pm_overlay[valid, 3] = 0.75
+				axes[2].imshow(pm_overlay)
 		axes[2].set_title("Fase superpuesta")
 
 		fig.suptitle(f"SINCRO — Vista principal — {study_context_label}", fontsize=12.5, fontweight="bold")
@@ -10856,19 +10880,20 @@ class MainWindow(QMainWindow):
 		fig.savefig(os.path.join(self.output_dir, "slices_fase.png"), dpi=150, bbox_inches="tight")
 		plt.close(fig)
 
-		pm = build_polar_map(self.phase_by_seg, cmap_name=cmap_phase_report, title=f"Phase Polar Map — {study_context_label}")
-		pm.fig.text(
-			0.02,
-			0.02,
-			"Qué muestra: distribución regional de fase (AHA 17). Uso clínico: identificar patrón y extensión de disincronía intraventricular.",
-			fontsize=8.8,
-			color="#334155",
-			ha="left",
-			va="bottom",
-		)
-		self._stamp_export_figure(pm.fig, active_cine_widget)
-		save_polar_map(pm, os.path.join(self.output_dir, "polar_map.png"), dpi=150)
-		plt.close(pm.fig)
+		if self.phase_result is not None:
+			pm = build_polar_map(self.phase_by_seg, cmap_name=cmap_phase_report, title=f"Phase Polar Map — {study_context_label}")
+			pm.fig.text(
+				0.02,
+				0.02,
+				"Qué muestra: distribución regional de fase (AHA 17). Uso clínico: identificar patrón y extensión de disincronía intraventricular.",
+				fontsize=8.8,
+				color="#334155",
+				ha="left",
+				va="bottom",
+			)
+			self._stamp_export_figure(pm.fig, active_cine_widget)
+			save_polar_map(pm, os.path.join(self.output_dir, "polar_map.png"), dpi=150)
+			plt.close(pm.fig)
 
 		if render_delta_combo and self.compare_bundle is not None and self.compare_bundle.get("phase_by_seg") and self.study is not self.compare_bundle.get("study"):
 			from matplotlib.cm import ScalarMappable
@@ -11066,18 +11091,19 @@ class MainWindow(QMainWindow):
 			self._stamp_export_figure(hfig, active_cine_widget)
 			save_histogram(hfig, os.path.join(self.output_dir, "histograma.png"), dpi=150)
 			plt.close(hfig)
-		cfig = build_clinical_phase_panel(
-			self.phase_by_seg,
-			self.phase_result.phases_deg,
-			metrics=self.metrics,
-			cmap_name=cmap_polar_clinico,
-			title=f"Panel polar clínico (histograma + fase) — {study_context_label}",
-		)
-		self._stamp_export_figure(cfig, active_cine_widget)
-		save_clinical_phase_panel(cfig, os.path.join(self.output_dir, "polar_clinico.png"), dpi=150)
-		plt.close(cfig)
-		_compose_polar_combo()
-		_compose_delta_combo()
+		if self.phase_result is not None:
+			cfig = build_clinical_phase_panel(
+				self.phase_by_seg,
+				self.phase_result.phases_deg,
+				metrics=self.metrics,
+				cmap_name=cmap_polar_clinico,
+				title=f"Panel polar clínico (histograma + fase) — {study_context_label}",
+			)
+			self._stamp_export_figure(cfig, active_cine_widget)
+			save_clinical_phase_panel(cfig, os.path.join(self.output_dir, "polar_clinico.png"), dpi=150)
+			plt.close(cfig)
+			_compose_polar_combo()
+			_compose_delta_combo()
 
 		# Opción A: en la corrida completa se corta acá (rápido); el render por-pestaña
 		# (target_tabs) continúa para generar la pesada solicitada bajo demanda.
@@ -11350,6 +11376,10 @@ class MainWindow(QMainWindow):
 			self._log("Cache tab: curva_fevi sin cambios, se omite regeneración.")
 
 		# Panel funcional gated SPECT: ED/ES + mapas + curvas de volumen/fase.
+		# No-gatillado: sin fase/métricas el panel se arma vacío y se descarta
+		# (render_panel_funcional queda False); estos alias evitan AttributeError.
+		_pbs = self.phase_by_seg if self.phase_by_seg is not None else {}
+		_mtr = self.metrics if self.metrics is not None else {}
 		fig_v = plt.figure(figsize=(14.0, 8.4), facecolor=style["fig_bg"])
 		gs = fig_v.add_gridspec(3, 4, width_ratios=[1.1, 1.1, 1.45, 1.15], hspace=0.28, wspace=0.22)
 		ax_ed_sa = fig_v.add_subplot(gs[0, 0])
@@ -11382,8 +11412,12 @@ class MainWindow(QMainWindow):
 
 		from viz.colormaps import phase_to_rgb
 
-		phase_mid = np.asarray(self.phase_result.phase_map[mid_slice], dtype=np.float64)
-		amp_mid = np.asarray(self.phase_result.amplitude_map[mid_slice], dtype=np.float64)
+		if self.phase_result is not None:
+			phase_mid = np.asarray(self.phase_result.phase_map[mid_slice], dtype=np.float64)
+			amp_mid = np.asarray(self.phase_result.amplitude_map[mid_slice], dtype=np.float64)
+		else:
+			phase_mid = np.full(frame.shape, np.nan, dtype=np.float64)
+			amp_mid = np.zeros_like(phase_mid)
 		amp_show = amp_mid / (float(np.nanmax(amp_mid)) + 1e-8)
 		phase_rgb = phase_to_rgb(phase_mid, cmap_name=cmap_phase_report, nan_color=(0.05, 0.07, 0.10))
 		ax_phase.imshow(phase_rgb)
@@ -11417,11 +11451,11 @@ class MainWindow(QMainWindow):
 		ax_curve.tick_params(axis="y", colors=style["vol"])
 		ax_curve.grid(True, color=style["grid"], alpha=0.45)
 
-		phase_seg_ids = np.array(sorted(int(k) for k in self.phase_by_seg.keys()), dtype=np.int32)
-		phase_seg_vals = np.array([float(self.phase_by_seg[int(k)]) for k in phase_seg_ids], dtype=np.float64) if phase_seg_ids.size else np.array([], dtype=np.float64)
+		phase_seg_ids = np.array(sorted(int(k) for k in _pbs.keys()), dtype=np.int32)
+		phase_seg_vals = np.array([float(_pbs[int(k)]) for k in phase_seg_ids], dtype=np.float64) if phase_seg_ids.size else np.array([], dtype=np.float64)
 		if phase_seg_ids.size:
 			ax_metrics.plot(phase_seg_ids, phase_seg_vals, color=style["deriv"], linewidth=1.8, marker="o", markersize=4)
-			ax_metrics.axhline(float(self.metrics.get("mean_phase", np.nan)), color=style["ed"], linestyle="--", linewidth=1.1)
+			ax_metrics.axhline(float(_mtr.get("mean_phase", np.nan)), color=style["ed"], linestyle="--", linewidth=1.1)
 			ax_metrics.set_xlim(1, 17)
 			ax_metrics.set_xticks(np.arange(1, 18, 2))
 			ax_metrics.set_ylim(0, 360)
@@ -11438,10 +11472,10 @@ class MainWindow(QMainWindow):
 			ax_metrics.text(0.5, 0.5, "Sin datos de fase por segmento", transform=ax_metrics.transAxes, ha="center", va="center", color=style["fg"])
 
 		metrics_lines = [
-			f"PSD técnico: {self.metrics.get('technical_classification', self.metrics.get('classification'))}",
-			f"Phase SD: {float(self.metrics.get('phase_sd', np.nan)):.1f}°",
-			f"Bandwidth: {float(self.metrics.get('bandwidth', np.nan)):.1f}°",
-			f"Entropy: {float(self.metrics.get('entropy_normalized_pct', np.nan)):.1f}%",
+			f"PSD técnico: {_mtr.get('technical_classification', _mtr.get('classification'))}",
+			f"Phase SD: {float(_mtr.get('phase_sd', np.nan)):.1f}°",
+			f"Bandwidth: {float(_mtr.get('bandwidth', np.nan)):.1f}°",
+			f"Entropy: {float(_mtr.get('entropy_normalized_pct', np.nan)):.1f}%",
 		]
 		if ef.get("available"):
 			metrics_lines.extend([
@@ -11457,10 +11491,10 @@ class MainWindow(QMainWindow):
 		ax_results.set_ylim(0.0, 1.0)
 		ax_results.text(0.02, 0.92, "Resultados", transform=ax_results.transAxes, va="top", ha="left", color=style["fg"], fontsize=11.5, fontweight="bold")
 		result_items = [
-			("PSD técnico", f"{self.metrics.get('technical_classification', self.metrics.get('classification'))} (no dx)"),
-			("Phase SD", f"{float(self.metrics.get('phase_sd', np.nan)):.1f}°"),
-			("Bandwidth", f"{float(self.metrics.get('bandwidth', np.nan)):.1f}°"),
-			("Entropy", f"{float(self.metrics.get('entropy_normalized_pct', np.nan)):.1f}%"),
+			("PSD técnico", f"{_mtr.get('technical_classification', _mtr.get('classification'))} (no dx)"),
+			("Phase SD", f"{float(_mtr.get('phase_sd', np.nan)):.1f}°"),
+			("Bandwidth", f"{float(_mtr.get('bandwidth', np.nan)):.1f}°"),
+			("Entropy", f"{float(_mtr.get('entropy_normalized_pct', np.nan)):.1f}%"),
 		]
 		if ef.get("available"):
 			result_items.extend([
@@ -14810,14 +14844,16 @@ class MainWindow(QMainWindow):
 					continue
 		return series
 
-	def _info_looks_sa_recon(self, info: dict, kw: dict) -> bool:
-		"""¿La serie son cortes SA gatillados YA reconstruidos (cualquier fabricante)?
+	def _info_looks_sa_recon(self, info: dict, kw: dict, *, require_gated: bool = True) -> bool:
+		"""¿La serie son cortes SA YA reconstruidos (cualquier fabricante)?
 
-		NM no-crudo (no proyecciones angulares), con señal de gatillado
-		(NumberOfTimeSlots>=3 o vector temporal, o montage con >=3 frames) y señal de
-		reconstruido (vector de cortes, geometría montage, RECON/DERIVED, o alguno de
-		los nombres configurados para SA). Excluye ejes largos HLA/VLA salvo que el
-		nombre diga SA. La validación real la hace dicom_loader.load al cargar.
+		NM no-crudo (no proyecciones angulares), con señal de reconstruido (vector de
+		cortes, geometría montage, RECON/DERIVED, o alguno de los nombres configurados
+		para SA). Con require_gated=True (default) exige además señal de gatillado
+		(NumberOfTimeSlots>=3 o vector temporal, o montage con >=3 frames); con
+		require_gated=False acepta también SA no-gatillados (perfusión). Excluye ejes
+		largos HLA/VLA salvo que el nombre diga SA. La validación real la hace
+		dicom_loader.load al cargar.
 		"""
 		if info["modality"].upper() != "NM":
 			return False
@@ -14842,6 +14878,8 @@ class MainWindow(QMainWindow):
 			bool(info.get("has_slice_vec")) or montage or "recon" in txt
 			or "derived" in info["image_type"].lower() or is_sa_named
 		)
+		if not require_gated:
+			return bool(recon)
 		return bool(gated and recon)
 
 	def _smart_load_ct_att_folder(self):
@@ -21312,12 +21350,13 @@ class MainWindow(QMainWindow):
 		self._log(f"[SA] Montaje clínico armado desde cortes SA ({'dual esfuerzo/reposo' if dual else primary_stage}).")
 
 	def _load_sa_recon_direct(self):
-		"""Carga cortes SA gatillados YA reconstruidos (cualquier fabricante) para
-		calcular asincronía/FEVI directo, sin reconstruir ni reorientar.
+		"""Carga cortes SA YA reconstruidos (cualquier fabricante) para calcular
+		asincronía/FEVI (si son gatillados, ≥3 gates) o sólo perfusión/mapa polar/
+		montaje (si son no-gatillados), sin reconstruir ni reorientar.
 
-		Pide una carpeta, escanea headers y muestra SOLO los cortes SA gatillados
-		(filtra CT, ejes largos HLA/VLA y proyecciones crudas). El usuario elige 1
-		(una etapa) o 2 (esfuerzo/reposo).
+		Pide una carpeta, escanea headers y muestra los cortes SA (filtra CT, ejes
+		largos HLA/VLA y proyecciones crudas), indicando gatillado vs no-gatillado.
+		El usuario elige 1 (una etapa) o 2 (esfuerzo/reposo).
 		"""
 		settings = getattr(self, "_ui_settings", None)
 		start_dir = ""
@@ -21363,7 +21402,7 @@ class MainWindow(QMainWindow):
 					"has_time_vec": (0x0054, 0x0070) in ds,
 					"n_time_slots": int(getattr(ds, "NumberOfTimeSlots", 0) or getattr(ds, "NumberOfTimeSlices", 0) or 0),
 				}
-				if not self._info_looks_sa_recon(info, kw):
+				if not self._info_looks_sa_recon(info, kw, require_gated=False):
 					continue
 				# Exigir orientación eje corto en el nombre: el ImageType no distingue
 				# SA de transaxial/HLA/VLA (todos 'RECON GATED TOMO'), solo el nombre.
@@ -21372,13 +21411,20 @@ class MainWindow(QMainWindow):
 					continue
 				stage = self._stage_from_dicom_text(f"{info['desc']} {info['protocol']} {fn}")
 				stage_txt = "Esfuerzo" if stage == "stress" else ("Reposo" if stage == "rest" else "sin etapa")
-				label = f"{fn}  ·  {stage_txt}"
-				candidates.append((label, fp, stage))
+				n_slots = int(info.get("n_time_slots", 0) or 0)
+				rows_i = int(info.get("rows", 0) or 0)
+				cols_i = int(info.get("cols", 0) or 0)
+				frames_i = int(info.get("frames", 1) or 1)
+				montage_i = rows_i > 0 and cols_i > 0 and cols_i % rows_i == 0 and (cols_i // rows_i) > 1
+				gated_hint = n_slots >= 3 or bool(info.get("has_time_vec")) or (montage_i and frames_i >= 3)
+				gate_txt = (f"gatillado · {n_slots} gates" if n_slots >= 3 else "gatillado") if gated_hint else "NO gatillado (perfusión)"
+				label = f"{fn}  ·  {stage_txt}  ·  {gate_txt}"
+				candidates.append((label, fp, stage, gated_hint))
 		if not candidates:
 			QMessageBox.warning(
 				self, "SINCRO",
-				"No se detectaron cortes SA gatillados reconstruidos en la carpeta.\n\n"
-				"Verificá que estén reconstruidos y gatillados (≥3 gates), o ajustá los "
+				"No se detectaron cortes SA reconstruidos en la carpeta.\n\n"
+				"Verificá que estén reconstruidos (gatillados o no), o ajustá los "
 				"nombres en '⚙ MAPEO…'.",
 			)
 			return
@@ -21387,30 +21433,54 @@ class MainWindow(QMainWindow):
 		candidates.sort(key=lambda c: order.get(c[2], 2))
 
 		from PyQt6.QtWidgets import (
-			QDialog, QVBoxLayout, QLabel, QListWidget, QListWidgetItem,
+			QDialog, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
 			QDialogButtonBox, QAbstractItemView,
 		)
 		dlg = QDialog(self)
-		dlg.setWindowTitle("Cortes SA gatillados reconstruidos")
+		dlg.setWindowTitle("Cortes SA reconstruidos")
 		lay = QVBoxLayout(dlg)
-		lay.addWidget(QLabel("Elegí 1 corte SA (una etapa) o 2 (esfuerzo/reposo):"))
-		lst = QListWidget()
-		lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-		for label, path, _stage in candidates:
-			it = QListWidgetItem(label)
-			it.setData(Qt.ItemDataRole.UserRole, path)
-			it.setToolTip(path)
-			lst.addItem(it)
-		lst.setCurrentRow(0)
-		lst.setMinimumWidth(460)
-		lay.addWidget(lst)
+		lay.addWidget(QLabel(
+			"Elegí 1 corte SA (una etapa) o 2 (esfuerzo/reposo).\n"
+			"Podés combinar columnas (p. ej. un gatillado y un no-gatillado)."
+		))
+
+		def _make_column(items: list) -> QListWidget:
+			lw = QListWidget()
+			lw.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+			lw.setMinimumWidth(360)
+			for label, path, _stage, _g in items:
+				it = QListWidgetItem(label)
+				it.setData(Qt.ItemDataRole.UserRole, path)
+				it.setToolTip(path)
+				lw.addItem(it)
+			return lw
+
+		lst_g = _make_column([c for c in candidates if c[3]])
+		lst_u = _make_column([c for c in candidates if not c[3]])
+
+		cols_lay = QHBoxLayout()
+		col_g = QVBoxLayout()
+		col_g.addWidget(QLabel("GATILLADO  (asincronía/FEVI)"))
+		col_g.addWidget(lst_g)
+		col_u = QVBoxLayout()
+		col_u.addWidget(QLabel("NO GATILLADO  (perfusión/mapa polar)"))
+		col_u.addWidget(lst_u)
+		cols_lay.addLayout(col_g)
+		cols_lay.addLayout(col_u)
+		lay.addLayout(cols_lay)
+
 		bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
 		bb.accepted.connect(dlg.accept)
 		bb.rejected.connect(dlg.reject)
 		lay.addWidget(bb)
 		if dlg.exec() != QDialog.DialogCode.Accepted:
 			return
-		sel = [lst.item(i).data(Qt.ItemDataRole.UserRole) for i in range(lst.count()) if lst.item(i).isSelected()]
+		sel = []
+		for lw in (lst_g, lst_u):
+			sel.extend(
+				lw.item(i).data(Qt.ItemDataRole.UserRole)
+				for i in range(lw.count()) if lw.item(i).isSelected()
+			)
 		if not sel:
 			return
 		sel = sel[:2]
@@ -21420,11 +21490,10 @@ class MainWindow(QMainWindow):
 		except Exception as exc:
 			QMessageBox.critical(self, "SINCRO", f"No se pudo leer el DICOM:\n{exc}")
 			return
-		if not bool(getattr(probe, "reconstructed", True)) or int(np.asarray(probe.cube).shape[0]) < 3:
+		if not bool(getattr(probe, "reconstructed", True)):
 			QMessageBox.warning(
 				self, "SINCRO",
-				"El corte elegido no parece SA gatillado reconstruido "
-				"(se requiere estar reconstruido y con ≥3 gates).",
+				"El corte elegido no parece estar reconstruido en eje corto (SA).",
 			)
 			return
 		self.file_edit.setText(primary)
@@ -21436,7 +21505,7 @@ class MainWindow(QMainWindow):
 		if primary_stage not in ("stress", "rest"):
 			primary_stage = "stress"
 		compare_loaded = False
-		if len(sel) > 1 and self.metrics is not None:
+		if len(sel) > 1 and self.study is not None:
 			# La 2da etapa a veces no carga bien; que su fallo no impida dejar la 1ra
 			# etapa procesada y visible (la 1ra siempre carga bien).
 			try:
@@ -21447,7 +21516,7 @@ class MainWindow(QMainWindow):
 		self._log(f"[SA] Cortes SA reconstruidos cargados directo: {os.path.basename(primary)}.")
 		# Montaje clínico armado desde los cortes SA (ya reorientados): 1ra etapa y,
 		# si se cargó la 2da, ambas fases apiladas (esfuerzo/reposo).
-		if self.metrics is not None:
+		if self.study is not None:
 			compare_stage = None
 			if compare_loaded:
 				compare_stage = stage_by_path.get(sel[1])
@@ -21619,36 +21688,48 @@ class MainWindow(QMainWindow):
 			smooth_sigma=float(self.sigma_spin.value()),
 			manual_rois=manual_rois,
 		)
-		comp_phase = phase_analysis(
-			comp_cube_for_analysis,
-			comp_seg.mask,
-			harmonics=int(self.harmonics_spin.value()),
-			amplitude_threshold_frac=float(self.phase_threshold_spin.value()),
-			normalize_reference=self.normalize_check.isChecked(),
-		)
-		comp_phase_raw = phase_analysis(
-			comp_cube_for_analysis,
-			comp_seg.mask,
-			harmonics=int(self.harmonics_spin.value()),
-			amplitude_threshold_frac=float(RAW_PHASE_QC_AMP_FILTER),
-			normalize_reference=self.normalize_check.isChecked(),
-		)
-		comp_metrics_raw = self._annotate_phase_metrics(
-			calculate_phase_metrics(comp_phase_raw.phases_deg),
-			comp_phase_raw,
-			RAW_PHASE_QC_AMP_FILTER,
-			"crudo ROI",
-		)
-		comp_metrics = self._annotate_phase_metrics(
-			calculate_phase_metrics(comp_phase.phases_deg),
-			comp_phase,
-			float(self.phase_threshold_spin.value()),
-			"clínico robusto",
-		)
-		comp_phase_qc = self._build_phase_qc(comp_phase_raw, comp_phase, comp_metrics_raw, comp_metrics)
 		comp_aha = map_to_17_segments(comp_seg)
-		comp_phase_by_seg = phase_by_segment(comp_phase.phase_map, comp_aha)
-		comp_territory = territory_analysis(comp_phase_by_seg)
+		comp_is_gated = int(np.asarray(comp_study.cube).shape[0]) >= 3
+		if not comp_is_gated:
+			# SA/no-gatillado: sólo perfusión/montaje/mapa polar; sin fase/FEVI/asincronía.
+			self._log("Comparación no-gatillada (<3 gates): sólo perfusión/mapa polar; fase/FEVI omitidos.")
+			comp_phase = None
+			comp_phase_raw = None
+			comp_metrics = None
+			comp_metrics_raw = None
+			comp_phase_qc = None
+			comp_phase_by_seg = None
+			comp_territory = None
+		else:
+			comp_phase = phase_analysis(
+				comp_cube_for_analysis,
+				comp_seg.mask,
+				harmonics=int(self.harmonics_spin.value()),
+				amplitude_threshold_frac=float(self.phase_threshold_spin.value()),
+				normalize_reference=self.normalize_check.isChecked(),
+			)
+			comp_phase_raw = phase_analysis(
+				comp_cube_for_analysis,
+				comp_seg.mask,
+				harmonics=int(self.harmonics_spin.value()),
+				amplitude_threshold_frac=float(RAW_PHASE_QC_AMP_FILTER),
+				normalize_reference=self.normalize_check.isChecked(),
+			)
+			comp_metrics_raw = self._annotate_phase_metrics(
+				calculate_phase_metrics(comp_phase_raw.phases_deg),
+				comp_phase_raw,
+				RAW_PHASE_QC_AMP_FILTER,
+				"crudo ROI",
+			)
+			comp_metrics = self._annotate_phase_metrics(
+				calculate_phase_metrics(comp_phase.phases_deg),
+				comp_phase,
+				float(self.phase_threshold_spin.value()),
+				"clínico robusto",
+			)
+			comp_phase_qc = self._build_phase_qc(comp_phase_raw, comp_phase, comp_metrics_raw, comp_metrics)
+			comp_phase_by_seg = phase_by_segment(comp_phase.phase_map, comp_aha)
+			comp_territory = territory_analysis(comp_phase_by_seg)
 		comp_ef = self._estimate_ef_for(comp_study, comp_seg)
 		return {
 			"path": path,

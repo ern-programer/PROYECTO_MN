@@ -516,6 +516,20 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
         had_summed = False
         notes.append(f"Reshape por producto: {n_gates} gates × {n_slices} slices.")
 
+    # --- Caso 5: volumen NO gatillado (1 gate, N cortes) ---
+    # frames = cortes; sin dimensión temporal (n_time None/<=1). Es el SA de
+    # perfusión no gatillado: se acepta para perfusión/mapa polar/montaje.
+    elif (n_time is None or int(n_time or 0) <= 1) and (
+        n_slices_tag is None or int(n_slices_tag) == n_frames
+    ):
+        n_gates = 1
+        n_slices = n_frames
+        H, W = arr.shape[1], arr.shape[2]
+        cube = arr.reshape(1, n_frames, H, W)
+        was_montage = False
+        had_summed = False
+        notes.append(f"Volumen no-gatillado: 1 gate × {n_slices} cortes (perfusión).")
+
     else:
         raise LoaderError(
             f"No pude determinar la estructura gated. frames={n_frames}, time={n_time}, "
@@ -523,14 +537,19 @@ def load(path: str, verbose: bool = False) -> GatedStudy:
             "Revisar el estudio con las herramientas de reconocimiento."
         )
 
-    # --- Auto-QC: ¿el corazón late? ---
-    frac = _first_harmonic_fraction(cube)
-    qc_passed = frac >= QC_FIRST_HARMONIC_MIN
-    if not qc_passed:
-        notes.append(
-            f"QC latido bajo (1er armónico={frac:.3f} < {QC_FIRST_HARMONIC_MIN}). "
-            "Posible gating error, reshape incorrecto o estudio no cardíaco."
-        )
+    # --- Auto-QC: ¿el corazón late? (sólo tiene sentido con gating) ---
+    if n_gates >= 3:
+        frac = _first_harmonic_fraction(cube)
+        qc_passed = frac >= QC_FIRST_HARMONIC_MIN
+        if not qc_passed:
+            notes.append(
+                f"QC latido bajo (1er armónico={frac:.3f} < {QC_FIRST_HARMONIC_MIN}). "
+                "Posible gating error, reshape incorrecto o estudio no cardíaco."
+            )
+    else:
+        frac = 0.0
+        qc_passed = False
+        notes.append("Estudio no-gatillado (1 gate): QC de latido omitido; sólo perfusión/mapa polar/montaje.")
 
     gating_info = _extract_gating_info(ds)
 
