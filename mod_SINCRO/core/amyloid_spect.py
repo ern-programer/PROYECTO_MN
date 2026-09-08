@@ -1119,7 +1119,7 @@ def remove_ct_table(
     return cleaned, body, notes
 
 
-def _auto_flip_ct_to_spect(ct_rs: np.ndarray, spect: np.ndarray) -> tuple[np.ndarray, str, float]:
+def _auto_flip_ct_to_spect(ct_rs: np.ndarray, spect: np.ndarray, forced_flips: tuple[bool, bool, bool] | None = None) -> tuple[np.ndarray, str, float]:
     """Resuelve la orientación de la CT probando las 8 combinaciones de flips.
 
     Cuando el affine DICOM no es utilizable, el remuestreo por spacing conserva
@@ -1127,9 +1127,29 @@ def _auto_flip_ct_to_spect(ct_rs: np.ndarray, spect: np.ndarray) -> tuple[np.nda
     maximiza la correlación entre la CT suavizada y el SPECT (ambos con señal
     dominada por el cuerpo/hueso), que es invariante a unidades. Devuelve
     también el NCC ganador para poder comparar candidatos de remuestreo.
+
+    ``forced_flips`` (opcional): si se pasa una terna (z,y,x), se SALTA la
+    búsqueda y se aplican esos flips tal cual. Sirve para congelar la
+    orientación resuelta a un factor de resolución y reutilizarla en otros
+    (evita que el NCC elija una orientación distinta al cambiar la grilla y
+    "invierta" el registro ya validado por el usuario).
     """
     sp = np.asarray(spect, dtype=np.float64)
     base = np.asarray(ct_rs, dtype=np.float64)
+    if forced_flips is not None:
+        flips = (bool(forced_flips[0]), bool(forced_flips[1]), bool(forced_flips[2]))
+        out = base
+        if flips[0]:
+            out = np.flip(out, axis=0)
+        if flips[1]:
+            out = np.flip(out, axis=1)
+        if flips[2]:
+            out = np.flip(out, axis=2)
+        note = (
+            f"Orientación CT reutilizada (congelada del registro): flips z/y/x = "
+            f"{flips[0]}/{flips[1]}/{flips[2]}."
+        )
+        return np.ascontiguousarray(out), note, 1.0, flips
     # La decisión de flips no necesita resolución completa: decimar acelera
     # ~8x en grillas 2x (modo CT nativa) sin cambiar el ganador.
     step = max(1, int(round(max(sp.shape) / 64.0)))
@@ -1169,7 +1189,7 @@ def _auto_flip_ct_to_spect(ct_rs: np.ndarray, spect: np.ndarray) -> tuple[np.nda
         f"Orientación CT auto-resuelta por correlación con SPECT: flips z/y/x = "
         f"{flips[0]}/{flips[1]}/{flips[2]} (NCC={best_score:.3f})."
     )
-    return np.ascontiguousarray(out), note, float(best_score)
+    return np.ascontiguousarray(out), note, float(best_score), flips
 
 
 def register_ct_to_spect_rigid(
@@ -1256,7 +1276,7 @@ def register_ct_to_spect_rigid(
     # resuelven los flips del candidato actual y, si el acuerdo con el SPECT
     # es pobre, se compara contra el candidato por espaciado físico y gana el
     # de mayor NCC. Si la orientación ya era correcta, gana la identidad.
-    ct_rs, flip_note, flip_score = _auto_flip_ct_to_spect(ct_rs, sp)
+    ct_rs, flip_note, flip_score, _flips = _auto_flip_ct_to_spect(ct_rs, sp)
     notes.append(flip_note)
     if flip_score < 0.30 and ct.shape != sp.shape and ct_spacing_zyx is not None and spect_spacing_zyx is not None:
         zoom_factors = tuple(
@@ -1265,7 +1285,7 @@ def register_ct_to_spect_rigid(
         )
         ct_phys = ndi.zoom(ct, zoom_factors, order=1)
         cand = _center_crop_or_pad_3d(ct_phys, sp.shape, fill_value=float(np.min(ct)))
-        cand, cand_note, cand_score = _auto_flip_ct_to_spect(cand, sp)
+        cand, cand_note, cand_score, _cflips = _auto_flip_ct_to_spect(cand, sp)
         if cand_score > flip_score:
             ct_rs = cand
             notes.append(

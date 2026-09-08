@@ -5715,6 +5715,7 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         self._trial_ct_native_base = None
         self._trial_spect_on_ct_base = None
         self._trial_ct_native_spacing_base = None
+        self._trial_reg_residual_zyx = (0.0, 0.0, 0.0)
 
     def _invalidate_ct_grid_trial_view(self):
         """Solo la vista final (flips/rot/shift): conserva la base pesada ya resuelta."""
@@ -5723,6 +5724,146 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         self._trial_ct_native = None
         self._trial_ct_native_spacing = None
         self._trial_ref_shape = None
+
+    def _calibrate_trial_to_registered(self, ct_native, calib_key=None):
+        """Alinea el trial a la CT registrada TAL COMO SE MUESTRA (flips + traslación).
+
+        Con nudge=0 el trial debe verse idéntico a la registrada: si difieren,
+        alinear mirando el trial DESALINEA la registrada (MIP y máscara rotos).
+        Busca los 8 flips + traslación (correlación FFT ±12 px, signo verificado
+        empíricamente por NCC) y devuelve la base corregida.
+        """
+        self._trial_reg_residual_zyx = (0.0, 0.0, 0.0)
+        reg = getattr(self, "_ct_auto_registered", None)
+        if reg is None:
+            return ct_native
+        # Reusar la calibración ya resuelta (misma CT+registro+factor): un rebuild
+        # disparado por cambios AJENOS al CT (p.ej. sustracción ósea cambia el SPECT)
+        # NO debe re-ejecutar el heurístico, que podría elegir otro espejo y "mover"
+        # o esconder la CT nítida.
+        if calib_key is not None and getattr(self, "_ct_native_calib_key", None) == calib_key:
+            frozen = getattr(self, "_ct_native_calib", None)
+            if frozen is not None:
+                (fz, fy, fx), resid = frozen
+                out = np.asarray(ct_native)
+                if fx:
+                    out = out[:, :, ::-1]
+                if fy:
+                    out = out[:, ::-1, :]
+                if fz:
+                    out = out[::-1]
+                self._trial_reg_residual_zyx = tuple(float(v) for v in resid)
+                return np.ascontiguousarray(out)
+        try:
+            # Marco del REGISTRO (sin flips de usuario ni visual transform): la
+            # vista luego aplica los mismos DELTAS de flips que la registrada.
+            reg_ref = np.asarray(reg, dtype=np.float32)
+            zf = tuple(r / max(1, n) for r, n in zip(reg_ref.shape, np.asarray(ct_native).shape))
+            src = np.asarray(ct_native, dtype=np.float32)
+            # Anti-alias antes de reducir: a 3x+ el down-zoom order=1 sin suavizado
+            # aliasa el borde óseo y corre el pico de correlación FFT → residuo
+            # espurio que saca la CT nítida del FOV (se "desaparece"). Suavizar
+            # ∝ al factor de reducción hace la calibración estable en todo factor.
+            sigma = tuple(((1.0 / z - 1.0) / 2.0) if z < 1.0 else 0.0 for z in zf)
+            if any(s > 0.1 for s in sigma):
+                src = ndi.gaussian_filter(src, sigma=sigma)
+            nat_lo = ndi.zoom(src, zf, order=1, prefilter=False)
+            nat_view = nat_lo
+            reg_shift = tuple(float(v) for v in getattr(self, "_ct_registration_shift_zyx", (0.0, 0.0, 0.0)))
+
+            def _mask(v):
+                m = (v > 150.0).astype(np.float32)
+                return m if m.sum() >= 500 else (v > -300.0).astype(np.float32)
+
+            def _ncc(u, v):
+                u = u - float(u.mean()); v = v - float(v.mean())
+                d = float(np.sqrt((u * u).sum() * (v * v).sum()))
+                return float((u * v).sum() / d) if d > 0 else 0.0
+
+            b = _mask(reg_ref)
+            B = np.fft.rfftn(b)
+            axes_dist = [np.minimum(np.arange(n), n - np.arange(n)) for n in b.shape]
+            zz, yy, xx = np.meshgrid(*axes_dist, indexing="ij")
+            # Ventana amplia: los desfases trial↔registrada vistos llegan a ~20 px.
+            lims = tuple(max(16, n // 3) for n in b.shape)
+            near = (zz <= lims[0]) & (yy <= lims[1]) & (xx <= lims[2])
+
+            best = None  # (ncc, flips, resid)
+            ident = None
+            for fz in (False, True):
+                for fy in (False, True):
+                    for fx in (False, True):
+                        cand = nat_view
+                        if fx:
+                            cand = cand[:, :, ::-1]
+                        if fy:
+                            cand = cand[:, ::-1, :]
+                        if fz:
+                            cand = cand[::-1]
+                        cand_pos = ndi.shift(np.ascontiguousarray(cand), shift=reg_shift, order=1, mode="nearest")
+                        a = _mask(cand_pos)
+                        cc = np.fft.irfftn(np.conj(np.fft.rfftn(a)) * B, s=a.shape, axes=(0, 1, 2))
+                        cc = np.where(near, cc, -np.inf)
+                        idx = np.unravel_index(int(np.argmax(cc)), cc.shape)
+                        d = tuple(float(i if i <= n // 2 else i - n) for i, n in zip(idx, cc.shape))
+                        s_best, n_best = (0.0, 0.0, 0.0), _ncc(cand_pos, reg_ref)
+                        for s in (d, tuple(-v for v in d)):
+                            if all(abs(v) < 0.5 for v in s):
+                                continue
+                            n_s = _ncc(ndi.shift(cand_pos, shift=s, order=1, mode="nearest"), reg_ref)
+                            if n_s > n_best:
+                                s_best, n_best = s, n_s
+                        if (fz, fy, fx) == (False, False, False):
+                            ident = (n_best, (fz, fy, fx), s_best)
+                        if best is None or n_best > best[0]:
+                            best = (n_best, (fz, fy, fx), s_best)
+            if best is None:
+                return ct_native
+            # Sesgo a identidad: el tórax es casi simétrico — un espejo solo gana
+            # si mejora claramente (evita flips espontáneos casi degenerados).
+            if ident is not None and best[1] != (False, False, False) and best[0] < ident[0] + 0.05:
+                best = ident
+            ncc_best, (fz, fy, fx), resid = best
+            if ncc_best < 0.35 and hasattr(self, "_metrics"):
+                self._metrics.append(
+                    f"[CT-NATIVE][WARN] Calibración débil (NCC={ncc_best:.3f}): el trial puede "
+                    "no coincidir con la registrada — verificar con QC registro."
+                )
+            # Tras un buen registro el residuo real es de pocos px; uno grande es un
+            # error del heurístico (simetría torácica/aliasing) que a 3x+ se ×factor
+            # y saca la CT del FOV ("desaparece"). Descartarlo y confiar en el shift
+            # de registro es más seguro que aplicar una traslación espuria.
+            if any(abs(v) > 6.0 for v in resid):
+                if hasattr(self, "_metrics"):
+                    self._metrics.append(
+                        f"[CT-NATIVE][WARN] Residuo implausible Δ={tuple(round(float(v),1) for v in resid)} px "
+                        "descartado (se confía en el shift de registro)."
+                    )
+                resid = (0.0, 0.0, 0.0)
+            out = np.asarray(ct_native)
+            # Flips axiales conmutan entre sí: aplicarlos a la base equivale a
+            # aplicarlos después de los flips de usuario de la vista.
+            if fx:
+                out = out[:, :, ::-1]
+            if fy:
+                out = out[:, ::-1, :]
+            if fz:
+                out = out[::-1]
+            self._trial_reg_residual_zyx = tuple(float(v) for v in resid)
+            if calib_key is not None:
+                self._ct_native_calib_key = calib_key
+                self._ct_native_calib = ((bool(fz), bool(fy), bool(fx)), tuple(float(v) for v in resid))
+            if hasattr(self, "_metrics"):
+                self._metrics.append(
+                    f"[CT-NATIVE] Calibración vs CT registrada: flips(z,y,x)=({int(fz)},{int(fy)},{int(fx)}) · "
+                    f"residuo Δ(z,y,x)=({resid[0]:.0f},{resid[1]:.0f},{resid[2]:.0f}) px · NCC={ncc_best:.3f}"
+                )
+            return np.ascontiguousarray(out)
+        except Exception as exc:
+            if hasattr(self, "_metrics"):
+                self._metrics.append(f"[CT-NATIVE][WARN] Calibración vs registrada falló: {exc}")
+            self._trial_reg_residual_zyx = (0.0, 0.0, 0.0)
+            return ct_native
 
     def _build_ct_grid_trial_base(self, base_sig) -> None:
         """Parte PESADA (resample CT a grilla Nx + auto-flip), cacheada una sola vez.
@@ -5742,9 +5883,11 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
         spect_affine_nx = None
         if self._spect_affine_ijk_to_lps is not None:
             sa = np.asarray(self._spect_affine_ijk_to_lps, dtype=np.float64).copy()
-            sa[0, 0] /= float(nf)
-            sa[1, 1] /= float(nf)
-            sa[2, 2] /= float(nf)
+            # Densificar ×nf = escalar TODO el bloque lineal 3×3 por 1/nf (los
+            # cosenos de dirección viven fuera de la diagonal cuando hay rotación:
+            # dividir solo la diagonal deja el spacing real intacto y la grilla
+            # cubre nf× el FOV → mapea fuera de la CT → todo fill a 3x+).
+            sa[:3, :3] /= float(nf)
             spect_affine_nx = sa
 
         ct_native, _ct_notes = resample_volume_to_spect_grid(
@@ -5757,6 +5900,30 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             fill_value=-1024.0,
             order=1,
         )
+        # La vía afín se degenera con affines oblicuos o cuando _ct_volume no
+        # comparte grilla con su affine: mapea casi toda la grilla objetivo fuera
+        # de la CT → todo fill (la CT nítida "desaparece"). Detectarlo por el
+        # contenido real y rehacer por spacing físico, que ignora la traslación
+        # LPS. Antes esto solo se recuperaba vía flip_score<0.30, pero con flips
+        # congelados _auto_flip devuelve NCC=1.0 y el rescate nunca corría a 3x+.
+        _cn0 = np.asarray(ct_native)
+        _used_affine = self._ct_affine_ijk_to_lps is not None and spect_affine_nx is not None
+        if _used_affine and float((_cn0 > (float(_cn0.min()) + 1.0)).mean()) < 0.01:
+            ct_native, _ct_notes = resample_volume_to_spect_grid(
+                ct_tx,
+                np.zeros(target_shape),
+                source_spacing_zyx=ct_sp,
+                spect_spacing_zyx=target_spacing,
+                source_affine_ijk_to_lps=None,
+                spect_affine_ijk_to_lps=None,
+                fill_value=-1024.0,
+                order=1,
+            )
+            if hasattr(self, '_metrics'):
+                self._metrics.append(
+                    "[CT-NATIVE] Vía afín degenerada (grilla fuera de la CT): "
+                    "remuestreo por spacing físico."
+                )
 
         # SPECT → grilla objetivo: zoom exacto ×nf (el affine de adquisición
         # deformaba el SPECT en estos crudos).
@@ -5768,9 +5935,37 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             spect_on_ct = pad
 
         from core.amyloid_spect import _auto_flip_ct_to_spect
-        ct_native, flip_note, flip_score = _auto_flip_ct_to_spect(ct_native, spect_on_ct)
+        # Si hay CT registrada, usarla de REFERENCIA para el auto-flip (CT vs CT
+        # discrimina mejor que CT vs SPECT y garantiza la MISMA orientación que la
+        # vista registrada).
+        flip_ref = spect_on_ct
+        if getattr(self, "_ct_registered", None) is not None:
+            try:
+                _reg = np.asarray(self._ct_registered, dtype=np.float32)
+                _zf = tuple(t / max(1, s) for t, s in zip(ct_native.shape, _reg.shape))
+                flip_ref = ndi.zoom(_reg - float(_reg.min()), _zf, order=1)
+                if hasattr(self, '_metrics'):
+                    self._metrics.append("[CT-NATIVE] Referencia de orientación: CT registrada (no SPECT).")
+            except Exception:
+                flip_ref = spect_on_ct
+        # La orientación (flips) depende del par de estudios y del registro, NO del
+        # factor de resolución. Se resuelve UNA vez (a cualquier factor) y se congela:
+        # al cambiar el factor se reutiliza la misma terna para no "invertir" el
+        # registro validado (el NCC podía elegir otra orientación en otra grilla y
+        # arruinar las máscaras/correcciones que aporta la CT).
+        orient_key = tuple(base_sig[:-1])  # base_sig sin el factor de resolución
+        frozen = None
+        if getattr(self, "_ct_native_autoflip_key", None) == orient_key:
+            frozen = getattr(self, "_ct_native_autoflip_flips", None)
+        ct_native, flip_note, flip_score, flips = _auto_flip_ct_to_spect(
+            ct_native, flip_ref, forced_flips=frozen
+        )
         if hasattr(self, '_metrics'):
             self._metrics.append(f"[CT-NATIVE] {flip_note}")
+        # Rescate por spacing físico: la vía afín se degenera con affines oblicuos
+        # o cuando _ct_volume no comparte grilla con su affine (mapea la grilla
+        # fuera de la CT → todo fill). Debe correr en TODOS los factores (con flips
+        # congelados o no); antes solo corría la 1ª vez y a 3x la CT quedaba vacía.
         if flip_score < 0.30:
             cand, _ = resample_volume_to_spect_grid(
                 ct_tx,
@@ -5782,20 +5977,43 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 fill_value=-1024.0,
                 order=1,
             )
-            cand, cand_note, cand_score = _auto_flip_ct_to_spect(cand, spect_on_ct)
+            cand, cand_note, cand_score, cand_flips = _auto_flip_ct_to_spect(
+                cand, flip_ref, forced_flips=frozen
+            )
             if cand_score > flip_score:
                 ct_native = cand
+                flips = cand_flips
                 if hasattr(self, '_metrics'):
                     self._metrics.append(
                         f"[CT-NATIVE] Acuerdo affine pobre (NCC={flip_score:.3f}): "
                         f"candidato físico adoptado (NCC={cand_score:.3f}). {cand_note}"
                     )
+        # Congelar SIEMPRE la orientación resuelta para que sea idéntica entre factores.
+        self._ct_native_autoflip_key = orient_key
+        self._ct_native_autoflip_flips = tuple(bool(v) for v in flips)
         if hasattr(self, '_metrics'):
             self._metrics.append(f"[CT-NATIVE] SPECT remuestreado a grilla {nf}x por zoom exacto (sin affine).")
             self._metrics.append(
                 f"[CT-NATIVE] SPECT {spect_tx.shape} → grid {spect_on_ct.shape} | "
                 f"CT {ct_tx.shape} → {ct_native.shape} ({nf}x SPECT res)"
             )
+
+        # Calibración contra el registro vigente: con nudge=0 el trial debe verse
+        # IGUAL que la CT registrada (misma verdad para MPR, MIP y máscara). Se
+        # congela por firma CT+registro+factor para que un rebuild disparado por
+        # cambios del SPECT (p.ej. sustracción ósea) NO re-ejecute el heurístico.
+        calib_key = (
+            id(getattr(self, "_ct_volume", None)),
+            id(getattr(self, "_ct_auto_registered", None)),
+            int(nf),
+            tuple(bool(v) for v in (getattr(self, "_ct_native_autoflip_flips", None) or (False, False, False))),
+            tuple(float(v) for v in getattr(self, "_ct_registration_shift_zyx", (0.0, 0.0, 0.0))),
+            tuple(np.asarray(self._ct_affine_ijk_to_lps).ravel()) if self._ct_affine_ijk_to_lps is not None else None,
+            tuple(np.asarray(self._spect_affine_ijk_to_lps).ravel()) if self._spect_affine_ijk_to_lps is not None else None,
+            tuple(self._spect_spacing_zyx) if self._spect_spacing_zyx is not None else None,
+            tuple(self._ct_spacing_zyx) if self._ct_spacing_zyx is not None else None,
+        )
+        ct_native = self._calibrate_trial_to_registered(ct_native, calib_key=calib_key)
 
         self._trial_base_sig = base_sig
         self._trial_ct_native_base = np.ascontiguousarray(np.asarray(ct_native, dtype=np.float32))
@@ -5838,6 +6056,9 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 bool(getattr(self, "_spect_flip_x_test", False)),
                 bool(getattr(self, "_spect_flip_y_test", False)),
                 bool(getattr(self, "_spect_flip_z_test", False)),
+                # La base vive en el marco del registro: NO depende de flips CT,
+                # pero SÍ del registro vigente (rebuild + recalibra si cambia).
+                id(getattr(self, "_ct_auto_registered", None)),
                 tuple(np.asarray(self._spect_affine_ijk_to_lps).ravel()) if self._spect_affine_ijk_to_lps is not None else None,
                 tuple(np.asarray(self._ct_affine_ijk_to_lps).ravel()) if self._ct_affine_ijk_to_lps is not None else None,
                 tuple(self._spect_spacing_zyx) if self._spect_spacing_zyx is not None else None,
@@ -5856,8 +6077,8 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             ct_native_spacing = self._trial_ct_native_spacing_base
             nf = float(max(2, min(5, int(getattr(self, '_ct_native_factor', 2)))))
 
-            # Flips manuales del usuario: relativos a la orientación auto-resuelta.
-            ct_native = self._ct_transform_3d(ct_native)
+            # La base ya vive en el marco del REGISTRO: los flips de usuario se
+            # aplican al final como DELTAS (idéntico a la CT registrada), no acá.
 
             # === Aplicar rotaciones del nudge (igual que _apply_ct_nudge) ===
             # Las rotaciones están en grados y se aplican sobre la grilla Nx.
@@ -5880,11 +6101,13 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
             # El shift total está en píxeles de la grilla SPECT original (64³).
             # Convertir a píxeles de la grilla objetivo (Nx): multiplicar por nf.
             total_shift = getattr(self, '_ct_total_shift_zyx', (0.0, 0.0, 0.0))
-            if any(abs(s) > 0.01 for s in total_shift):
+            resid = getattr(self, '_trial_reg_residual_zyx', (0.0, 0.0, 0.0))
+            eff_shift = tuple(float(t) + float(r) for t, r in zip(total_shift, resid))
+            if any(abs(s) > 0.01 for s in eff_shift):
                 shift_target = (
-                    float(total_shift[0]) * nf,
-                    float(total_shift[1]) * nf,
-                    float(total_shift[2]) * nf,
+                    float(eff_shift[0]) * nf,
+                    float(eff_shift[1]) * nf,
+                    float(eff_shift[2]) * nf,
                 )
                 ct_native = ndi.shift(ct_native, shift=shift_target, order=1, mode='nearest')
                 if hasattr(self, '_metrics'):
@@ -5893,19 +6116,43 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                         f"Δ(z,y,x)=({shift_target[0]:.1f},{shift_target[1]:.1f},{shift_target[2]:.1f}) px (grid {nf:g}x)"
                     )
 
+            # Mismos DELTAS de flips que la CT registrada → coordinación exacta
+            # de ambas vistas ante cualquier toggle de flips.
+            ct_native = self._ct_registered_visual_transform(ct_native)
+
             self._trial_spect_on_ct = np.ascontiguousarray(np.asarray(spect_on_ct, dtype=np.float32))  # float32 ahorra memoria
             self._trial_ct_native = np.ascontiguousarray(np.asarray(ct_native, dtype=np.float32))
             self._trial_ct_native_spacing = ct_native_spacing
             self._trial_ref_shape = tuple(int(v) for v in np.asarray(self._current_volume).shape[:3])
             self._trial_cache_signature = sig
             return True
-        except Exception:
-            self._invalidate_ct_grid_trial_cache()
+        except Exception as exc:
+            import traceback as _tb
+            try:
+                _logp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_ct_native_error.log")
+                with open(_logp, "a", encoding="utf-8") as _fh:
+                    _fh.write(f"=== CT nativa {int(getattr(self, '_ct_native_factor', 2))}x falló ===\n")
+                    _fh.write(_tb.format_exc())
+                    _fh.write("\n")
+            except Exception:
+                pass
+            if hasattr(self, "_metrics"):
+                self._metrics.append(f"[CT-NATIVE][ERROR] Vista nativa falló: {exc}")
+            if hasattr(self, "_status"):
+                self._status.setText(f"CT nativa {int(getattr(self, '_ct_native_factor', 2))}× falló: {exc}")
+            # Fallo transitorio (p.ej. memoria en un rebuild): limpiar solo la
+            # vista y CONSERVAR la base ya calibrada para recuperarse en el próximo
+            # render, en vez de borrar todo y revertir a la CT de baja resolución.
+            self._trial_cache_signature = None
+            self._trial_spect_on_ct = None
+            self._trial_ct_native = None
             return False
 
     def _on_ct_grid_trial_toggled(self, checked: bool):
         self._ct_grid_trial_mode = bool(checked)
-        self._invalidate_ct_grid_trial_cache()
+        # Solo la vista: la base calibrada sigue válida (recalibrar en cada toggle
+        # podía elegir un espejo casi degenerado y "mover" la CT).
+        self._invalidate_ct_grid_trial_view()
         if checked:
             self._status.setText("[PRUEBA/BETA] CT nativa + SPECT en grilla CT activado. Desmarcar para rollback inmediato.")
             if hasattr(self, "_metrics"):

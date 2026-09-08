@@ -6068,10 +6068,22 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                     self._metrics.append("[CT-NATIVE] Referencia de orientación: CT registrada (no SPECT).")
             except Exception:
                 flip_ref = spect_on_ct
-        ct_native, flip_note, flip_score = _auto_flip_ct_to_spect(ct_native, flip_ref)
+        # La orientación (flips) depende del par de estudios y del registro, NO del
+        # factor de resolución: se resuelve UNA vez y se congela para reutilizarla
+        # en otros factores (evita invertir el registro validado al cambiar la grilla).
+        orient_key = tuple(base_sig[:-1])  # base_sig sin el factor de resolución
+        frozen = None
+        if getattr(self, "_ct_native_autoflip_key", None) == orient_key:
+            frozen = getattr(self, "_ct_native_autoflip_flips", None)
+        if frozen is not None:
+            ct_native, flip_note, flip_score, flips = _auto_flip_ct_to_spect(
+                ct_native, flip_ref, forced_flips=frozen
+            )
+        else:
+            ct_native, flip_note, flip_score, flips = _auto_flip_ct_to_spect(ct_native, flip_ref)
         if hasattr(self, '_metrics'):
             self._metrics.append(f"[CT-NATIVE] {flip_note}")
-        if flip_score < 0.30:
+        if frozen is None and flip_score < 0.30:
             cand, _ = resample_volume_to_spect_grid(
                 ct_tx,
                 np.zeros(target_shape),
@@ -6082,14 +6094,21 @@ Los valores de corte deben validarse localmente antes de uso diagnóstico rutina
                 fill_value=-1024.0,
                 order=1,
             )
-            cand, cand_note, cand_score = _auto_flip_ct_to_spect(cand, flip_ref)
+            cand, cand_note, cand_score, cand_flips = _auto_flip_ct_to_spect(cand, flip_ref)
             if cand_score > flip_score:
                 ct_native = cand
+                flips = cand_flips
                 if hasattr(self, '_metrics'):
                     self._metrics.append(
                         f"[CT-NATIVE] Acuerdo affine pobre (NCC={flip_score:.3f}): "
                         f"candidato físico adoptado (NCC={cand_score:.3f}). {cand_note}"
                     )
+        if frozen is None:
+            # Congelar la orientación resuelta: al cambiar el factor de resolución
+            # se reutiliza esta terna y NO se re-decide el flip (evita invertir el
+            # registro validado y aplicar mal máscaras/AC de la CT).
+            self._ct_native_autoflip_key = tuple(base_sig[:-1])
+            self._ct_native_autoflip_flips = tuple(bool(v) for v in flips)
 
         if hasattr(self, '_metrics'):
             self._metrics.append(f"[CT-NATIVE] SPECT remuestreado a grilla {nf}x por zoom exacto (sin affine).")
