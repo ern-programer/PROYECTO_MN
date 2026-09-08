@@ -21150,6 +21150,158 @@ class MainWindow(QMainWindow):
 		if self.metrics is not None:
 			self._load_compare_study_from_path(compare_path)
 
+	def _build_sa_direct_clinical_montage(self, primary_stage: str, compare_stage: str | None):
+		"""Arma el montaje clínico (SA/HLA/VLA) desde los cortes SA ya reorientados
+		de la carga directa, para la 1ra etapa y —si se cargó la 2da— ambas fases.
+		El ungated (imagen de perfusión del montaje) se aproxima como suma de gates."""
+		try:
+			from core.cardiac_reorientation import anatomical_cuts_gated
+		except Exception as exc:
+			self._log(f"[SA][WARN] No se pudo importar anatomical_cuts_gated: {exc}")
+			return
+
+		def _isotropize(arr, study):
+			"""Reescala el eje de cortes (k, axis=1) para que su espaciado físico
+			iguale el in-plane. Sin esto, HLA=(K,I) y VLA=(J,K) salen como bandas
+			finas (K << in-plane) y el montaje parece mostrar "solo el SA"."""
+			px = getattr(study, "pixel_spacing", None)
+			try:
+				px_mm = float(px[0]) if px else 0.0
+			except Exception:
+				px_mm = 0.0
+			z_mm = 0.0
+			for _attr in ("z_spacing_mm", "spacing_between_slices_mm", "slice_thickness_mm"):
+				_v = getattr(study, _attr, None)
+				if _v:
+					try:
+						z_mm = float(_v)
+						break
+					except Exception:
+						pass
+			if px_mm <= 0.0 or z_mm <= 0.0:
+				return arr
+			factor = z_mm / px_mm
+			if factor <= 1.05:
+				return arr
+			factor = min(factor, 6.0)
+			try:
+				from scipy.ndimage import zoom as _ndi_zoom
+				return _ndi_zoom(arr, (1.0, factor, 1.0, 1.0), order=1)
+			except Exception:
+				return np.repeat(arr, max(1, int(round(factor))), axis=1)
+
+		def _heart_crop(arr):
+			"""Recorta el cubo (g,k,j,i) a un box centrado en el corazón. Sin esto,
+			con FOV 64x64 el corazón (~20px centrado) cae fuera de la ventana por
+			defecto del montaje y HLA/VLA quedan sobre puro fondo (negro)."""
+			ung = arr.sum(axis=0)
+			m = float(ung.max())
+			if m <= 0.0:
+				return arr
+			mask = ung > 0.20 * m
+			ks, js, iss = np.where(mask)
+			if ks.size < 8:
+				return arr
+			nk, nj, ni = ung.shape
+			def _seg(idx, n, floor):
+				lo, hi = int(idx.min()), int(idx.max())
+				c = (lo + hi) / 2.0
+				half = max((hi - lo) / 2.0 * 1.30, float(floor))
+				return int(np.clip(round(c - half), 0, n - 1)), int(np.clip(round(c + half), 0, n - 1))
+			k0, k1 = _seg(ks, nk, 3)
+			# Box in-plane cuadrado y centrado en el centroide del corazón.
+			cj = (int(js.min()) + int(js.max())) / 2.0
+			ci = (int(iss.min()) + int(iss.max())) / 2.0
+			half = max((int(js.max()) - int(js.min())) / 2.0, (int(iss.max()) - int(iss.min())) / 2.0)
+			half = max(half * 1.30, 6.0)
+			j0 = int(np.clip(round(cj - half), 0, nj - 1)); j1 = int(np.clip(round(cj + half), 0, nj - 1))
+			i0 = int(np.clip(round(ci - half), 0, ni - 1)); i1 = int(np.clip(round(ci + half), 0, ni - 1))
+			if k1 <= k0 or j1 <= j0 or i1 <= i0:
+				return arr
+			return arr[:, k0:k1 + 1, j0:j1 + 1, i0:i1 + 1]
+
+		def _cuts(cube, study):
+			arr = np.asarray(cube, dtype=np.float64) if cube is not None else None
+			if arr is None or arr.ndim != 4 or arr.shape[0] < 1 or arr.shape[1] < 2:
+				return None, None
+			# Recortar al corazón (centra y llena los paneles), luego isotropizar el
+			# eje de cortes para que HLA/VLA no salgan aplastados.
+			crop = _heart_crop(arr)
+			iso = _isotropize(crop, study)
+			g_sa = anatomical_cuts_gated(crop)
+			g_lx = anatomical_cuts_gated(iso)
+			# Cubo GE tiene el eje K (cortes) invertido vs. convencion crudo. SA no usa K (queda OK);
+			# HLA (K vertical) -> flip filas; VLA (K horizontal) -> flip columnas.
+			gated = {
+				"SA": np.ascontiguousarray(g_sa["sa"]),
+				"HLA": np.ascontiguousarray(g_lx["hla"][..., ::-1, :]),
+				"VLA": np.ascontiguousarray(g_lx["vla"][..., ::-1]),
+			}
+			u_sa = anatomical_cuts_gated(crop.sum(axis=0, keepdims=True))
+			u_lx = anatomical_cuts_gated(iso.sum(axis=0, keepdims=True))
+			ungated = {
+				"SA": np.ascontiguousarray(u_sa["sa"]),
+				"HLA": np.ascontiguousarray(u_lx["hla"][..., ::-1, :]),
+				"VLA": np.ascontiguousarray(u_lx["vla"][..., ::-1]),
+			}
+			return gated, ungated
+
+		def _assign(stage, gated, ungated):
+			if stage == "rest":
+				self.cine_crudo_axes_for_export_rest = gated
+				self.cine_crudo_axes_for_export_ungated_rest = ungated
+			else:
+				self.cine_crudo_axes_for_export_stress = gated
+				self.cine_crudo_axes_for_export_ungated_stress = ungated
+
+		def _center_stripes(stage, gated):
+			"""Centra la ventana de tiras HLA/VLA en el corazón (el crop lo dejó
+			centrado): sin esto el montaje arranca en el índice 0 y muestra las
+			lonjas anteriores/de borde en vez del núcleo miocárdico."""
+			tag = "REPOSO" if stage == "rest" else "ESFUERZO"
+			try:
+				n_hla = int(np.asarray(gated["HLA"]).shape[1])
+				n_vla = int(np.asarray(gated["VLA"]).shape[1])
+			except Exception:
+				return
+			def _cs(n):
+				per = min(9, n)
+				return max(1, (n - per) // 2 + 1)
+			starts = getattr(self, "cine_crudo_stripe_start_by_stage", None)
+			if isinstance(starts, dict):
+				starts[tag] = {"SA": 1, "VLA": _cs(n_vla), "HLA": _cs(n_hla)}
+
+		gated_p, ungated_p = _cuts(getattr(self.study, "cube", None), self.study)
+		if gated_p is None:
+			self._log("[SA][WARN] Cortes SA insuficientes para armar el montaje clínico.")
+			return
+		_assign(primary_stage, gated_p, ungated_p)
+		_center_stripes(primary_stage, gated_p)
+
+		if compare_stage is not None and self.compare_bundle is not None:
+			comp_study = self.compare_bundle.get("study")
+			gated_c, ungated_c = _cuts(getattr(comp_study, "cube", None), comp_study) if comp_study is not None else (None, None)
+			if gated_c is not None:
+				_assign(compare_stage, gated_c, ungated_c)
+				_center_stripes(compare_stage, gated_c)
+			else:
+				self._log("[SA][WARN] 2da etapa sin cortes SA válidos para el montaje.")
+
+		# El slot genérico sigue a _cine_crudo_recon_stage: apuntarlo a la etapa
+		# primaria para que la pestaña Montaje clínico renderice esa etapa.
+		self._cine_crudo_recon_stage = primary_stage
+		self.cine_crudo_montage_source = "ungated"
+		px = getattr(self.study, "pixel_spacing", None)
+		try:
+			self.cine_crudo_axes_pixel_mm = float(px[0]) if px else 0.0
+		except Exception:
+			self.cine_crudo_axes_pixel_mm = 0.0
+		n_gates_out = int(np.asarray(self.study.cube).shape[0])
+		self.cine_crudo_gate_from = 1
+		self.cine_crudo_gate_to = max(1, n_gates_out)
+		dual = compare_stage is not None and self.compare_bundle is not None
+		self._log(f"[SA] Montaje clínico armado desde cortes SA ({'dual esfuerzo/reposo' if dual else primary_stage}).")
+
 	def _load_sa_recon_direct(self):
 		"""Carga cortes SA gatillados YA reconstruidos (cualquier fabricante) para
 		calcular asincronía/FEVI directo, sin reconstruir ni reorientar.
@@ -21270,9 +21422,35 @@ class MainWindow(QMainWindow):
 		self.process_current()
 		if self.study is None:
 			return
+		stage_by_path = {c[1]: c[2] for c in candidates}
+		primary_stage = stage_by_path.get(primary)
+		if primary_stage not in ("stress", "rest"):
+			primary_stage = "stress"
+		compare_loaded = False
 		if len(sel) > 1 and self.metrics is not None:
-			self._load_compare_study_from_path(sel[1])
+			# La 2da etapa a veces no carga bien; que su fallo no impida dejar la 1ra
+			# etapa procesada y visible (la 1ra siempre carga bien).
+			try:
+				self._load_compare_study_from_path(sel[1])
+				compare_loaded = self.compare_bundle is not None
+			except Exception as exc:
+				self._log(f"[SA][WARN] La 2da etapa no se pudo cargar/procesar: {exc}")
 		self._log(f"[SA] Cortes SA reconstruidos cargados directo: {os.path.basename(primary)}.")
+		# Montaje clínico armado desde los cortes SA (ya reorientados): 1ra etapa y,
+		# si se cargó la 2da, ambas fases apiladas (esfuerzo/reposo).
+		if self.metrics is not None:
+			compare_stage = None
+			if compare_loaded:
+				compare_stage = stage_by_path.get(sel[1])
+				if compare_stage not in ("stress", "rest") or compare_stage == primary_stage:
+					compare_stage = "rest" if primary_stage == "stress" else "stress"
+			self._build_sa_direct_clinical_montage(primary_stage, compare_stage)
+		# Tras cargar y procesar la(s) SA: expandir la banda de asincronía y mostrar
+		# el histograma de fase, que es la lectura principal de estos estudios.
+		if self.metrics is not None:
+			if bool(getattr(self, "_lower_cine_collapsed", False)):
+				self._toggle_lower_cine_band()
+			self._select_tab_by_title("histograma")
 
 	def _edit_smart_load_keywords_dialog(self):
 		"""Editor de nombres/keywords que la carga inteligente usa para clasificar series.
