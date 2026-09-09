@@ -5765,13 +5765,9 @@ class MainWindow(QMainWindow):
 				btn._orig_tooltip if gated
 				else "Requiere estudio gatillado (≥3 gates). Estudio ungated: FEVI/asincronía no disponibles."
 			)
-		# Fuente Gated del montaje: deshabilitar si no hay gates (no hay cine).
-		if hasattr(self, "cine_crudo_montage_source_combo"):
-			idx = self.cine_crudo_montage_source_combo.findData("gated")
-			if idx >= 0:
-				self.cine_crudo_montage_source_combo.model().item(idx).setEnabled(gated)
-				if not gated and str(getattr(self, "cine_crudo_montage_source", "ungated")) == "gated":
-					self.cine_crudo_montage_source_combo.setCurrentIndex(0)  # volver a Ungated
+		# Fuente Gated del montaje: habilitar si alguna etapa (aunque sea la de
+		# comparación) tiene gates, para animar en gating mixto.
+		self._refresh_montage_gated_source_enabled()
 		# Controles GATED de la reconstrucción: deshabilitar todos si no hay gates.
 		gated_widgets = (
 			"cine_crudo_fbpclean_check", "cine_crudo_fbpclean_slider",
@@ -10093,6 +10089,10 @@ class MainWindow(QMainWindow):
 		except Exception as exc:
 			self._log(f"Textura de perfusión no disponible para export: {exc}")
 		try:
+			ef = self._estimate_lv_ef()
+		except Exception:
+			ef = None
+		try:
 			stress_rest = self._stress_rest_for_reports(ef)
 		except Exception as exc:
 			self._log(f"Comparación stress-rest no disponible para export: {exc}")
@@ -10806,11 +10806,18 @@ class MainWindow(QMainWindow):
 				need_tab_render[tab_name] = bool(tab_name in target_tabs_set)
 		render_compare_axes = bool(need_tab_render.get("comparacion_ejes", True))
 		render_curva_fevi = bool(need_tab_render.get("curva_fevi", True))
-		render_panel_funcional = bool(need_tab_render.get("panel_funcional_gated", True))
+		# El panel funcional gated es análisis 100% gatillado (ED/ES, fase, amplitud,
+		# curva FEVI). En gating mixto la etapa no gatillada tiene phase_result=None:
+		# no generar su panel (quedaría vacío/"no disponible"). Así _compose_dual_tab_images
+		# no lo compone y la pestaña muestra sólo la etapa gatillada.
+		render_panel_funcional = bool(need_tab_render.get("panel_funcional_gated", True)) and self.phase_result is not None
 		render_slices = target_tabs_set is None or "slices_fase" in target_tabs_set
 		render_polar_combo = target_tabs_set is None or "polar_combo" in target_tabs_set
 		render_delta_combo = target_tabs_set is None or "delta_combo" in target_tabs_set
-		render_histograma = target_tabs_set is None or "histograma" in target_tabs_set
+		# El histograma de fase exige análisis de fase (estudio gatillado). En gating
+		# mixto la etapa no gatillada tiene phase_result=None: sin esta guarda el
+		# render revienta con 'NoneType' object has no attribute 'phases_deg'.
+		render_histograma = (target_tabs_set is None or "histograma" in target_tabs_set) and self.phase_result is not None
 
 		# Opción A: la corrida completa (target_tabs_set is None) es rápida y omite
 		# las pesadas; el render por-pestaña (target_tabs) sí las genera al entrar.
@@ -11932,11 +11939,20 @@ class MainWindow(QMainWindow):
 			compare_frames: list[np.ndarray] = []
 			# Cache de mapas polares por gate para recolorear el cine en pantalla.
 			cine_cart_frames: list[list[dict]] = []
-			frame_count = int(study_cube_render.shape[0])
+			primary_count = int(study_cube_render.shape[0])
+			frame_count = primary_count
+			compare_count = 0
 			compare_cube_render = None
 			if self.compare_bundle is not None and self.compare_bundle.get("study") is not None:
 				compare_cube_render = self._apply_intestinal_mask_to_cube(self.compare_bundle["study"].cube, self.cine_compare)
-				frame_count = min(frame_count, int(compare_cube_render.shape[0]))
+				compare_count = int(compare_cube_render.shape[0])
+				# Gating mixto: si una etapa es estática (1 gate) animamos la gatillada
+				# y congelamos la estática; si ambas son gatilladas, sincronizamos al
+				# mínimo común de gates.
+				if primary_count >= 2 and compare_count >= 2:
+					frame_count = min(primary_count, compare_count)
+				else:
+					frame_count = max(primary_count, compare_count)
 				compare_apex_to_base = list(getattr(self.compare_bundle.get("aha"), "apex_to_base_order", []) or [])
 				if not compare_apex_to_base:
 					compare_apex_to_base = [int(s) for s in np.where(np.asarray(self.compare_bundle["seg"].mask).reshape(self.compare_bundle["seg"].mask.shape[0], -1).any(axis=1))[0].tolist()]
@@ -11944,20 +11960,22 @@ class MainWindow(QMainWindow):
 				compare_apex_to_base = []
 
 			for g in range(frame_count):
-				p_frame, p_pm = _render_gate_frame(study_cube_render, self.seg, apex_to_base, g, primary_phase_label)
+				gp = min(g, primary_count - 1)
+				p_frame, p_pm = _render_gate_frame(study_cube_render, self.seg, apex_to_base, gp, primary_phase_label)
 				if p_frame is None:
 					continue
 				primary_frames.append(p_frame)
-				primary_title = f"{primary_phase_label} gate {g + 1}/{int(study_cube_render.shape[0])}"
+				primary_title = f"{primary_phase_label} gate {gp + 1}/{primary_count}"
 				if self.compare_bundle is not None and self.compare_bundle.get("study") is not None:
-					r_frame, r_pm = _render_gate_frame(compare_cube_render, self.compare_bundle["seg"], compare_apex_to_base, g, compare_phase_label)
+					gc = min(g, compare_count - 1)
+					r_frame, r_pm = _render_gate_frame(compare_cube_render, self.compare_bundle["seg"], compare_apex_to_base, gc, compare_phase_label)
 					if r_frame is None:
 						compare_frames.append(p_frame)
 						cine_cart_frames.append([{"pm": np.asarray(p_pm, dtype=np.float32), "title": primary_title}])
 					else:
 						gap = np.full((p_frame.shape[0], 28, 3), 12, dtype=np.uint8)
 						panels = [p_frame, gap, r_frame]
-						rest_title = f"{compare_phase_label} gate {g + 1}/{int(compare_cube_render.shape[0])}"
+						rest_title = f"{compare_phase_label} gate {gc + 1}/{compare_count}"
 						cache_panels = [
 							{"pm": np.asarray(p_pm, dtype=np.float32), "title": primary_title},
 							{"pm": np.asarray(r_pm, dtype=np.float32), "title": rest_title},
@@ -11971,9 +11989,9 @@ class MainWindow(QMainWindow):
 							pm_math = _math_map(a_map, b_map, op_name)
 							if pm_math is not None:
 								math_label = f"{a_name} {op_name} {b_name}"
-								m_frame = _render_math_panel(pm_math, g, math_label)
+								m_frame = _render_math_panel(pm_math, gp, math_label)
 								panels.extend([gap, m_frame])
-								cache_panels.append({"pm": np.asarray(pm_math, dtype=np.float32), "title": f"{math_label} gate {g + 1}"})
+								cache_panels.append({"pm": np.asarray(pm_math, dtype=np.float32), "title": f"{math_label} gate {gp + 1}"})
 						compare_frames.append(np.concatenate(panels, axis=1))
 						cine_cart_frames.append(cache_panels)
 				else:
@@ -12303,7 +12321,13 @@ class MainWindow(QMainWindow):
 		if bool(build_cine) and bool(self.compare_axes_cine_check.isChecked()) and (not fast_mode):
 			primary_gate_count = int(self.study.cube.shape[0]) if self.study is not None else 0
 			secondary_gate_count = int(self.compare_bundle["study"].cube.shape[0]) if self.compare_bundle is not None else primary_gate_count
-			frame_count = max(1, min(primary_gate_count, secondary_gate_count))
+			# Gating mixto: si una etapa es estática (1 gate) animamos la gatillada
+			# (la estática se congela por el clamp de _extract_rows); si ambas son
+			# gatilladas, sincronizamos al mínimo común de gates.
+			if primary_gate_count >= 2 and secondary_gate_count >= 2:
+				frame_count = min(primary_gate_count, secondary_gate_count)
+			else:
+				frame_count = max(1, primary_gate_count, secondary_gate_count)
 			frames: list[QPixmap] = []
 			for gate_index in range(frame_count):
 				frame_fig = _build_compare_figure(gate_index, gate_index if self.compare_bundle is not None else None)
@@ -18270,9 +18294,12 @@ class MainWindow(QMainWindow):
 			}
 			self._crudo_montage_int_sig = None
 			# Inicializar rango de gates para montaje (todo el ciclo por defecto).
-			n_gates_out = int(sa_cube.shape[0])
+			# Gating mixto: usar el máximo de gates entre etapas para poder animar la
+			# etapa gatillada aunque la última reconstruida sea estática.
+			n_gates_out = max(int(sa_cube.shape[0]), self._montage_available_gates())
 			self.cine_crudo_gate_from = 1
 			self.cine_crudo_gate_to = max(1, n_gates_out)
+			self._refresh_montage_gated_source_enabled()
 			if hasattr(self, "cine_crudo_gate_from_spin") and hasattr(self, "cine_crudo_gate_to_spin"):
 				self.cine_crudo_gate_from_spin.blockSignals(True)
 				self.cine_crudo_gate_to_spin.blockSignals(True)
@@ -18722,6 +18749,40 @@ class MainWindow(QMainWindow):
 		g1 = int(getattr(self, "cine_crudo_gate_to", 1) or 1)
 		lo, hi = (g0, g1) if g0 <= g1 else (g1, g0)
 		return max(1, lo), max(1, hi)
+
+	def _montage_available_gates(self) -> int:
+		"""Máximo de gates en las tiras SA gatilladas de cualquier etapa.
+
+		En gating mixto (una etapa gatillada y otra estática) el cine debe poder
+		animar la etapa con más gates aunque la última reconstruida tenga 1 solo."""
+		best = 1
+		for attr in ("cine_crudo_axes_for_export_stress", "cine_crudo_axes_for_export_rest", "cine_crudo_axes_for_export"):
+			d = getattr(self, attr, None)
+			if not isinstance(d, dict):
+				continue
+			try:
+				arr = np.asarray(d.get("SA"))
+				if arr.ndim == 4:
+					best = max(best, int(arr.shape[0]))
+			except Exception:
+				pass
+		return best
+
+	def _refresh_montage_gated_source_enabled(self):
+		"""Habilita la fuente 'Gated' del montaje si alguna etapa tiene ≥2 gates."""
+		combo = getattr(self, "cine_crudo_montage_source_combo", None)
+		if combo is None:
+			return
+		idx = combo.findData("gated")
+		if idx < 0:
+			return
+		enabled = self._montage_available_gates() >= 2
+		try:
+			combo.model().item(idx).setEnabled(enabled)
+		except Exception:
+			return
+		if not enabled and str(getattr(self, "cine_crudo_montage_source", "ungated")) == "gated":
+			combo.setCurrentIndex(0)
 
 	def _toggle_montage_cine(self):
 		src = str(getattr(self, "cine_crudo_montage_source", "ungated"))
@@ -19785,8 +19846,8 @@ class MainWindow(QMainWindow):
 		"""Acceso rápido: usar todos los gates disponibles en el montaje."""
 		if not self.cine_crudo_axes_for_export:
 			return
-		sa = np.asarray(self.cine_crudo_axes_for_export.get("SA", []), dtype=np.float64)
-		n = int(sa.shape[0]) if sa.ndim == 4 else 1
+		# Gating mixto: incluir los gates de la etapa gatillada aunque la actual sea estática.
+		n = self._montage_available_gates()
 		if hasattr(self, "cine_crudo_gate_from_spin") and hasattr(self, "cine_crudo_gate_to_spin"):
 			self.cine_crudo_gate_from_spin.blockSignals(True)
 			self.cine_crudo_gate_to_spin.blockSignals(True)
@@ -21395,9 +21456,10 @@ class MainWindow(QMainWindow):
 			self.cine_crudo_axes_pixel_mm = float(px[0]) if px else 0.0
 		except Exception:
 			self.cine_crudo_axes_pixel_mm = 0.0
-		n_gates_out = int(np.asarray(self.study.cube).shape[0])
+		n_gates_out = max(int(np.asarray(self.study.cube).shape[0]), self._montage_available_gates())
 		self.cine_crudo_gate_from = 1
 		self.cine_crudo_gate_to = max(1, n_gates_out)
+		self._refresh_montage_gated_source_enabled()
 		dual = compare_stage is not None and self.compare_bundle is not None
 		# Recordar las etapas y la firma intestinal para poder reconstruir el
 		# montaje si el usuario edita el ROI intestinal después de cargar.
