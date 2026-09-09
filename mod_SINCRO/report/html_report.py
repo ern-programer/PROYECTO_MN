@@ -438,6 +438,13 @@ def generate_html_report(
     """
     os.makedirs(os.path.dirname(output_html) or ".", exist_ok=True)
 
+    # Estudios NO gatillados (perfusión) llegan sin métricas de fase/FEVI/territorio:
+    # normalizar a dict vacío para que el informe salga solo con perfusión.
+    metrics = metrics or {}
+    volumes = volumes or {}
+    ef = ef or {}
+    territory = territory or {}
+
     # --- Datos del estudio ---
     phase_label = "Esfuerzo" if "STRESS" in str(getattr(study, "source_path", "")).upper() else (
         "Reposo" if "REST" in str(getattr(study, "source_path", "")).upper() else "Estudio"

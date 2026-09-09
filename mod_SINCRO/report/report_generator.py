@@ -103,6 +103,13 @@ def generate_report(
 
 	os.makedirs(os.path.dirname(output_pdf), exist_ok=True)
 
+	# Estudios NO gatillados (perfusión) llegan sin métricas de fase/FEVI/territorio:
+	# normalizar a dict vacío para que el informe salga solo con perfusión.
+	metrics = metrics or {}
+	volumes = volumes or {}
+	ef = ef or {}
+	territory = territory or {}
+
 	styles = getSampleStyleSheet()
 	DARK_BLUE = HexColor("#1a3a5c")
 	LIGHT_BLUE = HexColor("#e8f0f8")

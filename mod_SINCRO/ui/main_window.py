@@ -12632,14 +12632,16 @@ class MainWindow(QMainWindow):
 			self._log(f"[WARN] Captura 3D no disponible: {exc}")
 
 	def _generate_pdf_report(self):
-		if self.study is None or self.seg is None or self.metrics is None or self.territory is None:
+		# Estudios NO gatillados (perfusión) no tienen metrics/territory de fase; el
+		# informe debe salir igual con los datos e imágenes de perfusión obtenidos.
+		if self.study is None or self.seg is None:
 			return
 		pdf_path = os.path.join(self.output_dir, "informe_sincro.pdf")
 		params = {
 			"threshold": float(self.threshold_spin.value()),
 			"smooth_sigma": float(self.sigma_spin.value()),
 			"harmonics": int(self.harmonics_spin.value()),
-			"amp_filter": float(self.metrics.get("amp_filter", self.phase_threshold_spin.value())),
+			"amp_filter": float((self.metrics or {}).get("amp_filter", self.phase_threshold_spin.value())),
 			"visual_style": str(self.visual_style_combo.currentText()),
 			"polar_rotation_deg": int(self.polar_rotation_spin.value()),
 			"polar_cine_speed_ms": int(self.polar_cine_speed_spin.value()),
@@ -12677,7 +12679,7 @@ class MainWindow(QMainWindow):
 				ef = dict(ef)
 				ef["compare_thickening_pct"] = float(compare_ef["thickening_pct"])
 				ef["compare_label"] = self.compare_label or "Comparación"
-		report_metrics = dict(self.metrics)
+		report_metrics = dict(self.metrics or {})
 		try:
 			dataset, sex, protocol, nd = self._normal_db_context()
 			report_metrics["normal_db_eval"] = nd
@@ -12753,7 +12755,8 @@ class MainWindow(QMainWindow):
 			self._log(f"[WARN] No se pudo generar HTML integrado: {exc}")
 
 	def _ensure_reports_generated(self):
-		if self.study is None or self.seg is None or self.metrics is None or self.territory is None:
+		# Perfusión (no gatillado): basta study + seg; metrics/territory pueden faltar.
+		if self.study is None or self.seg is None:
 			QMessageBox.information(self, "SINCRO", "Primero procesá un estudio para generar informes.")
 			return False
 		self._set_progress(92, "Generando informes (PDF + HTML)...")
