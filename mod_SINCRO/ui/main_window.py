@@ -2218,6 +2218,7 @@ class MainWindow(QMainWindow):
 				toolbar6_r2.addWidget(self.cine_crudo_ac_check)
 				self.cine_crudo_ac_qc_btn = QPushButton("QC AC")
 				self.cine_crudo_ac_qc_btn.setMaximumWidth(58)
+				self.cine_crudo_ac_qc_btn.setEnabled(False)
 				self.cine_crudo_ac_qc_btn.setToolTip(
 					"QC visual de la alineación μ-map ↔ reconstrucción: contornos del "
 					"cuerpo (cian) y tejido denso (naranja) del CT/ATT superpuestos al "
@@ -7128,6 +7129,11 @@ class MainWindow(QMainWindow):
 		# guard study/seg porque el crudo puede tener cortes sin segmentación.
 		# Solo se re-renderiza si algo del montaje cambió desde el último render.
 		if tab_name == "comparacion_ejes" and self.cine_crudo_axes_for_export:
+			# Si el montaje vino de carga directa SA y se editó el ROI intestinal,
+			# reconstruir los cortes para que reflejen la sustracción actual.
+			self._maybe_rebuild_sa_direct_montage()
+			# Ídem para el montaje crudo: re-cortar SA/HLA/VLA con el intestino actual.
+			self._maybe_rebuild_crudo_montage()
 			sig = self._montage_signature()
 			already = (
 				self.cine_crudo_preview_mode == "sa_montage"
@@ -7531,6 +7537,10 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_axes_for_export_mf = {}
 		self.cine_crudo_axes_for_export_mf_stress = {}
 		self.cine_crudo_axes_for_export_mf_rest = {}
+		self._sa_direct_montage_stages = None
+		self._sa_direct_montage_int_sig = None
+		self._crudo_montage_reo_by_stage = {}
+		self._crudo_montage_int_sig = None
 		self.cine_crudo_rest_source_label = ""
 		self.cine_crudo_cut_thickness_mm = 0.0
 		self.cine_crudo_cut_thickness_mm_rest = 0.0
@@ -10895,7 +10905,7 @@ class MainWindow(QMainWindow):
 			save_polar_map(pm, os.path.join(self.output_dir, "polar_map.png"), dpi=150)
 			plt.close(pm.fig)
 
-		if render_delta_combo and self.compare_bundle is not None and self.compare_bundle.get("phase_by_seg") and self.study is not self.compare_bundle.get("study"):
+		if render_delta_combo and isinstance(self.phase_by_seg, dict) and self.compare_bundle is not None and self.compare_bundle.get("phase_by_seg") and self.study is not self.compare_bundle.get("study"):
 			from matplotlib.cm import ScalarMappable
 			from matplotlib.colors import Normalize
 			from matplotlib.patches import Circle, Wedge
@@ -14741,6 +14751,7 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_ac_check.setChecked(True)
 			if getattr(self, "cine_crudo_fusion_btn", None) is not None:
 				self._refresh_fusion_btn_state()
+			self._refresh_ac_qc_btn_state()
 			src_txt = "ATTMAP export" if source == "att_export" else "CT→μ bilineal (140 keV)"
 			self._log(
 				f"[AC] μ-map cargado para {stage_txt}: {mu.shape}, fuente={src_txt}, "
@@ -15193,6 +15204,17 @@ class MainWindow(QMainWindow):
 		if btn is None:
 			return
 		active = bool(getattr(self, "_ac_qc_active", False))
+		# Sin CT/ATT en ninguna etapa no hay μ-map que contrastar: QC AC deshabilitado.
+		has_ct = False
+		try:
+			for stg in ("stress", "rest"):
+				st = self._dual_session().stage(stg)
+				if getattr(st, "ct_volume_native", None) is not None or getattr(st, "mu_map_native", None) is not None:
+					has_ct = True
+					break
+		except Exception:
+			has_ct = False
+		btn.setEnabled(bool(has_ct or active))
 		btn.setStyleSheet("background-color:#15803d; color:white; font-weight:bold;" if active else "")
 
 	def _render_ac_qc(self):
@@ -15609,6 +15631,7 @@ class MainWindow(QMainWindow):
 			if getattr(self, "cine_crudo_ac_check", None) is not None:
 				self.cine_crudo_ac_check.setEnabled(True)
 				self.cine_crudo_ac_check.setChecked(True)
+			self._refresh_ac_qc_btn_state()
 			# Sugerir límites Base/Ápex de la feta desde la máscara ya fusionada
 			# (editable; no fuerza re-recon). Solo con CT/fusión presente.
 			feta_ok = False
@@ -16650,6 +16673,7 @@ class MainWindow(QMainWindow):
 			self._mark_step_done("recon", cfg.reconstruction_method, getattr(result.gated_volume, "shape", None))
 			try:
 				self._refresh_fusion_btn_state()
+				self._refresh_ac_qc_btn_state()
 			except Exception:
 				pass
 			return True
@@ -18229,6 +18253,19 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_axes_for_export_ungated_stress = {k: np.array(v, copy=True) for k, v in self.cine_crudo_axes_for_export_ungated.items()}
 				self.cine_crudo_axes_for_export_mf_stress = {k: np.array(v, copy=True) for k, v in getattr(self, "cine_crudo_axes_for_export_mf", {}).items()}
 				self._log("Cortes de ESFUERZO guardados automáticamente para el montaje comparativo.")
+			# Guardar la fuente reorientada SIN máscara por etapa: el ROI intestinal se
+			# dibuja sobre el visor recién tras 'Procesar recon', o sea después de
+			# generar los cortes. Con esto se puede re-cortar el montaje cuando el
+			# usuario dibuje/edite el intestino (ver _maybe_rebuild_crudo_montage).
+			reo_src = getattr(self, "_crudo_montage_reo_by_stage", None)
+			if not isinstance(reo_src, dict):
+				reo_src = {}
+				self._crudo_montage_reo_by_stage = reo_src
+			reo_src[str(getattr(self, "_cine_crudo_recon_stage", "stress") or "stress")] = {
+				"gated": np.array(reo_cube, copy=True),
+				"ungated": np.array(ung_cube4, copy=True),
+			}
+			self._crudo_montage_int_sig = None
 			# Inicializar rango de gates para montaje (todo el ciclo por defecto).
 			n_gates_out = int(sa_cube.shape[0])
 			self.cine_crudo_gate_from = 1
@@ -21318,7 +21355,18 @@ class MainWindow(QMainWindow):
 			if isinstance(starts, dict):
 				starts[tag] = {"SA": 1, "VLA": _cs(n_vla), "HLA": _cs(n_hla)}
 
-		gated_p, ungated_p = _cuts(getattr(self.study, "cube", None), self.study)
+		def _intestinal_cube(cube, cine_widget):
+			"""Aplica la sustracción/atenuación intestinal del visor sobre el cubo
+			antes de cortar, para que el montaje refleje el ROI intestinal."""
+			if cube is None:
+				return None
+			try:
+				return self._apply_intestinal_mask_to_cube(np.asarray(cube), cine_widget)
+			except Exception:
+				return cube
+
+		prim_cube = _intestinal_cube(getattr(self.study, "cube", None), self.cine)
+		gated_p, ungated_p = _cuts(prim_cube, self.study)
 		if gated_p is None:
 			self._log("[SA][WARN] Cortes SA insuficientes para armar el montaje clínico.")
 			return
@@ -21327,7 +21375,8 @@ class MainWindow(QMainWindow):
 
 		if compare_stage is not None and self.compare_bundle is not None:
 			comp_study = self.compare_bundle.get("study")
-			gated_c, ungated_c = _cuts(getattr(comp_study, "cube", None), comp_study) if comp_study is not None else (None, None)
+			comp_cube = _intestinal_cube(getattr(comp_study, "cube", None), self.cine_compare) if comp_study is not None else None
+			gated_c, ungated_c = _cuts(comp_cube, comp_study) if comp_cube is not None else (None, None)
 			if gated_c is not None:
 				_assign(compare_stage, gated_c, ungated_c)
 				_center_stripes(compare_stage, gated_c)
@@ -21347,7 +21396,99 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_gate_from = 1
 		self.cine_crudo_gate_to = max(1, n_gates_out)
 		dual = compare_stage is not None and self.compare_bundle is not None
+		# Recordar las etapas y la firma intestinal para poder reconstruir el
+		# montaje si el usuario edita el ROI intestinal después de cargar.
+		self._sa_direct_montage_stages = (primary_stage, compare_stage)
+		self._sa_direct_montage_int_sig = self._sa_direct_intestinal_sig()
 		self._log(f"[SA] Montaje clínico armado desde cortes SA ({'dual esfuerzo/reposo' if dual else primary_stage}).")
+
+	def _sa_direct_intestinal_sig(self) -> str:
+		"""Firma de los ROI intestinales de ambos visores, para saber si el montaje
+		SA directo quedó desactualizado tras editar el intestino."""
+		try:
+			return self._hash_payload({
+				"p": self._intestinal_signature_for_widget(self.cine),
+				"c": self._intestinal_signature_for_widget(self.cine_compare),
+			})
+		except Exception:
+			return ""
+
+	def _maybe_rebuild_sa_direct_montage(self):
+		"""Reconstruye el montaje SA directo si cambió el ROI intestinal desde el
+		último armado. No hace nada si el estudio actual no vino por carga directa."""
+		stages = getattr(self, "_sa_direct_montage_stages", None)
+		if not stages or self.study is None:
+			return
+		sig = self._sa_direct_intestinal_sig()
+		if sig == getattr(self, "_sa_direct_montage_int_sig", None):
+			return
+		primary_stage, compare_stage = stages
+		self._build_sa_direct_clinical_montage(primary_stage, compare_stage)
+
+	def _crudo_montage_intestinal_sig(self) -> str:
+		"""Firma de los ROI intestinales de ambos visores para el montaje crudo."""
+		try:
+			return self._hash_payload({
+				"p": self._intestinal_signature_for_widget(self.cine),
+				"c": self._intestinal_signature_for_widget(self.cine_compare),
+			})
+		except Exception:
+			return ""
+
+	def _recut_crudo_stage_with_intestinal(self, stage: str, src: dict, cine_widget: "CineWidget | None"):
+		"""Re-corta una etapa crudo aplicando el ROI intestinal del visor dado.
+
+		Parte de la fuente reorientada guardada SIN máscara (el re-corte es
+		idempotente: sin ROI reproduce el corte original). El SA visible == reo_cube
+		1:1 (_SA_FLIP es identidad), por eso el ROI dibujado sobre el SA se alinea
+		con reo_cube y se propaga consistente a HLA/VLA vía anatomical_cuts_gated."""
+		from core.cardiac_reorientation import anatomical_cuts_gated
+		gated = src.get("gated")
+		if gated is None:
+			return
+		gated_m = self._apply_intestinal_mask_to_cube(np.asarray(gated, dtype=np.float64), cine_widget)
+		cuts = anatomical_cuts_gated(gated_m)
+		axes = {
+			"SA": np.ascontiguousarray(cuts["sa"]),
+			"HLA": np.ascontiguousarray(cuts["hla"]),
+			"VLA": np.ascontiguousarray(cuts["vla"]),
+		}
+		axes_u = None
+		ungated = src.get("ungated")
+		if ungated is not None:
+			ung_m = self._apply_intestinal_mask_to_cube(np.asarray(ungated, dtype=np.float64), cine_widget)
+			cuts_u = anatomical_cuts_gated(ung_m)
+			axes_u = {
+				"SA": np.ascontiguousarray(cuts_u["sa"]),
+				"HLA": np.ascontiguousarray(cuts_u["hla"]),
+				"VLA": np.ascontiguousarray(cuts_u["vla"]),
+			}
+		if stage == "rest":
+			self.cine_crudo_axes_for_export_rest = axes
+			if axes_u is not None:
+				self.cine_crudo_axes_for_export_ungated_rest = axes_u
+		else:
+			self.cine_crudo_axes_for_export_stress = axes
+			if axes_u is not None:
+				self.cine_crudo_axes_for_export_ungated_stress = axes_u
+
+	def _maybe_rebuild_crudo_montage(self):
+		"""Re-corta el montaje crudo aplicando el ROI intestinal actual si cambió.
+
+		El montaje crudo guarda la fuente reorientada sin máscara por etapa; acá se
+		re-aplica el intestino de cada visor (primario→self.cine, comparado→
+		self.cine_compare) y se re-enrutan las tiras SA/HLA/VLA gated y ungated."""
+		reo_src = getattr(self, "_crudo_montage_reo_by_stage", None)
+		if not isinstance(reo_src, dict) or not reo_src:
+			return
+		sig = self._crudo_montage_intestinal_sig()
+		if sig == getattr(self, "_crudo_montage_int_sig", None):
+			return
+		primary_stage = "rest" if str(getattr(self, "_cine_crudo_recon_stage", "stress")) == "rest" else "stress"
+		for stage, src in reo_src.items():
+			widget = self.cine if stage == primary_stage else self.cine_compare
+			self._recut_crudo_stage_with_intestinal(stage, src, widget)
+		self._crudo_montage_int_sig = sig
 
 	def _load_sa_recon_direct(self):
 		"""Carga cortes SA YA reconstruidos (cualquier fabricante) para calcular
@@ -21754,17 +21895,13 @@ class MainWindow(QMainWindow):
 		stage_key = "rest" if str(stage) == "rest" else "stress"
 		stage_state = self._dual_session().stage(stage_key)
 		mem_study = stage_state.cut_study
-		if mem_study is None or self.study is None or self.metrics is None:
+		if mem_study is None or self.study is None:
 			return False
 		if mem_study is self.study:
 			return False
-		try:
-			n_g = int(np.asarray(mem_study.cube).shape[0])
-			if n_g < 3:
-				self._log(f"[DUAL] Comparación desde memoria omitida: etapa {stage_key} sin gating suficiente (<3).")
-				return False
-		except Exception:
-			pass
+		# Cualquier combinación de gating: la etapa no-gatillada entra como comparación
+		# de perfusión/mapa polar/montaje (sin Δ de fase, que requiere gating en ambas).
+		# _process_secondary_bundle omite la fase si <3 gates.
 
 		stage_label = "Reposo" if stage_key == "rest" else "Esfuerzo"
 		pseudo_path = str(stage_state.source_path or stage_state.cut_source_label or f"{stage_key}_memory")

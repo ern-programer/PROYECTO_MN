@@ -1593,6 +1593,17 @@ class CineWidget(QWidget):
 				self._compare_widget = None
 				self._sliders_col_widget = _slider_w
 				layout.addLayout(img_ctrls_row)
+				# La 2da etapa también necesita el menú ROI intestinal: sin él, el
+				# clic sobre su imagen cae en el modo por defecto (marcar centro) y
+				# no se puede dibujar/atenuar el intestino de la fase comparada.
+				compare_controls = QHBoxLayout()
+				compare_controls.setContentsMargins(0, 0, 0, 0)
+				compare_controls.setSpacing(6)
+				compare_controls.addWidget(intestinal_btn_menu)
+				compare_controls.addStretch(1)
+				_ccw = QWidget()
+				_ccw.setLayout(compare_controls)
+				layout.addWidget(_ccw, 0)
 			else:
 				# Hueco para la 2da etapa (set_compare_viewer la inserta acá, pos 1).
 				self._compare_slot = img_ctrls_row
