@@ -596,6 +596,7 @@ class MainWindow(QMainWindow):
 		splitter.setOpaqueResize(True)
 		splitter.setHandleWidth(10)
 		left = self._build_sidebar()
+		self._sidebar_widget = left
 
 		self.file_edit = QLineEdit()
 		self.file_edit.setPlaceholderText("Ruta al DICOM gated reconstruido...")
@@ -3243,6 +3244,9 @@ class MainWindow(QMainWindow):
 		self.patient_data_label.setStyleSheet("font-size:9pt; color:#1f2937;")
 		pat_l.addWidget(self.patient_data_label)
 		lay.addWidget(pat_box, 0)
+		# Los datos del paciente se reubican a la tarjeta fija del sidebar.
+		self._readonly_patient_box = pat_box
+		pat_box.setVisible(False)
 
 		res_box = QGroupBox("Resultados en vivo")
 		res_l = QVBoxLayout(res_box)
@@ -3253,6 +3257,9 @@ class MainWindow(QMainWindow):
 		self.main_metrics_readout.setStyleSheet("font-size:10pt; color:#1f2937;")
 		res_l.addWidget(self.main_metrics_readout)
 		lay.addWidget(res_box, 1)
+		# 'Resultados en vivo' se reubica a la tarjeta fija del sidebar.
+		self._readonly_results_box = res_box
+		res_box.setVisible(False)
 		self.readonly_panel = panel
 		return panel
 
@@ -3588,6 +3595,17 @@ class MainWindow(QMainWindow):
 		# informe técnico; no pertenecen al resumen clínico "en vivo".
 		return parts
 
+	def _patient_biometrics_line(self, study) -> str:
+		"""Línea HTML 'Peso · Altura' si el DICOM trae esos datos; si no, ''."""
+		wt = str(getattr(study, "patient_weight", "") or "").strip()
+		ht = str(getattr(study, "patient_size", "") or "").strip()
+		parts = []
+		if wt:
+			parts.append(f"Peso: {wt} kg")
+		if ht:
+			parts.append(f"Altura: {ht} m")
+		return (" &nbsp;|&nbsp; ".join(parts) + "<br>") if parts else ""
+
 	def _refresh_readonly_results_panel(self) -> None:
 		"""Refresca el panel de solo-lectura de la banda inferior tras procesar."""
 		if getattr(self, "patient_data_label", None) is None:
@@ -3609,9 +3627,11 @@ class MainWindow(QMainWindow):
 				stime = f"{stime_raw[:2]}:{stime_raw[2:4]}"
 			else:
 				stime = ""
+			bio_line = self._patient_biometrics_line(study)
 			self.patient_data_label.setText(
 				f"<b>{ctx['patient_name']}</b> (ID: {ctx['patient_id']})<br>"
 				f"Sexo: {g('patient_sex')} &nbsp;|&nbsp; Nac.: {birth}<br>"
+				f"{bio_line}"
 				f"Estudio: {ctx['study_date']} {stime}<br>"
 				f"Accession: {g('accession_number')}<br>"
 				f"Desc.: {g('study_description')}<br>"
@@ -3646,9 +3666,11 @@ class MainWindow(QMainWindow):
 				lbl2 = "Reposo" if lbl1 == "Esfuerzo" else ("Esfuerzo" if lbl1 == "Reposo" else "Etapa 2")
 			birth = self._format_dicom_date(str(getattr(study, "patient_birth_date", "") or "")) or "N/D"
 			cell = "padding:1px 8px 1px 0;"
+			bio_line = self._patient_biometrics_line(study)
 			self.patient_data_label.setText(
 				f"<b>{ctx1['patient_name']}</b> (ID: {ctx1['patient_id']})<br>"
 				f"Sexo: {gg(study, 'patient_sex')} &nbsp;|&nbsp; Nac.: {birth}<br>"
+				f"{bio_line}"
 				f"<table style='border-spacing:0;'>"
 				f"<tr><td style='{cell}'></td>"
 				f"<td style='{cell}'><b>{lbl1}</b></td>"
@@ -3844,6 +3866,11 @@ class MainWindow(QMainWindow):
 		# Título de la 2da. etapa sobre el cine_compare (reposo/esfuerzo según la
 		# 1ra. cargada); se actualiza cada vez que se reprocesa/carga.
 		self._refresh_cine_compare_title()
+		# Si las tarjetas fijas del sidebar ya existen, mantenerlas al día con los
+		# textos recién refrescados (sin reentrar durante su propia actualización).
+		if not getattr(self, "_updating_side_cards", False):
+			if getattr(self, "_patient_card", None) is not None or getattr(self, "_results_card", None) is not None:
+				self._refresh_persistent_patient_card()
 
 	def _tab_name_from_title(self, title: str) -> str | None:
 		for name, tab_title in self._tab_titles.items():
@@ -3967,6 +3994,134 @@ class MainWindow(QMainWindow):
 
 	def _log(self, message: str):
 		self.log_box.append(message)
+
+	def _show_fading_notice(self, title: str, body: str, msec: int = 2000):
+		"""Aviso flotante no-modal en la zona inferior del sidebar que se
+		desvanece tras ``msec`` ms. Si hay varios, se apilan uno sobre otro."""
+		from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
+		from PyQt6.QtWidgets import QGraphicsOpacityEffect
+		host = getattr(self, "_sidebar_widget", None)
+		if host is None:
+			return
+		notices = getattr(self, "_fading_notices", None)
+		if notices is None:
+			notices = []
+			self._fading_notices = notices
+		body_html = body.replace("\n", "<br>")
+		card = QLabel(host)
+		card.setObjectName("fadingNotice")
+		card.setTextFormat(Qt.TextFormat.RichText)
+		card.setWordWrap(True)
+		card.setText(f"<b>{title}</b><br>{body_html}")
+		card.setStyleSheet(
+			"#fadingNotice { background: #eef6ff; border: 1px solid #4a90d9; border-radius: 8px;"
+			" padding: 9px 11px; color: #1f3b5b; font-size: 11px; }"
+		)
+		width = max(180, host.width() - 20)
+		card.setFixedWidth(width)
+		card.adjustSize()
+		card.show()
+		effect = QGraphicsOpacityEffect(card)
+		card.setGraphicsEffect(effect)
+		effect.setOpacity(1.0)
+		notices.append(card)
+		self._reposition_fading_notices()
+		# Mantener visible y desvanecer en el último tramo del intervalo.
+		fade_ms = min(1500, int(msec) // 2)
+		anim = QPropertyAnimation(effect, b"opacity", card)
+		anim.setStartValue(1.0)
+		anim.setEndValue(0.0)
+		anim.setDuration(fade_ms)
+		anim.setEasingCurve(QEasingCurve.Type.InCubic)
+
+		def _finish(c=card):
+			try:
+				self._fading_notices.remove(c)
+			except (ValueError, AttributeError):
+				pass
+			c.deleteLater()
+			self._reposition_fading_notices()
+
+		anim.finished.connect(_finish)
+		QTimer.singleShot(max(0, int(msec) - fade_ms), anim.start)
+		# Al terminar el aviso, mostrar la tarjeta fija con los datos del paciente.
+		QTimer.singleShot(int(msec), self._refresh_persistent_patient_card)
+
+	def _reposition_fading_notices(self):
+		"""Apila los avisos activos desde el borde inferior del sidebar hacia arriba.
+		Las tarjetas fijas quedan abajo de todo: 'Resultados en vivo' al fondo y
+		'Datos del Paciente' encima de ella."""
+		host = getattr(self, "_sidebar_widget", None)
+		if host is None:
+			return
+		margin, spacing = 10, 6
+		y = host.height() - margin
+		for name in ("_results_card", "_patient_card"):  # resultados más abajo
+			card = getattr(self, name, None)
+			if card is not None and card.isVisible():
+				card.adjustSize()
+				y -= card.height()
+				card.move(margin, max(margin, y))
+				card.raise_()
+				y -= spacing
+		for notice in reversed(getattr(self, "_fading_notices", None) or []):  # el más nuevo abajo
+			notice.adjustSize()
+			y -= notice.height()
+			notice.move(margin, max(margin, y))
+			notice.raise_()
+			y -= spacing
+
+	def _ensure_side_card(self, attr: str, obj_name: str, html: str):
+		"""Crea (si hace falta) y actualiza una tarjeta fija del sidebar."""
+		host = getattr(self, "_sidebar_widget", None)
+		if host is None:
+			return getattr(self, attr, None)
+		card = getattr(self, attr, None)
+		if card is None:
+			from PyQt6.QtWidgets import QLabel as _QLabel
+			card = _QLabel(host)
+			card.setObjectName(obj_name)
+			card.setTextFormat(Qt.TextFormat.RichText)
+			card.setWordWrap(True)
+			card.setStyleSheet(
+				f"#{obj_name} {{ background: #eef6ff; border: 1px solid #4a90d9; border-radius: 8px;"
+				" padding: 9px 11px; color: #1f3b5b; font-size: 11px; }"
+			)
+		card.setText(html)
+		card.setFixedWidth(max(180, host.width() - 20))
+		card.adjustSize()
+		card.show()
+		return card
+
+	def _refresh_persistent_patient_card(self):
+		"""Tarjetas fijas del sidebar (mismo estilo que los avisos): datos del
+		paciente y 'Resultados en vivo'. Persisten hasta que se resetea el estudio."""
+		host = getattr(self, "_sidebar_widget", None)
+		label = getattr(self, "patient_data_label", None)
+		if host is None or label is None:
+			return
+		if getattr(self, "study", None) is None:
+			for name in ("_patient_card", "_results_card"):
+				c = getattr(self, name, None)
+				if c is not None:
+					c.deleteLater()
+					setattr(self, name, None)
+			self._reposition_fading_notices()
+			return
+		# Refrescar los textos fuente sin reentrar en esta función.
+		self._updating_side_cards = True
+		try:
+			self._refresh_readonly_results_panel()
+		finally:
+			self._updating_side_cards = False
+		self._patient_card = self._ensure_side_card("_patient_card", "patientCard", label.text())
+		res_lbl = getattr(self, "main_metrics_readout", None)
+		res_txt = res_lbl.text() if res_lbl is not None else ""
+		self._results_card = self._ensure_side_card(
+			"_results_card", "resultsCard",
+			f"<b>Resultados en vivo</b><br>{res_txt}",
+		)
+		self._reposition_fading_notices()
 
 	def _restore_window_layout(self):
 		geom = self._ui_settings.value("window_geometry", None)
@@ -6047,15 +6202,14 @@ class MainWindow(QMainWindow):
 		if "cine_crudo" in self.preview_labels:
 			try:
 				source = str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
-				# Al cargar el estudio crudo: arrancar el cine automáticamente a 50 ms.
-				if hasattr(self, "cine_crudo_speed_spin"):
-					self.cine_crudo_speed_spin.setValue(50)
+				# Con carga dual pendiente, no arrancar el cine todavía: espera a que
+				# la 2da etapa esté cargada (lo dispara _load_compare_raw_study_from_path).
+				pending_dual = getattr(self, "_pending_dual_raw_load", False)
+				self._pending_dual_raw_load = False
 				self._load_cine_crudo_frames(source)
 				self._select_tab_by_title("cine_crudo")
-				if self.cine_crudo_frames and not self.cine_crudo_playing:
-					self.cine_crudo_playing = True
-					self.cine_crudo_timer.start()
-					self._update_cine_crudo_toggle_text()
+				if not pending_dual:
+					self._autostart_cine_crudo()
 			except Exception as exc:
 				self._log(f"[WARN] No se pudo cargar cine crudo: {exc}")
 				self._select_tab_by_title("ungated")
@@ -6072,15 +6226,13 @@ class MainWindow(QMainWindow):
 		self.statusBar().showMessage("Crudo cargado: QC de proyecciones listo")
 		self._refresh_readonly_results_panel()
 
-		QMessageBox.information(
-			self,
-			"Estudio crudo (proyecciones gated)",
-			f"Se cargó el estudio CRUDO: {n_gates} gates × {n_angles} ángulos.\n\n"
+		self._show_fading_notice(
+			"Estudio crudo cargado",
+			f"{n_gates} gates × {n_angles} ángulos\n"
 			f"• FC adquisición: {fc} lpm\n"
-			f"• Motion tracking: {mov_txt} (max {ty['max_shift_px']}px)\n"
-			f"• Panel QC generado en la pestaña 'ungated'.\n\n"
-			"El análisis de fase (segmentación/PSD/BW) requiere reconstrucción. "
-			"Próximo paso del pipeline: motion correction y reconstrucción gate-por-gate.",
+			f"• Motion: {mov_txt} (max {ty['max_shift_px']}px)\n"
+			f"• Panel QC en pestaña 'ungated'\n"
+			"Fase (segm./PSD/BW) requiere reconstrucción.",
 		)
 		try:
 			get_logger().log_processing_end(path, perf_counter() - t_total, {"mode": "raw_projections"})
@@ -7622,6 +7774,7 @@ class MainWindow(QMainWindow):
 		self.summary_technical.clear()
 		self.summary_executive.clear()
 		self._refresh_readonly_results_panel()
+		self._refresh_persistent_patient_card()
 		for movie in list(self.preview_movies.values()):
 			movie.stop()
 		self.preview_movies.clear()
@@ -9579,17 +9732,13 @@ class MainWindow(QMainWindow):
 		return " · ".join(parts)
 
 	def _update_patient_banner(self):
-		"""Banner permanente en la barra de estado: paciente + fecha + etapa activa."""
+		"""El banner de la barra de estado se retiró: los datos del paciente ahora
+		viven en la tarjeta fija del sidebar. Se mantiene el método como no-op para
+		no romper las llamadas existentes."""
 		lbl = getattr(self, "_patient_banner_lbl", None)
-		if lbl is None:
-			lbl = QLabel("")
-			lbl.setStyleSheet("color:#fbbf24; font-weight:bold; padding:0 10px;")
-			self.statusBar().addPermanentWidget(lbl)
-			self._patient_banner_lbl = lbl
-		try:
-			lbl.setText(self._patient_banner_text() if self.study is not None else "")
-		except Exception:
+		if lbl is not None:
 			lbl.setText("")
+			lbl.setVisible(False)
 
 	def _dual_compare_labels(self) -> tuple[str, str]:
 		"""Rótulos de renders comparativos: SIEMPRE Esfuerzo/Reposo (DICOM), nunca el nombre del archivo."""
@@ -15059,6 +15208,8 @@ class MainWindow(QMainWindow):
 		if self.study is None and have_raw:
 			primary = raw_s or raw_r
 			self.file_edit.setText(primary["files"][0])
+			# Con ambas etapas crudas, diferir el arranque del cine a la 2da carga.
+			self._pending_dual_raw_load = bool(raw_s and raw_r)
 			self.process_current()
 			if raw_s and raw_r and self.study is not None and not bool(getattr(self.study, "reconstructed", True)):
 				self._load_compare_raw_study_from_path(raw_r["files"][0])
@@ -20349,6 +20500,17 @@ class MainWindow(QMainWindow):
 		if self.cine_crudo_play_btn is not None:
 			self.cine_crudo_play_btn.setText("⏸" if self.cine_crudo_playing else "▶")
 
+	def _autostart_cine_crudo(self):
+		"""Arranca el cine crudo a 50 ms si hay frames y no está ya corriendo."""
+		if not getattr(self, "cine_crudo_frames", None):
+			return
+		if hasattr(self, "cine_crudo_speed_spin"):
+			self.cine_crudo_speed_spin.setValue(50)
+		if not self.cine_crudo_playing:
+			self.cine_crudo_playing = True
+			self.cine_crudo_timer.start()
+			self._update_cine_crudo_toggle_text()
+
 	def _on_cine_crudo_speed_changed(self, value: int):
 		self.cine_crudo_timer.setInterval(max(40, int(value)))
 
@@ -21281,6 +21443,7 @@ class MainWindow(QMainWindow):
 			valid_paths = valid_paths[:2]
 
 		if len(valid_paths) == 1:
+			self._pending_dual_raw_load = False
 			self.file_edit.setText(valid_paths[0])
 			self.process_current()
 			return
@@ -21340,6 +21503,8 @@ class MainWindow(QMainWindow):
 		primary_path = max(valid_paths, key=_score_stress)
 		compare_path = valid_paths[0] if valid_paths[1] == primary_path else valid_paths[1]
 		self.file_edit.setText(primary_path)
+		# Dos estudios: diferir el arranque del cine hasta que carguen ambos.
+		self._pending_dual_raw_load = True
 		self.process_current()
 		if self.study is None:
 			return
@@ -21893,6 +22058,8 @@ class MainWindow(QMainWindow):
 				self._log(f"Etapa detectada por metadata → arriba: {st_top or 'indeterminada'} · abajo: {st_bot or 'indeterminada'} (el selector Etapa sigue mandando).")
 			# Con ambas etapas crudas cargadas, recomponer el QC dual (Esf | Rep).
 			self._compose_and_show_dual_qc()
+			# Recién ahora que están las dos etapas: arrancar el cine dual a 50 ms.
+			self._autostart_cine_crudo()
 		except Exception as exc:
 			self._log(f"[ERROR compare raw] {exc}")
 			QMessageBox.critical(self, "Error de comparación cruda", str(exc))
