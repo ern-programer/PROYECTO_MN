@@ -212,11 +212,13 @@ class CardiacReorientationDialog(QDialog):
         # Estado de orientación (se completa aplicando el preset default).
         # - _preset_flip_ap: espejar A/P en los cortes reorientados.
         # - _preset_invert_ll_handles: invertir base↔ápex SOLO en lateral izq.
+        #   OJO: es puramente COSMÉTICO (lo deshace _long_axis_vector); dejarlo
+        #   activo mostraba base/ápex cruzados en LL respecto de AP. Default OFF.
         # - _post_ops: ajustes geométricos manuales EXTRA (rotar/espejar/swap).
         #   OJO: "flip-ap" del preset NO se guarda en _post_ops; se aplica una
         #   sola vez a través de _effective_post_ops() para evitar doble flip.
         self._preset_flip_ap = True
-        self._preset_invert_ll_handles = True
+        self._preset_invert_ll_handles = False
         self._post_ops = []
         # Ajuste fino manual por plano (grados): SA/HLA/VLA.
         self._fine_rot_sa = 0
@@ -225,7 +227,7 @@ class CardiacReorientationDialog(QDialog):
         _default = self._preset_store.get(DEFAULT_PRESET_NAME)
         if _default is not None:
             self._preset_flip_ap = bool(_default.get("flip_ap", True))
-            self._preset_invert_ll_handles = bool(_default.get("invert_ll_handles", True))
+            self._preset_invert_ll_handles = bool(_default.get("invert_ll_handles", False))
             self._post_ops = [
                 op for op in list(_default.get("post_ops", [])) if op != "flip-ap"
             ]
@@ -806,6 +808,15 @@ class CardiacReorientationDialog(QDialog):
         dx = self._ap_vol_from_disp_x(self.h_tra2.x) - self._ap_vol_from_disp_x(self.h_tra1.x)
         dz_ll = self.h_cor2.y - self.h_cor1.y
         dy = self._ll_vol_from_disp_y(self.h_cor2.x) - self._ll_vol_from_disp_y(self.h_cor1.x)
+        # Base y ápex son UN solo segmento: dz DEBE coincidir en ambas vistas.
+        # El flip lateral (base↔ápex, _preset_invert_ll_handles) niega dz_ll y dy
+        # a la vez; al promediar dz se cancelaría la inclinación (uz→0) y el eje
+        # quedaría aplanado al plano axial. Si los signos de dz discrepan es SOLO
+        # por ese flip (imposible físicamente en un eje único): se des-hace en
+        # ambas componentes laterales antes de promediar.
+        if dz_ap * dz_ll < 0:
+            dz_ll = -dz_ll
+            dy = -dy
         uz = 0.5 * (dz_ap + dz_ll)
         u = np.array([uz, dy, dx], dtype=np.float64)
         nrm = float(np.linalg.norm(u))

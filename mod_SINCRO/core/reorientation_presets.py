@@ -37,11 +37,11 @@ def _preset(flip_ap: bool, invert_ll_handles: bool, post_ops: list[str] | None =
 # Presets de fábrica. El estándar es el validado contra Xeleris/Odyssey.
 FACTORY_PRESETS: dict[str, dict[str, Any]] = {
     "Estándar (Xeleris/Odyssey)": _preset(
-        flip_ap=True, invert_ll_handles=True, post_ops=[],
+        flip_ap=True, invert_ll_handles=False, post_ops=[],
         description="Convención clínica estándar supino. Validado contra Xeleris 2 y Odyssey.",
     ),
     "Dextrocardia": _preset(
-        flip_ap=True, invert_ll_handles=True, post_ops=["flip-lr"],
+        flip_ap=True, invert_ll_handles=False, post_ops=["flip-lr"],
         description="Corazón a la derecha (situs inversus / dextrocardia): espeja L/R sobre el estándar.",
     ),
     "Sin ajuste (crudo)": _preset(

@@ -212,6 +212,171 @@ def default_center(volume: np.ndarray) -> tuple[float, float, float]:
     return (cz, cy, cx)
 
 
+def _perp_eccentricity(pts: np.ndarray, w: np.ndarray, sw: float, u: np.ndarray) -> float:
+    """Excentricidad (λmax/λmin) de la nube proyectada en el plano ⟂ a ``u``.
+
+    Si ``u`` coincide con el eje largo del VI, los cortes SA son anillos
+    circulares y la proyección perpendicular es isótropa → excentricidad ≈ 1.
+    Al desalinear ``u``, la sección se vuelve elíptica → excentricidad > 1.
+    """
+    _, e_j, e_i = _basis_from_long_axis(u)
+    pj = pts @ e_j
+    pi = pts @ e_i
+    a = float((w * pj * pj).sum() / sw)
+    b = float((w * pj * pi).sum() / sw)
+    d = float((w * pi * pi).sum() / sw)
+    tr = a + d
+    disc = max(tr * tr - 4.0 * (a * d - b * b), 0.0) ** 0.5
+    l1 = 0.5 * (tr + disc)
+    l2 = 0.5 * (tr - disc)
+    return l1 / (l2 + 1e-9)
+
+
+def _refine_long_axis_circularity(
+    pts: np.ndarray,
+    w: np.ndarray,
+    u0: np.ndarray,
+    max_deg: float = 20.0,
+) -> np.ndarray:
+    """Refina el eje largo maximizando la circularidad de la sección ⟂.
+
+    El PCA de máxima varianza es inestable cuando la nube del VI está poco
+    elongada (autovalores casi degenerados) y tiende a pegarse al eje ``z`` del
+    scanner, dando un eje subinclinado. Este refinamiento parte del eje PCA y
+    busca localmente la dirección que hace más circulares los anillos SA, que
+    SÍ distingue el eje largo oblicuo real del eje axial (un tubo oblicuo
+    cortado en axial da elipses, cortado ⟂ da círculos).
+
+    ``max_deg`` acota la desviación respecto del eje PCA. Se mantiene DELIBERADAMENTE
+    estrecho (20°) por dos razones validadas contra ground-truth manual:
+    (1) un cono amplio deja que el óptimo de excentricidad salte al hemisferio
+    equivocado (eje 40-60° errado, inestable entre reconstrucciones); y
+    (2) empujar la excentricidad hasta su mínimo global SOBREPASA el eje largo
+    real (el eje correcto no es el MÁS circular, sino uno ligeramente elíptico).
+    Un cono de 20° ancla el resultado al PCA estable y solo corrige la
+    subinclinación, quedando más cerca del eje manual que un cono amplio.
+    """
+    u = np.asarray(u0, dtype=np.float64)
+    u = u / (np.linalg.norm(u) or 1.0)
+    u_ref = u.copy()
+    sw = float(w.sum())
+    if sw <= 0.0:
+        return u
+    cos_lim = float(np.cos(np.deg2rad(max_deg)))
+    best_u = u.copy()
+    best_cost = _perp_eccentricity(pts, w, sw, u)
+    step = np.deg2rad(12.0)
+    for _ in range(80):
+        improved = False
+        _, e_j, e_i = _basis_from_long_axis(best_u)
+        for direction in (e_j, e_i):
+            for s in (step, -step):
+                cand = best_u * np.cos(s) + direction * np.sin(s)
+                cn = float(np.linalg.norm(cand))
+                if cn <= 0.0:
+                    continue
+                cand = cand / cn
+                if abs(float(np.dot(cand, u_ref))) < cos_lim:
+                    continue  # fuera del cono permitido respecto del PCA
+                cost = _perp_eccentricity(pts, w, sw, cand)
+                if cost < best_cost - 1e-6:
+                    best_cost = cost
+                    best_u = cand
+                    improved = True
+        if not improved:
+            step *= 0.5
+            if step < np.deg2rad(0.5):
+                break
+    if float(np.dot(best_u, u_ref)) < 0:
+        best_u = -best_u
+    return best_u
+
+
+def _resolve_apex_sign(pts: np.ndarray, w: np.ndarray, u: np.ndarray) -> int:
+    """Signo ``s`` tal que ``s*u`` apunta base→ápex (hacia el ápex).
+
+    El VI es un elipsoide truncado hueco: ancho y pesado en la BASE (plano
+    valvular) y se AFINA hasta cerrarse en el ÁPEX. Por eso el hemisferio del
+    ápex tiene MENOR radio perpendicular (más angosto) y MENOR masa que el de
+    la base. El estrechamiento (taper) es la discriminante primaria; la masa
+    confirma. Es mucho más robusto que "el ápex apunta lejos del centro del
+    cuerpo", que se sesga por el hígado/intestino captantes del ungated.
+
+    Devuelve ``+1`` si ``u`` ya apunta al ápex, ``-1`` si hay que invertirlo, y
+    ``0`` si ambos cues son ambiguos (empate) y conviene un desempate externo.
+    """
+    u = np.asarray(u, dtype=np.float64)
+    u = u / (np.linalg.norm(u) or 1.0)
+    proj = pts @ u
+    perp_r = np.sqrt(np.maximum((pts * pts).sum(axis=1) - proj * proj, 0.0))
+    pos = proj > 0.0
+    neg = ~pos
+    wp = w[pos]
+    wn = w[neg]
+    mp = float(wp.sum())
+    mn = float(wn.sum())
+    if mp <= 0.0 or mn <= 0.0:
+        return 0
+    r_pos = float((perp_r[pos] * wp).sum() / mp)
+    r_neg = float((perp_r[neg] * wn).sum() / mn)
+    rmean = 0.5 * (r_pos + r_neg) + 1e-9
+    taper = (r_neg - r_pos) / rmean   # >0 si +u es el lado angosto (ápex)
+    mass = (mn - mp) / (mp + mn)      # >0 si +u es el lado liviano (ápex)
+    # Voto: taper pesa doble (señal geométrica más directa del cono del VI).
+    score = 2.0 * taper + mass
+    if abs(score) < 0.02:
+        return 0  # empate: dejar desempate al llamador
+    return 1 if score > 0.0 else -1
+
+
+def _ungated_shell_axis(ungated_volume, center, radius, u_ref):
+    """Eje largo por PCA de la cáscara miocárdica ungated (perfusión).
+
+    Sirve para desambiguar el SIGNO del tilt en x del eje de movimiento: la
+    nube del movimiento gated es escasa y casi simétrica respecto al plano y-z,
+    así que el signo de su componente x queda indeterminado y se refleja según
+    la reconstrucción (visto en app vs probe: uz,uy idénticos pero ux con signo
+    opuesto). La cáscara de perfusión (muchos más vóxeles) es estable en ese
+    signo. Devuelve un vector unitario (z,y,x) con signo alineado a ``u_ref``,
+    o ``None`` si no hay suficiente señal.
+    """
+    if ungated_volume is None:
+        return None
+    v = np.asarray(ungated_volume, dtype=np.float64)
+    if v.ndim != 3:
+        return None
+    Z, Y, X = v.shape
+    zz, yy, xx = np.mgrid[0:Z, 0:Y, 0:X]
+    cz, cy, cx = center
+    d2 = (zz - cz) ** 2 + (yy - cy) ** 2 + (xx - cx) ** 2
+    loc = v * (d2 <= float(radius) ** 2)
+    lmax = float(loc.max())
+    if lmax <= 0.0:
+        return None
+    m = loc >= 0.45 * lmax
+    if int(m.sum()) < 10:
+        return None
+    pz, py, px = np.nonzero(m)
+    w = v[pz, py, px]
+    sw = float(w.sum())
+    if sw <= 0.0:
+        return None
+    mz = float((pz * w).sum() / sw)
+    my = float((py * w).sum() / sw)
+    mx = float((px * w).sum() / sw)
+    P = np.stack([pz - mz, py - my, px - mx], axis=1)
+    cov = (P.T * w) @ P / sw
+    _, evec = np.linalg.eigh(cov)
+    us = np.asarray(evec[:, -1], dtype=np.float64)
+    n = float(np.linalg.norm(us))
+    if n <= 0.0:
+        return None
+    us = us / n
+    if float(np.dot(us, np.asarray(u_ref, dtype=np.float64))) < 0:
+        us = -us
+    return us
+
+
 def auto_orient_lv(gated_cube, ungated_volume=None):
     """Detecta el VI automáticamente usando el movimiento del gated SPECT.
 
@@ -281,8 +446,20 @@ def auto_orient_lv(gated_cube, ungated_volume=None):
     nrm = float(np.linalg.norm(u))
     u = u / (nrm if nrm > 0 else 1.0)
 
-    # Signo base→ápex: el ápex del VI apunta hacia afuera del centro del cuerpo.
-    if ungated_volume is not None:
+    # Refinamiento por circularidad: el PCA de máxima varianza queda
+    # subinclinado (se pega al eje axial) cuando la nube del VI está poco
+    # elongada. Ajustar el eje para que los anillos SA sean circulares corrige
+    # esa inclinación insuficiente sin depender de autovalores degenerados.
+    u = _refine_long_axis_circularity(pts, wv, u)
+
+    # Signo base→ápex: primario = geometría del VI (se afina hacia el ápex).
+    # El ungated (centro del cuerpo) solo desempata si el taper/masa dan empate,
+    # porque el hígado/intestino captantes sesgan ese centro y da signos errados.
+    s = _resolve_apex_sign(pts, wv, u)
+    if s != 0:
+        if s < 0:
+            u = -u
+    elif ungated_volume is not None:
         vol = np.asarray(ungated_volume, dtype=np.float64)
         tot = float(vol.sum())
         if tot > 0:
@@ -299,6 +476,20 @@ def auto_orient_lv(gated_cube, ungated_volume=None):
     rz = float(np.clip(1.6 * zz.std() + 3.0, 6.0, cube.shape[1]))
     ry = float(np.clip(1.6 * yy.std() + 3.0, 6.0, cube.shape[2]))
     rx = float(np.clip(1.6 * xx.std() + 3.0, 6.0, cube.shape[3]))
+
+    # Signo del tilt en x: la PCA del movimiento gated deja indeterminado el
+    # signo de u[2] (reflexión en el plano y-z de una nube casi simétrica) y se
+    # da vuelta según la reconstrucción. La cáscara de perfusión ungated es
+    # estable en ese signo: si discrepan, se refleja u en x (conserva uz,uy y la
+    # magnitud del tilt, solo corrige de qué lado cae el ápex → base/ápex en AP).
+    if ungated_volume is not None:
+        u_shell = _ungated_shell_axis(
+            ungated_volume, (cz, cy, cx), 1.3 * max(rz, ry, rx) + 4.0, u
+        )
+        if u_shell is not None and abs(float(u_shell[2])) > 1e-3:
+            if np.sign(u[2]) != np.sign(u_shell[2]):
+                u = u.copy()
+                u[2] = -u[2]
 
     return {
         "center": (cz, cy, cx),

@@ -119,6 +119,12 @@ class DualCardiacReorientationDialog(QDialog):
         brow.addWidget(btn_ok)
         root.addLayout(brow)
 
+        # Reposo hereda de arranque la MISMA orientación auto que esfuerzo (eje,
+        # VOI y límites Base/Ápex). El auto de cada etapa difiere levemente por
+        # ruido; clínicamente la orientación debe ser idéntica. Queda editable
+        # para ajuste fino y el botón Copiar E→R permite re-sincronizar.
+        self._copy_orientation_stress_to_rest()
+
     # ------------------------------------------------------------- helpers
     def _stress_half_length(self) -> float:
         s = self.panel_stress

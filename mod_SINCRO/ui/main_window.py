@@ -2465,6 +2465,10 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_reorient_btn.setToolTip("Paso 3. Abre la reorientación oblicua interactiva (Rec/Ref estilo Xeleris): definí eje largo del VI en vistas anterior/lateral, ROI y límites Base/Ápex, con preview SA/HLA/VLA en vivo.")
 				self.cine_crudo_reorient_btn.clicked.connect(self._open_cine_crudo_reorientation)
 				self.cine_crudo_reorient_btn.setEnabled(False)
+				self.cine_crudo_trust_btn = QToolButton()
+				self.cine_crudo_trust_btn.setText("TRUST")
+				self.cine_crudo_trust_btn.setToolTip("Ejecuta TODO el pipeline automáticamente desde el crudo (sin SPECT/CT): 1·Procesar → 2·Reconstruir y filtrar → 3·Reorientar (automático) → 4·Procesar. Confiá en la automatización.")
+				self.cine_crudo_trust_btn.clicked.connect(self._run_trust_pipeline)
 				toolbar6_r2.addWidget(QLabel("Base"))
 				self.cine_crudo_cut_base_spin = QSpinBox()
 				self.cine_crudo_cut_base_spin.setRange(1, 1)
@@ -2581,6 +2585,7 @@ class MainWindow(QMainWindow):
 				flow_row.addWidget(self.cine_crudo_fusion_btn)
 				flow_row.addWidget(self.cine_crudo_recon_feta_btn)
 				flow_row.addWidget(self.cine_crudo_reorient_btn)
+				flow_row.addWidget(self.cine_crudo_trust_btn)
 				# El paso 'Procesar' ya no es un botón manual: se dispara automáticamente
 				# al terminar Reorientar. La cadena visible termina en '3 · REORIENTAR'.
 				flow_row.addStretch(1)
@@ -2598,6 +2603,7 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_fusion_btn.setStyleSheet(_flow_btn_style("#0891b2"))
 				self.cine_crudo_recon_feta_btn.setStyleSheet(_flow_btn_style("#16a34a"))
 				self.cine_crudo_reorient_btn.setStyleSheet(_flow_btn_style("#ea580c"))
+				self.cine_crudo_trust_btn.setStyleSheet(_flow_btn_style("#7c3aed"))
 				self.cine_crudo_process_recon_btn.setStyleSheet(_flow_btn_style("#7c3aed"))
 				tab_layout.addLayout(flow_row)
 
@@ -16870,10 +16876,11 @@ class MainWindow(QMainWindow):
 							self._log(f"[FETA] Auto-detección de corazón no disponible: {exc}")
 							auto = None
 						if auto is not None:
-							# Margen extra pedido: 2 cortes más en el marker superior
-							# (base, z menor) y 1 corte más en el marker inferior (ápex).
-							base_1 = int(np.clip(auto[0] + 1 - 2, 1, n_slices))
-							apex_1 = int(np.clip(auto[1] + 1 + 1, 1, n_slices))
+							# Margen de seguridad reducido: base (marker superior) 1
+							# corte más adentro que el ápex; ambos por dentro de la
+							# banda auto-detectada.
+							base_1 = int(np.clip(auto[0] + 1 + 1, 1, n_slices))
+							apex_1 = int(np.clip(auto[1] + 1 - 1, 1, n_slices))
 							stage_txt = "REPOSO" if stage == "rest" else "ESFUERZO"
 							self._log(
 								f"[FETA] Base/Ápex auto-detectados desde SPECT para {stage_txt}: "
@@ -18100,6 +18107,89 @@ class MainWindow(QMainWindow):
 			except Exception as exc:
 				self._log(f"[WARN] Auto-procesar dual post-reorientación falló: {exc}")
 		return ok_all
+
+	def _run_trust_pipeline(self):
+		"""TRUST: ejecuta todo el pipeline desde crudo automáticamente (sin SPECT/CT).
+
+		Encadena 1·Procesar (recon raw) → 2·Reconstruir y filtrar (feta) →
+		3·Reorientar (automático, auto_orient_lv) → 4·Procesar fase/FEVI."""
+		raw_study, _mr, _corr, _stage = self._cine_crudo_recon_target()
+		if raw_study is None or getattr(raw_study, "reconstructed", True):
+			QMessageBox.information(self, "SINCRO", "TRUST: cargá primero un estudio crudo gated en la pestaña de procesamiento.")
+			return
+		stages = self._cine_crudo_target_stages()
+		self._log(f"[TRUST] Pipeline automático desde crudo · etapas: {', '.join(stages)}.")
+		try:
+			self.statusBar().showMessage("TRUST: reconstruyendo…", 4000)
+		except Exception:
+			pass
+		# 1 · PROCESAR: recon raw base (FBP) para tener las líneas Base/Ápex.
+		if self._reconstruct_cine_crudo_raw() is False:
+			self._log("[TRUST] Detenido: falló Recon raw.")
+			return
+		# 2 · RECONSTRUIR y FILTRAR: feta axial entre Base/Ápex.
+		if self._reconstruct_cine_crudo_raw(feta_only=True) is False:
+			self._log("[TRUST] Detenido: falló Reconstruir y filtrar (feta).")
+			return
+		# 3 · REORIENTAR automático por etapa (esfuerzo/reposo secuencial: la 2da
+		# hereda semilla + zoom bloqueado de la 1ra).
+		ok_any = False
+		for stage in stages:
+			if self._auto_reorient_single_stage(stage):
+				ok_any = True
+			else:
+				self._log(f"[TRUST][WARN] Reorientación automática falló en {stage}.")
+		if not ok_any:
+			QMessageBox.warning(self, "SINCRO", "TRUST: la reorientación automática no produjo resultados. Reorientá manualmente con '3 · REORIENTAR'.")
+			return
+		# 4 · PROCESAR fase/FEVI (con dos etapas procesa ambas y arma la comparación).
+		try:
+			self._process_cine_crudo_reconstruction()
+		except Exception as exc:
+			self._log(f"[TRUST][WARN] Procesar automático falló: {exc}")
+			return
+		self._log("[TRUST] Pipeline completo.")
+		try:
+			self._show_fading_notice(
+				"TRUST completado",
+				"Pipeline automático desde crudo finalizado.\n1·Procesar → 2·Reconstruir → 3·Reorientar → 4·Procesar",
+			)
+		except Exception:
+			pass
+
+	def _auto_reorient_single_stage(self, stage: str) -> bool:
+		"""Reorientación AUTOMÁTICA (auto_orient_lv, sin diálogo) para el pipeline TRUST.
+
+		Instancia el diálogo de reorientación —que auto-orienta el VI por PCA del
+		movimiento gated en su constructor— y aplica el resultado sin mostrarlo."""
+		self._set_active_cine_crudo_stage(stage, refresh_view=False, force=True)
+		self._cine_crudo_recon_stage = stage
+		if self.cine_crudo_recon_result is None:
+			return False
+		kw = self._build_reorient_dialog_kwargs(stage)
+		if kw is None:
+			return False
+		try:
+			from ui.reorientation_dialog import CardiacReorientationDialog
+		except Exception as exc:
+			self._log(f"[TRUST][WARN] No se pudo importar la reorientación: {exc}")
+			return False
+		_undo_group = self.UNDO_ATTRS_REORIENT + self.UNDO_ATTRS_CUTS
+		_undo_before = None if getattr(self, "_undo_suspended", False) else self._snapshot_attrs(_undo_group, deep=False)
+		stage_txt = {"stress": "Esfuerzo", "rest": "Reposo"}.get(stage, stage)
+		self._log(f"[TRUST][REORIENT] Reorientación automática de '{stage_txt}'.")
+		dlg = CardiacReorientationDialog(parent=self, **kw)
+		try:
+			try:
+				dlg._recompute_and_draw(full=True)  # inicializa límites Base/Ápex al tamaño reorientado
+			except Exception:
+				pass
+			dlg._accept()  # calcula reoriented_* desde la auto-orientación PCA
+			ok = self._apply_reorientation_result(dlg, generate_cuts=True) if dlg.reoriented_gated is not None else False
+		finally:
+			dlg.deleteLater()
+		self._commit_undo("Reorientación (auto)", _undo_group, _undo_before, deep=False)
+		return ok
 
 	def _open_cine_crudo_reorientation(self, _force_stage: str | None = None):
 		"""Abre el diálogo interactivo de reorientación oblicua (Rec/Ref estilo Xeleris)."""
