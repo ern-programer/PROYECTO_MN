@@ -6047,8 +6047,15 @@ class MainWindow(QMainWindow):
 		if "cine_crudo" in self.preview_labels:
 			try:
 				source = str(self.cine_crudo_source_combo.currentText()) if hasattr(self, "cine_crudo_source_combo") else "UngGat"
+				# Al cargar el estudio crudo: arrancar el cine automáticamente a 50 ms.
+				if hasattr(self, "cine_crudo_speed_spin"):
+					self.cine_crudo_speed_spin.setValue(50)
 				self._load_cine_crudo_frames(source)
 				self._select_tab_by_title("cine_crudo")
+				if self.cine_crudo_frames and not self.cine_crudo_playing:
+					self.cine_crudo_playing = True
+					self.cine_crudo_timer.start()
+					self._update_cine_crudo_toggle_text()
 			except Exception as exc:
 				self._log(f"[WARN] No se pudo cargar cine crudo: {exc}")
 				self._select_tab_by_title("ungated")
@@ -16676,9 +16683,54 @@ class MainWindow(QMainWindow):
 				# Con feta, preservar la selección Base/Ápex del usuario (la feta se
 				# reconstruyó justo en esa banda); solo resetear a full en Recon raw.
 				if not feta_only:
-					self.cine_crudo_cut_base_spin.setValue(1)
-					self.cine_crudo_cut_apex_spin.setValue(max(1, n_slices))
-					self._cine_crudo_stage_limits_set(stage, 1, max(1, n_slices), n_slices)
+					# Prioridad de los límites Base/Ápex:
+					#   1) Máscara de segmentación SPECT/CT (si ya está fusionada) →
+					#      es la referencia anatómica; corrige/pisa cualquier guess.
+					#   2) Auto-detección desde el propio SPECT (latido/intensidad).
+					#   3) Full-range (nada de lo anterior disponible).
+					mask_ok = False
+					try:
+						mask_ok = bool(self._suggest_feta_limits_from_fusion(stage))
+					except Exception as exc:
+						self._log(f"[FETA][WARN] No pude derivar límites desde la máscara: {exc}")
+						mask_ok = False
+					if mask_ok:
+						# _suggest_feta_limits_from_fusion ya fijó stage_limits (y los
+						# spins si la etapa es la activa) desde la máscara: la máscara
+						# manda, no auto-detectar ni recapturar desde los spins.
+						pass
+					else:
+						# Sin SPECT-CT no hay máscara: se estiman desde el volumen
+						# reconstruido (banda axial más caliente / latido). Editable.
+						base_1, apex_1 = 1, max(1, n_slices)
+						auto = None
+						try:
+							from core.lv_center import heart_axial_bounds_from_spect
+							# Preferir el gated 4D: si tiene ≥3 gates, la detección usa el
+							# latido (apaga el hígado). Si es 1 gate, cae a intensidad.
+							vol_auto = getattr(result, "gated_volume", None)
+							if vol_auto is None or int(np.asarray(vol_auto).shape[0]) < 3:
+								vol_auto = getattr(result, "ungated_volume", None)
+								if vol_auto is None:
+									vol_auto = result.gated_volume
+							# Margen de seguridad ≥3 cortes a cada lado de la banda.
+							auto = heart_axial_bounds_from_spect(vol_auto, margin=3)
+						except Exception as exc:
+							self._log(f"[FETA] Auto-detección de corazón no disponible: {exc}")
+							auto = None
+						if auto is not None:
+							# Margen extra pedido: 2 cortes más en el marker superior
+							# (base, z menor) y 1 corte más en el marker inferior (ápex).
+							base_1 = int(np.clip(auto[0] + 1 - 2, 1, n_slices))
+							apex_1 = int(np.clip(auto[1] + 1 + 1, 1, n_slices))
+							stage_txt = "REPOSO" if stage == "rest" else "ESFUERZO"
+							self._log(
+								f"[FETA] Base/Ápex auto-detectados desde SPECT para {stage_txt}: "
+								f"z=[{base_1},{apex_1}] de {n_slices}. Editable; ajustá las líneas si hace falta."
+							)
+						self.cine_crudo_cut_base_spin.setValue(base_1)
+						self.cine_crudo_cut_apex_spin.setValue(apex_1)
+						self._cine_crudo_stage_limits_set(stage, base_1, apex_1, n_slices)
 				else:
 					self._cine_crudo_capture_limits_from_spins(stage)
 			if hasattr(self, "cine_crudo_cut_thickness_spin"):

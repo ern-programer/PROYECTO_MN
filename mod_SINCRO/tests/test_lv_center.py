@@ -14,6 +14,7 @@ from core.lv_center import (
     _wall_angular_coverage,
     cavity_center_from_image,
     cavity_center_from_mask,
+    heart_axial_bounds_from_spect,
     refine_center_to_cavity,
 )
 from core.segmentation import segment_myocardium
@@ -223,3 +224,158 @@ def test_guard_acepta_herradura_amplia():
     # El refinamiento acerca el centro al de la cavidad real (24, 24).
     assert abs(cy - 24.0) < abs(in_cy - 24.0)
     assert abs(cx - 24.0) < 1.5
+
+
+def _blob_slice(size: int, amp: float, cy: float | None = None, cx: float | None = None) -> np.ndarray:
+    """Corte 2D con una mancha gaussiana caliente (corazón/hígado).
+
+    Por defecto la mancha va centrada; ``cy``/``cx`` permiten desplazarla para
+    reproducir la anatomía real (el hígado queda lateral/inferior al corazón).
+    """
+    ys, xs = np.ogrid[:size, :size]
+    c = size / 2.0
+    cy = c if cy is None else cy
+    cx = c if cx is None else cx
+    d2 = (ys - cy) ** 2 + (xs - cx) ** 2
+    return amp * np.exp(-d2 / (2.0 * (size * 0.15) ** 2))
+
+
+def test_axial_bounds_banda_unica():
+    """Corazón como banda caliente contigua: los límites la cubren + margen."""
+    n, size = 20, 24
+    vol = np.zeros((n, size, size), dtype=np.float64)
+    # Joroba miocárdica en z=[6,13], fondo tenue en el resto.
+    for z in range(n):
+        vol[z] += 2.0  # fondo
+    for z in range(6, 14):
+        vol[z] += _blob_slice(size, amp=100.0)
+
+    bounds = heart_axial_bounds_from_spect(vol, margin=1)
+    assert bounds is not None
+    lo, hi = bounds
+    # Cubre la banda real con el margen aplicado.
+    assert lo <= 6 and hi >= 13
+    # No se traga todo el volumen.
+    assert lo >= 4 and hi <= 15
+
+
+def test_axial_bounds_descarta_higado_caudal():
+    """Corazón (caliente) + hígado (algo más frío) separados por un valle:
+    la banda elegida es la del corazón, no la del hígado."""
+    n, size = 24, 24
+    vol = np.full((n, size, size), 1.5, dtype=np.float64)
+    # Corazón z=[4,10] (pico alto).
+    for z in range(4, 11):
+        vol[z] += _blob_slice(size, amp=120.0)
+    # Hígado z=[16,22] (más frío) tras un valle profundo (z=[11,15] casi fondo).
+    for z in range(16, 23):
+        vol[z] += _blob_slice(size, amp=45.0)
+
+    bounds = heart_axial_bounds_from_spect(vol, margin=1)
+    assert bounds is not None
+    lo, hi = bounds
+    # Debe quedarse con el corazón y NO extenderse al hígado.
+    assert lo <= 4 and hi <= 12
+    assert hi < 16
+
+
+def test_axial_bounds_4d_suma_gates():
+    """Acepta volumen 4D (g,K,H,W) sumando gates."""
+    n, size = 16, 20
+    vol4 = np.zeros((8, n, size, size), dtype=np.float64)
+    for g in range(8):
+        for z in range(5, 11):
+            vol4[g, z] += _blob_slice(size, amp=30.0)
+        vol4[g] += 1.0
+    bounds = heart_axial_bounds_from_spect(vol4, margin=1)
+    assert bounds is not None
+    lo, hi = bounds
+    assert lo <= 5 and hi >= 10
+
+
+def test_axial_bounds_volumen_vacio_devuelve_none():
+    """Sin señal (todo cero) no se puede estimar: None (el llamador no empeora)."""
+    assert heart_axial_bounds_from_spect(np.zeros((10, 16, 16))) is None
+    # Muy pocos cortes tampoco.
+    assert heart_axial_bounds_from_spect(np.ones((2, 16, 16))) is None
+
+
+def test_axial_bounds_gated_latido_recorta_higado_estatico():
+    """Método por latido: el corazón (que late) marca la banda; el hígado caudal
+    caliente pero ESTÁTICO no aparece en el perfil de amplitud → no se anexa.
+
+    Es el caso que el perfil de intensidad no resolvía (el hígado estiraba la
+    banda hasta casi el final del FOV). Con gating, la banda queda ajustada al
+    corazón.
+    """
+    g, n, size = 8, 24, 20
+    vol4 = np.full((g, n, size, size), 2.0, dtype=np.float64)
+    # Corazón z=[5,11]: LATE (amplitud sinusoidal entre gates).
+    for gi in range(g):
+        beat = 1.0 + 0.6 * np.sin(2.0 * np.pi * gi / g)
+        for z in range(5, 12):
+            vol4[gi, z] += _blob_slice(size, amp=90.0 * beat)
+    # Hígado z=[17,23]: caliente pero ESTÁTICO (igual en todos los gates).
+    for gi in range(g):
+        for z in range(17, 24):
+            vol4[gi, z] += _blob_slice(size, amp=110.0)
+
+    bounds = heart_axial_bounds_from_spect(vol4, margin=1)
+    assert bounds is not None
+    lo, hi = bounds
+    # La banda es la del corazón; el hígado (z>=17) queda fuera.
+    assert lo <= 5 and hi >= 11
+    assert hi < 16
+
+
+def test_axial_bounds_un_gate_cae_a_intensidad():
+    """1 gate (no gatillado): no hay latido → usa el perfil de intensidad."""
+    n, size = 20, 20
+    vol4 = np.full((1, n, size, size), 1.5, dtype=np.float64)
+    for z in range(6, 13):
+        vol4[0, z] += _blob_slice(size, amp=80.0)
+    bounds = heart_axial_bounds_from_spect(vol4, margin=1)
+    assert bounds is not None
+    lo, hi = bounds
+    assert lo <= 6 and hi >= 12
+
+
+def test_axial_bounds_gated_ignora_arrastre_global():
+    """Caso real GE con movimiento: todo el volumen se TRASLADA entre gates
+    (arrastre global) pero solo el corazón se CONTRAE. La traslación de una
+    estructura rígida hace latir sus bordes opuestos en ANTIFASE, así que su F1
+    complejo se cancela al sumarlo; la contracción cardíaca es coherente (en
+    fase) y sobrevive. El perfil por suma coherente |Σ F1| no debe inflarse al
+    hígado ni a full-FOV.
+
+    Antes (|F1| absoluto) esto daba z≈[2,63]/64 porque el borde del hígado
+    desplazado y el arrastre global 'latían'. Con la suma coherente, el hígado
+    (antifase) se cancela y solo el miocardio pulsátil en fase cuenta.
+    """
+    from scipy.ndimage import shift as _ndi_shift
+
+    g, n, size = 8, 32, 24
+    base = np.full((n, size, size), 2.0, dtype=np.float64)
+    # Hígado caudal brillante y ESTÁTICO en forma (solo se traslada con el resto).
+    # Va DESPLAZADO (lateral/inferior) respecto del corazón, como en la anatomía real.
+    liver_cy, liver_cx = size * 0.72, size * 0.70
+    for z in range(22, 30):
+        base[z] += _blob_slice(size, amp=130.0, cy=liver_cy, cx=liver_cx)
+    vol4 = np.empty((g, n, size, size), dtype=np.float64)
+    for gi in range(g):
+        # Arrastre global: traslada TODO el volumen (movimiento del paciente).
+        dy = 4.0 * np.sin(2.0 * np.pi * gi / g)
+        dx = 3.0 * np.cos(2.0 * np.pi * gi / g)
+        frame = _ndi_shift(base, (0.0, dy, dx), order=1, mode="nearest")
+        # Corazón z=[6,13] centrado: además del arrastre, SE CONTRAE (modula amplitud).
+        beat = 1.0 + 0.5 * np.sin(2.0 * np.pi * gi / g)
+        for z in range(6, 14):
+            frame[z] += _blob_slice(size, amp=70.0 * beat)
+        vol4[gi] = frame
+
+    bounds = heart_axial_bounds_from_spect(vol4, margin=1)
+    assert bounds is not None
+    lo, hi = bounds
+    # La banda es la del corazón; no llega al hígado ni ocupa todo el FOV.
+    assert lo <= 7
+    assert hi < 20

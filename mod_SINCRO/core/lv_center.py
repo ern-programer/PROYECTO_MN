@@ -301,3 +301,211 @@ def refine_center_to_cavity(
             # Salto implausible (foco extracardíaco, anillo roto): no se mueve.
             return float(cy), float(cx)
     return float(new_cy), float(new_cx)
+
+
+# ---------------------------------------------------------------------------
+# Banda axial del corazón desde el SPECT (sin CT)
+# ---------------------------------------------------------------------------
+
+#: Fracción del pico del perfil axial que separa "banda cardíaca" de fondo.
+#: El corazón es la estructura más caliente del FOV torácico en un MIBI/tetro;
+#: por debajo de esta fracción del máximo se considera fuera de la banda.
+HEART_AXIAL_LEVEL_FRAC = 0.35
+
+#: Fracción del máximo por debajo de la cual un valle entre dos jorobas cuenta
+#: como separación real (corazón vs hígado). Un valle poco profundo NO parte la
+#: banda (es la propia caída base→ápex del miocardio).
+HEART_AXIAL_VALLEY_FRAC = 0.55
+
+#: Umbral para el perfil por LATIDO (amplitud temporal). Solo el miocardio late,
+#: así que el fondo es casi nulo y se puede exigir un umbral más alto que en el
+#: perfil de intensidad (donde el hígado inflaba la base).
+HEART_AXIAL_BEAT_LEVEL_FRAC = 0.30
+
+#: Nº mínimo de gates para intentar el perfil por latido (bajo esto la FFT/rango
+#: temporal no es confiable; se cae al perfil de intensidad).
+HEART_MIN_GATES_FOR_BEAT = 3
+
+#: Fracción de modulación mínima (|F1|/DC) para contar un voxel como pulsátil.
+#: El miocardio ronda 0.15–0.40; el hígado/arrastre global queda por debajo.
+BEAT_FRACTION_MIN = 0.12
+
+#: Un voxel se considera "con señal" si su DC supera esta fracción del DC de
+#: referencia (percentil 60 de los voxels con señal). Descarta el fondo, donde
+#: |F1|/DC explota por ruido.
+BEAT_DC_MIN_FRAC = 0.35
+
+
+def _bounds_from_axial_profile(
+    profile: np.ndarray,
+    *,
+    level_frac: float,
+    valley_frac: float,
+    margin: int,
+) -> tuple[int, int] | None:
+    """Banda contigua [lo, hi] (0-based inclusivo) desde un perfil axial 1D.
+
+    Umbral a ``level_frac``·pico; toma la banda que contiene el pico global y
+    fusiona vecinas separadas por un valle poco profundo (>= ``valley_frac``·pico
+    = caída base→ápex del propio miocardio, no otra víscera). Añade ``margin`` y
+    clampea. Devuelve None si el perfil no tiene señal.
+    """
+    profile = np.asarray(profile, dtype=np.float64).ravel()
+    n = int(profile.shape[0])
+    if n < 3:
+        return None
+    peak = float(profile.max())
+    if peak <= 0.0:
+        return None
+
+    above = profile >= float(level_frac) * peak
+    if not above.any():
+        return None
+
+    bands: list[tuple[int, int]] = []
+    start = None
+    for i in range(n):
+        if above[i] and start is None:
+            start = i
+        elif not above[i] and start is not None:
+            bands.append((start, i - 1))
+            start = None
+    if start is not None:
+        bands.append((start, n - 1))
+    if not bands:
+        return None
+
+    peak_idx = int(np.argmax(profile))
+    heart_band = next((b for b in bands if b[0] <= peak_idx <= b[1]), bands[0])
+    lo, hi = heart_band
+
+    valley_level = float(valley_frac) * peak
+    for b in bands:
+        if b == heart_band:
+            continue
+        gap_lo, gap_hi = (hi + 1, b[0] - 1) if b[0] > hi else (b[1] + 1, lo - 1)
+        if gap_lo > gap_hi:
+            lo, hi = min(lo, b[0]), max(hi, b[1])
+            continue
+        if float(profile[gap_lo:gap_hi + 1].min()) >= valley_level:
+            lo, hi = min(lo, b[0]), max(hi, b[1])
+
+    lo = int(np.clip(lo - int(margin), 0, n - 1))
+    hi = int(np.clip(hi + int(margin), 0, n - 1))
+    if hi <= lo:
+        return None
+    return lo, hi
+
+
+def _beat_amplitude_axial_profile(gated: np.ndarray) -> np.ndarray | None:
+    """Perfil axial de LATIDO desde un volumen gated (g, K, H, W).
+
+    La amplitud absoluta ``|F1|`` no basta: con movimiento del paciente TODO el
+    volumen se traslada entre gates, y el borde de una estructura brillante que
+    se desplaza (hígado, FOV) da ``|F1|`` alto sin ser miocardio. La fracción de
+    modulación ``|F1|/DC`` ayuda pero tampoco alcanza: un voxel de borde que pasa
+    de brillante a oscuro por la traslación también modula fuerte.
+
+    El discriminador que sí separa corazón de hígado es la **coherencia de
+    fase**. La contracción cardíaca es un cambio de volumen COHERENTE: todos los
+    voxels del miocardio laten (engrosan/adelgazan) en fase, así que sus primeros
+    armónicos ``F1`` (complejos) apuntan en la misma dirección y **suman
+    constructivamente**. La traslación de una estructura rígida, en cambio, hace
+    que los bordes opuestos laten en ANTIFASE (uno se aclara mientras el otro se
+    oscurece): sus ``F1`` apuntan en direcciones opuestas y **se cancelan** al
+    sumarlos.
+
+    Por eso el perfil suma el ``F1`` COMPLEJO por corte y toma el módulo:
+      - Corazón (en fase)  → ``|Σ F1|`` ≈ ``Σ |F1|``  (no se cancela).
+      - Hígado (antifase) → ``|Σ F1|`` ≪ ``Σ |F1|``  (se cancela).
+    Se enmascara antes a voxels con señal (DC no despreciable) y con fracción de
+    modulación mínima, para no arrastrar ruido de fondo.
+
+    Devuelve la suma coherente por corte, o ``None`` si no hay latido detectable.
+    """
+    arr = np.asarray(gated, dtype=np.float64)
+    if arr.ndim != 4 or arr.shape[0] < HEART_MIN_GATES_FOR_BEAT:
+        return None
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    g, K, H, W = arr.shape
+
+    spectrum = np.fft.fft(arr, axis=0)
+    dc = np.abs(spectrum[0]) / float(g)          # media temporal por voxel
+    f1 = spectrum[1] * (2.0 / float(g))          # 1er armónico COMPLEJO por voxel
+    amp = np.abs(f1)                             # |F1|
+
+    # Voxels con señal real (evita arrastrar ruido de fondo con DC≈0).
+    dc_ref = float(np.percentile(dc[dc > 0], 60)) if np.any(dc > 0) else 0.0
+    if dc_ref <= 0.0:
+        return None
+    signal = dc >= (BEAT_DC_MIN_FRAC * dc_ref)
+
+    frac = np.zeros_like(dc)
+    np.divide(amp, dc, out=frac, where=signal & (dc > 0))
+    mask = signal & (frac >= BEAT_FRACTION_MIN)
+    f1_masked = f1 * mask                        # anula fondo/baja modulación
+
+    # Suma COHERENTE por corte: la contracción en fase sobrevive, la traslación
+    # en antifase se cancela.
+    profile = np.abs(f1_masked.reshape(K, -1).sum(axis=1))
+    if float(profile.max()) <= 0.0:
+        return None
+    return profile
+
+
+def heart_axial_bounds_from_spect(
+    volume: np.ndarray,
+    *,
+    level_frac: float = HEART_AXIAL_LEVEL_FRAC,
+    margin: int = 1,
+) -> tuple[int, int] | None:
+    """Estima la banda axial [z_base, z_apex] del corazón desde el SPECT.
+
+    Sin SPECT-CT no hay máscara anatómica para ubicar los límites Base/Ápex de
+    la feta; hay que deducirlos del propio volumen reconstruido.
+
+    Dos caminos, en orden de confiabilidad:
+
+    1. **Por latido** (si ``volume`` es gated 4D con ≥3 gates). El corazón es la
+       única estructura que se contrae; el perfil de amplitud temporal (1er
+       armónico FFT) enciende el miocardio y apaga el hígado/intestino/fondo, así
+       que la banda sale ajustada incluso con contaminación caudal fuerte.
+    2. **Por intensidad** (fallback: volumen estático o 1 gate). El corazón es la
+       estructura compacta más caliente → joroba en el perfil de cuentas por
+       corte. Puede estirarse hacia el hígado caudal, por eso es el fallback.
+
+    En ambos casos: umbral relativo al pico → banda(s) contigua(s) → se toma la
+    del pico global fusionando vecinas separadas por valles poco profundos →
+    ``margin`` a cada lado → clamp.
+
+    ``volume`` puede ser 3D ``(K, H, W)`` o 4D ``(g, K, H, W)``. Devuelve índices
+    **0-based** ``(z_lo, z_hi)`` inclusivos, o ``None`` si no se pudo estimar (el
+    llamador conserva su punto de partida, nunca lo empeora).
+    """
+    arr = np.asarray(volume, dtype=np.float64)
+
+    # Camino 1: perfil por latido (gated). Umbral propio, más alto (fondo ~0).
+    beat_profile = _beat_amplitude_axial_profile(arr) if arr.ndim == 4 else None
+    if beat_profile is not None:
+        bounds = _bounds_from_axial_profile(
+            beat_profile,
+            level_frac=HEART_AXIAL_BEAT_LEVEL_FRAC,
+            valley_frac=HEART_AXIAL_VALLEY_FRAC,
+            margin=margin,
+        )
+        if bounds is not None:
+            return bounds
+
+    # Camino 2 (fallback): perfil de intensidad (suma de gates si es 4D).
+    if arr.ndim == 4:
+        arr = arr.sum(axis=0)
+    if arr.ndim != 3 or arr.shape[0] < 3:
+        return None
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    profile = arr.reshape(arr.shape[0], -1).sum(axis=1)
+    return _bounds_from_axial_profile(
+        profile,
+        level_frac=float(level_frac),
+        valley_frac=HEART_AXIAL_VALLEY_FRAC,
+        margin=margin,
+    )
