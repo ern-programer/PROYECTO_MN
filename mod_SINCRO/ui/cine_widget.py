@@ -1047,7 +1047,7 @@ class CineWidget(QWidget):
 			# estirados. Ancho fijo para que los controles queden compactos al
 			# lado de la imagen.
 			for _sl in (self.gate_slider, self.slice_slider):
-				_sl.setFixedWidth(120)
+				_sl.setFixedWidth(60)
 				_sl.setMaximumHeight(18)
 				_sl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 		else:
@@ -1585,8 +1585,8 @@ class CineWidget(QWidget):
 			# Fila principal: [grilla 1ra etapa][2da etapa][controles][stretch]
 			img_ctrls_row = QHBoxLayout()
 			img_ctrls_row.setSpacing(8)
-			img_ctrls_row.addLayout(grid, 0)
 			if self._is_compare:
+				img_ctrls_row.addLayout(grid, 0)
 				# El compare va incrustado en el CineWidget principal: no necesita
 				# sus propios controles ni stretch, solo la grilla limpia.
 				self._compare_slot = None
@@ -1605,48 +1605,55 @@ class CineWidget(QWidget):
 				_ccw.setLayout(compare_controls)
 				layout.addWidget(_ccw, 0)
 			else:
+				# Columna Esfuerzo: grilla (imagen + slice/gate) con su ROI intestinal
+				# JUSTO DEBAJO, espejando la 2da etapa (Reposo). Los controles
+				# compartidos (play/colormap/speed/gate/slice/interp) van en la barra
+				# inferior, debajo de ambos cines.
+				_esf_col = QVBoxLayout()
+				_esf_col.setContentsMargins(0, 0, 0, 0)
+				_esf_col.setSpacing(2)
+				_esf_col.addLayout(grid)
+				_esf_roi_row = QHBoxLayout()
+				_esf_roi_row.setContentsMargins(2, 0, 0, 0)
+				_esf_roi_row.setSpacing(6)
+				_esf_roi_row.addWidget(intestinal_btn_menu)
+				_esf_roi_row.addStretch(1)
+				_esf_col.addLayout(_esf_roi_row)
+				img_ctrls_row.addLayout(_esf_col, 0)
 				# Hueco para la 2da etapa (set_compare_viewer la inserta acá, pos 1).
 				self._compare_slot = img_ctrls_row
 				self._compare_widget = None
 				self._sliders_col_widget = _slider_w
-				layout.addStretch(1)
-				layout.addLayout(img_ctrls_row)
-				# Fila inferior debajo de los dos cines: play, colormap, invertir, speed
-				# SOLO en la 1ra etapa (el compare no lleva estos controles duplicados).
+
+				# Columna de controles compartidos: va A LA DERECHA de la 2da etapa
+				# (Reposo), aprovechando el espacio libre. play/colormap/invertir,
+				# speed, gate, slice e interpolación manejan AMBOS cines (ya están
+				# sincronizados por señales), por eso van una sola vez, apilados.
+				_ctrls_col = QVBoxLayout()
+				_ctrls_col.setContentsMargins(0, 0, 0, 0)
+				_ctrls_col.setSpacing(10)
+				# Fila 1: play solo.
+				_play_row = QHBoxLayout()
+				_play_row.setContentsMargins(0, 0, 0, 0)
+				_play_row.setSpacing(6)
+				_play_row.addWidget(self.play_button)
+				_play_row.addStretch(1)
+				_play_w = QWidget()
+				_play_w.setLayout(_play_row)
+				_ctrls_col.addWidget(_play_w)
+				# Fila 2: colormap + invertir.
 				bottom_controls = QHBoxLayout()
 				bottom_controls.setContentsMargins(0, 0, 0, 0)
 				bottom_controls.setSpacing(6)
-				bottom_controls.addWidget(self.play_button)
 				bottom_controls.addWidget(QLabel("Colormap"))
+				self.cmap_combo.setMaximumWidth(96)
 				bottom_controls.addWidget(self.cmap_combo)
 				bottom_controls.addWidget(self.invert_cmap_check)
-				bottom_controls.addSpacing(8)
-				bottom_controls.addWidget(intestinal_btn_menu)
 				bottom_controls.addStretch(1)
 				_bcw = QWidget()
 				_bcw.setLayout(bottom_controls)
-				_bcw.setFixedWidth(440)
-				layout.addWidget(_bcw, 0)
-				# Fila del speed: slider con label que ocupa el MISMO ancho que los
-				# dos cines juntos (imagen 1ra + rangeSlider 1ra + gap + imagen 2da +
-				# rangeSlider 2da ≈ 440px). El label "Speed" va a la izquierda del
-				# slider, y los botones < / > a los costados. Contenedor centrado.
-				_speed_total = 440
-				_speed_row = QHBoxLayout()
-				_speed_row.setContentsMargins(0, 0, 0, 0)
-				_speed_row.setSpacing(4)
-				_speed_row.addWidget(QLabel("Speed"))
-				_speed_row.addWidget(self.speed_prev_btn)
-				_speed_row.addWidget(self.speed_slider, 1)
-				_speed_row.addWidget(self.speed_next_btn)
-				_speed_row.addWidget(self.speed_label)
-				_speed_w = QWidget()
-				_speed_w.setLayout(_speed_row)
-				_speed_w.setFixedWidth(_speed_total)
-				layout.addWidget(_speed_w, 0)
-				# Fila de Gate y Slice lado a lado, debajo del speed.
-				# Ambos ocupan el mismo ancho total que los cines (440px).
-				_gs_total = 440
+				_ctrls_col.addWidget(_bcw)
+				# Fila 3: Gate y Slice lado a lado.
 				_gs_row = QHBoxLayout()
 				_gs_row.setContentsMargins(0, 0, 0, 0)
 				_gs_row.setSpacing(10)
@@ -1665,13 +1672,25 @@ class CineWidget(QWidget):
 				_slice_group.addWidget(self.slice_prev_btn)
 				_slice_group.addWidget(self.slice_slider, 1)
 				_slice_group.addWidget(self.slice_next_btn)
-				_gs_row.addLayout(_gate_group, 1)
-				_gs_row.addLayout(_slice_group, 1)
+				_gs_row.addLayout(_gate_group, 0)
+				_gs_row.addLayout(_slice_group, 0)
+				_gs_row.addStretch(1)
 				_gs_w = QWidget()
 				_gs_w.setLayout(_gs_row)
-				_gs_w.setFixedWidth(_gs_total)
-				layout.addWidget(_gs_w, 0)
-				# Fila de interpolación de escalado (mismo set que cortes/montaje).
+				_ctrls_col.addWidget(_gs_w)
+				# Fila 4: speed.
+				_speed_row = QHBoxLayout()
+				_speed_row.setContentsMargins(0, 0, 0, 0)
+				_speed_row.setSpacing(4)
+				_speed_row.addWidget(QLabel("Speed"))
+				_speed_row.addWidget(self.speed_prev_btn)
+				_speed_row.addWidget(self.speed_slider, 1)
+				_speed_row.addWidget(self.speed_next_btn)
+				_speed_row.addWidget(self.speed_label)
+				_speed_w = QWidget()
+				_speed_w.setLayout(_speed_row)
+				_ctrls_col.addWidget(_speed_w)
+				# Fila 5: interpolación de escalado (mismo set que cortes/montaje).
 				_interp_row = QHBoxLayout()
 				_interp_row.setContentsMargins(0, 0, 0, 0)
 				_interp_row.setSpacing(4)
@@ -1680,8 +1699,20 @@ class CineWidget(QWidget):
 				_interp_row.addStretch(1)
 				_interp_w = QWidget()
 				_interp_w.setLayout(_interp_row)
-				_interp_w.setFixedWidth(_gs_total)
-				layout.addWidget(_interp_w, 0)
+				_ctrls_col.addWidget(_interp_w)
+				_ctrls_col.addStretch(1)
+				_ctrls_w = QWidget()
+				_ctrls_w.setLayout(_ctrls_col)
+				_ctrls_w.setFixedWidth(264)
+				# La columna se inserta DESPUÉS de la 2da etapa (que set_compare_viewer
+				# mete en pos 1): [Esfuerzo][Reposo][stretch][controles][stretch].
+				# Stretch 3:1 — el bloque queda corrido hacia la derecha, cerca de
+				# los histogramas, con un pequeño margen al final.
+				img_ctrls_row.addStretch(3)
+				img_ctrls_row.addWidget(_ctrls_w, 0, Qt.AlignmentFlag.AlignTop)
+				img_ctrls_row.addStretch(1)
+				layout.addStretch(1)
+				layout.addLayout(img_ctrls_row)
 			self.help_label.setVisible(False)
 		else:
 			layout.addLayout(preview_row)
@@ -1697,10 +1728,11 @@ class CineWidget(QWidget):
 		# Slice/Gate (~20px) + márgenes. Así no sobra espacio vacío vertical.
 		self.setMinimumHeight(190 if self._compact_viewer else 260)
 		if self._compact_viewer and self._is_compare:
-			# Altura fija = su grilla 3×2 (márgenes 4+4 + title 20 + spacing 2 + img
-			# 160 + spacing 2 + bottom 18 = 210). Sin esto el splitter lo estiraba y
-			# la fila inferior se desalineaba vs la 1ra etapa.
-			self.setFixedHeight(210)
+			# Altura fija = grilla 3×2 (title 20 + spacing 2 + img 160 + spacing 2 +
+			# bottom 18 = 202) + fila ROI intestinal debajo (~30). Sin margen para la
+			# fila ROI, Slice/Gate se comprimía DENTRO de la imagen; con 234 queda
+			# afuera (debajo) igual que la etapa Esfuerzo. AlignTop evita estiramiento.
+			self.setFixedHeight(234)
 		self.setSizePolicy(self.sizePolicy().horizontalPolicy(), self.sizePolicy().verticalPolicy())
 		self.set_active_highlight(False)
 		self._refresh_intestinal_apply_button_text()

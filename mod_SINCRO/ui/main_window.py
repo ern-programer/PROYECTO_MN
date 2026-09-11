@@ -2781,7 +2781,7 @@ class MainWindow(QMainWindow):
 		# El segundo visor (cine_compare) ya NO va acá; según el mockup vive al
 		# extremo derecho de la banda inferior (ver bottom_hsplit más abajo).
 		cine_area = QWidget()
-		cine_area.setMinimumWidth(456)  # evita que el splitter comprima las imágenes
+		cine_area.setMinimumWidth(700)  # Esfuerzo + Reposo + columna de controles
 		cine_area_layout = QVBoxLayout(cine_area)
 		cine_area_layout.setContentsMargins(0, 0, 0, 0)
 		cine_area_layout.setSpacing(2)
@@ -4177,7 +4177,7 @@ class MainWindow(QMainWindow):
 		second = self._second_phase_label()
 		if getattr(self, "cine_compare", None) is not None:
 			self.cine_compare.set_phase_title(second)
-			self.cine_compare.set_image_overlay_label(second, color=self._phase_overlay_color(second))
+			self.cine_compare.set_image_overlay_label("")
 		if getattr(self, "cine", None) is not None:
 			try:
 				phase = self._study_context().get("phase", "")
@@ -4185,7 +4185,7 @@ class MainWindow(QMainWindow):
 				phase = ""
 			first = phase if phase in ("Reposo", "Esfuerzo") else "1ra. Fase"
 			self.cine.set_phase_title(first)
-			self.cine.set_image_overlay_label(first, color=self._phase_overlay_color(first))
+			self.cine.set_image_overlay_label("")
 
 	@staticmethod
 	def _phase_overlay_color(label: str) -> str:
@@ -8177,19 +8177,8 @@ class MainWindow(QMainWindow):
 		)
 
 	def _stamp_export_figure(self, fig, cine_widget: CineWidget | None = None):
-		try:
-			fig.text(
-				0.995,
-				0.004,
-				self._intestinal_export_stamp_text(cine_widget),
-				ha="right",
-				va="bottom",
-				fontsize=7.2,
-				color="#f8fafc",
-				bbox=dict(boxstyle="round,pad=0.22", facecolor="black", edgecolor="#334155", alpha=0.60),
-			)
-		except Exception:
-			pass
+		# Sello de estado del ROI intestino desactivado: no se estampa en los PNG.
+		return
 
 	def _annotate_phase_metrics(self, metrics: dict, phase_result, amp_filter: float, label: str) -> dict:
 		out = dict(metrics or {})
@@ -10965,8 +10954,7 @@ class MainWindow(QMainWindow):
 			color=style["fg"], fontsize=12.5, fontweight="bold",
 		)
 		legend = (
-			"Borde dorado = segmento de activación más tardía (fase máxima).   "
-			"Viabilidad por % del máximo segmentario: ≥70% viable · 50–70% dudosa · <50% no viable."
+			"Borde dorado = segmento de activación más tardía (fase máxima)."
 		)
 		if dual:
 			legend += "   Δfase = esfuerzo − reposo (circular)."
@@ -19708,6 +19696,12 @@ class MainWindow(QMainWindow):
 			# Render en memoria (numpy RGB + QPainter): sin matplotlib ni PNG en cada cambio.
 			pix = self._composite_montage_pixmap(rows_data, int(cols), montage_cmap, suptitle, ref_views=ref_views)
 			self.cine_crudo_preview_mode = "sa_montage"
+			# Al ENTRAR al montaje, restaurar el zoom por defecto configurado (la
+			# pantalla de markers lo fuerza a 40%). Solo en la transición de modo:
+			# los re-renders por interacción conservan el zoom que fijó el usuario.
+			if getattr(self, "_last_cine_crudo_preview_mode", None) != "sa_montage":
+				self.preview_zoom["comparacion_ejes"] = self._default_preview_zoom("comparacion_ejes")
+			self._last_cine_crudo_preview_mode = "sa_montage"
 			# Firma del estado ya renderizado: al reentrar no se re-renderiza si no cambió.
 			self._montage_last_signature = self._montage_signature()
 			# Escribir sa_montage.png solo en HQ (reload al cambiar de pestaña y "Guardar PNG").

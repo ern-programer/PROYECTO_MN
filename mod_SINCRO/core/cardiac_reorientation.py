@@ -392,6 +392,11 @@ LV_AXIS_PRIOR = np.array([0.3627, 0.7804, 0.5094]) / np.linalg.norm([0.3627, 0.7
 # dentro del ruido de trazado manual (~±8° entre sesiones del mismo operador).
 LV_PRIOR_CONE_DEG = 6.0
 
+# Margen de seguridad de la VOI elíptica: agranda los semiejes ~15% respecto al
+# ajuste ceñido al movimiento del gated, para no recortar pared/ápex cuando el
+# corazón queda justo en el borde de la elipse.
+LV_VOI_SAFETY_MARGIN = 1.15
+
 
 def auto_orient_lv(gated_cube, ungated_volume=None):
     """Detecta el VI automáticamente: prior anatómico + movimiento gated.
@@ -481,9 +486,9 @@ def auto_orient_lv(gated_cube, ungated_volume=None):
     proj = pts @ u
     half = float(1.3 * proj.std())
     half = float(np.clip(half if half > 0 else 6.0, 5.0, 0.5 * max(cube.shape[1:])))
-    rz = float(np.clip(1.6 * zz.std() + 3.0, 6.0, cube.shape[1]))
-    ry = float(np.clip(1.6 * yy.std() + 3.0, 6.0, cube.shape[2]))
-    rx = float(np.clip(1.6 * xx.std() + 3.0, 6.0, cube.shape[3]))
+    rz = float(np.clip(LV_VOI_SAFETY_MARGIN * (1.6 * zz.std() + 3.0), 6.0, cube.shape[1]))
+    ry = float(np.clip(LV_VOI_SAFETY_MARGIN * (1.6 * yy.std() + 3.0), 6.0, cube.shape[2]))
+    rx = float(np.clip(LV_VOI_SAFETY_MARGIN * (1.6 * xx.std() + 3.0), 6.0, cube.shape[3]))
 
     try:  # DIAGNÓSTICO TEMPORAL (quitar): trazar cada paso del eje auto.
         import os as _os
