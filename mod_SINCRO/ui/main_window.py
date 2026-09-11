@@ -1581,12 +1581,9 @@ class MainWindow(QMainWindow):
 		self.log_box.setPlaceholderText("Eventos y advertencias aparecerán aquí.")
 		self.log_box.setToolTip("Mensajes del loader, segmentación y reprocesado.")
 
-		log_box = QGroupBox("Log")
-		log_layout = QVBoxLayout(log_box)
-		log_layout.setContentsMargins(6, 6, 6, 6)
-		log_layout.setSpacing(4)
-		log_layout.addWidget(self.log_box)
-		self._sidebar_layout.addWidget(log_box)
+		# El log ya no vive en el sidebar: se muestra en una consola independiente
+		# (_ensure_log_window) que se abre al clickear la mascota Rockford.
+		self._log_window = None
 		self._sidebar_layout.addStretch(1)
 
 		# Cada caja de opciones del sidebar pasa a ser una sección colapsable:
@@ -4001,7 +3998,7 @@ class MainWindow(QMainWindow):
 	def _log(self, message: str):
 		self.log_box.append(message)
 
-	def _show_fading_notice(self, title: str, body: str, msec: int = 2000):
+	def _show_fading_notice(self, title: str, body: str, msec: int = 2000, variant: str = "info"):
 		"""Aviso flotante no-modal en la zona inferior del sidebar que se
 		desvanece tras ``msec`` ms. Si hay varios, se apilan uno sobre otro."""
 		from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
@@ -4019,9 +4016,14 @@ class MainWindow(QMainWindow):
 		card.setTextFormat(Qt.TextFormat.RichText)
 		card.setWordWrap(True)
 		card.setText(f"<b>{title}</b><br>{body_html}")
+		_palettes = {
+			"info": ("#eef6ff", "#4a90d9", "#1f3b5b"),
+			"success": ("#e9f9ef", "#2e9e58", "#14532d"),
+		}
+		_bg, _border, _fg = _palettes.get(variant, _palettes["info"])
 		card.setStyleSheet(
-			"#fadingNotice { background: #eef6ff; border: 1px solid #4a90d9; border-radius: 8px;"
-			" padding: 9px 11px; color: #1f3b5b; font-size: 11px; }"
+			"#fadingNotice { background: %s; border: 1px solid %s; border-radius: 8px;"
+			" padding: 9px 11px; color: %s; font-size: 11px; }" % (_bg, _border, _fg)
 		)
 		width = max(180, host.width() - 20)
 		card.setFixedWidth(width)
@@ -4432,6 +4434,7 @@ class MainWindow(QMainWindow):
 		self._ui_enable_tooltips = bool(self._ui_settings.value("ui/enable_tooltips", True, type=bool))
 		self._ui_compact_controls = bool(self._ui_settings.value("ui/compact_controls", False, type=bool))
 		self._dual_pipeline_auto_enabled = bool(self._ui_settings.value("pipeline/dual_auto_enabled", True, type=bool))
+		self._trust_localizer_fast_fbp = bool(self._ui_settings.value("trust/localizer_fast_fbp", True, type=bool))
 		src = str(self._ui_settings.value("analysis/perfusion_source", self.PERFUSION_SOURCE_ED))
 		self._perfusion_source = src if src in self.PERFUSION_SOURCE_LABELS else self.PERFUSION_SOURCE_ED
 
@@ -4440,6 +4443,7 @@ class MainWindow(QMainWindow):
 		self._ui_settings.setValue("ui/enable_tooltips", bool(self._ui_enable_tooltips))
 		self._ui_settings.setValue("ui/compact_controls", bool(self._ui_compact_controls))
 		self._ui_settings.setValue("pipeline/dual_auto_enabled", bool(getattr(self, "_dual_pipeline_auto_enabled", True)))
+		self._ui_settings.setValue("trust/localizer_fast_fbp", bool(getattr(self, "_trust_localizer_fast_fbp", True)))
 		self._ui_settings.setValue("analysis/perfusion_source", self.perfusion_source())
 		self._ui_settings.sync()
 
@@ -4913,6 +4917,9 @@ class MainWindow(QMainWindow):
 		tabs.addTab(tab_analisis, "Análisis")
 		tabs.addTab(tab_informe, "Informe")
 		tabs.addTab(tab_investigacion, "Investigación")
+		tab_trust = QWidget()
+		tab_trust_l = QVBoxLayout(tab_trust)
+		tabs.addTab(tab_trust, "TRUST")
 		root.addWidget(tabs)
 
 		# --- Apariencia: selector de tema ---
@@ -5123,6 +5130,28 @@ class MainWindow(QMainWindow):
 		zoom_outer.addWidget(zoom_form_host)
 		tab_interfaz_right.addWidget(zoom_box)
 
+		# --- TRUST: pipeline automático desde crudo ---
+		trust_box = QGroupBox("Pipeline TRUST")
+		trust_l = QVBoxLayout(trust_box)
+		trust_msg = QLabel(
+			"Opciones que aplican SOLO al botón TRUST (pipeline automático desde el "
+			"crudo). No afectan al flujo manual."
+		)
+		trust_msg.setWordWrap(True)
+		trust_msg.setStyleSheet("color:#6b7280; font-size:8pt;")
+		trust_l.addWidget(trust_msg)
+		trust_fast_fbp = QCheckBox("Localizador rápido FBP (B-lite)")
+		trust_fast_fbp.setChecked(bool(getattr(self, "_trust_localizer_fast_fbp", True)))
+		trust_fast_fbp.setToolTip(
+			"Primera reconstrucción (solo para ubicar los markers Base/Ápex) forzada a "
+			"FBP rápido, aunque el método elegido sea OSEM/NÍTIDA. La feta (volumen de "
+			"trabajo) se reconstruye con el método real. Evita correr el método pesado "
+			"dos veces y acelera TRUST."
+		)
+		trust_l.addWidget(trust_fast_fbp)
+		tab_trust_l.addWidget(trust_box)
+		tab_trust_l.addStretch(1)
+
 		# Aplicar el tema en vivo al cambiar el combo (aunque se cancele el diálogo,
 		# ya queda aplicado el tema elegido; se persiste solo al Aceptar).
 		def _on_theme_changed(_idx: int):
@@ -5164,6 +5193,7 @@ class MainWindow(QMainWindow):
 		self._ui_enable_tooltips = bool(enable_tooltips.isChecked())
 		self._ui_compact_controls = bool(compact_controls.isChecked())
 		self._dual_pipeline_auto_enabled = bool(dual_pipeline_auto.isChecked())
+		self._trust_localizer_fast_fbp = bool(trust_fast_fbp.isChecked())
 		self._apply_global_ui_preferences()
 		self._save_global_ui_preferences()
 
@@ -5676,7 +5706,14 @@ class MainWindow(QMainWindow):
 		# Mascota (Rockford) como indicador de actividad: corre mientras procesa.
 		self._progress_gif = QLabel()
 		self._progress_gif.setFixedSize(22, 22)
-		self._progress_gif.setStyleSheet("background: transparent; border: none;")
+		self._progress_gif.setStyleSheet(
+			"QLabel { background: transparent; border: none; }"
+			" QToolTip { background-color: #1e293b; color: #f8fafc;"
+			" border: 1px solid #475569; padding: 3px 6px; }"
+		)
+		self._progress_gif.setCursor(Qt.CursorShape.PointingHandCursor)
+		self._progress_gif.setToolTip("Rockford: clic para abrir la consola de eventos.")
+		self._progress_gif.mousePressEvent = self._on_mascot_clicked
 		self._progress_movie = None
 		gif_path = os.path.join(assets_dir, "rockford-boulder-dash_sidebar.gif")
 		if os.path.exists(gif_path):
@@ -5699,6 +5736,36 @@ class MainWindow(QMainWindow):
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.addWidget(scroll)
 		return sidebar
+
+	def _on_mascot_clicked(self, event):
+		"""Clic en Rockford: abre/enfoca la consola de eventos independiente."""
+		self._ensure_log_window()
+		self._log_window.show()
+		self._log_window.raise_()
+		self._log_window.activateWindow()
+
+	def _ensure_log_window(self):
+		"""Crea (una sola vez) la ventana consola que hospeda ``self.log_box``."""
+		if self._log_window is not None:
+			return
+		win = QDialog(self)
+		win.setWindowTitle("SINCRO · Consola de eventos")
+		win.setModal(False)
+		win.resize(720, 420)
+		lay = QVBoxLayout(win)
+		lay.setContentsMargins(6, 6, 6, 6)
+		lay.setSpacing(4)
+		lay.addWidget(self.log_box)
+		row = QHBoxLayout()
+		btn_clear = QPushButton("Limpiar")
+		btn_clear.clicked.connect(self.log_box.clear)
+		row.addWidget(btn_clear)
+		row.addStretch(1)
+		btn_close = QPushButton("Cerrar")
+		btn_close.clicked.connect(win.hide)
+		row.addWidget(btn_close)
+		lay.addLayout(row)
+		self._log_window = win
 
 	def _browse_file(self):
 		paths = self._select_dicom_paths(
@@ -16634,19 +16701,25 @@ class MainWindow(QMainWindow):
 			self._set_active_cine_crudo_stage(stage, refresh_view=False, force=True)
 		return self._reconstruct_cine_crudo_raw()
 
-	def _reconstruct_cine_crudo_raw(self, feta_only: bool = False, _force_stage: str | None = None):
+	def _reconstruct_cine_crudo_raw(self, feta_only: bool = False, _force_stage: str | None = None,
+									force_fbp_localizer: bool = False):
 		"""Reconstruye desde crudo la etapa seleccionada (Esfuerzo=primario / Reposo=secundario).
 
 		``feta_only``: si True, reconstruye SOLO la banda axial (feta) delimitada por
 		los markers Base/Ápex — excluye actividad extracardíaca de arriba/abajo y es
 		más rápido. El volumen resultante es el de trabajo (reorientación/análisis).
+		``force_fbp_localizer``: si True (solo TRUST/B-lite), fuerza FBP rápido en esta
+		recon —usada solo para ubicar los markers—, aunque el método sea OSEM/NÍTIDA.
 		"""
 		if _force_stage is None:
 			stages = self._cine_crudo_target_stages()
 			if len(stages) > 1:
 				return self._run_cine_crudo_stage_orchestrator(
 					"Recon raw",
-					lambda stage: self._reconstruct_cine_crudo_raw(feta_only=feta_only, _force_stage=stage),
+					lambda stage: self._reconstruct_cine_crudo_raw(
+						feta_only=feta_only, _force_stage=stage,
+						force_fbp_localizer=force_fbp_localizer,
+					),
 				)
 			_force_stage = stages[0]
 		if _force_stage:
@@ -16672,6 +16745,19 @@ class MainWindow(QMainWindow):
 			angles = getattr(raw_study, "angles_deg", None)
 			cfg = self._cine_crudo_recon_config(raw_study)
 			cfg = self._apply_stage_iter_overrides(cfg, stage)
+			if force_fbp_localizer:
+				# B-lite (TRUST): esta recon solo ubica los markers Base/Ápex, así que
+				# se fuerza FBP rápido y se apagan RR/NÍTIDA/denoisers. El método real
+				# del usuario se aplica después en la recon de la feta.
+				from dataclasses import replace as _dc_replace
+				cfg = _dc_replace(
+					cfg, reconstruction_method="fbp", gated_method="fbp",
+					resolution_recovery=False, rr_ungated=False, rr_gated=False,
+					psf_model=None, nitida2_mode="none", nitida3_enabled=False,
+					nitida4d_enabled=False,
+				)
+				self._use_adjoint_osem = False
+				self._log("[TRUST][B-lite] Localizador rápido: recon FBP solo para ubicar Base/Ápex.")
 			feta_txt = ""
 			if feta_only:
 				# La feta se define con los markers Base/Ápex de ESTA pantalla, que
@@ -17111,8 +17197,11 @@ class MainWindow(QMainWindow):
 	def _cine_crudo_cut_bounds(self, n_slices: int) -> tuple[int, int]:
 		stage = getattr(self, "_cine_crudo_recon_stage", "stress")
 		base, apex = self._cine_crudo_stage_limits_get(stage, int(n_slices))
-		z0 = int(np.clip(min(base, apex) - 1, 0, max(0, int(n_slices) - 1)))
-		z1 = int(np.clip(max(base, apex) - 1, 0, max(0, int(n_slices) - 1)))
+		# Margen de seguridad: 2 cortes extra hacia cada extremo (base y ápex)
+		# para no recortar miocardio si el marker quedó justo sobre la pared.
+		margin = 2
+		z0 = int(np.clip(min(base, apex) - 1 - margin, 0, max(0, int(n_slices) - 1)))
+		z1 = int(np.clip(max(base, apex) - 1 + margin, 0, max(0, int(n_slices) - 1)))
 		if z1 <= z0:
 			z1 = min(max(0, int(n_slices) - 1), z0 + 1)
 		return z0, z1
@@ -18124,7 +18213,11 @@ class MainWindow(QMainWindow):
 		except Exception:
 			pass
 		# 1 · PROCESAR: recon raw base (FBP) para tener las líneas Base/Ápex.
-		if self._reconstruct_cine_crudo_raw() is False:
+		# B-lite: si está activo en Configuración → TRUST, este localizador se
+		# fuerza a FBP rápido (el método real se aplica en la feta del paso 2).
+		if self._reconstruct_cine_crudo_raw(
+			force_fbp_localizer=bool(getattr(self, "_trust_localizer_fast_fbp", True))
+		) is False:
 			self._log("[TRUST] Detenido: falló Recon raw.")
 			return
 		# 2 · RECONSTRUIR y FILTRAR: feta axial entre Base/Ápex.
@@ -18153,6 +18246,7 @@ class MainWindow(QMainWindow):
 			self._show_fading_notice(
 				"TRUST completado",
 				"Pipeline automático desde crudo finalizado.\n1·Procesar → 2·Reconstruir → 3·Reorientar → 4·Procesar",
+				variant="success",
 			)
 		except Exception:
 			pass
