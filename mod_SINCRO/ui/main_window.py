@@ -4019,6 +4019,7 @@ class MainWindow(QMainWindow):
 		_palettes = {
 			"info": ("#eef6ff", "#4a90d9", "#1f3b5b"),
 			"success": ("#e9f9ef", "#2e9e58", "#14532d"),
+			"warning": ("#fff4e5", "#e07b00", "#7c3a00"),
 		}
 		_bg, _border, _fg = _palettes.get(variant, _palettes["info"])
 		card.setStyleSheet(
@@ -4996,6 +4997,69 @@ class MainWindow(QMainWindow):
 		self._cfg_polar_box.setVisible(True)
 		tab_analisis_l.addWidget(self._cfg_polar_box)
 
+		# --- BD de normales del eje del VI (auto-orientación) ---
+		normals_box = QGroupBox("BD de normales — eje del VI (auto-orientación)")
+		normals_l = QVBoxLayout(normals_box)
+		normals_msg = QLabel(
+			"Cada reorientación que aceptás queda registrada como caso normal. "
+			"Con más casuística, el prior anatómico de la auto-orientación se "
+			"recalibra a TU población y equipo (mejora la puntería del eje)."
+		)
+		normals_msg.setWordWrap(True)
+		normals_msg.setStyleSheet("color:#6b7280; font-size:8pt;")
+		normals_l.addWidget(normals_msg)
+		normals_record = QCheckBox("Registrar mis correcciones (Aplicar) en la BD de normales")
+		normals_record.setChecked(bool(self._ui_settings.value("normals/record_axis", True, type=bool)) if hasattr(self, "_ui_settings") else True)
+		normals_l.addWidget(normals_record)
+		try:
+			from core import axis_normals as _axn
+			from core.cardiac_reorientation import LV_AXIS_PRIOR as _prior_default
+			_n_axis = _axn.count_cases()
+			_cal = _axn.calibrated_prior()
+		except Exception:
+			_axn = None
+			_n_axis, _cal = 0, None
+		_prior_txt = (
+			f"calibrado local {_cal}" if _cal is not None
+			else f"de fábrica {[round(float(v), 3) for v in _prior_default]}"
+		) if _axn is not None else "N/D"
+		normals_info = QLabel(f"Casos acumulados: {_n_axis} · Prior actual: {_prior_txt}")
+		normals_info.setStyleSheet("color:#6b7280; font-size:8pt;")
+		normals_info.setWordWrap(True)
+		normals_l.addWidget(normals_info)
+
+		def _recalibrate_axis_prior():
+			if _axn is None:
+				return
+			prior, n = _axn.recalibrate(min_cases=3)
+			if prior is None:
+				QMessageBox.information(dlg, "BD de normales", f"Se necesitan al menos 3 casos (hay {n}).")
+				return
+			normals_info.setText(f"Casos acumulados: {n} · Prior actual: calibrado local {prior}")
+			self._log(f"[NORMALES] Prior del eje recalibrado con {n} casos: {prior}")
+
+		def _reset_axis_prior():
+			if _axn is None:
+				return
+			_axn.reset_prior()
+			normals_info.setText(
+				f"Casos acumulados: {_axn.count_cases()} · Prior actual: de fábrica "
+				f"{[round(float(v), 3) for v in _prior_default]}"
+			)
+			self._log("[NORMALES] Prior del eje restaurado al de fábrica.")
+
+		normals_btns = QHBoxLayout()
+		normals_recal_btn = QPushButton("Recalibrar prior con mis casos")
+		normals_recal_btn.setToolTip("Recalcula el prior anatómico como media de todos los ejes que validaste (mínimo 3 casos).")
+		normals_recal_btn.clicked.connect(_recalibrate_axis_prior)
+		normals_reset_btn = QPushButton("Restaurar prior de fábrica")
+		normals_reset_btn.setToolTip("Vuelve al prior por defecto sin borrar los casos acumulados.")
+		normals_reset_btn.clicked.connect(_reset_axis_prior)
+		normals_btns.addWidget(normals_recal_btn)
+		normals_btns.addWidget(normals_reset_btn)
+		normals_l.addLayout(normals_btns)
+		tab_analisis_l.addWidget(normals_box)
+
 		# --- Escalas de color de las imágenes del informe ---
 		# El grid (16 combos) vive en self._report_cmap_box; se aloja acá dentro de
 		# un scroll y se saca del diálogo al cerrar para que no se destruya con él.
@@ -5212,6 +5276,7 @@ class MainWindow(QMainWindow):
 			settings.setValue("integrity/hash_max_days", int(hash_max_days.value()))
 			settings.setValue("research/show_experimental", bool(show_experimental.isChecked()))
 			settings.setValue("research/collect_data", bool(collect_data.isChecked()))
+			settings.setValue("normals/record_axis", bool(normals_record.isChecked()))
 			settings.sync()
 
 		# Zoom por defecto de cada pestaña.
@@ -6165,20 +6230,18 @@ class MainWindow(QMainWindow):
 					self._log(f"Ventanas de scatter detectadas en ambas etapas: stress={sc_name_top} | rest={sc_name_bot}{_k_msg}.")
 				else:
 					self._log(f"Ventana de scatter detectada: {sc_name_top if _sc is not None else sc_name_bot} (misma geometría que EM){_k_msg}.")
-				ans = QMessageBox.question(
-					self, "SINCRO — Scatter EM/SC",
-					(
-						"Se detectó SCATTER hermano en la(s) etapa(s) crudas:\n"
-						f"• Stress: {sc_name_top}\n"
-						f"• Rest: {sc_name_bot}\n\n"
-						"¿Usarlo para la corrección de scatter en la reconstrucción?\n"
-						"(P = EM − k×SC, pre-recon. Podés cambiarlo con el checkbox 'Desc. SC'.)"
+				# Se USA scatter por defecto (mejor física); en vez de un modal se avisa
+				# en el sidebar en naranja durante 3 s y se explica cómo desactivarlo.
+				self.cine_crudo_scatter_check.setChecked(True)
+				try:
+					self._show_fading_notice(
+						"Corrección de scatter activada",
+						"Se usará SC en la reconstrucción (P = EM − k×SC).\n"
+						"Para desactivarla, destildá 'Desc. SC' en el panel de filtros.",
+						msec=5000, variant="warning",
 					)
-					,
-					QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-					QMessageBox.StandardButton.Yes,
-				)
-				self.cine_crudo_scatter_check.setChecked(ans == QMessageBox.StandardButton.Yes)
+				except Exception:
+					pass
 			else:
 				self.cine_crudo_scatter_check.setEnabled(False)
 				self.cine_crudo_scatter_check.setChecked(False)

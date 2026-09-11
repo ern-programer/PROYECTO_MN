@@ -1386,6 +1386,39 @@ class CardiacReorientationDialog(QDialog):
     def _accept(self):
         u = self._long_axis_vector()
         center = self._voi_center()
+        try:  # DEBUG temporal: capturar eje AUTO vs eje MANUAL (ground truth).
+            import os as _osgt
+            _ua = None if self._auto is None else np.asarray(self._auto["long_axis"], float)
+            _um = np.asarray(u, float)
+
+            def _tilt(v):
+                return float(np.degrees(np.arctan2(float(np.hypot(v[1], v[2])), abs(float(v[0])) + 1e-9)))
+
+            _lines = ["\n=== APLICAR (ground truth) ===\n"]
+            if _ua is not None:
+                _d = abs(float(np.dot(_ua, _um)))
+                _err = float(np.degrees(np.arccos(min(1.0, _d))))
+                _lines.append(f"  AUTO   u={np.round(_ua,4).tolist()} tilt={_tilt(_ua):.1f}\n")
+                _lines.append(f"  ERROR auto vs manual = {_err:.1f} grados\n")
+            _lines.append(f"  MANUAL u={np.round(_um,4).tolist()} tilt={_tilt(_um):.1f}\n")
+            _lines.append(f"  center={tuple(round(float(v),1) for v in center)}  base_k={self._base_k} apex_k={self._apex_k}\n")
+            _lines.append(f"  flip_ap={self._preset_flip_ap} invert_ll={self._preset_invert_ll_handles} post_ops={self._post_ops} fine(sa,hla,vla)=({self._fine_rot_sa},{self._fine_rot_hla},{self._fine_rot_vla})\n")
+            with open(_osgt.path.join(_osgt.path.dirname(_osgt.path.dirname(_osgt.path.abspath(__file__))), "_ground_truth.log"), "a", encoding="utf-8") as _fh:
+                _fh.writelines(_lines)
+        except Exception:
+            pass
+        try:  # BD de normales: registrar el eje validado (si está habilitado).
+            from PyQt6.QtCore import QSettings
+            if QSettings("Gammasys", "GammaSync").value("normals/record_axis", True, type=bool):
+                from core.axis_normals import record_case
+                record_case(
+                    u,
+                    auto_axis=None if self._auto is None else self._auto["long_axis"],
+                    center=center,
+                    stage=str(getattr(self, "_stage_label", "") or ""),
+                )
+        except Exception:
+            pass
         out, sample_scale = self._reformat_out_and_scale()
         self.result_long_axis = u
         self.result_center = center

@@ -377,26 +377,44 @@ def _ungated_shell_axis(ungated_volume, center, radius, u_ref):
     return us
 
 
+# Prior anatómico del eje largo del VI (base→ápex) en (z, y, x), paciente
+# supino, convención de la reconstrucción propia de SINCRO. Es la media de 9
+# ground-truths manuales (stress+rest, 2026-09) cuya dispersión inter-paciente
+# fue ≤ ~10°: el eje real del VI varía POCO entre pacientes, mientras que el
+# PCA del movimiento gated variaba 20-90°. El refinamiento por circularidad se
+# ancla a este prior (no al PCA) y personaliza dentro de un cono estrecho.
+LV_AXIS_PRIOR = np.array([0.3627, 0.7804, 0.5094]) / np.linalg.norm([0.3627, 0.7804, 0.5094])
+
+# Cono de personalización alrededor del prior. Validado contra ground-truth:
+# el mínimo de excentricidad NO coincide con el eje real (converge a un
+# atractor propio y se clava en el borde del cono), así que el cono acota el
+# DAÑO máximo del refinamiento, no solo su alcance. Con 6° el peor caso queda
+# dentro del ruido de trazado manual (~±8° entre sesiones del mismo operador).
+LV_PRIOR_CONE_DEG = 6.0
+
+
 def auto_orient_lv(gated_cube, ungated_volume=None):
-    """Detecta el VI automáticamente usando el movimiento del gated SPECT.
+    """Detecta el VI automáticamente: prior anatómico + movimiento gated.
 
     El miocardio se contrae/relaja una vez por ciclo cardíaco, así que su
     señal temporal entre gates tiene un primer armónico (1x/ciclo) fuerte.
     El hígado permanece estático y el intestino muy captante solo aporta
     ruido de Poisson (crece con sqrt(cuentas), sin oscilación coherente).
     La amplitud del primer armónico |FFT[1]| por vóxel aísla así el VI
-    incluso cuando hay actividad intestinal que "roba" cuentas; usar la
-    desviación estándar temporal en su lugar dejaba entrar ese ruido y
-    descentraba la VOI hacia el intestino.
+    incluso cuando hay actividad intestinal que "roba" cuentas.
 
-    A partir de la máscara de movimiento se estima:
-    - ``center`` (z, y, x): centro de masa ponderado por movimiento,
-    - ``long_axis`` (z, y, x): autovector principal (PCA ponderado) = eje largo,
-    - ``semiaxes`` (z, y, x): semiejes de la VOI elíptica que envuelve el VI,
-    - ``half_length``: media longitud sugerida para la línea del eje largo.
+    Del movimiento se estima el CENTRO y el tamaño de la VOI. Para el EJE, en
+    cambio, el PCA de la nube de movimiento demostró ser inestable (errores de
+    20-90° vs. eje manual según la reconstrucción), mientras que el eje manual
+    real varía ≤ ~10° entre pacientes. Por eso el eje parte del prior anatómico
+    ``LV_AXIS_PRIOR`` y se personaliza maximizando la circularidad de los
+    anillos SA dentro de un cono de ±``LV_PRIOR_CONE_DEG``. El signo base→ápex
+    queda definido por el prior (elimina las heurísticas de signo, que eran la
+    principal fuente de ejes invertidos).
 
-    El signo base→ápex se resuelve heurísticamente (el ápex apunta hacia afuera
-    del centro del cuerpo). Devuelve ``None`` si no hay gated utilizable.
+    Devuelve dict con ``center``, ``long_axis``, ``semiaxes``, ``half_length``
+    o ``None`` si no hay gated utilizable. ``ungated_volume`` se acepta por
+    compatibilidad (ya no se usa para el eje).
     """
     if gated_cube is None:
         return None
@@ -442,33 +460,23 @@ def auto_orient_lv(gated_cube, ungated_volume=None):
     pts = np.stack([zz - cz, yy - cy, xx - cx], axis=1)
     cov = (pts.T * wv) @ pts / sw
     evals, evecs = np.linalg.eigh(cov)
-    u = np.asarray(evecs[:, -1], dtype=np.float64)  # mayor autovalor = eje largo
-    nrm = float(np.linalg.norm(u))
-    u = u / (nrm if nrm > 0 else 1.0)
+    _diag_u_pca = np.asarray(evecs[:, -1], dtype=np.float64)  # solo diagnóstico
+    _diag_u_pca = _diag_u_pca / (float(np.linalg.norm(_diag_u_pca)) or 1.0)
 
-    # Refinamiento por circularidad: el PCA de máxima varianza queda
-    # subinclinado (se pega al eje axial) cuando la nube del VI está poco
-    # elongada. Ajustar el eje para que los anillos SA sean circulares corrige
-    # esa inclinación insuficiente sin depender de autovalores degenerados.
-    u = _refine_long_axis_circularity(pts, wv, u)
-
-    # Signo base→ápex: primario = geometría del VI (se afina hacia el ápex).
-    # El ungated (centro del cuerpo) solo desempata si el taper/masa dan empate,
-    # porque el hígado/intestino captantes sesgan ese centro y da signos errados.
-    s = _resolve_apex_sign(pts, wv, u)
-    if s != 0:
-        if s < 0:
-            u = -u
-    elif ungated_volume is not None:
-        vol = np.asarray(ungated_volume, dtype=np.float64)
-        tot = float(vol.sum())
-        if tot > 0:
-            zc = float((vol.sum(axis=(1, 2)) * np.arange(vol.shape[0])).sum() / tot)
-            yc = float((vol.sum(axis=(0, 2)) * np.arange(vol.shape[1])).sum() / tot)
-            xc = float((vol.sum(axis=(0, 1)) * np.arange(vol.shape[2])).sum() / tot)
-            to_apex = np.array([cz - zc, cy - yc, cx - xc], dtype=np.float64)
-            if float(np.dot(u, to_apex)) < 0:
-                u = -u
+    # Eje: refinamiento por circularidad ANCLADO AL PRIOR ANATÓMICO (no al PCA).
+    # El prior fija hemisferio y signo base→ápex; la circularidad personaliza
+    # dentro del cono estrecho según la anatomía real del paciente. Si el sitio
+    # calibró su propia BD de normales (core.axis_normals), se usa ese prior.
+    prior = LV_AXIS_PRIOR
+    try:
+        from core.axis_normals import get_prior as _get_prior
+        prior = _get_prior(LV_AXIS_PRIOR)
+    except Exception:
+        pass
+    u = _refine_long_axis_circularity(pts, wv, prior, max_deg=LV_PRIOR_CONE_DEG)
+    if float(np.dot(u, prior)) < 0:
+        u = -u
+    _diag_u_circ = u.copy()
 
     proj = pts @ u
     half = float(1.3 * proj.std())
@@ -477,19 +485,38 @@ def auto_orient_lv(gated_cube, ungated_volume=None):
     ry = float(np.clip(1.6 * yy.std() + 3.0, 6.0, cube.shape[2]))
     rx = float(np.clip(1.6 * xx.std() + 3.0, 6.0, cube.shape[3]))
 
-    # Signo del tilt en x: la PCA del movimiento gated deja indeterminado el
-    # signo de u[2] (reflexión en el plano y-z de una nube casi simétrica) y se
-    # da vuelta según la reconstrucción. La cáscara de perfusión ungated es
-    # estable en ese signo: si discrepan, se refleja u en x (conserva uz,uy y la
-    # magnitud del tilt, solo corrige de qué lado cae el ápex → base/ápex en AP).
-    if ungated_volume is not None:
-        u_shell = _ungated_shell_axis(
-            ungated_volume, (cz, cy, cx), 1.3 * max(rz, ry, rx) + 4.0, u
-        )
-        if u_shell is not None and abs(float(u_shell[2])) > 1e-3:
-            if np.sign(u[2]) != np.sign(u_shell[2]):
-                u = u.copy()
-                u[2] = -u[2]
+    try:  # DIAGNÓSTICO TEMPORAL (quitar): trazar cada paso del eje auto.
+        import os as _os
+        import datetime as _dt
+
+        def _r(v):
+            return None if v is None else np.round(np.asarray(v, float), 4).tolist()
+
+        def _ang(a, b):
+            if a is None or b is None:
+                return None
+            d = abs(float(np.dot(np.asarray(a, float), np.asarray(b, float))))
+            return round(float(np.degrees(np.arccos(min(1.0, d)))), 1)
+
+        ecc_pca = _perp_eccentricity(pts, wv, sw, _diag_u_pca)
+        ecc_prior = _perp_eccentricity(pts, wv, sw, prior)
+        ecc_circ = _perp_eccentricity(pts, wv, sw, _diag_u_circ)
+        ev = np.sort(np.asarray(evals, float))[::-1]
+        elong = float(ev[0] / (ev[1] + 1e-9))
+        _lines = [
+            f"\n=== auto_orient_lv(prior) {_dt.datetime.now():%H:%M:%S} ===\n",
+            f"  cube={tuple(int(x) for x in cube.shape)} nvox_mask={len(zz)} mmax={mmax:.3g}\n",
+            f"  center=({cz:.1f},{cy:.1f},{cx:.1f}) semiaxes=({rz:.1f},{ry:.1f},{rx:.1f})\n",
+            f"  evals={np.round(ev,2).tolist()} elong(l1/l2)={elong:.2f}\n",
+            f"  u_pca ={_r(_diag_u_pca)} ecc={ecc_pca:.3f} (solo referencia)\n",
+            f"  prior ={_r(prior)} ecc={ecc_prior:.3f}\n",
+            f"  u_final={_r(u)} ecc={ecc_circ:.3f} ang_prior->final={_ang(prior, u)}\n",
+        ]
+        _log = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "_auto_axis_diag.log")
+        with open(_log, "a", encoding="utf-8") as _fh:
+            _fh.writelines(_lines)
+    except Exception:
+        pass
 
     return {
         "center": (cz, cy, cx),
