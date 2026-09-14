@@ -10,7 +10,9 @@ from core.stress_rest import (
     compare_stress_rest,
     compare_territories,
     transient_ischemic_dilation,
+    perfusion_transient_ischemic_dilation,
     TID_GATED_SOFT_CUTOFF,
+    TID_PERFUSION_SOFT_CUTOFF,
 )
 
 
@@ -126,3 +128,37 @@ def test_tid_incluido_en_compare_stress_rest():
     )
     assert out["tid"]["available"] is True
     assert abs(out["tid"]["ratio"] - 1.2) < 1e-9
+
+
+def test_tid_perfusion_ratio_esfuerzo_sobre_reposo():
+    out = perfusion_transient_ischemic_dilation(130.0, 100.0)
+    assert out["available"] is True
+    assert abs(out["ratio"] - 1.30) < 1e-9
+    assert out["stress_cavity_ml"] == 130.0
+    assert out["rest_cavity_ml"] == 100.0
+    assert out["elevated"] is True  # 1.30 >= cutoff
+    assert out["method"] == "perfusion_cavity_ratio"
+
+
+def test_tid_perfusion_no_elevado_bajo_cutoff():
+    out = perfusion_transient_ischemic_dilation(100.0, 100.0)
+    assert out["available"] is True
+    assert out["elevated"] is False
+    assert out["soft_cutoff"] == TID_PERFUSION_SOFT_CUTOFF
+
+
+def test_tid_perfusion_cavidad_invalida_no_disponible():
+    assert perfusion_transient_ischemic_dilation(None, 100.0)["available"] is False
+    assert perfusion_transient_ischemic_dilation(100.0, 0.0)["available"] is False
+    assert perfusion_transient_ischemic_dilation(float("nan"), 100.0)["available"] is False
+
+
+def test_tid_perfusion_incluido_en_compare_stress_rest():
+    stress = _metrics(45.0, 80.0, 4.5, 70.0, 12.0, 100.0)
+    rest = _metrics(35.0, 60.0, 4.0, 62.0, 8.0, 100.0)
+    out = compare_stress_rest(
+        stress, rest,
+        stress_cavity_ungated_ml=150.0, rest_cavity_ungated_ml=120.0,
+    )
+    assert out["tid_perfusion"]["available"] is True
+    assert abs(out["tid_perfusion"]["ratio"] - 1.25) < 1e-9

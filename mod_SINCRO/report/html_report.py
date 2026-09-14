@@ -715,6 +715,27 @@ def generate_html_report(
                 f"{float(tid['stress_edv_ml']):.0f}/{float(tid['rest_edv_ml']):.0f} mL — {tnote}</div>"
                 "</div>"
             )
+        tid_p = stress_rest.get("tid_perfusion") or {}
+        if tid_p.get("available"):
+            ratio_p = float(tid_p["ratio"])
+            cutoff_p = float(tid_p.get("soft_cutoff", 1.22))
+            elevated_p = bool(tid_p.get("elevated"))
+            tcolor_p = "var(--accent-red)" if elevated_p else "var(--accent-green)"
+            tnote_p = (
+                f"≥ {cutoff_p:.2f} (umbral orientativo, no diagnóstico): posible isquemia "
+                "extensa/multivaso o de tronco. Correlacionar con perfusión y clínica."
+                if elevated_p
+                else f"&lt; {cutoff_p:.2f} (umbral orientativo): sin dilatación transitoria "
+                "significativa por este parámetro."
+            )
+            stress_rest_html += (
+                f"<div style='margin:16px 0; padding:12px 16px; border-left:4px solid {tcolor_p};'>"
+                "<div style='font-size:0.9rem; color:var(--fg-muted);'>TID perfusión — cavidad ungated (esfuerzo/reposo)</div>"
+                f"<div style='font-size:1.6rem; font-weight:700; color:{tcolor_p};'>{ratio_p:.2f}</div>"
+                f"<div style='font-size:0.85rem; color:var(--fg);'>Cavidad esfuerzo/reposo = "
+                f"{float(tid_p['stress_cavity_ml']):.0f}/{float(tid_p['rest_cavity_ml']):.0f} mL — {tnote_p}</div>"
+                "</div>"
+            )
 
     # --- Cuantificación relativa de perfusión (AHA 17) ---
     perfusion_quant_html = ""
@@ -844,6 +865,11 @@ def generate_html_report(
     guia_tag = _img_tag(os.path.join(output_dir, "guia_fase_vi.png"), "Guía para fase VI", "featured-img")
     if guia_tag:
         visual_sections.append(f'<div class="featured" style="max-height:1400px;">{guia_tag}<div class="caption">Guía para fase VI: bull\'s-eye doble (fase + perfusión/viabilidad) y tabla segmentaria AHA-17.</div></div>')
+
+    # Panel TID dedicado (semáforo gatillado + perfusión y comparación de cavidades).
+    tid_tag = _img_tag(os.path.join(output_dir, "tid.png"), "TID — Dilatación isquémica transitoria", "featured-img")
+    if tid_tag:
+        visual_sections.append(f'<div class="featured" style="max-height:1200px;">{tid_tag}<div class="caption">TID — Dilatación isquémica transitoria: TID gatillado (cociente EDV) y TID de perfusión clásico (cociente de cavidad ungated) con semáforo, más comparación visual de cavidades esfuerzo/reposo. Orientativo, no diagnóstico.</div></div>')
 
     # Vistas 3D (si fueron capturadas).
     td3d_gif = _gif_tag(os.path.join(output_dir, "3d_rotation.gif"), "Reconstrucción 3D rotación")

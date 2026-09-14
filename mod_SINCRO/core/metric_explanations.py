@@ -151,6 +151,31 @@ _EXPLANATIONS: dict[str, dict[str, str]] = {
         ),
         "reference": "TID en SPECT de perfusión (marcador pronóstico); variante gatillada por EDV ratio.",
     },
+    "tid_perfusion": {
+        "title": "TID perfusión — Dilatación Isquémica Transitoria (clásica, ungated)",
+        "short": "Cociente del tamaño de cavidad esfuerzo/reposo sobre imágenes sumadas; elevado sugiere isquemia extensa.",
+        "what": (
+            "Es el TID clásico de la literatura: compara el tamaño de la cavidad "
+            "del ventrículo izquierdo entre esfuerzo y reposo, medido sobre las "
+            "imágenes de perfusión NO gatilladas (sumadas). Una cavidad mayor en "
+            "esfuerzo (TID elevado) puede reflejar isquemia extensa (enfermedad "
+            "multivaso o de tronco) o dilatación subendocárdica difusa."
+        ),
+        "how": (
+            "Se suman los gates (ungate) y se mide el tamaño de cavidad con la "
+            "geometría ECTb sin engrosamiento, en esfuerzo y reposo: TID = "
+            "cavidad_esfuerzo / cavidad_reposo. El volumen absoluto tiene un sesgo "
+            "sistemático (espesor de pared fijo) pero al ser un cociente del mismo "
+            "método el sesgo se cancela. No mezclar con volúmenes gatillados ni por TC."
+        ),
+        "units": "Cociente adimensional (esfuerzo/reposo).",
+        "cutoffs": (
+            "Orientativo (NO diagnóstico): el TID clásico ungated suele citarse "
+            "~≥1.22. Depende de protocolo, cámara y población: interpretar con la "
+            "perfusión y la clínica."
+        ),
+        "reference": "TID clásico en SPECT de perfusión sobre imágenes ungated (marcador pronóstico).",
+    },
 }
 
 

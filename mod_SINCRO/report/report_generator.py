@@ -431,6 +431,26 @@ def generate_report(
 					)
 				story.append(Paragraph(tid_txt, body_style))
 				story.append(Spacer(1, 2 * mm))
+			tid_p = stress_rest.get("tid_perfusion") or {}
+			if tid_p.get("available"):
+				ratio_p = float(tid_p["ratio"])
+				cutoff_p = float(tid_p.get("soft_cutoff", 1.22))
+				tid_p_txt = (
+					f"<b>TID perfusión — cavidad ungated (esfuerzo/reposo): {ratio_p:.2f}</b> "
+					f"(cavidad esfuerzo/reposo = {float(tid_p['stress_cavity_ml']):.0f}/{float(tid_p['rest_cavity_ml']):.0f} mL). "
+				)
+				if tid_p.get("elevated"):
+					tid_p_txt += (
+						f"Ratio &gt;= {cutoff_p:.2f} (umbral orientativo, no diagnóstico): posible isquemia "
+						"extensa/multivaso o de tronco; correlacionar con perfusión y clínica."
+					)
+				else:
+					tid_p_txt += (
+						f"Ratio &lt; {cutoff_p:.2f} (umbral orientativo): sin dilatación transitoria "
+						"significativa por este parámetro."
+					)
+				story.append(Paragraph(tid_p_txt, body_style))
+				story.append(Spacer(1, 2 * mm))
 			for note in stress_rest.get("notes", []):
 				story.append(Paragraph(f"• {note}", small_style))
 			story.append(Spacer(1, 3 * mm))
@@ -750,6 +770,7 @@ def generate_report(
 		("ct_fusion_stress.png", "Fusión SPECT/CT en grilla de reconstrucción · Esfuerzo (axial/coronal/sagital)."),
 		("ct_fusion_rest.png", "Fusión SPECT/CT en grilla de reconstrucción · Reposo (axial/coronal/sagital)."),
 		("comparacion_stress_rest.png", "Comparación de disincronía entre estudios (stress vs rest): PSD, BW, Kurtosis, Entropy con Δ e interpretación de stunning."),
+		("tid.png", "TID — Dilatación isquémica transitoria: TID gatillado (cociente EDV) y TID de perfusión clásico (cociente de cavidad ungated) con semáforo, más comparación visual de cavidades esfuerzo/reposo. Orientativo, no diagnóstico."),
 		("curva_tac.png", "Curva de actividad por gate."),
 		("curva_fevi.png", "Curva FEVI preliminar con volumen y derivada."),
 		("histograma_esfuerzo_panel.png", "Histograma de fase · Esfuerzo (pasajero FBP estándar)."),

@@ -101,7 +101,7 @@ USO
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from scipy.ndimage import map_coordinates, median_filter
@@ -611,6 +611,80 @@ def analyze_lv_ectb(
             "(en un ventrículo normal la pared engrosa en sístole)."
         )
     return res
+
+
+def measure_static_cavity_volume_ml(
+    ungated,
+    seg,
+    pixel_mm: tuple[float, float],
+    slice_mm: float,
+    config: "ECTbLVConfig | None" = None,
+) -> dict[str, object]:
+    """Mide el tamaño de la cavidad del VI sobre una imagen de perfusión NO gatillada.
+
+    POR QUÉ
+    -------
+    El TID de perfusión clásico compara el **tamaño de la cavidad** del VI en las
+    imágenes sumadas (ungated) de esfuerzo vs reposo. No hay gates: es una sola
+    imagen estática por estadío. Reutilizamos toda la geometría validada del
+    ECTb (perfiles radiales, sustracción de pared, plano valvular, suavizado)
+    apilando la imagen 3 veces como si fueran 3 gates idénticos y desactivando
+    el cálculo de engrosamiento (``use_thickening=False``). Con eso todos los
+    "gates" dan el mismo volumen y ``edv_ml`` es directamente el volumen de
+    cavidad estático.
+
+    IMPORTANTE
+    ----------
+    El espesor de pared telediastólico es un valor **fijo** (10 mm por defecto),
+    así que este volumen tiene un sesgo sistemático. Eso NO invalida el TID:
+    como el MISMO método se aplica a esfuerzo y reposo, el sesgo se cancela en
+    el cociente esfuerzo/reposo. No mezclar este volumen con EDV gatillado.
+
+    Parámetros
+    ----------
+    ungated : ndarray
+        Imagen de perfusión sumada. Acepta ``(n_slices, H, W)`` o
+        ``(1, n_slices, H, W)``.
+    seg : SegmentationResult
+        Segmentación del miocardio (misma que usa el ECTb gatillado).
+    pixel_mm : (float, float)
+        Tamaño de píxel en el plano (fila, columna) en mm.
+    slice_mm : float
+        Separación entre cortes en mm.
+    config : ECTbLVConfig, opcional
+        Config base. Se fuerza ``use_thickening=False``.
+
+    Devuelve
+    --------
+    dict con ``available`` (bool) y, si es True, ``cavity_ml`` (float) y
+    ``valid_slices`` (int). Si falla, ``available=False`` y ``reason`` (str).
+    """
+    arr = np.asarray(ungated, dtype=np.float64)
+    if arr.ndim == 4:
+        if arr.shape[0] != 1:
+            return {"available": False, "reason": "La imagen ungated no puede tener gates."}
+        arr = arr[0]
+    if arr.ndim != 3:
+        return {"available": False, "reason": "La imagen ungated debe ser (cortes, alto, ancho)."}
+
+    # Apilar 3 veces: el ECTb exige ≥3 gates. Al ser idénticos, todos los
+    # volúmenes por gate coinciden y edv = esv = volumen de cavidad estático.
+    cube = np.repeat(arr[None, ...], 3, axis=0)
+
+    cfg = replace(config or ECTbLVConfig(), use_thickening=False)
+    try:
+        res = analyze_lv_ectb(cube, seg, pixel_mm, slice_mm, cfg)
+    except Exception as exc:  # noqa: BLE001 - queremos degradar con motivo
+        return {"available": False, "reason": str(exc)}
+
+    if not res.available:
+        return {"available": False, "reason": res.reason}
+
+    return {
+        "available": True,
+        "cavity_ml": float(res.edv_ml),
+        "valid_slices": int(len(res.valid_slices)),
+    }
 
 
 def wall_segmentation_from_ectb(

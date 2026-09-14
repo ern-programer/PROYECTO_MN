@@ -69,7 +69,11 @@ from core.perfusion_texture import (
 	perfusion_texture_by_segment,
 )
 from core.segmental_report import SEGMENT_NAMES, build_segmental_report
-from core.stress_rest import compare_stress_rest, transient_ischemic_dilation
+from core.stress_rest import (
+	compare_stress_rest,
+	transient_ischemic_dilation,
+	perfusion_transient_ischemic_dilation,
+)
 from core.perfusion_quant import perfusion_by_segment, perfusion_quant_summary
 from core.executive_summary import build_executive_summary
 from core.intestinal_subtraction import apply_intestinal_subtraction
@@ -78,6 +82,7 @@ from core.ectb_lv import (
 	ECTbLVConfig,
 	analyze_lv_ectb,
 	convert_ef_pct,
+	measure_static_cavity_volume_ml,
 	wall_segmentation_from_ectb,
 )
 from core.logging_config import get_logger
@@ -576,6 +581,7 @@ class MainWindow(QMainWindow):
 		self._advanced_extra_tab_order = [
 			"bullseye_directo",
 			"guia_fase_vi",
+			"tid",
 			"ungated",
 		]
 
@@ -1611,6 +1617,7 @@ class MainWindow(QMainWindow):
 			"panel_funcional_gated": "PANEL FUNCIONAL GATED",
 			"bullseye_directo": "bullseye_directo",
 			"guia_fase_vi": "Guía para fase VI",
+			"tid": "TID",
 			"ungated": "QC",
 			"cine_crudo": "PROCESAMIENTO",
 		}
@@ -1625,6 +1632,7 @@ class MainWindow(QMainWindow):
 			"panel_funcional_gated": "Panel funcional integrado (ED/ES, fase, amplitud y curvas) para lectura clínica rápida.",
 			"bullseye_directo": "Bull's-eye de perfusión segmentaria AHA (17): resumen compacto de intensidad regional.",
 			"guia_fase_vi": "Guía para fase VI: bull's-eye doble (fase + perfusión/viabilidad) y tabla segmentaria AHA-17 que cruza cuándo se contrae cada segmento con cuánto capta. Si hay estudio de comparación, muestra reposo y esfuerzo con Δfase en una sola imagen.",
+			"tid": "TID — Dilatación isquémica transitoria: compara el tamaño de cavidad del VI entre esfuerzo y reposo. Muestra el TID gatillado (cociente EDV) y el TID de perfusión clásico (cociente de cavidad ungated) con semáforo, la comparación visual de cavidades y una tabla. Requiere estudio de comparación (esfuerzo + reposo).",
 			"ungated": "Desgatillado (UngRaw): suma de todos los gates = perfusión total con máxima estadística. Base para cortes anatómicos y comparación contra RECON del fabricante.",
 			"cine_crudo": "Cine de proyecciones crudas SPECT: revisá el movimiento del paciente entre ángulos antes de reconstruir. Selector gated/UngGat, play/pause, velocidad y frame-by-frame.",
 		}
@@ -1639,6 +1647,7 @@ class MainWindow(QMainWindow):
 			"panel_funcional_gated",
 			"bullseye_directo",
 			"guia_fase_vi",
+			"tid",
 			"ungated",
 			"cine_crudo",
 		]:
@@ -3934,7 +3943,7 @@ class MainWindow(QMainWindow):
 					break
 
 	def _default_preview_tabs(self) -> set[str]:
-		tabs = {"slices_fase", "polar_combo", "delta_combo", "histograma", "comparacion_stress_rest", "ungated"}
+		tabs = {"slices_fase", "polar_combo", "delta_combo", "histograma", "comparacion_stress_rest", "tid", "ungated"}
 		active = self._active_tab_name()
 		if active:
 			tabs.add(active)
@@ -3947,6 +3956,7 @@ class MainWindow(QMainWindow):
 			"delta_combo": ("delta_combo.png",),
 			"histograma": ("histograma.png",),
 			"comparacion_stress_rest": ("comparacion_stress_rest.png",),
+			"tid": ("tid.png",),
 			"comparacion_ejes": ("comparacion_ejes.png",),
 			"curva_fevi": ("curva_fevi.png",),
 			"panel_funcional_gated": ("panel_funcional_gated.png",),
@@ -10246,6 +10256,61 @@ class MainWindow(QMainWindow):
 			return None
 		return state
 
+	def _ungated_cavity_ml(self, study, seg):
+		"""Volumen de cavidad del VI sobre la perfusión ungated (sumada).
+
+		Para el TID de perfusión clásico. Suma los gates (ungate) y mide el
+		tamaño de cavidad con la geometría ECTb, sin engrosamiento. Cachea por
+		identidad de (study, seg) porque el ECTb es pesado y se llama tanto en el
+		resumen en pantalla como en el armado de informes.
+		"""
+		if study is None or seg is None:
+			return None
+		pixel_spacing = getattr(study, "pixel_spacing", None)
+		slice_mm = getattr(study, "z_spacing_mm", None)
+		cube = getattr(study, "cube", None)
+		if not pixel_spacing or slice_mm is None or cube is None:
+			return None
+		cache = getattr(self, "_ungated_cavity_cache", None)
+		if cache is None:
+			cache = self._ungated_cavity_cache = {}
+		key = (id(study), id(seg))
+		if key in cache:
+			return cache[key]
+		try:
+			from core.ungating import ungate
+			ug = ungate(cube)
+			res = measure_static_cavity_volume_ml(
+				ug,
+				seg,
+				(float(pixel_spacing[0]), float(pixel_spacing[1])),
+				float(slice_mm),
+				self.ectb_config(),
+			)
+		except Exception as exc:
+			self._log(f"[WARN] TID perfusión (cavidad ungated) falló: {exc}")
+			res = None
+		val = None
+		if res and res.get("available"):
+			val = float(res["cavity_ml"])
+		cache[key] = val
+		return val
+
+	def _exec_rest_cavity_ml(self):
+		"""Volumen de cavidad ungated de reposo (bundle o StageState) para el TID."""
+		rest_study = rest_seg = None
+		if self.compare_bundle is not None:
+			rest_study = self.compare_bundle.get("study")
+			rest_seg = self.compare_bundle.get("seg")
+		if rest_study is None or rest_seg is None:
+			rstate = self._rest_stage_state()
+			if rstate is not None:
+				rest_study = rest_study or rstate.cut_study
+				rest_seg = rest_seg or rstate.seg
+		if rest_study is None or rest_seg is None:
+			return None
+		return self._ungated_cavity_ml(rest_study, rest_seg)
+
 	def _stress_rest_for_reports(self, ef):
 		"""Comparación stress-rest para informes.
 
@@ -10272,6 +10337,20 @@ class MainWindow(QMainWindow):
 				rest_ef = state.ef or rest_ef
 		if not rest_metrics:
 			return None
+		# TID de perfusión clásico: tamaño de cavidad sobre imágenes ungated.
+		stress_cavity_ml = self._ungated_cavity_ml(self.study, self.seg)
+		rest_cavity_ml = None
+		rest_study = rest_seg = None
+		if self.compare_bundle is not None:
+			rest_study = self.compare_bundle.get("study")
+			rest_seg = self.compare_bundle.get("seg")
+		if rest_study is None or rest_seg is None:
+			rstate = self._rest_stage_state()
+			if rstate is not None:
+				rest_study = rest_study or rstate.cut_study
+				rest_seg = rest_seg or rstate.seg
+		if rest_study is not None and rest_seg is not None:
+			rest_cavity_ml = self._ungated_cavity_ml(rest_study, rest_seg)
 		return compare_stress_rest(
 			self.metrics,
 			rest_metrics,
@@ -10279,6 +10358,8 @@ class MainWindow(QMainWindow):
 			rest_territory,
 			ef,
 			rest_ef,
+			stress_cavity_ungated_ml=stress_cavity_ml,
+			rest_cavity_ungated_ml=rest_cavity_ml,
 		)
 
 	def _compute_perfusion_quant(self):
@@ -10604,6 +10685,31 @@ class MainWindow(QMainWindow):
 							f"    → TID ≥ {float(tid['soft_cutoff']):.2f} (umbral orientativo, no diagnóstico): "
 							"posible isquemia extensa/multivaso; correlacionar con perfusión y clínica."
 						)
+			# TID de perfusión clásico (tamaño de cavidad sobre imágenes ungated).
+			if tid_compare_ef and tid_compare_ef.get("available"):
+				cmp_state = self._rest_stage_state()
+				rest_study_p = rest_seg_p = None
+				if self.compare_bundle is not None:
+					rest_study_p = self.compare_bundle.get("study")
+					rest_seg_p = self.compare_bundle.get("seg")
+				if (rest_study_p is None or rest_seg_p is None) and cmp_state is not None:
+					rest_study_p = rest_study_p or cmp_state.cut_study
+					rest_seg_p = rest_seg_p or cmp_state.seg
+				s_cav = self._ungated_cavity_ml(self.study, self.seg)
+				r_cav = self._ungated_cavity_ml(rest_study_p, rest_seg_p)
+				tid_p = perfusion_transient_ischemic_dilation(s_cav, r_cav)
+				if tid_p.get("available"):
+					cur_lbl = ctx.get("phase", "Esfuerzo")
+					cmp_lbl = self.compare_label or "Reposo"
+					clinical.append(
+						f"  TID perfusión (cavidad ungated esfuerzo/reposo): {float(tid_p['ratio']):.2f}  "
+						f"({cur_lbl}/{cmp_lbl} = {float(tid_p['stress_cavity_ml']):.0f}/{float(tid_p['rest_cavity_ml']):.0f} mL)"
+					)
+					if tid_p.get("elevated"):
+						clinical.append(
+							f"    → TID perfusión ≥ {float(tid_p['soft_cutoff']):.2f} (umbral orientativo, no diagnóstico): "
+							"posible isquemia extensa/multivaso; correlacionar con perfusión y clínica."
+						)
 			if ef.get("shape_index_ed") is not None:
 				clinical.append(
 					f"  Índice de esfericidad ED/ES: {float(ef['shape_index_ed']):.2f} / "
@@ -10752,6 +10858,8 @@ class MainWindow(QMainWindow):
 				phase_label=str(ctx.get("phase", "Estudio")),
 				db_eval=exec_db_eval,
 				rest_ef=getattr(self, "compare_ef", None),
+				stress_cavity_ungated_ml=self._ungated_cavity_ml(self.study, self.seg),
+				rest_cavity_ungated_ml=self._exec_rest_cavity_ml(),
 			)
 			self.summary_executive.setPlainText(exec_summary.get("plain_text", ""))
 		except Exception:
@@ -22621,7 +22729,7 @@ class MainWindow(QMainWindow):
 		if target_tabs is not None:
 			names = [n for n in names if n in set(target_tabs)]
 		for name in names:
-			if name in ("comparacion_stress_rest", "comparacion_ejes", "guia_fase_vi"):
+			if name in ("comparacion_stress_rest", "tid", "comparacion_ejes", "guia_fase_vi"):
 				continue
 			left_path = os.path.join(self.output_dir, f"{name}.png")
 			right_path = os.path.join(self.compare_output_dir, f"{name}.png")
@@ -22736,12 +22844,13 @@ class MainWindow(QMainWindow):
 		self.dual_mode_active = False
 		self.active_cine_source = "primary"
 		self._refresh_cine_source_selector()
-		cmp_path = os.path.join(self.output_dir, "comparacion_stress_rest.png")
-		if os.path.exists(cmp_path):
-			try:
-				os.remove(cmp_path)
-			except OSError:
-				pass
+		for _stale in ("comparacion_stress_rest.png", "tid.png"):
+			_p = os.path.join(self.output_dir, _stale)
+			if os.path.exists(_p):
+				try:
+					os.remove(_p)
+				except OSError:
+					pass
 		self._invalidate_output_cache()
 
 	def _run_compare_hq_pipeline(self, bundle: dict, *, left_label: str, right_label: str, deferred: bool = False, target_tabs: set[str] | None = None):
@@ -22752,6 +22861,7 @@ class MainWindow(QMainWindow):
 		# El gráfico comparativo debe existir ANTES de componer el histograma dual,
 		# porque ese compuesto lo apila debajo de los dos histogramas.
 		self._write_compare_stress_rest()
+		self._write_tid_panel()
 		self._compose_dual_tab_images(left_label, right_label, target_tabs=target_tabs)
 		# polar_cine ya se genera compuesto dentro de _write_outputs cuando hay compare_bundle.
 		# Evitamos recomponer de nuevo para no duplicar paneles (p.ej. Reposo repetido).
@@ -22926,6 +23036,159 @@ class MainWindow(QMainWindow):
 		self._stamp_export_figure(fig, self.cine)
 		fig.tight_layout(rect=(0, 0, 1, 0.96))
 		fig.savefig(os.path.join(self.output_dir, "comparacion_stress_rest.png"), dpi=160, bbox_inches="tight")
+		plt.close(fig)
+
+	def _write_tid_panel(self):
+		"""Genera tid.png: panel dedicado de TID (dilatación isquémica transitoria).
+
+		Muestra el TID gatillado (cociente EDV) y el TID de perfusión clásico
+		(cociente de cavidad ungated) con semáforo, la comparación visual de las
+		cavidades esfuerzo/reposo (eje corto, misma escala) y una tabla de valores.
+		Requiere estudio de comparación (esfuerzo + reposo).
+		"""
+		if self.study is None or self.seg is None or self.compare_bundle is None:
+			return
+		import matplotlib.pyplot as plt
+		from core.ungating import ungate
+
+		rest_study = self.compare_bundle.get("study")
+		rest_seg = self.compare_bundle.get("seg")
+		if rest_study is None or rest_seg is None:
+			rstate = self._rest_stage_state()
+			if rstate is not None:
+				rest_study = rest_study or rstate.cut_study
+				rest_seg = rest_seg or rstate.seg
+		if rest_study is None or rest_seg is None:
+			return
+
+		# TID gatillado (cociente EDV) y TID perfusión (cociente cavidad ungated).
+		ef_stress = self._estimate_lv_ef() or {}
+		ef_rest = getattr(self, "compare_ef", None) or {}
+		tid_g = transient_ischemic_dilation(ef_stress.get("edv_ml"), ef_rest.get("edv_ml"))
+		s_cav = self._ungated_cavity_ml(self.study, self.seg)
+		r_cav = self._ungated_cavity_ml(rest_study, rest_seg)
+		tid_p = perfusion_transient_ischemic_dilation(s_cav, r_cav)
+		if not tid_g.get("available") and not tid_p.get("available"):
+			return
+
+		cur_label = self._study_context().get("phase", "Esfuerzo")
+		cmp_label = self.compare_label or "Reposo"
+
+		def _axis_strips(cube, seg, n_sa=6, n_long=5):
+			"""Tiras SA/HLA/VLA de la perfusión ungated (reslice por corte/fila/columna)."""
+			ung = np.asarray(ungate(cube), dtype=np.float64)  # (cortes, H, W)
+			s_n, h_n, w_n = ung.shape
+			mask = getattr(seg, "mask", None)
+			m3 = np.asarray(mask) if (mask is not None and np.asarray(mask).ndim == 3) else None
+			if m3 is not None and m3.any():
+				vslc = np.where(np.any(m3, axis=(1, 2)))[0]
+				vrow = np.where(np.any(m3, axis=(0, 2)))[0]
+				vcol = np.where(np.any(m3, axis=(0, 1)))[0]
+			else:
+				vslc, vrow, vcol = np.arange(s_n), np.arange(h_n), np.arange(w_n)
+
+			def _pick(rng, k):
+				if rng.size == 0:
+					rng = np.array([0])
+				return np.unique(np.clip(
+					np.linspace(rng[0], rng[-1], min(k, max(1, rng.size))).round().astype(int),
+					0, None,
+				))
+
+			sa = np.hstack([ung[i] for i in np.clip(_pick(vslc, n_sa), 0, s_n - 1)])
+			hla = np.hstack([np.rot90(ung[:, r, :], 1) for r in np.clip(_pick(vrow, n_long), 0, h_n - 1)])
+			vla = np.hstack([np.rot90(ung[:, :, c], 1) for c in np.clip(_pick(vcol, n_long), 0, w_n - 1)])
+			return sa, hla, vla
+
+		strips_s = _axis_strips(self.study.cube, self.seg)
+		strips_r = _axis_strips(rest_study.cube, rest_seg)
+		vmax = max(1e-6, *(float(a.max()) for a in (*strips_s, *strips_r)))
+
+		fig = plt.figure(figsize=(15, 9.2), facecolor="#0f172a")
+		gs = fig.add_gridspec(1, 2, width_ratios=[1.5, 1.05], wspace=0.08)
+		gs_left = gs[0, 0].subgridspec(2, 1, hspace=0.16)
+		axis_titles = ("SA", "HLA", "VLA")
+		for bi, (lbl, strips) in enumerate(((cur_label, strips_s), (cmp_label, strips_r))):
+			sub = gs_left[bi].subgridspec(3, 1, hspace=0.04)
+			for ai, (atitle, strip) in enumerate(zip(axis_titles, strips)):
+				ax = fig.add_subplot(sub[ai])
+				ax.imshow(strip, cmap="hot", vmin=0.0, vmax=vmax, aspect="auto")
+				ax.set_xticks([])
+				ax.set_yticks([])
+				ax.set_ylabel(atitle, color="#e2e8f0", fontsize=9, fontweight="bold")
+				if ai == 0:
+					ax.set_title(f"{lbl} — cavidad VI (SA / HLA / VLA, misma escala)", color="#e2e8f0", fontsize=10.5, fontweight="bold")
+
+		# Columna derecha subdividida: tarjetas (arriba) + gauge de barras (abajo).
+		gs_right = gs[0, 1].subgridspec(2, 1, height_ratios=[1.55, 1.0], hspace=0.10)
+		ax_c = fig.add_subplot(gs_right[0])
+		ax_c.axis("off")
+
+		def _card(y, title, tid, keys):
+			ax_c.text(0.02, y, title, transform=ax_c.transAxes, fontsize=12, color="#94a3b8", va="top", fontweight="bold")
+			if tid.get("available"):
+				ratio = float(tid["ratio"])
+				cutoff = float(tid.get("soft_cutoff", 0.0))
+				elevated = bool(tid.get("elevated"))
+				color = "#d9534f" if elevated else "#5cb85c"
+				s_v = float(tid[keys[0]])
+				r_v = float(tid[keys[1]])
+				ax_c.text(0.02, y - 0.075, f"{ratio:.2f}", transform=ax_c.transAxes, fontsize=34, color=color, fontweight="bold", va="top")
+				estado = "ELEVADO" if elevated else "normal"
+				ax_c.text(0.34, y - 0.075, f"{estado}\n(umbral ≥ {cutoff:.2f})", transform=ax_c.transAxes, fontsize=11, color=color, va="top", fontweight="bold")
+				ax_c.text(0.02, y - 0.245, f"{cur_label} / {cmp_label} = {s_v:.0f} / {r_v:.0f} mL", transform=ax_c.transAxes, fontsize=11, color="#cbd5e1", va="top")
+				return y - 0.35
+			ax_c.text(0.02, y - 0.075, "N/D", transform=ax_c.transAxes, fontsize=24, color="#64748b", fontweight="bold", va="top")
+			ax_c.text(0.02, y - 0.20, str(tid.get("reason", "")), transform=ax_c.transAxes, fontsize=9, color="#64748b", va="top")
+			return y - 0.30
+
+		y = 0.98
+		y = _card(y, "TID gatillado (cociente EDV)", tid_g, ("stress_edv_ml", "rest_edv_ml"))
+		y = _card(y, "TID perfusión (cavidad ungated)", tid_p, ("stress_cavity_ml", "rest_cavity_ml"))
+		ax_c.text(
+			0.02, y,
+			"Orientativo, NO diagnóstico. Un TID elevado sugiere isquemia extensa\n"
+			"(multivaso o de tronco) o dilatación subendocárdica difusa; correlacionar\n"
+			"con perfusión y clínica. El sesgo del volumen absoluto se cancela en el\n"
+			"cociente del mismo método (no mezclar gatillado con ungated ni con TC).",
+			transform=ax_c.transAxes, fontsize=9, color="#94a3b8", va="top",
+		)
+
+		# Gauge de barras: cociente de cada TID relativo a su umbral (1.0 = umbral).
+		ax_g = fig.add_subplot(gs_right[1])
+		ax_g.set_facecolor("#0f172a")
+		gauge_rows = []
+		if tid_g.get("available"):
+			gauge_rows.append(("TID gatillado", float(tid_g["ratio"]), float(tid_g["soft_cutoff"]), bool(tid_g["elevated"])))
+		if tid_p.get("available"):
+			gauge_rows.append(("TID perfusión", float(tid_p["ratio"]), float(tid_p["soft_cutoff"]), bool(tid_p["elevated"])))
+		norm_vals = [r[1] / r[2] if r[2] > 0 else 0.0 for r in gauge_rows]
+		ypos = np.arange(len(gauge_rows))[::-1]
+		colors = ["#d9534f" if r[3] else "#5cb85c" for r in gauge_rows]
+		ax_g.barh(ypos, norm_vals, height=0.5, color=colors, zorder=3)
+		ax_g.axvline(1.0, color="#e2e8f0", ls="--", lw=1.4, zorder=2)
+		for yi, r, nv in zip(ypos, gauge_rows, norm_vals):
+			ax_g.text(nv + 0.02, yi, f"{r[1]:.2f}", va="center", ha="left", color="#e2e8f0", fontsize=10, fontweight="bold")
+		ax_g.set_yticks(ypos)
+		ax_g.set_yticklabels([r[0] for r in gauge_rows], color="#cbd5e1", fontsize=10)
+		ax_g.set_ylim(-0.6, len(gauge_rows) - 0.4)
+		ax_g.set_xlim(0.0, max(1.4, (max(norm_vals) if norm_vals else 1.0) * 1.18))
+		ax_g.set_xlabel("Cociente relativo al umbral (1.0 = umbral orientativo)", color="#94a3b8", fontsize=9)
+		ax_g.set_title("Ratio TID vs umbral", color="#e2e8f0", fontsize=10.5, fontweight="bold")
+		ax_g.tick_params(colors="#94a3b8")
+		for spine in ax_g.spines.values():
+			spine.set_color("#334155")
+		ax_g.grid(True, axis="x", alpha=0.15)
+
+		fig.suptitle(
+			f"TID — Dilatación isquémica transitoria — {self._patient_banner_text(include_stage=False)}",
+			color="#f8fafc", fontsize=13, fontweight="bold",
+		)
+		self._stamp_export_figure(fig, self.cine)
+		fig.savefig(
+			os.path.join(self.output_dir, "tid.png"),
+			dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor(),
+		)
 		plt.close(fig)
 
 	def open_output_folder(self):

@@ -63,6 +63,12 @@ INDUCIBLE_BW_DELTA_DEG = 15.0
 #: gatillado (EDV) tiende a valores algo menores y depende de población/cámara.
 TID_GATED_SOFT_CUTOFF = 1.20
 
+#: Umbral orientativo del TID de PERFUSIÓN clásico (cociente de tamaño de cavidad
+#: sobre imágenes ungated esfuerzo/reposo). El valor clásico de la literatura
+#: ronda ~1.22, pero depende de población, cámara y software. NO es diagnóstico:
+#: es una ayuda de lectura a correlacionar con clínica y perfusión.
+TID_PERFUSION_SOFT_CUTOFF = 1.22
+
 
 def circular_delta_deg(a: float, b: float) -> float:
     """Delta angular ``a - b`` envuelto a (-180, 180]. NaN si alguno es NaN."""
@@ -110,6 +116,40 @@ def transient_ischemic_dilation(
         "soft_cutoff": TID_GATED_SOFT_CUTOFF,
         "elevated": bool(ratio >= TID_GATED_SOFT_CUTOFF),
         "method": "gated_edv_ratio",
+    }
+
+
+def perfusion_transient_ischemic_dilation(
+    stress_cavity_ml: Any, rest_cavity_ml: Any
+) -> dict:
+    """TID de perfusión clásico = cavidad(esfuerzo) / cavidad(reposo).
+
+    Cociente del tamaño de cavidad del VI medido sobre las imágenes de perfusión
+    NO gatilladas (sumadas) del MISMO método, entre esfuerzo y reposo. Es el TID
+    "clásico" de la literatura (cutoff orientativo ``~TID_PERFUSION_SOFT_CUTOFF``).
+
+    El volumen de cavidad estático tiene un sesgo sistemático (espesor de pared
+    fijo), pero al ser un cociente del mismo método el sesgo se cancela. NO es
+    diagnóstico: un ratio elevado sugiere dilatación isquémica transitoria,
+    hallazgo pronóstico a correlacionar con la clínica y la perfusión. No mezclar
+    con volúmenes gatillados ni por TC.
+    """
+    try:
+        s = float(stress_cavity_ml)
+        r = float(rest_cavity_ml)
+    except (TypeError, ValueError):
+        return {"available": False, "reason": "faltan cavidades de esfuerzo o reposo"}
+    if not (np.isfinite(s) and np.isfinite(r)) or s <= 0.0 or r <= 0.0:
+        return {"available": False, "reason": "cavidad no válida para el cociente"}
+    ratio = s / r
+    return {
+        "available": True,
+        "ratio": float(ratio),
+        "stress_cavity_ml": s,
+        "rest_cavity_ml": r,
+        "soft_cutoff": TID_PERFUSION_SOFT_CUTOFF,
+        "elevated": bool(ratio >= TID_PERFUSION_SOFT_CUTOFF),
+        "method": "perfusion_cavity_ratio",
     }
 
 
@@ -194,6 +234,8 @@ def compare_stress_rest(
     rest_territory: dict[str, dict] | None = None,
     stress_ef: dict | None = None,
     rest_ef: dict | None = None,
+    stress_cavity_ungated_ml: Any = None,
+    rest_cavity_ungated_ml: Any = None,
 ) -> dict:
     """Compara las métricas de fase de esfuerzo vs reposo.
 
@@ -255,6 +297,9 @@ def compare_stress_rest(
     tid = transient_ischemic_dilation(
         (stress_ef or {}).get("edv_ml"), (rest_ef or {}).get("edv_ml")
     )
+    tid_perfusion = perfusion_transient_ischemic_dilation(
+        stress_cavity_ungated_ml, rest_cavity_ungated_ml
+    )
 
     return {
         "available": True,
@@ -267,6 +312,7 @@ def compare_stress_rest(
         "rest_function": rest_function,
         "function_deltas": function_deltas,
         "tid": tid,
+        "tid_perfusion": tid_perfusion,
         "notes": _interpret(deltas),
         "references": [
             "Fukumoto 2025 (PMID 40021521): phase entropy en esfuerzo predice eventos cardíacos mayores.",

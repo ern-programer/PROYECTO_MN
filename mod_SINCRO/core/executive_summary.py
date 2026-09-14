@@ -16,7 +16,10 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from core.stress_rest import transient_ischemic_dilation
+from core.stress_rest import (
+    transient_ischemic_dilation,
+    perfusion_transient_ischemic_dilation,
+)
 
 
 def _num(value: Any) -> float | None:
@@ -61,6 +64,8 @@ def build_executive_summary(
     phase_label: str = "Estudio",
     db_eval: dict | None = None,
     rest_ef: dict | None = None,
+    stress_cavity_ungated_ml: Any = None,
+    rest_cavity_ungated_ml: Any = None,
 ) -> dict:
     """Construye el resumen ejecutivo (hallazgo en lenguaje natural).
 
@@ -142,6 +147,7 @@ def build_executive_summary(
     rest_ef = rest_ef or {}
     rest_pct = _num(rest_ef.get("ef_pct"))
     tid = transient_ischemic_dilation(ef.get("edv_ml"), rest_ef.get("edv_ml")) if ef else {"available": False}
+    tid_perf = perfusion_transient_ischemic_dilation(stress_cavity_ungated_ml, rest_cavity_ungated_ml)
     if ef.get("available"):
         ef_pct = _num(ef.get("ef_pct"))
         edv = _num(ef.get("edv_ml"))
@@ -172,6 +178,14 @@ def build_executive_summary(
             if tid.get("elevated"):
                 frase_func += (
                     f" (≥ {_fmt(tid.get('soft_cutoff'), 2)}, umbral orientativo: posible "
+                    "isquemia extensa/multivaso, correlacionar con perfusión)"
+                )
+            frase_func += "."
+        if tid_perf.get("available"):
+            frase_func += f" TID perfusión (cavidad ungated esfuerzo/reposo): {_fmt(tid_perf.get('ratio'), 2)}"
+            if tid_perf.get("elevated"):
+                frase_func += (
+                    f" (≥ {_fmt(tid_perf.get('soft_cutoff'), 2)}, umbral orientativo: posible "
                     "isquemia extensa/multivaso, correlacionar con perfusión)"
                 )
             frase_func += "."
@@ -212,6 +226,8 @@ def build_executive_summary(
         "thickening_pct": _num(ef.get("thickening_pct")) if ef else None,
         "tid_ratio": _num(tid.get("ratio")) if tid.get("available") else None,
         "tid_elevated": bool(tid.get("elevated")) if tid.get("available") else None,
+        "tid_perfusion_ratio": _num(tid_perf.get("ratio")) if tid_perf.get("available") else None,
+        "tid_perfusion_elevated": bool(tid_perf.get("elevated")) if tid_perf.get("available") else None,
         "myocardial_ml": _num(volumes.get("myocardial_ml")) if volumes else None,
     }
 
