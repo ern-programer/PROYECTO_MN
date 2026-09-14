@@ -804,14 +804,9 @@ class MainWindow(QMainWindow):
 		self.polar_compare_term_b_combo = QComboBox()
 		self.polar_compare_term_b_combo.addItems(["Esfuerzo", "Reposo"])
 		self.polar_compare_term_b_combo.setCurrentText("Reposo")
-		polar_math_terms = QWidget()
-		polar_math_terms_layout = QHBoxLayout(polar_math_terms)
-		polar_math_terms_layout.setContentsMargins(0, 0, 0, 0)
-		polar_math_terms_layout.setSpacing(4)
-		polar_math_terms_layout.addWidget(QLabel("A"))
-		polar_math_terms_layout.addWidget(self.polar_compare_term_a_combo)
-		polar_math_terms_layout.addWidget(QLabel("B"))
-		polar_math_terms_layout.addWidget(self.polar_compare_term_b_combo)
+		# Velocidad de cine y operación matemática esfuerzo/reposo viven ahora en la
+		# barra de la pestaña PERFUSIÓN POLAR (se agregan en el armado de tabs), para
+		# poder ajustarlos en vivo sin abrir Configuración.
 
 		self.export_polar_mp4_check = QCheckBox("Exportar polar cine MP4")
 		self.export_polar_mp4_check.setChecked(True)
@@ -850,9 +845,8 @@ class MainWindow(QMainWindow):
 		_cfg_polar_form = QFormLayout(self._cfg_polar_box)
 		_cfg_polar_form.addRow("Rotación polar", self.polar_rotation_spin)
 		_cfg_polar_form.addRow("Suavizado polar", polar_perf_smooth_widget)
-		_cfg_polar_form.addRow("Velocidad polar cine", self.polar_cine_speed_spin)
-		_cfg_polar_form.addRow("Math polar stress/rest", self.polar_compare_math_combo)
-		_cfg_polar_form.addRow("Términos math", polar_math_terms)
+		# "Velocidad polar cine", "Math polar stress/rest" y "Términos math" se
+		# reubicaron en la barra de la pestaña PERFUSIÓN POLAR (uso en vivo).
 
 		self._cfg_visual_box = QGroupBox("Visualización / rendimiento")
 		_cfg_visual_form = QFormLayout(self._cfg_visual_box)
@@ -1696,6 +1690,21 @@ class MainWindow(QMainWindow):
 				restart_btn.clicked.connect(self._restart_polar_cine_preview)
 				toolbar.addWidget(play_btn)
 				toolbar.addWidget(restart_btn)
+				# Controles reubicados desde Configuración: velocidad de cine y operación
+				# matemática esfuerzo/reposo, para ajustar en vivo sobre esta pestaña.
+				toolbar.addWidget(QLabel("Vel."))
+				toolbar.addWidget(self.polar_cine_speed_spin)
+				toolbar.addWidget(QLabel("Math"))
+				toolbar.addWidget(self.polar_compare_math_combo)
+				toolbar.addWidget(QLabel("A"))
+				toolbar.addWidget(self.polar_compare_term_a_combo)
+				toolbar.addWidget(QLabel("B"))
+				toolbar.addWidget(self.polar_compare_term_b_combo)
+				polar_math_apply_btn = QToolButton()
+				polar_math_apply_btn.setText("Aplicar")
+				polar_math_apply_btn.setToolTip("Aplicar la operación matemática esfuerzo/reposo al cine polar")
+				polar_math_apply_btn.clicked.connect(self._apply_polar_math)
+				toolbar.addWidget(polar_math_apply_btn)
 			if name == "cine_crudo":
 				# --- Fila 1 (toolbar principal): zoom + reproducción + navegación + fuente/modo ---
 				self.cine_crudo_play_btn = QToolButton()
@@ -2910,6 +2919,9 @@ class MainWindow(QMainWindow):
 		self.statusBar().showMessage("Listo")
 		self.tabs.currentChanged.connect(self._on_preview_tab_changed)
 		self.polar_cine_speed_spin.valueChanged.connect(self._on_polar_cine_speed_changed)
+		self.polar_compare_math_combo.currentTextChanged.connect(self._on_polar_math_changed)
+		self.polar_compare_term_a_combo.currentTextChanged.connect(self._on_polar_math_changed)
+		self.polar_compare_term_b_combo.currentTextChanged.connect(self._on_polar_math_changed)
 		self.cmap_combo.currentTextChanged.connect(self._on_phase_cmap_changed)
 		self._on_phase_cmap_changed(self.cmap_combo.currentText())
 		self._refresh_presets_for_current_patient()
@@ -12256,9 +12268,12 @@ class MainWindow(QMainWindow):
 						gap = np.full((p_frame.shape[0], 28, 3), 12, dtype=np.uint8)
 						panels = [p_frame, gap, r_frame]
 						rest_title = f"{compare_phase_label} gate {gc + 1}/{compare_count}"
+						# La cache de pantalla guarda esfuerzo/reposo con su rol; la operación
+						# matemática se calcula EN VIVO en _rebuild_polar_cine_frames_screen
+						# según los combos de la barra. El GIF/montaje de disco sí la hornea.
 						cache_panels = [
-							{"pm": np.asarray(p_pm, dtype=np.float32), "title": primary_title},
-							{"pm": np.asarray(r_pm, dtype=np.float32), "title": rest_title},
+							{"pm": np.asarray(p_pm, dtype=np.float32), "title": primary_title, "role": "primary", "gate": gp},
+							{"pm": np.asarray(r_pm, dtype=np.float32), "title": rest_title, "role": "rest", "gate": gp},
 						]
 						op_name = str(self.polar_compare_math_combo.currentText())
 						if op_name != "Ninguna" and p_pm is not None and r_pm is not None:
@@ -12271,7 +12286,6 @@ class MainWindow(QMainWindow):
 								math_label = f"{a_name} {op_name} {b_name}"
 								m_frame = _render_math_panel(pm_math, gp, math_label)
 								panels.extend([gap, m_frame])
-								cache_panels.append({"pm": np.asarray(pm_math, dtype=np.float32), "title": f"{math_label} gate {gp + 1}"})
 						compare_frames.append(np.concatenate(panels, axis=1))
 						cine_cart_frames.append(cache_panels)
 				else:
@@ -13266,12 +13280,30 @@ class MainWindow(QMainWindow):
 			return False
 		try:
 			cmap_name = str(getattr(self, "polar_perf_screen_cmap", "odyssey_cool") or "odyssey_cool")
+			op_name = str(self.polar_compare_math_combo.currentText())
+			a_name = str(self.polar_compare_term_a_combo.currentText())
+			b_name = str(self.polar_compare_term_b_combo.currentText())
 			frames_out: list[QPixmap] = []
 			for panels in cache["frames"]:
 				bufs = []
+				role_pm: dict[str, np.ndarray] = {}
+				gate_idx = 0
 				for pnl in panels:
 					cart = self._polar_pm_to_cartesian(pnl["pm"])
 					bufs.append(self._render_polar_cart_panel(cart, str(pnl.get("title", "")), cmap_name))
+					role = pnl.get("role")
+					if role:
+						role_pm[role] = np.asarray(pnl["pm"], dtype=np.float32)
+						gate_idx = int(pnl.get("gate", 0))
+				# Operación matemática esfuerzo/reposo calculada en vivo según los combos.
+				if op_name != "Ninguna" and "primary" in role_pm and "rest" in role_pm:
+					a_map = role_pm["primary"] if a_name == "Esfuerzo" else role_pm["rest"]
+					b_map = role_pm["primary"] if b_name == "Esfuerzo" else role_pm["rest"]
+					pm_math = self._polar_math_map(a_map, b_map, op_name)
+					if pm_math is not None:
+						math_label = f"{a_name} {op_name} {b_name} gate {gate_idx + 1}"
+						cart_m = self._polar_pm_to_cartesian(pm_math)
+						bufs.append(self._render_polar_cart_panel(cart_m, math_label, cmap_name))
 				if not bufs:
 					continue
 				if len(bufs) == 1:
@@ -13438,6 +13470,40 @@ class MainWindow(QMainWindow):
 
 	def _on_polar_cine_speed_changed(self, value: int):
 		self.polar_cine_timer.setInterval(max(40, int(value)))
+
+	def _polar_math_map(self, a: np.ndarray, b: np.ndarray, op: str) -> "np.ndarray | None":
+		if op == "Ninguna":
+			return None
+		if op == "Suma":
+			return np.clip(a + b, 0.0, 1.0)
+		if op == "Resta":
+			return np.clip(a - b, 0.0, 1.0)
+		if op == "Multiplicación":
+			return np.clip(a * b, 0.0, 1.0)
+		if op == "División":
+			div = a / np.maximum(b, 1e-6)
+			mx = float(np.nanmax(div)) if np.isfinite(div).any() else 0.0
+			return np.clip(div / (mx + 1e-8), 0.0, 1.0)
+		return None
+
+	def _on_polar_math_changed(self, *args):
+		"""Recalcula el cine polar en vivo al cambiar operación/términos math."""
+		if self.polar_view_mode != "cine":
+			return
+		if not getattr(self, "_polar_cine_cart_cache", None):
+			return
+		self._rebuild_polar_cine_frames_screen()
+		self._load_preview("polar_perfusion_directa")
+
+	def _apply_polar_math(self):
+		"""Botón Aplicar: fuerza la vista Cine y recalcula la operación math."""
+		if not getattr(self, "_polar_cine_cart_cache", None):
+			self.statusBar().showMessage("No hay cine polar cargado para aplicar la operación", 4000)
+			return
+		if self.polar_view_mode != "cine":
+			self._set_polar_view_mode("cine")
+		self._rebuild_polar_cine_frames_screen()
+		self._load_preview("polar_perfusion_directa")
 
 	# --- Cine crudo (proyecciones SPECT) ---
 	def _rgb_frame_to_qpixmap_raw(self, rgb: np.ndarray) -> QPixmap:
