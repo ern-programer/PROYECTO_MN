@@ -303,6 +303,17 @@ class AsynchronyReviewWindow(QWidget):
 		if main is None:
 			return {}
 		if self._active_is_rest():
+			# Mostrar el anillo REAL de la segmentación de Reposo: así el centrado
+			# (auto o manual por clic) se ve moverse. El texto de ROIs no se
+			# actualiza al re-derivar, quedaría estático.
+			seg = self._active_seg_ring()
+			if seg is not None and hasattr(main, "_rois_from_segmentation"):
+				try:
+					rings = main._rois_from_segmentation(seg)
+					if rings:
+						return rings
+				except Exception:
+					pass
 			try:
 				return main._parse_manual_rois_text(getattr(main, "compare_manual_rois_text", "")) or {}
 			except Exception:
@@ -339,10 +350,10 @@ class AsynchronyReviewWindow(QWidget):
 	def _update_stage_dependent_controls(self):
 		"""Habilita/inhabilita controles que hoy sólo aplican a Esfuerzo.
 
-		El motor de la 2da etapa (Reposo) sólo honra los parámetros de fase y las
-		ROIs manuales de comparación. La ROI ECTb como fuente del análisis y el
-		centro manual por clic siguen siendo exclusivos de Esfuerzo, así que se
-		deshabilitan (con tooltip) cuando la etapa activa es Reposo.
+		El motor de la 2da etapa (Reposo) honra los parámetros de fase, las ROIs
+		manuales de comparación, el centrado de cavidad y el centro manual por
+		clic. La ROI ECTb como fuente del análisis sigue siendo exclusiva de
+		Esfuerzo, así que se deshabilita (con tooltip) cuando la etapa es Reposo.
 		"""
 		is_rest = self._active_is_rest()
 		roi_msg = (
@@ -352,17 +363,16 @@ class AsynchronyReviewWindow(QWidget):
 		for w in (self.apply_combo, self.apply_btn):
 			w.setEnabled(not is_rest)
 			w.setToolTip(roi_msg or w.toolTip())
-		center_msg = (
-			"Sólo disponible en Esfuerzo (1ra etapa). El centro manual por clic no se aplica a Reposo."
-			if is_rest else ""
+		# El centro manual por clic ahora también se aplica a Reposo (override de
+		# cavidad sobre la 2da etapa), así que queda habilitado en ambas etapas.
+		center_tip = (
+			"Fijá el centro de cavidad de Reposo por clic (override sobre el auto)."
+			if is_rest else
+			"Fijá el centro de cavidad de Esfuerzo por clic (override sobre el auto)."
 		)
 		for w in (self.manual_center_check, self.manual_center_all_check, self.manual_center_clear_btn):
-			w.setEnabled(not is_rest)
-			if is_rest:
-				w.setToolTip(center_msg)
-		if is_rest and self.manual_center_check.isChecked():
-			# Salir del modo de clic de centro al pasar a Reposo.
-			self.manual_center_check.setChecked(False)
+			w.setEnabled(True)
+		self.manual_center_check.setToolTip(center_tip)
 
 	def _capture_sidebar_params(self) -> dict:
 		"""Fotografía los parámetros de fase del sidebar (para memoria por etapa)."""
@@ -489,26 +499,49 @@ class AsynchronyReviewWindow(QWidget):
 	def _on_manual_center_clear(self):
 		"""Borra todos los centros manuales vía la ventana principal."""
 		main = self._main
-		if main is None or not hasattr(main, "_clear_manual_centers"):
+		if main is None:
 			self._set_status("No hay ventana principal para limpiar centros.")
 			return
-		main._clear_manual_centers()
+		if self._active_is_rest():
+			if not hasattr(main, "_clear_compare_manual_centers"):
+				self._set_status("No hay ventana principal para limpiar centros.")
+				return
+			main._clear_compare_manual_centers()
+		elif hasattr(main, "_clear_manual_centers"):
+			main._clear_manual_centers()
+		else:
+			self._set_status("No hay ventana principal para limpiar centros.")
+			return
 		self._push_manual_centers()
 		self._set_status("Centros manuales borrados; vuelve el centro automático.", ok=True)
 
 	def _on_center_picked(self, slice_index, center):
 		"""Reenvía el clic de centro a la ventana principal y refresca el marcador."""
 		main = self._main
-		if main is None or not hasattr(main, "_on_center_picked"):
+		if main is None:
 			self._set_status("No hay ventana principal para fijar el centro.")
 			return
-		main._on_center_picked(slice_index, center)
+		if self._active_is_rest():
+			if not hasattr(main, "_on_compare_center_picked"):
+				self._set_status("No hay ventana principal para fijar el centro.")
+				return
+			main._on_compare_center_picked(slice_index, center)
+		elif hasattr(main, "_on_center_picked"):
+			main._on_center_picked(slice_index, center)
+		else:
+			self._set_status("No hay ventana principal para fijar el centro.")
+			return
 		self._push_manual_centers()
 
 	def _push_manual_centers(self):
-		"""Dibuja en el panel izquierdo los centros manuales de la principal."""
+		"""Dibuja en el panel izquierdo los centros manuales de la etapa activa."""
 		main = self._main
-		centers = getattr(main, "manual_center_per_slice", None) if main is not None else None
+		if main is None:
+			centers = None
+		elif self._active_is_rest():
+			centers = getattr(main, "compare_manual_center_per_slice", None)
+		else:
+			centers = getattr(main, "manual_center_per_slice", None)
 		self.cine_main.set_manual_centers(centers)
 
 	def _sync_manual_center_checks(self):

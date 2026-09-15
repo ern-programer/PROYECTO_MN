@@ -320,6 +320,9 @@ class MainWindow(QMainWindow):
 		# {slice_idx: (cy, cx)}. Manda sobre el centroide automático y se propaga
 		# a radios, ángulo AHA y fase. Vacío = centro 100% automático.
 		self.manual_center_per_slice: dict[int, tuple[float, float]] = {}
+		# Centro de cavidad manual de la 2da etapa (Reposo), independiente del de
+		# Esfuerzo. Se pasa como override a la segmentación de comparación.
+		self.compare_manual_center_per_slice: dict[int, tuple[float, float]] = {}
 		# Estudio de comparación (típicamente REST vs el actual STRESS) para el
 		# análisis stress/rest de disincronía (stunning isquémico, Camilletti 2015).
 		self.compare_metrics = None
@@ -6777,13 +6780,68 @@ class MainWindow(QMainWindow):
 		# corromper la 2da etapa y la demora del reproceso completo de comparación).
 		self._async_skip_compare_reprocess = True
 		QTimer.singleShot(0, self.process_current)
+
+	def _on_compare_center_picked(self, slice_index: int, center):
+		"""Centro de cavidad manual para Reposo (2da etapa), independiente de Esfuerzo.
+
+		center = (cy, cx) fija; center = None borra el de ese corte. Reprocesa SOLO
+		Reposo (Esfuerzo intacto). Honra 'Aplicar el clic a todos los cortes'.
+		"""
+		try:
+			s = int(slice_index)
+		except (TypeError, ValueError):
+			return
+		apply_all = bool(getattr(self, "manual_center_all_check", None) and self.manual_center_all_check.isChecked())
+		comp_study = self.compare_bundle.get("study") if self.compare_bundle else None
+		n_slices = None
+		if comp_study is not None and getattr(comp_study, "cube", None) is not None:
+			n_slices = int(comp_study.cube.shape[1])
+
+		if center is None:
+			if apply_all:
+				self.compare_manual_center_per_slice = {}
+			else:
+				self.compare_manual_center_per_slice.pop(s, None)
+		else:
+			cy, cx = float(center[0]), float(center[1])
+			if apply_all and n_slices:
+				self.compare_manual_center_per_slice = {k: (cy, cx) for k in range(n_slices)}
+			else:
+				self.compare_manual_center_per_slice[s] = (cy, cx)
+
+		count = len(self.compare_manual_center_per_slice)
+		self.statusBar().showMessage(
+			f"Centro manual Reposo {'borrado' if center is None else 'fijado'} · {count} corte(s)."
+		)
+		if self.compare_bundle is None:
+			return
+		self._load_compare_bundle_from_stage_memory("rest")
+		self._refresh_summary()
+		self._safe_refresh_asynchrony_review_window()
+
+	def _clear_compare_manual_centers(self):
+		"""Borra los centros manuales de Reposo y reprocesa solo esa etapa."""
+		if not self.compare_manual_center_per_slice:
+			self.statusBar().showMessage("No había centros manuales en Reposo.")
+			return
+		self.compare_manual_center_per_slice = {}
+		self.statusBar().showMessage("Centros manuales de Reposo borrados; vuelve el centro automático.")
+		if self.compare_bundle is None:
+			return
+		self._load_compare_bundle_from_stage_memory("rest")
+		self._refresh_summary()
+		self._safe_refresh_asynchrony_review_window()
 	def _manual_center_override_array(self, n_slices: int):
 		"""Arma el array (n_slices, 2) de override para segment_myocardium, con
 		NaN donde no hay centro manual. Devuelve None si no hay ninguno."""
-		if not self.manual_center_per_slice:
+		return self._center_override_from_dict(self.manual_center_per_slice, n_slices)
+
+	def _center_override_from_dict(self, centers, n_slices: int):
+		"""Array (n_slices, 2) de override con NaN donde no hay centro. None si vacío."""
+		if not centers:
 			return None
 		ov = np.full((int(n_slices), 2), np.nan, dtype=np.float64)
-		for s, c in self.manual_center_per_slice.items():
+		for s, c in centers.items():
 			if 0 <= int(s) < int(n_slices) and c is not None:
 				ov[int(s), 0] = float(c[0])
 				ov[int(s), 1] = float(c[1])
@@ -22600,7 +22658,13 @@ class MainWindow(QMainWindow):
 			for slice_index, roi in parsed_compare_rois.items()
 			if self._is_roi_valid_for_manual(roi)
 		}
-		if str(self.seg_method.currentText()) == "manual" and valid_compare_rois:
+		# Centro manual de Reposo: override sobre el centrado auto. En modo manual
+		# la segmentación ignora el override, así que si hay centro manual fijado
+		# se fuerza auto para que el override recentre el anillo.
+		comp_center_override = self._center_override_from_dict(
+			self.compare_manual_center_per_slice, int(comp_cube_for_segmentation.shape[1])
+		)
+		if str(self.seg_method.currentText()) == "manual" and valid_compare_rois and comp_center_override is None:
 			seg_method = "manual"
 			manual_rois = valid_compare_rois
 		comp_seg = segment_myocardium(
@@ -22610,6 +22674,7 @@ class MainWindow(QMainWindow):
 			smooth_sigma=float(self.sigma_spin.value()),
 			manual_rois=manual_rois,
 			refine_cavity_center=self.cavity_center_enabled(),
+			center_override_per_slice=comp_center_override,
 		)
 		comp_aha = map_to_17_segments(comp_seg)
 		comp_is_gated = int(np.asarray(comp_study.cube).shape[0]) >= 3
