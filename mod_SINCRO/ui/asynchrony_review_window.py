@@ -48,6 +48,8 @@ class AsynchronyReviewWindow(QWidget):
 		self._show_center_contour = True
 		self._show_endo_contour = True
 		self._show_epi_contour = True
+		self._edit_stage = "stress"
+		self._stage_phase_params = {}
 		self.setWindowTitle("Vista asincronía — comparación principal vs pared")
 		self.resize(1300, 760)
 		self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
@@ -87,6 +89,24 @@ class AsynchronyReviewWindow(QWidget):
 		self.status_label = QLabel("—")
 		self.status_label.setWordWrap(True)
 		self.status_label.setStyleSheet("color:#a06000;")
+
+		# Selector de etapa: sobre cuál se muestra/reprocesa el ajuste fino.
+		# Esfuerzo siempre es la etapa primaria; Reposo se reprocesa por separado
+		# sin tocar Esfuerzo.
+		self.stage_combo = QComboBox()
+		self.stage_combo.addItem("Esfuerzo (1ra etapa)", "stress")
+		self.stage_combo.addItem("Reposo (2da etapa)", "rest")
+		self.stage_combo.setToolTip(
+			"Elegí sobre qué etapa trabajás. Esfuerzo y Reposo se reprocesan por "
+			"separado: ajustar una no altera la otra."
+		)
+		self.stage_combo.currentIndexChanged.connect(self._on_edit_stage_changed)
+		stage_row = QHBoxLayout()
+		stage_row.setContentsMargins(0, 0, 0, 4)
+		stage_row.addWidget(QLabel("Etapa a trabajar:"))
+		stage_row.addWidget(self.stage_combo)
+		stage_row.addStretch(1)
+		self.stage_row = stage_row
 
 		# Decisión: qué geometría alimenta realmente el análisis de fase.
 		self.apply_combo = QComboBox()
@@ -189,6 +209,7 @@ class AsynchronyReviewWindow(QWidget):
 		content_layout = QVBoxLayout(content)
 		content_layout.setContentsMargins(6, 6, 6, 6)
 		content_layout.addWidget(self.help_label)
+		content_layout.addLayout(self.stage_row)
 		content_layout.addLayout(legend_row)
 		content_layout.addLayout(apply_row)
 		content_layout.addLayout(center_row)
@@ -206,6 +227,193 @@ class AsynchronyReviewWindow(QWidget):
 		self._wire_sync()
 		self.cine_main.centerPicked.connect(self._on_center_picked)
 		self.sync_from_main()
+
+	# ------------------------------------------------------------------
+	# Selección de etapa (Esfuerzo / Reposo / Ambas)
+	# ------------------------------------------------------------------
+	def _rest_available(self) -> bool:
+		"""¿Hay una 2da etapa (Reposo) cargada para trabajar por separado?"""
+		main = self._main
+		return main is not None and getattr(main, "compare_bundle", None) is not None
+
+	def _active_is_rest(self) -> bool:
+		"""¿La etapa activa a mostrar/reprocesar es Reposo?"""
+		return self._edit_stage == "rest" and self._rest_available()
+
+	def _compare_bundle(self):
+		main = self._main
+		return getattr(main, "compare_bundle", None) if main is not None else None
+
+	def _active_study(self):
+		"""Estudio (cubo gated) de la etapa activa."""
+		if self._active_is_rest():
+			bundle = self._compare_bundle()
+			if bundle is not None:
+				return bundle.get("study")
+		return getattr(self._main, "study", None) if self._main is not None else None
+
+	def _active_metrics(self):
+		"""Métricas de fase de la etapa activa."""
+		if self._active_is_rest():
+			bundle = self._compare_bundle()
+			if bundle is not None:
+				return bundle.get("metrics") or getattr(self._main, "compare_metrics", None)
+		return getattr(self._main, "metrics", None) if self._main is not None else None
+
+	def _active_phase_result(self):
+		"""Resultado de fase (phases_deg) de la etapa activa."""
+		if self._active_is_rest():
+			bundle = self._compare_bundle()
+			if bundle is not None:
+				return bundle.get("phase_result")
+		return getattr(self._main, "phase_result", None) if self._main is not None else None
+
+	def _active_ef(self):
+		"""Diccionario de FEVI de la etapa activa (con clave 'available'/'ef_pct')."""
+		main = self._main
+		if main is None:
+			return None
+		if self._active_is_rest():
+			bundle = self._compare_bundle()
+			ef = None
+			if bundle is not None:
+				ef = bundle.get("ef")
+			if ef is None:
+				ef = getattr(main, "compare_ef", None)
+			return ef
+		try:
+			return main._estimate_lv_ef()
+		except Exception:
+			return None
+
+	def _active_seg_ring(self):
+		"""Segmentación anular (semilla ECTb) de la etapa activa."""
+		if self._active_is_rest():
+			bundle = self._compare_bundle()
+			if bundle is not None:
+				seg = bundle.get("seg")
+				if seg is not None and str(getattr(seg, "method", "")) != "ectb_wall":
+					return seg
+			return None
+		return self._ectb_seed_segmentation()
+
+	def _active_rois(self):
+		"""ROIs manuales de la etapa activa para dibujar en el panel izquierdo."""
+		main = self._main
+		if main is None:
+			return {}
+		if self._active_is_rest():
+			try:
+				return main._parse_manual_rois_text(getattr(main, "compare_manual_rois_text", "")) or {}
+			except Exception:
+				return {}
+		try:
+			return main._parse_manual_rois() or {}
+		except Exception:
+			return {}
+
+	def _on_edit_stage_changed(self, *_args):
+		"""Cambia la etapa sobre la que se muestra/reprocesa el ajuste fino."""
+		new_stage = str(self.stage_combo.currentData() or "stress")
+		if new_stage in ("rest", "both") and not self._rest_available():
+			# No hay 2da etapa: volver a Esfuerzo sin ruido.
+			self.stage_combo.blockSignals(True)
+			idx = self.stage_combo.findData("stress")
+			if idx >= 0:
+				self.stage_combo.setCurrentIndex(idx)
+			self.stage_combo.blockSignals(False)
+			self._set_status("No hay 2da etapa (Reposo) cargada: se trabaja sobre Esfuerzo.")
+			new_stage = "stress"
+		# Guardar los parámetros del sidebar de la etapa que dejamos.
+		self._stage_phase_params[self._edit_stage] = self._capture_sidebar_params()
+		self._edit_stage = new_stage
+		# Restaurar (si existen) los parámetros memorizados de la etapa entrante.
+		cached = self._stage_phase_params.get(new_stage)
+		if cached:
+			self._apply_sidebar_params(cached)
+		self._update_stage_dependent_controls()
+		self.sync_from_main()
+		nombre = {"stress": "Esfuerzo", "rest": "Reposo", "both": "Ambas etapas"}.get(new_stage, new_stage)
+		self._set_status(f"Trabajando sobre: {nombre}.", ok=True)
+
+	def _update_stage_dependent_controls(self):
+		"""Habilita/inhabilita controles que hoy sólo aplican a Esfuerzo.
+
+		El motor de la 2da etapa (Reposo) sólo honra los parámetros de fase y las
+		ROIs manuales de comparación. La ROI ECTb como fuente del análisis y el
+		centro manual por clic siguen siendo exclusivos de Esfuerzo, así que se
+		deshabilitan (con tooltip) cuando la etapa activa es Reposo.
+		"""
+		is_rest = self._active_is_rest()
+		roi_msg = (
+			"Sólo disponible en Esfuerzo (1ra etapa). El motor de Reposo usa la ROI de anillo."
+			if is_rest else ""
+		)
+		for w in (self.apply_combo, self.apply_btn):
+			w.setEnabled(not is_rest)
+			w.setToolTip(roi_msg or w.toolTip())
+		center_msg = (
+			"Sólo disponible en Esfuerzo (1ra etapa). El centro manual por clic no se aplica a Reposo."
+			if is_rest else ""
+		)
+		for w in (self.manual_center_check, self.manual_center_all_check, self.manual_center_clear_btn):
+			w.setEnabled(not is_rest)
+			if is_rest:
+				w.setToolTip(center_msg)
+		if is_rest and self.manual_center_check.isChecked():
+			# Salir del modo de clic de centro al pasar a Reposo.
+			self.manual_center_check.setChecked(False)
+
+	def _capture_sidebar_params(self) -> dict:
+		"""Fotografía los parámetros de fase del sidebar (para memoria por etapa)."""
+		return {
+			"seg_method": self.seg_method_combo.currentText(),
+			"threshold": float(self.threshold_spin.value()),
+			"sigma": float(self.sigma_spin.value()),
+			"harmonics": int(self.harmonics_spin.value()),
+			"amp_filter": float(self.amp_filter_spin.value()),
+			"cmap": self.cmap_combo.currentText(),
+		}
+
+	def _apply_sidebar_params(self, params: dict):
+		"""Restaura parámetros de fase memorizados al sidebar (sin disparar señales)."""
+		for widget, key, kind in (
+			(self.seg_method_combo, "seg_method", "combo"),
+			(self.threshold_spin, "threshold", "spin"),
+			(self.sigma_spin, "sigma", "spin"),
+			(self.harmonics_spin, "harmonics", "spin"),
+			(self.amp_filter_spin, "amp_filter", "spin"),
+			(self.cmap_combo, "cmap", "combo"),
+		):
+			if key not in params:
+				continue
+			widget.blockSignals(True)
+			if kind == "spin":
+				widget.setValue(params[key])
+			else:
+				idx = widget.findText(str(params[key]))
+				if idx >= 0:
+					widget.setCurrentIndex(idx)
+			widget.blockSignals(False)
+
+	def _refresh_stage_combo_enabled(self):
+		"""Activa/desactiva Reposo/Ambas según haya 2da etapa cargada."""
+		available = self._rest_available()
+		model = self.stage_combo.model()
+		for data in ("rest", "both"):
+			idx = self.stage_combo.findData(data)
+			if idx < 0:
+				continue
+			item = model.item(idx)
+			if item is not None:
+				item.setEnabled(available)
+		if not available and self._edit_stage in ("rest", "both"):
+			self.stage_combo.blockSignals(True)
+			idx = self.stage_combo.findData("stress")
+			if idx >= 0:
+				self.stage_combo.setCurrentIndex(idx)
+			self.stage_combo.blockSignals(False)
+			self._edit_stage = "stress"
 
 	def _refresh_applied_label(self):
 		"""Muestra qué geometría está usando hoy el análisis principal."""
@@ -231,20 +439,35 @@ class AsynchronyReviewWindow(QWidget):
 		self.cavity_center_check.blockSignals(False)
 
 	def _on_cavity_center_toggled(self, checked: bool):
-		"""Cambia el criterio de centrado desde esta ventana y reprocesa."""
+		"""Cambia el criterio de centrado desde esta ventana y reprocesa la etapa activa."""
 		main = self._main
-		if main is None or not hasattr(main, "set_cavity_center_enabled"):
+		if main is None:
 			self._set_status("No hay ventana principal para cambiar el centrado.")
 			return
-		# set_cavity_center_enabled dispara el toggled de la principal, que ya
-		# reprocesa; si el valor no cambió no hay nada que hacer.
-		if not main.set_cavity_center_enabled(bool(checked)):
+		check = getattr(main, "cavity_center_check", None)
+		if check is None:
+			self._set_status("No hay ventana principal para cambiar el centrado.")
 			return
+		if bool(check.isChecked()) == bool(checked):
+			return
+		# Cambiar el flag SIN disparar el auto-reproceso (que reprocesa
+		# ambas etapas); acá se reprocesa sólo la etapa activa.
+		check.blockSignals(True)
+		check.setChecked(bool(checked))
+		check.blockSignals(False)
+		if hasattr(main, "_propagate_cavity_center"):
+			main._propagate_cavity_center()
 		modo = "cavidad" if bool(checked) else "centroide de miocardio"
 		if getattr(main, "study", None) is None:
 			self._set_status(f"Centro del VI: {modo}. Cargá un estudio para procesarlo.")
 			return
-		self._set_status(f"Centro del VI: {modo}. Reprocesando...", ok=True)
+		try:
+			main.reprocess_async_stage(self._edit_stage)
+		except Exception as exc:
+			self._set_status(f"No se pudo reprocesar: {exc}")
+			return
+		nombre = {"stress": "Esfuerzo", "rest": "Reposo", "both": "ambas etapas"}.get(self._edit_stage, self._edit_stage)
+		self._set_status(f"Centro del VI: {modo} ({nombre}). Reprocesando...", ok=True)
 
 	def _on_manual_center_mode_toggled(self, checked: bool):
 		"""Prende/apaga el modo de fijar centro por clic en el panel izquierdo."""
@@ -376,11 +599,12 @@ class AsynchronyReviewWindow(QWidget):
 			self._set_status("Parámetros aplicados. Cargá un estudio en la ventana principal.")
 			return
 		try:
-			main.process_current()
+			main.reprocess_async_stage(self._edit_stage)
 		except Exception as exc:
 			self._set_status(f"No se pudo reprocesar: {exc}")
 			return
-		self._set_status("Reprocesado con los parámetros de fase actuales.", ok=True)
+		nombre = {"stress": "Esfuerzo", "rest": "Reposo", "both": "ambas etapas"}.get(self._edit_stage, self._edit_stage)
+		self._set_status(f"Reprocesado ({nombre}) con los parámetros de fase actuales.", ok=True)
 
 	def _write_phase_controls_to_main(self):
 		"""Copia los valores del sidebar a los widgets del motor (sin reprocesar)."""
@@ -442,6 +666,13 @@ class AsynchronyReviewWindow(QWidget):
 		main = self._main
 		if main is None:
 			return
+		# El motor comparte los mismos widgets de fase para ambas etapas, así que
+		# main refleja la ÚLTIMA etapa reprocesada. Si ya memorizamos parámetros
+		# para la etapa activa, los preferimos para no "contaminar" con los de la otra.
+		cached = self._stage_phase_params.get(self._edit_stage)
+		if cached:
+			self._apply_sidebar_params(cached)
+			return
 		pairs = [
 			(self.seg_method_combo, getattr(main, "seg_method", None), "combo"),
 			(self.threshold_spin, getattr(main, "threshold_spin", None), "spin"),
@@ -465,7 +696,7 @@ class AsynchronyReviewWindow(QWidget):
 	def _refresh_metrics_readout(self):
 		"""Muestra PSD / BW / Entropy / FEVI del estudio ya procesado."""
 		main = self._main
-		metrics = getattr(main, "metrics", None) if main is not None else None
+		metrics = self._active_metrics() if main is not None else None
 		if not metrics:
 			self.metrics_readout.setText("Sin resultados: procesá un estudio.")
 			return
@@ -479,15 +710,20 @@ class AsynchronyReviewWindow(QWidget):
 
 		fevi_txt = "N/D"
 		try:
-			ef = main._estimate_lv_ef()
+			ef = self._active_ef()
 			if ef and ef.get("available"):
 				fevi_txt = f"{float(ef.get('ef_pct')):.1f}%"
 		except Exception:
 			fevi_txt = "N/D"
 
 		cls = metrics.get("technical_classification", metrics.get("classification", "N/D"))
+		stage_tag = {"stress": "Esfuerzo", "rest": "Reposo", "both": "Esfuerzo"}.get(self._edit_stage, "")
+		if self._active_is_rest():
+			stage_tag = "Reposo"
+		prefix = f"[{stage_tag}]\n" if stage_tag else ""
 		self.metrics_readout.setText(
-			f"Phase SD: {_fmt('phase_sd', '°')}\n"
+			prefix
+			+ f"Phase SD: {_fmt('phase_sd', '°')}\n"
 			f"Bandwidth: {_fmt('bandwidth', '°')}\n"
 			f"Entropy: {_fmt('entropy_normalized_pct', '%')}\n"
 			f"FEVI: {fevi_txt}\n"
@@ -511,7 +747,7 @@ class AsynchronyReviewWindow(QWidget):
 		ax.tick_params(colors="#9fb0c4", labelsize=8)
 
 		main = self._main
-		phase_result = getattr(main, "phase_result", None) if main is not None else None
+		phase_result = self._active_phase_result() if main is not None else None
 		phases = getattr(phase_result, "phases_deg", None) if phase_result is not None else None
 		if phases is None:
 			phases = np.asarray([], dtype=np.float64)
@@ -530,7 +766,7 @@ class AsynchronyReviewWindow(QWidget):
 			self._phase_canvas.draw_idle()
 			return
 
-		metrics = getattr(main, "metrics", None) or {}
+		metrics = self._active_metrics() or {}
 		ax.hist(
 			phases % 360.0, bins=72, range=(0.0, 360.0),
 			color="#2c7fb8", alpha=0.85, edgecolor="#0b1220", linewidth=0.4,
@@ -577,7 +813,8 @@ class AsynchronyReviewWindow(QWidget):
 			self._set_status("ROI seleccionada. Cargá un estudio en la ventana principal para procesarlo.")
 			return
 		try:
-			main.process_current()
+			# La ROI ECTb sólo afecta a Esfuerzo; se reprocesa esa etapa.
+			main.reprocess_async_stage("stress")
 		except Exception as exc:
 			self._set_status(f"No se pudo reprocesar: {exc}")
 			return
@@ -601,16 +838,14 @@ class AsynchronyReviewWindow(QWidget):
 			self.cine_wall.set_cube(None)
 			return
 
+		self._refresh_stage_combo_enabled()
 		self._refresh_applied_label()
-		study = getattr(self._main, "study", None)
+		study = self._active_study()
 		cube = getattr(study, "cube", None) if study is not None else None
 		self.cine_main.set_cube(cube)
 		self.cine_wall.set_cube(cube)
 		if cube is not None:
-			try:
-				rois = self._main._parse_manual_rois()
-			except Exception:
-				rois = {}
+			rois = self._active_rois()
 			self.cine_main.set_manual_rois(rois)
 			self.cine_wall.set_manual_rois({})
 			self._ensure_wall_result()
@@ -727,8 +962,8 @@ class AsynchronyReviewWindow(QWidget):
 			self._wall_result = None
 			self._wall_reason = "No hay ventana principal asociada."
 			return
-		study = getattr(main, "study", None)
-		seg = self._ectb_seed_segmentation()
+		study = self._active_study()
+		seg = self._active_seg_ring()
 		if study is None or seg is None:
 			self._wall_result = None
 			self._wall_reason = "Falta estudio o segmentación anular: procesá primero en la ventana principal."
@@ -771,7 +1006,7 @@ class AsynchronyReviewWindow(QWidget):
 				str(getattr(self, "_wall_reason", "") or "Sin contornos ECTb: procesá el estudio en la ventana principal.")
 			)
 			return
-		seg = self._ectb_seed_segmentation()
+		seg = self._active_seg_ring()
 		if seg is None:
 			self.cine_wall.preview.set_overlay_contours([])
 			self._set_status("Sin segmentación anular cargada: no hay contornos para dibujar.")
