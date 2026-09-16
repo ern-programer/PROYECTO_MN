@@ -2210,9 +2210,14 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_scatter_k_spin.setMaximumWidth(58)
 				self.cine_crudo_scatter_k_spin.setEnabled(False)
 				self.cine_crudo_scatter_k_spin.setToolTip(
-					"Factor k de la resta de scatter (P = EM - k×SC). 1.0 = resta "
-					"directa (dual-window). Con TEW se calcula de los anchos de "
-					"ventana. Calibrar con fantoma/estudio real.")
+					"Factor k de la resta de scatter (P = EM − k×SC).\n"
+					"Si el DICOM trae las ventanas de energía, se calcula solo:\n"
+					"    k = W_EM / (2·W_SC)   (TEW, Ogawa 1991)\n"
+					"Ej. CARDIAC HwK: W_EM=28, W_SC=12 → k=1.167.\n"
+					"El /2 es la convención trapezoidal de una sola ventana\n"
+					"satélite inferior (DEW, conservadora en Tc-99m). Sin /2\n"
+					"sería k=W_EM/W_SC=2.33 (sobre-resta). Editable: 1.0 = resta\n"
+					"directa. Calibrar con fantoma/estudio real si hace falta.")
 				self.cine_crudo_scatter_k_spin.valueChanged.connect(self._on_scatter_preview_changed)
 				toolbar6_r2.addWidget(self.cine_crudo_scatter_k_spin)
 				# --- CT/ATT + AC: corrección de atenuación iterativa (OSEM/MLEM). El

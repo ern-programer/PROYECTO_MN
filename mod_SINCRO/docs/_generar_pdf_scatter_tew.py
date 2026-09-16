@@ -20,10 +20,10 @@ styles = getSampleStyleSheet()
 title = ParagraphStyle("t", parent=styles["Title"], fontSize=16, alignment=TA_CENTER, spaceAfter=4)
 sub = ParagraphStyle("s", parent=styles["Normal"], fontSize=9.5, alignment=TA_CENTER,
                      textColor=colors.HexColor("#555555"), spaceAfter=12)
-h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontSize=11, spaceBefore=7, spaceAfter=3,
+h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontSize=11, spaceBefore=5, spaceAfter=3,
                     textColor=colors.HexColor("#1a3a5c"))
-body = ParagraphStyle("b", parent=styles["Normal"], fontSize=9, leading=11.5,
-                      alignment=TA_JUSTIFY, spaceAfter=4)
+body = ParagraphStyle("b", parent=styles["Normal"], fontSize=9, leading=11,
+                      alignment=TA_JUSTIFY, spaceAfter=3)
 eq = ParagraphStyle("eq", parent=styles["Normal"], fontSize=9, leading=12, alignment=TA_CENTER,
                     fontName="Courier", spaceBefore=2, spaceAfter=4,
                     backColor=colors.HexColor("#f4f4f4"))
@@ -32,7 +32,7 @@ ref = ParagraphStyle("r", parent=styles["Normal"], fontSize=8, leading=10,
 
 
 doc = SimpleDocTemplate(OUT, pagesize=A4, leftMargin=18*mm, rightMargin=18*mm,
-                        topMargin=12*mm, bottomMargin=12*mm,
+                        topMargin=10*mm, bottomMargin=10*mm,
                         title="Por qué el scatter entra en el fotopico (nota TEW)")
 S = []
 
@@ -93,19 +93,20 @@ S.append(Paragraph("P<sub>corr</sub> = P<sub>EM</sub> − k · P<sub>SC</sub>,&n
                    "k ≈ W<sub>EM</sub> / (2·W<sub>SC</sub>)", eq))
 S.append(Paragraph(
     "Para las ventanas del ejemplo (W<sub>EM</sub> = 28 keV, W<sub>SC</sub> = 12 keV) resulta k ≈ 1.17. "
-    "En la práctica el k teórico es un punto de partida: el valor fino se calibra con fantoma o con un "
-    "estudio real, porque la proporción exacta depende de la geometría del paciente y del colimador. La "
-    "hipótesis de proporcionalidad no es exacta —el scatter de ángulo chico, que es el que entra al "
-    "fotopico, está algo sub-representado en la ventana inferior— pero alcanza para quitar el pedestal "
-    "suave que rellena la cavidad ventricular, que es lo que clínicamente importa.", body))
+    "El factor 1/2 es la convención trapezoidal de una única ventana satélite inferior (variante DEW, "
+    "habitual en <sup>99m</sup>Tc); omitirlo daría k ≈ 2.33 y sobre-restaría. El k teórico es un punto de "
+    "partida: el valor fino se calibra con fantoma o estudio real. La hipótesis de proporcionalidad no es "
+    "exacta —el scatter de ángulo chico está algo sub-representado en la ventana inferior— pero alcanza para "
+    "quitar el pedestal suave que rellena la cavidad ventricular. El software identifica la ventana del "
+    "fotopico por su energía (EnergyWindowRangeSequence), no por su orden en el DICOM, así que k y la "
+    "separación de proyecciones salen bien aunque el equipo exporte las ventanas invertidas.", body))
 
 # ---------------------------------------------------------------- moraleja
 S.append(Paragraph("Moraleja", h1))
 S.append(Paragraph(
     "La ventana del fotopico no es una puerta con guardia: es un tamiz con agujeros del tamaño justo para "
-    "que pase el scatter de ángulo chico, más el ruido energético del detector, más las dispersiones "
-    "internas del cristal. Aceptarlo y medirlo en una ventana vecina es más barato y más honesto que "
-    "suponer que no existe.", body))
+    "que pase el scatter de ángulo chico, más el ruido energético del detector. Aceptarlo y medirlo en una "
+    "ventana vecina es más barato y más honesto que suponer que no existe.", body))
 
 S.append(Spacer(1, 4))
 S.append(Paragraph("Referencias", h1))

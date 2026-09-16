@@ -208,12 +208,41 @@ def load_raw_projections(path: str, *, _skip_scatter: bool = False) -> RawGatedP
     scatter_k_tew: float | None = None
     if energy_vec is not None and len(energy_vec) == n_frames:
         ev = [int(v) for v in energy_vec]
-        n_energy = len(set(ev))
+        energy_windows = sorted(set(ev))
+        n_energy = len(energy_windows)
         if n_energy == 2 and ang_vec is not None and len(ang_vec) == n_frames:
             av = [int(v) for v in ang_vec]
             n_angles = len(set(av))
-            em_frames = [f for f in range(n_frames) if ev[f] == 1]
-            sc_frames = [f for f in range(n_frames) if ev[f] == 2]
+            # --- Identificar EM (fotopico) vs SC (scatter) por energía, no por orden. ---
+            # No asumimos que la ventana nº1 sea el fotopico: algunos equipos exportan
+            # las ventanas invertidas. El fotopico es el de MAYOR energía (límite
+            # superior más alto, ~140 keV en Tc-99m). El EnergyWindowVector marca cada
+            # frame con el nº de ventana v -> ewi[v-1] en EnergyWindowInformationSequence.
+            def _win_range(item):
+                ews = _get(item, (0x0054, 0x0013), None)  # EnergyWindowRangeSequence
+                if ews is not None and len(ews) >= 1:
+                    lo = float(_get(ews[0], (0x0054, 0x0014), 0) or 0)  # LowerLimit keV
+                    hi = float(_get(ews[0], (0x0054, 0x0015), 0) or 0)  # UpperLimit keV
+                    if hi > lo:
+                        return lo, hi
+                return None
+            ewi = _get(ds, (0x0054, 0x0012), None)  # EnergyWindowInformationSequence
+            win_ranges: dict[int, tuple[float, float]] = {}
+            if ewi is not None:
+                for _wnum in energy_windows:
+                    if 1 <= _wnum <= len(ewi):
+                        _r = _win_range(ewi[_wnum - 1])
+                        if _r is not None:
+                            win_ranges[_wnum] = _r
+            # EM = ventana con mayor límite superior; SC = la otra. Sin rangos
+            # legibles, fallback al orden clásico (ventana 1 = EM, ventana 2 = SC).
+            if len(win_ranges) == 2:
+                em_win = max(win_ranges, key=lambda w: win_ranges[w][1])
+                sc_win = min(win_ranges, key=lambda w: win_ranges[w][1])
+            else:
+                em_win, sc_win = energy_windows[0], energy_windows[1]
+            em_frames = [f for f in range(n_frames) if ev[f] == em_win]
+            sc_frames = [f for f in range(n_frames) if ev[f] == sc_win]
             # Caso UNGATED dual-energy: 1 gate, n_angles por ventana.
             if len(em_frames) == n_angles and len(sc_frames) == n_angles:
                 projections = np.zeros((1, n_angles, H, W), dtype=np.float64)
@@ -225,7 +254,7 @@ def load_raw_projections(path: str, *, _skip_scatter: bool = False) -> RawGatedP
                 n_gates = 1
                 notes.append(
                     f"DUAL-ENERGY: {n_angles} ángulos × 2 ventanas. "
-                    f"EM (ventana 1) y SC (ventana 2) separados automáticamente."
+                    f"EM (ventana {em_win}) y SC (ventana {sc_win}) separados automáticamente."
                 )
             # Caso GATED dual-energy: n_gates × n_angles por ventana.
             elif time_vec is not None and len(time_vec) == n_frames:
@@ -240,44 +269,29 @@ def load_raw_projections(path: str, *, _skip_scatter: bool = False) -> RawGatedP
                         scatter_projections[tv[f] - 1, av[f] - 1] = arr[f]
                     notes.append(
                         f"DUAL-ENERGY GATED: {n_gates} gates × {n_angles} ángulos × 2 ventanas. "
-                        f"EM (ventana 1) y SC (ventana 2) separados automáticamente."
+                        f"EM (ventana {em_win}) y SC (ventana {sc_win}) separados automáticamente."
                     )
                 else:
                     projections = None
             else:
                 projections = None
-            # Leer límites de energía para el factor k de TEW (si se separó).
-            if projections is not None:
-                try:
-                    # Las ventanas viven en EnergyWindowInformationSequence (0054,0012):
-                    # cada item tiene su EnergyWindowRangeSequence (0054,0013) con
-                    # LowerLimit (0054,0014) / UpperLimit (0054,0015) en keV.
-                    ewi = _get(ds, (0x0054, 0x0012), None)  # EnergyWindowInformationSequence
-                    if ewi is not None and len(ewi) >= 2:
-                        def _win_range(item):
-                            ews = _get(item, (0x0054, 0x0013), None)
-                            if ews is not None and len(ews) >= 1:
-                                lo = float(_get(ews[0], (0x0054, 0x0014), 0) or 0)
-                                hi = float(_get(ews[0], (0x0054, 0x0015), 0) or 0)
-                                if hi > lo:
-                                    return lo, hi
-                            return None
-                        wr1 = _win_range(ewi[0])
-                        wr2 = _win_range(ewi[1])
-                        if wr1 is not None and wr2 is not None:
-                            lo1, hi1 = wr1
-                            lo2, hi2 = wr2
-                            w_em = hi1 - lo1
-                            w_sc = hi2 - lo2
-                            if w_em > 0 and w_sc > 0:
-                                k_tew = w_em / (2.0 * w_sc)
-                                scatter_k_tew = k_tew
-                                notes.append(
-                                    f"TEW: EM [{lo1:.0f}-{hi1:.0f}] keV (W={w_em:.0f}), "
-                                    f"SC [{lo2:.0f}-{hi2:.0f}] keV (W={w_sc:.0f}) -> k={k_tew:.3f}."
-                                )
-                except Exception:
-                    pass
+            # --- Factor k de TEW a partir de los anchos de ventana medidos. ---
+            # Ogawa (1991): el scatter en el fotopico se estima con ventanas satélite.
+            # Con una sola satélite inferior (DEW, típico en Tc-99m):
+            #     k = W_EM / (2 * W_SC)      ->   P_corr = EM - k * SC
+            # Ej. CARDIAC HwK: W_EM=28 (126-154), W_SC=12 (114-126) -> k=1.167.
+            # El /2 es la convención trapezoidal conservadora de una sola satélite.
+            if projections is not None and em_win in win_ranges and sc_win in win_ranges:
+                lo_em, hi_em = win_ranges[em_win]
+                lo_sc, hi_sc = win_ranges[sc_win]
+                w_em = hi_em - lo_em
+                w_sc = hi_sc - lo_sc
+                if w_em > 0 and w_sc > 0:
+                    scatter_k_tew = w_em / (2.0 * w_sc)
+                    notes.append(
+                        f"TEW: EM [{lo_em:.0f}-{hi_em:.0f}] keV (W={w_em:.0f}), "
+                        f"SC [{lo_sc:.0f}-{hi_sc:.0f}] keV (W={w_sc:.0f}) -> k={scatter_k_tew:.3f}."
+                    )
         else:
             projections = None
     else:
