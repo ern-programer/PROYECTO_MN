@@ -76,6 +76,13 @@ class RawReconConfig:
     post_filter_sigma_px: float = 0.0
     post_filter_sigma_ungated_px: float | None = None
     post_filter_sigma_gated_px: float | None = None
+    # Piso de post-filtro gaussiano ACOPLADO a la RR: la recuperación de
+    # resolución (PSF) es una deconvolución implícita que amplifica el ruido de
+    # alta frecuencia. Cuando una rama corre con RR y su sigma post quedó por
+    # debajo de este piso, se eleva al piso (medido: σ=1.0 baja el ruido ~15%
+    # sin tocar el contraste). Solo aplica con post_filter_kind="gaussian".
+    # 0 = sin acople (comportamiento previo).
+    rr_post_filter_sigma_px: float = 1.0
     # Post-filtro alternativo Butterworth 3D radial (protocolo Xeleris óseo:
     # OSEM 8×4 + Butter 0.35/5 post-recon). kind: "gaussian" | "butterworth".
     # Con "butterworth" se ignoran las sigmas y se usa cutoff/orden (frac. Nyquist).
@@ -1484,10 +1491,24 @@ def reconstruct_raw_gated_pipeline(
     post_ung = _post_global if getattr(cfg, "post_filter_sigma_ungated_px", None) is None else float(cfg.post_filter_sigma_ungated_px)
     post_gat = _post_global if getattr(cfg, "post_filter_sigma_gated_px", None) is None else float(cfg.post_filter_sigma_gated_px)
 
+    _post_kind = str(getattr(cfg, "post_filter_kind", "gaussian") or "gaussian").strip().lower()
+
+    # Acople RR->post-filtro: si la rama corre con RR y su sigma quedó por debajo
+    # del piso, se eleva. La RR amplifica ruido de alta frecuencia; este piso es
+    # su contraparte (medido: σ=1.0 => ruido -15%, contraste intacto). Solo con
+    # kind gaussiano (con butterworth ese filtro ya suaviza e ignora las sigmas).
+    _rr_floor = float(getattr(cfg, "rr_post_filter_sigma_px", 0.0) or 0.0)
+    if _rr_floor > 0.0 and _post_kind != "butterworth":
+        if rr_psf is not None and post_ung < _rr_floor:
+            post_ung = _rr_floor
+            notes.append(f"Post-filtro acoplado a RR (UngGat): sigma elevada al piso {_rr_floor:.2f}px.")
+        if gated_rr_psf is not None and post_gat < _rr_floor:
+            post_gat = _rr_floor
+            notes.append(f"Post-filtro acoplado a RR (gated): sigma elevada al piso {_rr_floor:.2f}px.")
+
     # Guardar copia SIN filtro para toggle en UI (se asigna al result al final)
     _ungated_unfiltered = np.ascontiguousarray(ungated_volume.copy())
 
-    _post_kind = str(getattr(cfg, "post_filter_kind", "gaussian") or "gaussian").strip().lower()
     if _post_kind == "butterworth":
         if progress_callback is not None:
             progress_callback(0.96, "Aplicando post-filtro Butterworth 3D...")
