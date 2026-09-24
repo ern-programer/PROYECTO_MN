@@ -66,3 +66,7 @@ Desktop.ini
 # --- SINCRO: datos de runtime / investigacion (no versionar) ---
 mod_SINCRO/research_data/
 mod_SINCRO/report_hashes/
+
+# --- SINCRO: artefactos locales de diagnóstico / recovery ---
+mod_SINCRO/_backup_vieja_24sep/
+mod_SINCRO/_startup_stack.txt
