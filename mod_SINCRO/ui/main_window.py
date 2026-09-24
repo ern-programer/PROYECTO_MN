@@ -6491,7 +6491,9 @@ class MainWindow(QMainWindow):
 			self,
 			"Cargar ECG de 12 derivaciones",
 			"",
-			"ECG (*.pdf *.scp *.dcm *.dicom);;PDF (*.pdf);;SCP-ECG (*.scp);;DICOM (*.dcm *.dicom);;Todos (*.*)",
+			"ECG (*.pdf *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp *.scp *.dcm *.dicom);;"
+			"PDF (*.pdf);;Imagen (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp);;"
+			"SCP-ECG (*.scp);;DICOM (*.dcm *.dicom);;Todos (*.*)",
 		)
 		if not path:
 			return

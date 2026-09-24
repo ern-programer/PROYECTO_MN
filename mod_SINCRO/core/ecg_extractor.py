@@ -235,46 +235,92 @@ def extract_from_dicom_waveform(filepath: str) -> ECGData:
     return data
 
 
-def _ocr_pdf(filepath: str) -> str:
-    """Extrae texto de un PDF escaneado con OCR (pytesseract + pdf2image/PyMuPDF)."""
+# Cache del motor RapidOCR (carga costosa: modelos ONNX).
+_RAPIDOCR_ENGINE = None
+
+
+def _get_rapidocr():
+    """Devuelve una instancia (cacheada) de RapidOCR o None si no está disponible.
+
+    RapidOCR (rapidocr-onnxruntime) es OCR 100% pip: NO requiere Tesseract ni
+    ningún binario del sistema. Los modelos ONNX vienen en el paquete, por lo que
+    es portable a otras PCs con solo `pip install rapidocr-onnxruntime`.
+    """
+    global _RAPIDOCR_ENGINE
+    if _RAPIDOCR_ENGINE is not None:
+        return _RAPIDOCR_ENGINE
     try:
-        import pytesseract
+        from rapidocr_onnxruntime import RapidOCR
     except ImportError:
-        raise ImportError("pytesseract no instalado. Instalar con: pip install pytesseract (y Tesseract OCR en el sistema)")
+        return None
+    _RAPIDOCR_ENGINE = RapidOCR()
+    return _RAPIDOCR_ENGINE
+
+
+def _pdf_pages_to_numpy(filepath: str, dpi: int = 300) -> list:
+    """Renderiza cada página de un PDF a un array numpy RGB usando PyMuPDF (fitz)."""
+    import numpy as _np
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        raise ImportError("PyMuPDF (fitz) requerido para renderizar PDF. Instalar: pip install pymupdf")
+
+    from PIL import Image
+    import io as _io
 
     images = []
-    # Intentar pdf2image primero
+    zoom = dpi / 72.0
+    mat = fitz.Matrix(zoom, zoom)
+    doc = fitz.open(filepath)
     try:
-        from pdf2image import convert_from_path
-        images = convert_from_path(filepath, dpi=300)
-    except ImportError:
-        # Fallback a PyMuPDF (fitz)
-        try:
-            import fitz
-            doc = fitz.open(filepath)
-            for page in doc:
-                pix = page.get_pixmap(dpi=300)
-                from PIL import Image
-                import io
-                images.append(Image.open(io.BytesIO(pix.tobytes("png"))))
-            doc.close()
-        except ImportError:
-            raise ImportError("pdf2image o PyMuPDF requerido para OCR. Instalar con: pip install pdf2image o pip install PyMuPDF")
+        for page in doc:
+            pix = page.get_pixmap(matrix=mat)
+            img = Image.open(_io.BytesIO(pix.tobytes("png"))).convert("RGB")
+            images.append(_np.asarray(img))
+    finally:
+        doc.close()
+    return images
 
-    text = ""
+
+def _ocr_images(images: list) -> str:
+    """Aplica RapidOCR a una lista de imágenes (numpy arrays) y concatena el texto."""
+    engine = _get_rapidocr()
+    if engine is None:
+        raise ImportError(
+            "OCR no disponible: falta rapidocr-onnxruntime. "
+            "Instalar con: pip install rapidocr-onnxruntime (no requiere Tesseract)"
+        )
+
+    text_parts = []
     for img in images:
-        text += pytesseract.image_to_string(img, lang="spa+eng") + "\n"
-    return text
+        result, _elapsed = engine(img)
+        if result:
+            # result = [[box, text, score], ...]
+            for item in result:
+                if len(item) >= 2 and item[1]:
+                    text_parts.append(str(item[1]))
+    return "\n".join(text_parts)
 
 
-def extract_from_pdf_file(filepath: str) -> ECGData:
-    """
-    Extrae texto de PDF y luego datos ECG.
-    Requiere PyPDF2 o pdfplumber. Si el PDF es escaneado, usa OCR (pytesseract).
-    """
+def _ocr_pdf(filepath: str) -> str:
+    """Extrae texto de un PDF escaneado con OCR (RapidOCR, sin Tesseract)."""
+    images = _pdf_pages_to_numpy(filepath, dpi=300)
+    return _ocr_images(images)
+
+
+def _ocr_image_file(filepath: str) -> str:
+    """Extrae texto de una imagen (PNG/JPG/etc.) con OCR (RapidOCR, sin Tesseract)."""
+    import numpy as _np
+    from PIL import Image
+
+    img = Image.open(filepath).convert("RGB")
+    return _ocr_images([_np.asarray(img)])
+
+
+def _extract_pdf_text_digital(filepath: str) -> str:
+    """Extrae la capa de texto de un PDF digital (sin OCR). Vacío si es escaneado."""
     text = ""
-
-    # Intentar con pdfplumber primero (mejor extracción)
+    # pdfplumber primero (mejor layout), luego pypdf/PyPDF2.
     try:
         import pdfplumber
         with pdfplumber.open(filepath) as pdf:
@@ -282,29 +328,76 @@ def extract_from_pdf_file(filepath: str) -> ECGData:
                 page_text = page.extract_text()
                 if page_text:
                     text += page_text + "\n"
+        return text
     except ImportError:
-        # Fallback a PyPDF2
+        pass
+
+    try:
+        from pypdf import PdfReader
+    except ImportError:
         try:
-            import PyPDF2
-            with open(filepath, "rb") as f:
-                reader = PyPDF2.PdfReader(f)
-                for page in reader.pages:
-                    text += page.extract_text() + "\n"
+            from PyPDF2 import PdfReader  # type: ignore
         except ImportError:
-            raise ImportError("pdfplumber o PyPDF2 requerido. Instalar con: pip install pdfplumber")
+            return text
+
+    reader = PdfReader(filepath)
+    for page in reader.pages:
+        page_text = page.extract_text() or ""
+        if page_text:
+            text += page_text + "\n"
+    return text
+
+
+def extract_from_pdf_file(filepath: str) -> ECGData:
+    """
+    Extrae datos ECG de un PDF.
+
+    Estrategia en cascada:
+      1. Capa de texto digital (pypdf/pdfplumber) — sin OCR, ideal para PDF generado por equipo.
+      2. Si el PDF es escaneado (sin texto) → OCR con RapidOCR (pip puro, sin Tesseract).
+    """
+    text = _extract_pdf_text_digital(filepath)
+    used_ocr = False
 
     if not text.strip():
         # PDF escaneado → OCR
         try:
             text = _ocr_pdf(filepath)
+            used_ocr = True
         except ImportError as exc:
-            raise ValueError(f"PDF escaneado sin texto y OCR no disponible: {exc}")
+            raise ValueError(f"PDF escaneado sin texto y {exc}")
 
     if not text.strip():
         raise ValueError("No se pudo extraer texto del PDF ni con OCR.")
 
     data = extract_from_pdf_text(text)
-    if "ocr" in text.lower() or not any(c.isalpha() for c in text[:50]):
+    if used_ocr:
+        # El OCR puede introducir errores → marcar confianza no alta.
+        if data.confianza == "alta":
+            data.confianza = "media"
+    return data
+
+
+def extract_from_image_file(filepath: str) -> ECGData:
+    """
+    Extrae datos ECG de una imagen (foto o escaneo: PNG/JPG/BMP/TIFF) vía OCR.
+    Lee los valores impresos en el ECG (FC/QRS/QT/QTc/PR/ritmo). Usa RapidOCR.
+    """
+    try:
+        text = _ocr_image_file(filepath)
+    except ImportError as exc:
+        raise ValueError(f"No se puede leer la imagen: {exc}")
+
+    if not text.strip():
+        raise ValueError(
+            "No se detectó texto en la imagen. "
+            "Asegurate de que el ECG muestre los valores impresos (FC, QRS, QT) legibles."
+        )
+
+    data = extract_from_pdf_text(text)
+    data.fuente = "imagen"
+    # OCR de foto: confianza como mucho media (dependiente de calidad de imagen).
+    if data.confianza == "alta":
         data.confianza = "media"
     return data
 
@@ -319,12 +412,16 @@ def extract_ecg(filepath: str) -> ECGData:
 
     if ext == ".pdf":
         return extract_from_pdf_file(filepath)
+    elif ext in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"):
+        return extract_from_image_file(filepath)
     elif ext in (".scp", ".scp-ecg"):
         return extract_from_scp_ecg(filepath)
     elif ext in (".dcm", ".dicom"):
         return extract_from_dicom_waveform(filepath)
     else:
-        raise ValueError(f"Formato no soportado: {ext}. Usar .pdf, .scp o .dcm")
+        raise ValueError(
+            f"Formato no soportado: {ext}. Usar .pdf, .png/.jpg (imagen), .scp o .dcm"
+        )
 
 
 def compare_ecg_data(manual: ECGData, extracted: ECGData) -> dict[str, Any]:

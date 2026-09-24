@@ -12,3 +12,14 @@ opencv-python>=4.8
 matplotlib>=3.7
 reportlab>=4.0
 PyQt6>=6.5
+
+# --- Lectura de ECG (contexto clínico, pestaña ECG) ---
+# pypdf: lee la capa de texto de PDFs digitales (sin OCR).
+# pymupdf (fitz): renderiza PDF escaneado a imagen para OCR.
+# Pillow: manejo de imágenes (PNG/JPG/foto de ECG).
+# rapidocr-onnxruntime: OCR 100% pip, NO requiere Tesseract ni ningún .exe del
+#   sistema (modelos ONNX incluidos). Portable: solo pip install en cada PC.
+pypdf>=4.0
+pymupdf>=1.24
+Pillow>=10.0
+rapidocr-onnxruntime>=1.2
