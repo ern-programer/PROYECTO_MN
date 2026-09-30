@@ -5,6 +5,8 @@ Centraliza la lógica de temas para poder ELEGIR entre:
 	ninguna hoja de estilo; el sistema operativo/Qt decide el look.
   - "modern": hoja de estilo moderna (``ui/theme.qss``), look claro con acento
 	azul GammaSync, tarjetas redondeadas, etc.
+  - "console": EPar, consola clara y cálida inspirada en LCARS, limitada a
+	navegación y controles periféricos; no cambia los visores ni sus colormaps.
 
 La preferencia se persiste en ``QSettings("Gammasys", "GammaSync")`` bajo la
 clave ``ui/theme``. El default es "classic" (nativo) para no forzar el QSS
@@ -23,11 +25,13 @@ from PyQt6.QtCore import QSettings
 # Identificadores estables de tema y su etiqueta legible para la UI.
 THEME_CLASSIC = "classic"
 THEME_MODERN = "modern"
+THEME_CONSOLE = "console"
 
 # Orden e nombres mostrados en el selector del panel de Configuración.
 AVAILABLE_THEMES: list[tuple[str, str]] = [
 	(THEME_CLASSIC, "Clásico (nativo)"),
 	(THEME_MODERN, "Moderno (QSS)"),
+	(THEME_CONSOLE, "EPar"),
 ]
 
 DEFAULT_THEME = THEME_CLASSIC
@@ -58,6 +62,9 @@ def label_to_theme(label: str) -> str:
 def current_theme() -> str:
 	"""Lee el tema guardado en QSettings. Si no hay o es inválido, devuelve el default."""
 	value = str(_settings().value(_SETTINGS_KEY, DEFAULT_THEME) or DEFAULT_THEME)
+	# Quien haya elegido el tema experimental conserva el tema suave al actualizar.
+	if value == "lcars":
+		return THEME_CONSOLE
 	valid = {tid for tid, _ in AVAILABLE_THEMES}
 	return value if value in valid else DEFAULT_THEME
 
@@ -97,6 +104,14 @@ def apply_theme(app, theme_id: str | None = None) -> str:
 	"""
 	if theme_id is None:
 		theme_id = current_theme()
+	if theme_id == THEME_CONSOLE:
+		try:
+			with open(os.path.join(os.path.dirname(__file__), "theme_console.qss"), encoding="utf-8") as fh:
+				qss = fh.read()
+		except OSError:
+			qss = ""
+		app.setStyleSheet(qss)
+		return THEME_CONSOLE if qss else THEME_CLASSIC
 	if theme_id == THEME_MODERN:
 		qss = load_modern_stylesheet()
 		app.setStyleSheet(qss)  # "" si faltó el archivo → nativo, sin romper

@@ -599,6 +599,7 @@ class MainWindow(QMainWindow):
 
 		central = QWidget()
 		self.setCentralWidget(central)
+		self.setObjectName("sincroMainWindow")
 
 		splitter = QSplitter(Qt.Orientation.Horizontal)
 		splitter.setChildrenCollapsible(False)
@@ -606,6 +607,7 @@ class MainWindow(QMainWindow):
 		splitter.setHandleWidth(10)
 		left = self._build_sidebar()
 		self._sidebar_widget = left
+		self._apply_sidebar_theme()
 
 		self.file_edit = QLineEdit()
 		self.file_edit.setPlaceholderText("Ruta al DICOM gated reconstruido...")
@@ -1605,6 +1607,7 @@ class MainWindow(QMainWindow):
 		right_splitter.setHandleWidth(10)
 
 		self.tabs = QTabWidget()
+		self.tabs.setObjectName("sincroMainTabs")
 		self.preview_labels: dict[str, QLabel] = {}
 		self._tab_widgets: dict[str, QWidget] = {}
 		self._tab_titles: dict[str, str] = {}
@@ -4956,17 +4959,19 @@ class MainWindow(QMainWindow):
 		"""Panel de Configuración de la aplicación.
 
 		Reúne (y seguirá reuniendo, migración gradual) las opciones de
-		configuración. Hoy: selección de tema visual (Clásico/Moderno) + las
+		configuración. Hoy: selección de tema visual + las
 		preferencias de interfaz que antes estaban en "Config UI".
 		"""
 		from ui import theme_manager
 
 		dlg = QDialog(self)
+		dlg.setObjectName("eparSettingsDialog")
 		dlg.setWindowTitle("Configuración")
 		root = QVBoxLayout(dlg)
 
 		# Configuración organizada en pestañas por utilidad.
 		tabs = QTabWidget()
+		tabs.setObjectName("eparSettingsTabs")
 		tab_interfaz = QWidget()
 		tab_interfaz_l = QHBoxLayout(tab_interfaz)
 		# Dos columnas: izquierda (apariencia/interfaz/visual) y derecha (zoom por pestaña).
@@ -5001,7 +5006,8 @@ class MainWindow(QMainWindow):
 			theme_combo.setCurrentIndex(idx)
 		theme_combo.setToolTip(
 			"Clásico: estilo nativo de Qt (como estaba la app).\n"
-			"Moderno: hoja de estilo con acento azul GammaSync, tarjetas redondeadas, etc."
+			"Moderno: tarjetas claras y acento azul GammaSync.\n"
+			"EPar: navegación cálida inspirada en LCARS; visores y colores clínicos intactos."
 		)
 		appearance_l.addRow("Tema visual:", theme_combo)
 		theme_note = QLabel("El cambio de tema se aplica al instante.")
@@ -5289,6 +5295,7 @@ class MainWindow(QMainWindow):
 			app = QApplication.instance()
 			if app is not None and tid:
 				theme_manager.apply_theme(app, tid)
+				self._apply_sidebar_theme(tid)
 		theme_combo.currentIndexChanged.connect(_on_theme_changed)
 
 		tab_interfaz_left.addStretch(1)
@@ -5309,6 +5316,7 @@ class MainWindow(QMainWindow):
 			app = QApplication.instance()
 			if app is not None:
 				theme_manager.apply_theme(app, prev_theme)
+				self._apply_sidebar_theme(prev_theme)
 			return
 
 		# Tema
@@ -5317,6 +5325,7 @@ class MainWindow(QMainWindow):
 		app = QApplication.instance()
 		if app is not None:
 			theme_manager.apply_theme(app, chosen_theme)
+			self._apply_sidebar_theme(chosen_theme)
 
 		# Interfaz
 		self._ui_show_helpers = bool(show_helpers.isChecked())
@@ -5808,6 +5817,7 @@ class MainWindow(QMainWindow):
 			"QLabel { font-size: 11px; }"
 			"QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox { background: white; }"
 		)
+		self._sidebar_base_stylesheet = sidebar.styleSheet()
 		scroll = QScrollArea()
 		scroll.setWidgetResizable(True)
 		scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -5867,6 +5877,36 @@ class MainWindow(QMainWindow):
 		layout.setContentsMargins(0, 0, 0, 0)
 		layout.addWidget(scroll)
 		return sidebar
+
+	def _apply_sidebar_theme(self, theme_id: str | None = None):
+		"""Tematiza sólo los controles laterales, sin tocar los visores clínicos."""
+		from ui import theme_manager
+		if theme_id is None:
+			theme_id = theme_manager.current_theme()
+		base = self._sidebar_base_stylesheet
+		if theme_id == theme_manager.THEME_CONSOLE:
+			base += """
+			#sincroSidebar { background: #e7eaf0; border-right: 5px solid #f6c477; }
+			QGroupBox { background: #f8f7f5; border: 1px solid #c8d0dc; border-radius: 14px;
+			  margin-top: 8px; color: #29354b; }
+			QGroupBox::title { color: #344363; }
+			QGroupBox#collapsibleContent { background: #f8f7f5; border-color: #c8d0dc;
+			  border-top: none; border-top-left-radius: 0; border-top-right-radius: 0; margin-top: 0; }
+			QToolButton#collapsibleHeader { color: #272e44; background: #d7d0e9;
+			  border: 1px solid #aca5c7; border-radius: 14px; padding: 6px 10px; }
+			QToolButton#collapsibleHeader:hover { background: #c7bee1; }
+			QToolButton#collapsibleHeader:checked { background: #f6c477;
+			  border-color: #d19a54; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+			QPushButton { background: #344363; color: white; border: 1px solid #344363;
+			  border-radius: 10px; padding: 5px 8px; }
+			QPushButton:hover { background: #465d89; }
+			QPushButton:disabled { background: #d6dae2; color: #576278; border-color: #c1c9d6; }
+			QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QDoubleSpinBox, QSpinBox {
+			  background: #fffdf9; color: #253148; border: 1px solid #aebacc; border-radius: 7px; }
+			QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+			  border-color: #7864aa; }
+			"""
+		self._sidebar_widget.setStyleSheet(base)
 
 	def _on_mascot_clicked(self, event):
 		"""Clic en Rockford: abre/enfoca la consola de eventos independiente."""

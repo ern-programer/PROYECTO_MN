@@ -975,6 +975,7 @@ class PerfusionFusionPanel(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("eparPerfusionFusion")
         self.setWindowTitle("SINCRO — Fusión SPECT/CT · PERFUSIÓN")
         # Qt.Window (no Dialog): entrada propia en la barra de tareas para
         # poder minimizar/restaurar independiente de la ventana principal.
@@ -1102,6 +1103,7 @@ class PerfusionFusionPanel(QDialog):
         root.setSpacing(6)
 
         flow_box = QGroupBox("Flujo clínico PERFUSIÓN SPECT / SPECT-CT")
+        flow_box.setObjectName("eparFlowBox")
         flow = QGridLayout(flow_box)
         flow.setContentsMargins(8, 6, 8, 6)
         flow.setHorizontalSpacing(8)
@@ -1346,6 +1348,7 @@ class PerfusionFusionPanel(QDialog):
         top_row.addWidget(flow_box)
 
         recon_box = QGroupBox("Reconstrucción y filtros")
+        recon_box.setObjectName("eparReconBox")
         recon_grid = QGridLayout(recon_box)
         recon_grid.setContentsMargins(8, 6, 8, 6)
         recon_grid.setHorizontalSpacing(8)

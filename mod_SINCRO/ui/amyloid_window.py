@@ -376,6 +376,7 @@ class AmyloidWindow(QDialog):
 
     def __init__(self, parent=None, image=None, study=None, initial_folder=None):
         super().__init__(parent)
+        self.setObjectName("eparAmyloidPlanar")
         self.setWindowTitle("SINCRO — Amiloidosis")
         self.setWindowFlags(
             self.windowFlags()
@@ -445,7 +446,10 @@ class AmyloidWindow(QDialog):
         root.addWidget(self._info_lbl)
 
         # ── Toolbar ────────────────────────────────────────────────
-        toolbar = QHBoxLayout()
+        toolbar_frame = QFrame()
+        toolbar_frame.setObjectName("eparPlanarToolbar")
+        toolbar = QHBoxLayout(toolbar_frame)
+        toolbar.setContentsMargins(10, 5, 10, 5)
         toolbar.setSpacing(8)
 
         # Selector de layout.
@@ -513,7 +517,7 @@ class AmyloidWindow(QDialog):
         self._btn_mode.clicked.connect(self._toggle_mode)
         toolbar.addWidget(self._btn_mode)
 
-        root.addLayout(toolbar)
+        root.addWidget(toolbar_frame)
 
         # ── Línea separadora ───────────────────────────────────────
         sep = QFrame()

@@ -1,0 +1,151 @@
+/* GammaSync — Consola creativa (inspiración LCARS suave).
+   Sólo navegación, pestañas y contenedores periféricos. No se cambia la
+   paleta del visor, sus imágenes, mapas polares, alarmas ni valores clínicos.
+   Se usan selectores con nombre: nunca QWidget/QLabel globales. */
+
+QMainWindow#sincroMainWindow {
+    background: #e7eaf0;
+    color: #243248;
+    font-family: "Segoe UI";
+}
+
+/* La banda de pasos es navegación; las curvas y el montaje no son tematizados. */
+QWidget#pipelineStepBar {
+    background: #e2e5ed;
+    border-bottom: 2px solid #bec8d9;
+}
+
+QTabWidget#sincroMainTabs::pane {
+    border: 1px solid #cbd3df;
+    border-radius: 10px;
+    background: #f0f2f6;
+    top: -1px;
+}
+QTabWidget#sincroMainTabs QTabBar::tab {
+    background: #dce2ec;
+    color: #35415b;
+    border: 1px solid #c2cbdb;
+    border-top-left-radius: 15px;
+    border-top-right-radius: 5px;
+    padding: 6px 13px;
+    margin-right: 3px;
+    min-height: 20px;
+    font-weight: 600;
+}
+QTabWidget#sincroMainTabs QTabBar::tab:selected {
+    background: #f6c477;
+    border-color: #d19a54;
+    color: #202638;
+}
+QTabWidget#sincroMainTabs QTabBar::tab:hover:!selected {
+    background: #cbd7eb;
+}
+
+QMainWindow#sincroMainWindow QStatusBar {
+    background: #e0e5ee;
+    color: #34425c;
+    border-top: 1px solid #bdc9db;
+}
+
+/* AMYLO Planar: sólo franja de navegación, no visor de cuadrantes ni ROI. */
+QFrame#eparPlanarToolbar {
+    background: #e4dfed;
+    border: 1px solid #b7abc9;
+    border-left: 5px solid #f6c477;
+    border-radius: 12px;
+}
+QFrame#eparPlanarToolbar QLabel {
+    color: #29354b;
+    background: transparent;
+    border: none;
+}
+QFrame#eparPlanarToolbar QPushButton,
+QFrame#eparPlanarToolbar QToolButton {
+    background: #344363;
+    color: #ffffff;
+    border: 1px solid #344363;
+    border-radius: 10px;
+    padding: 5px 9px;
+}
+QFrame#eparPlanarToolbar QPushButton:hover,
+QFrame#eparPlanarToolbar QToolButton:hover {
+    background: #465d89;
+}
+QFrame#eparPlanarToolbar QComboBox {
+    background: #fffdf9;
+    color: #253148;
+    border: 1px solid #aebacc;
+    border-radius: 7px;
+    padding: 3px 6px;
+}
+
+/* AMYLO SPECT/CT y Fusión: cabeceras del flujo, nunca los MPR/MIP. */
+QGroupBox#eparFlowBox,
+QGroupBox#eparReconBox {
+    background: #f8f7f5;
+    color: #29354b;
+    border: 1px solid #c8d0dc;
+    border-left: 5px solid #b8a5d7;
+    border-radius: 12px;
+    margin-top: 15px;
+}
+QGroupBox#eparFlowBox::title,
+QGroupBox#eparReconBox::title {
+    color: #344363;
+    background: #e4dfed;
+    border-radius: 7px;
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 9px;
+    padding: 2px 9px;
+}
+QGroupBox#eparFlowBox QPushButton:hover,
+QGroupBox#eparReconBox QPushButton:hover {
+    border: 1px solid #7864aa;
+}
+
+/* Configuración: navegación y acciones. El resto de diálogos queda nativo. */
+QDialog#eparSettingsDialog {
+    background: #e7eaf0;
+    color: #243248;
+}
+QDialog#eparSettingsDialog QGroupBox {
+    background: #f8f7f5;
+    color: #29354b;
+    border: 1px solid #c8d0dc;
+    border-radius: 12px;
+    margin-top: 14px;
+    padding: 7px;
+}
+QDialog#eparSettingsDialog QGroupBox::title {
+    color: #344363;
+    background: #e4dfed;
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 9px;
+    padding: 2px 9px;
+}
+QTabWidget#eparSettingsTabs::pane {
+    border: 1px solid #c8d0dc;
+    border-radius: 10px;
+    background: #f1f2f6;
+}
+QTabWidget#eparSettingsTabs QTabBar::tab {
+    background: #dce2ec;
+    color: #35415b;
+    border: 1px solid #c2cbdb;
+    border-top-left-radius: 15px;
+    border-top-right-radius: 5px;
+    padding: 6px 12px;
+}
+QTabWidget#eparSettingsTabs QTabBar::tab:selected {
+    background: #f6c477;
+    color: #202638;
+}
+QDialog#eparSettingsDialog QDialogButtonBox QPushButton {
+    background: #344363;
+    color: white;
+    border: 1px solid #344363;
+    border-radius: 9px;
+    padding: 5px 12px;
+}
