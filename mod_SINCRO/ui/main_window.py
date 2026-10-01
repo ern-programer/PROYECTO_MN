@@ -279,6 +279,9 @@ class MainWindow(QMainWindow):
 
 	def __init__(self, initial_path: str | None = None):
 		super().__init__()
+		self._epar_plus_console = None
+		self._epar_plus_docked_sizes = [300, 1260]
+		self._epar_plus_closing_app = False
 		self.setWindowTitle(f"GammaSync v{__version__} - Interfaz de procesado")
 		screen = QApplication.primaryScreen()
 		if screen is not None:
@@ -611,6 +614,7 @@ class MainWindow(QMainWindow):
 
 		self.file_edit = QLineEdit()
 		self.file_edit.setPlaceholderText("Ruta al DICOM gated reconstruido...")
+		self.file_edit.textChanged.connect(self._update_epar_plus_study_text)
 		browse_btn = QPushButton("Abrir...")
 		browse_btn.clicked.connect(self._browse_file)
 
@@ -1255,6 +1259,13 @@ class MainWindow(QMainWindow):
 			"sustracción ósea visual y exportación."
 		)
 		button_row.addWidget(self.amyloid_spect_btn, 5, 0, 1, 4)
+		self.epar_plus_btn = QPushButton("Desacoplar controles (EPar +)")
+		self.epar_plus_btn.clicked.connect(self.toggle_epar_plus_console)
+		self.epar_plus_btn.setToolTip(
+			"Mueve este mismo panel de controles a una ventana independiente para liberar "
+			"el ancho del visor o usar un segundo monitor."
+		)
+		button_row.addWidget(self.epar_plus_btn, 6, 0, 1, 4)
 
 		# Ubicar Acciones justo debajo de la versión y la barra de progreso.
 		insert_at = self._sidebar_layout.indexOf(self._progress_bar) + 1
@@ -2951,6 +2962,8 @@ class MainWindow(QMainWindow):
 		self._hide_sync_controls_in_main()
 		self._refresh_readonly_results_panel()
 		self._install_undo_shortcuts()
+		if self._ui_settings.value("epar_plus/detached", False, type=bool):
+			QTimer.singleShot(0, self.detach_epar_plus_console)
 		if initial_path:
 			self.file_edit.setText(initial_path)
 			if self.auto_run_check.isChecked():
@@ -3142,6 +3155,17 @@ class MainWindow(QMainWindow):
 			self._step_chip_labels[st.key] = chip
 			lay.addWidget(chip)
 		lay.addStretch(1)
+		self._epar_plus_front_btn = QPushButton("◉ EPar +")
+		self._epar_plus_front_btn.setObjectName("eparPlusFrontButton")
+		self._epar_plus_front_btn.setToolTip("Traer la consola de controles EPar + al frente.")
+		self._epar_plus_front_btn.setStyleSheet(
+			"QPushButton{background:#d6a35f;color:#171a25;border:1px solid #a97742;"
+			"border-radius:11px;padding:3px 11px;font-weight:700;}"
+			"QPushButton:hover{background:#efc483;}"
+		)
+		self._epar_plus_front_btn.clicked.connect(self.bring_epar_plus_console_to_front)
+		self._epar_plus_front_btn.setVisible(False)
+		lay.addWidget(self._epar_plus_front_btn)
 		self._undo_hint_label = QLabel("")
 		self._undo_hint_label.setStyleSheet("color:#6b7280; font-size:8pt;")
 		lay.addWidget(self._undo_hint_label)
@@ -4456,7 +4480,10 @@ class MainWindow(QMainWindow):
 
 	def _save_window_layout(self):
 		self._ui_settings.setValue("window_geometry", self.saveGeometry())
-		self._ui_settings.setValue("main_splitter_state_v2", self.main_splitter.saveState())
+		# Con EPar + el splitter tiene temporalmente un solo widget. No sobrescribir
+		# con ese estado el reparto válido que se restaurará al volver a acoplar.
+		if self.main_splitter.indexOf(self._sidebar_widget) >= 0:
+			self._ui_settings.setValue("main_splitter_state_v2", self.main_splitter.saveState())
 		self._ui_settings.setValue("right_splitter_state_v3", self.right_splitter.saveState())
 		self._ui_settings.setValue("bottom_hsplit_state_v7", self.bottom_hsplit.saveState())
 		self._save_sidebar_sections_state()
@@ -5028,6 +5055,12 @@ class MainWindow(QMainWindow):
 		enable_tooltips.setChecked(bool(self._ui_enable_tooltips))
 		compact_controls = QCheckBox("Modo compacto (ocultar botones secundarios)")
 		compact_controls.setChecked(bool(self._ui_compact_controls))
+		epar_plus_start = QCheckBox("Iniciar con controles desacoplados (EPar +)")
+		epar_plus_start.setChecked(bool(self._ui_settings.value("epar_plus/detached", False, type=bool)))
+		epar_plus_start.setToolTip(
+			"Mueve el sidebar real a una consola independiente y deja todo el ancho para las imágenes. "
+			"La consola se puede llevar a otro monitor y cerrar para volver a acoplarla."
+		)
 		dual_pipeline_auto = QCheckBox("Con dos etapas, procesar Ambas automáticamente")
 		dual_pipeline_auto.setChecked(bool(getattr(self, "_dual_pipeline_auto_enabled", True)))
 		dual_pipeline_auto.setToolTip(
@@ -5038,6 +5071,7 @@ class MainWindow(QMainWindow):
 		ui_l.addWidget(show_helpers)
 		ui_l.addWidget(enable_tooltips)
 		ui_l.addWidget(compact_controls)
+		ui_l.addWidget(epar_plus_start)
 		tab_interfaz_left.addWidget(ui_box)
 		self._cfg_visual_box.setVisible(True)
 		tab_interfaz_left.addWidget(self._cfg_visual_box)
@@ -5331,6 +5365,7 @@ class MainWindow(QMainWindow):
 		self._ui_show_helpers = bool(show_helpers.isChecked())
 		self._ui_enable_tooltips = bool(enable_tooltips.isChecked())
 		self._ui_compact_controls = bool(compact_controls.isChecked())
+		self._ui_settings.setValue("epar_plus/detached", bool(epar_plus_start.isChecked()))
 		self._dual_pipeline_auto_enabled = bool(dual_pipeline_auto.isChecked())
 		self._trust_localizer_fast_fbp = bool(trust_fast_fbp.isChecked())
 		self._apply_global_ui_preferences()
@@ -5366,8 +5401,73 @@ class MainWindow(QMainWindow):
 
 		self.statusBar().showMessage("Configuración aplicada")
 
+	def toggle_epar_plus_console(self):
+		"""Alterna el sidebar real entre el splitter y la consola EPar +."""
+		if self._epar_plus_console is not None and self._epar_plus_console.isVisible():
+			self.dock_epar_plus_console()
+		else:
+			self.detach_epar_plus_console()
+
+	def _update_epar_plus_study_text(self, path: str):
+		console = self._epar_plus_console
+		if console is not None:
+			console.set_study_text(os.path.basename(path.strip()) if path.strip() else "SIN ESTUDIO")
+
+	def bring_epar_plus_console_to_front(self):
+		"""Recupera la consola desacoplada desde la ventana principal."""
+		console = self._epar_plus_console
+		if console is None or self.main_splitter.indexOf(self._sidebar_widget) >= 0:
+			self.detach_epar_plus_console()
+			return
+		console.bring_to_front()
+
+	def detach_epar_plus_console(self):
+		"""Libera ancho del visor moviendo el sidebar a una ventana independiente."""
+		if self._epar_plus_console is not None and self._epar_plus_console.isVisible():
+			self._epar_plus_console.raise_()
+			self._epar_plus_console.activateWindow()
+			return
+		from ui.epar_plus_console import EParPlusConsole
+		self._epar_plus_docked_sizes = self.main_splitter.sizes()
+		console = self._epar_plus_console or EParPlusConsole(self)
+		if self._epar_plus_console is None:
+			console.dockRequested.connect(self.dock_epar_plus_console)
+			self._epar_plus_console = console
+		self._sidebar_widget.setMaximumWidth(16777215)
+		console.take_sidebar(self._sidebar_widget)
+		geom = self._ui_settings.value("epar_plus/geometry", None)
+		console.restore_safe_geometry(geom)
+		console.set_study_text(os.path.basename(self.file_edit.text().strip()) if self.file_edit.text().strip() else "SIN ESTUDIO")
+		console.set_status_text(self._progress_bar.format() or "LISTO")
+		console.bring_to_front()
+		self.main_splitter.setSizes([0, max(1, self.width())])
+		self.epar_plus_btn.setText("Acoplar controles")
+		self._epar_plus_front_btn.setVisible(True)
+		self._ui_settings.setValue("epar_plus/detached", True)
+		self._ui_settings.sync()
+
+	def dock_epar_plus_console(self):
+		"""Devuelve el mismo sidebar al splitter principal sin perder su estado."""
+		console = self._epar_plus_console
+		if console is None:
+			return
+		self._ui_settings.setValue("epar_plus/geometry", console.saveGeometry())
+		sidebar = console.release_sidebar()
+		console.hide()
+		if sidebar is not None:
+			sidebar.setMaximumWidth(560)
+			self.main_splitter.insertWidget(0, sidebar)
+			sidebar.show()
+		sizes = self._epar_plus_docked_sizes
+		if len(sizes) != 2 or sizes[0] <= 0:
+			sizes = [300, 1260]
+		self.main_splitter.setSizes(sizes)
+		self.epar_plus_btn.setText("Desacoplar controles (EPar +)")
+		self._epar_plus_front_btn.setVisible(False)
+		self._ui_settings.setValue("epar_plus/detached", False)
+		self._ui_settings.sync()
+
 	def closeEvent(self, event):
-		self._save_window_layout()
 		if self._last_browse_dir:
 			settings = getattr(self, "_ui_settings", None)
 			if settings:
@@ -5376,6 +5476,12 @@ class MainWindow(QMainWindow):
 		if self._check_unsaved_study():
 			event.ignore()
 			return
+		console = self._epar_plus_console
+		if console is not None:
+			self._ui_settings.setValue("epar_plus/geometry", console.saveGeometry())
+		self._save_window_layout()
+		if console is not None:
+			console.close_for_app()
 		super().closeEvent(event)
 
 	def _check_unsaved_study(self) -> bool:
@@ -8848,6 +8954,9 @@ class MainWindow(QMainWindow):
 		if label:
 			self._progress_bar.setFormat(label)
 			self.statusBar().showMessage(label)
+		console = self._epar_plus_console
+		if console is not None:
+			console.set_status_text(label or self._progress_bar.format())
 		QApplication.processEvents()
 
 	def _schedule_deferred_hq_render(
