@@ -5023,11 +5023,14 @@ class MainWindow(QMainWindow):
 		preferencias de interfaz que antes estaban en "Config UI".
 		"""
 		from ui import theme_manager
+		from ui.epar_dialog import EParDialog
 
-		dlg = QDialog(self)
+		dlg = EParDialog(
+			self._dialog_parent(), title="Configuración", accent=self._dialog_accent("#d8bb78"),
+			settings=self._ui_settings, geometry_key="dialogs/configuration/geometry",
+		)
 		dlg.setObjectName("eparSettingsDialog")
-		dlg.setWindowTitle("Configuración")
-		root = QVBoxLayout(dlg)
+		root = dlg.content_layout
 
 		# Configuración organizada en pestañas por utilidad.
 		tabs = QTabWidget()
@@ -5378,8 +5381,7 @@ class MainWindow(QMainWindow):
 		buttons.accepted.connect(dlg.accept)
 		buttons.rejected.connect(dlg.reject)
 		root.addWidget(buttons)
-		# El diálogo se ajusta al tamaño de su contenido (sin espacio sobrante).
-		root.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
+		root.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
 
 		prev_theme = cur_theme
 		if dlg.exec() != int(QDialog.DialogCode.Accepted):
@@ -6185,6 +6187,10 @@ class MainWindow(QMainWindow):
 		mode = getattr(self, "_active_detached_console", "")
 		console = getattr(self, "_epar_modern_console" if mode == "modern" else "_epar_plus_console", None)
 		return console if console is not None and console.isVisible() else self
+
+	def _dialog_accent(self, fallback: str = "#7898a1") -> str:
+		from ui.epar_dialog import button_accent
+		return button_accent(self.sender(), fallback)
 
 	def _select_dicom_paths(
 		self,
@@ -22239,37 +22245,22 @@ class MainWindow(QMainWindow):
 	def load_one_or_two_studies(self):
 		# Ofrecer carga inteligente por carpeta (EM+ATT+CT+SC de ambas etapas) o
 		# la selección manual de 1/2 archivos de siempre.
-		box = QMessageBox(self)
-		box.setWindowTitle("SINCRO — Cargar estudios")
-		box.setIcon(QMessageBox.Icon.Question)
-		box.setText("¿Cómo querés cargar?")
-		box.setInformativeText(
-			"• Carpeta inteligente: marcás una carpeta y lee/carga todo lo que haya "
-			"(Esfuerzo y Reposo, con sus EM, ATT, CT y Scatter).\n"
-			"• Cortes SA ya reconstruidos: si ya tenés el estudio preprocesado (cualquier "
-			"fabricante), salta la reconstrucción y calcula asincronía/FEVI directo.\n"
-			"• Elegir archivos: seleccionás 1 o 2 estudios a mano."
-		)
-		btn_smart = box.addButton("🔍 Carpeta inteligente", QMessageBox.ButtonRole.AcceptRole)
-		btn_sa = box.addButton("Cortes SA ya reconstruidos", QMessageBox.ButtonRole.ActionRole)
-		btn_files = box.addButton("Elegir archivos", QMessageBox.ButtonRole.ActionRole)
-		btn_names = box.addButton("⚙ MAPEO…", QMessageBox.ButtonRole.HelpRole)
-		box.addButton("Cancelar", QMessageBox.ButtonRole.RejectRole)
-		box.setDefaultButton(btn_smart)
-		box.exec()
-		clicked = box.clickedButton()
-		if clicked is btn_smart:
+		from ui.epar_dialog import StudyLoadDialog
+		box = StudyLoadDialog(self._dialog_parent(), accent=self._dialog_accent(), settings=self._ui_settings)
+		if box.exec() != int(QDialog.DialogCode.Accepted):
+			return
+		if box.choice == "smart":
 			self._smart_load_ct_att_folder()
 			return
-		if clicked is btn_sa:
+		if box.choice == "sa":
 			self._load_sa_recon_direct()
 			return
-		if clicked is btn_names:
+		if box.choice == "mapping":
 			# Configurar los nombres de series y reabrir el selector de carga.
-			self._edit_smart_load_keywords_dialog()
+			self._edit_smart_load_keywords_dialog(accent=box.mapping_accent())
 			self.load_one_or_two_studies()
 			return
-		if clicked is not btn_files:
+		if box.choice != "files":
 			return
 		paths = self._select_dicom_paths(
 			title="Seleccionar uno o dos estudios (stress/rest)",
@@ -22799,7 +22790,7 @@ class MainWindow(QMainWindow):
 			# pobló mientras la banda estaba colapsada y no repintaba hasta reasignarlo.
 			self._apply_cine_source("primary", preserve_position=False)
 
-	def _edit_smart_load_keywords_dialog(self):
+	def _edit_smart_load_keywords_dialog(self, *, accent: str | None = None):
 		"""Editor de nombres/keywords que la carga inteligente usa para clasificar series.
 
 		Permite agregar/mapear nombres propios (p. ej. '_SA') a lo que necesita SINCRO
@@ -22809,6 +22800,7 @@ class MainWindow(QMainWindow):
 			QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
 			QDialogButtonBox, QLabel, QPushButton,
 		)
+		from ui.epar_dialog import EParDialog
 		cfg = self._smart_load_keywords()
 		labels = {
 			"sa_recon": "Cortes SA reconstruidos",
@@ -22818,9 +22810,13 @@ class MainWindow(QMainWindow):
 			"stress": "Etapa Esfuerzo",
 			"rest": "Etapa Reposo",
 		}
-		dlg = QDialog(self)
-		dlg.setWindowTitle("MAPEO de series para la carga")
-		root = QVBoxLayout(dlg)
+		dlg = EParDialog(
+			self._dialog_parent(), title="Mapeo de series", accent=accent or self._dialog_accent(),
+			settings=self._ui_settings, geometry_key="dialogs/series_mapping/geometry",
+		)
+		dlg.setObjectName("eparSeriesMappingDialog")
+		dlg.apply_compact_style()
+		root = dlg.content_layout
 		info = QLabel(
 			"Palabras clave (separadas por coma) que SINCRO busca en la descripción, "
 			"protocolo, ImageType y nombre de archivo para reconocer cada tipo de serie. "
@@ -22856,6 +22852,7 @@ class MainWindow(QMainWindow):
 		bottom.addStretch(1)
 		bottom.addWidget(buttons)
 		root.addLayout(bottom)
+		root.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
 		if dlg.exec() == QDialog.DialogCode.Accepted:
 			new_cfg = {key: [p.strip() for p in edit.text().split(",") if p.strip()] for key, edit in edits.items()}
 			self._save_smart_load_keywords(new_cfg)
