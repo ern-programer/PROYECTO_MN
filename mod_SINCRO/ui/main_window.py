@@ -280,6 +280,8 @@ class MainWindow(QMainWindow):
 	def __init__(self, initial_path: str | None = None):
 		super().__init__()
 		self._epar_plus_console = None
+		self._epar_modern_console = None
+		self._active_detached_console = ""
 		self._epar_plus_docked_sizes = [300, 1260]
 		self._epar_plus_closing_app = False
 		self.setWindowTitle(f"GammaSync v{__version__} - Interfaz de procesado")
@@ -1266,6 +1268,12 @@ class MainWindow(QMainWindow):
 			"el ancho del visor o usar un segundo monitor."
 		)
 		button_row.addWidget(self.epar_plus_btn, 6, 0, 1, 4)
+		self.epar_modern_btn = QPushButton("Desacoplar controles (EPar+ Modern)")
+		self.epar_modern_btn.clicked.connect(self.toggle_epar_modern_console)
+		self.epar_modern_btn.setToolTip(
+			"Abre una segunda consola desacoplada, compacta y fiel al diseño LCARS de referencia."
+		)
+		button_row.addWidget(self.epar_modern_btn, 7, 0, 1, 4)
 
 		# Ubicar Acciones justo debajo de la versión y la barra de progreso.
 		insert_at = self._sidebar_layout.indexOf(self._progress_bar) + 1
@@ -1600,7 +1608,17 @@ class MainWindow(QMainWindow):
 		# El log ya no vive en el sidebar: se muestra en una consola independiente
 		# (_ensure_log_window) que se abre al clickear la mascota Rockford.
 		self._log_window = None
+		# Reservar el pie del sidebar para paciente/resultados: el stretch absorbe
+		# el espacio libre y mantiene estas tarjetas abajo; si las secciones crecen,
+		# quedan al final natural del scroll sin superponerse con ningún control.
 		self._sidebar_layout.addStretch(1)
+		self._side_cards_host = QWidget()
+		self._side_cards_host.setObjectName("sideCardsHost")
+		self._side_cards_layout = QVBoxLayout(self._side_cards_host)
+		self._side_cards_layout.setContentsMargins(0, 4, 0, 0)
+		self._side_cards_layout.setSpacing(5)
+		self._side_cards_host.setVisible(False)
+		self._sidebar_layout.addWidget(self._side_cards_host)
 
 		# Cada caja de opciones del sidebar pasa a ser una sección colapsable:
 		# el título se convierte en botón. Se hace acá, al final, para no tener
@@ -2690,7 +2708,7 @@ class MainWindow(QMainWindow):
 			label = QLabel("Sin procesar")
 			label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 			label.setMinimumSize(500, 320)
-			label.setStyleSheet("background:#111; color:#ddd; border:1px solid #444;")
+			label.setStyleSheet("background:#000; color:#ddd; border:1px solid #444;")
 			label.setScaledContents(False)
 			label.setMouseTracking(True)
 			helptxt = preview_help_texts.get(name, "")
@@ -2719,6 +2737,12 @@ class MainWindow(QMainWindow):
 			scroller.setWidgetResizable(False)
 			scroller.setWidget(label)
 			self._preview_scrollers[name] = scroller
+			background_cmap = {
+				"cine_crudo": getattr(self, "cine_crudo_screen_cmap", "gray"),
+				"comparacion_ejes": getattr(self, "cine_crudo_montage_cmap", "gray"),
+				"polar_perfusion_directa": getattr(self, "polar_perf_screen_cmap", "gray"),
+			}.get(name)
+			self._set_preview_background(name, background_cmap)
 			if name == "comparacion_ejes":
 				# Controles de color/ventaneo pegados al panel (antes vivían lejos,
 				# en la barra del montaje). Columna vertical a la derecha: cmap +
@@ -2964,6 +2988,8 @@ class MainWindow(QMainWindow):
 		self._install_undo_shortcuts()
 		if self._ui_settings.value("epar_plus/detached", False, type=bool):
 			QTimer.singleShot(0, self.detach_epar_plus_console)
+		elif self._ui_settings.value("epar_modern/detached", False, type=bool):
+			QTimer.singleShot(0, self.detach_epar_modern_console)
 		if initial_path:
 			self.file_edit.setText(initial_path)
 			if self.auto_run_check.isChecked():
@@ -4114,22 +4140,12 @@ class MainWindow(QMainWindow):
 		QTimer.singleShot(int(msec), self._refresh_persistent_patient_card)
 
 	def _reposition_fading_notices(self):
-		"""Apila los avisos activos desde el borde inferior del sidebar hacia arriba.
-		Las tarjetas fijas quedan abajo de todo: 'Resultados en vivo' al fondo y
-		'Datos del Paciente' encima de ella."""
+		"""Apila sólo avisos temporales; las tarjetas fijas viven en el layout."""
 		host = getattr(self, "_sidebar_widget", None)
 		if host is None:
 			return
 		margin, spacing = 10, 6
 		y = host.height() - margin
-		for name in ("_results_card", "_patient_card"):  # resultados más abajo
-			card = getattr(self, name, None)
-			if card is not None and card.isVisible():
-				card.adjustSize()
-				y -= card.height()
-				card.move(margin, max(margin, y))
-				card.raise_()
-				y -= spacing
 		for notice in reversed(getattr(self, "_fading_notices", None) or []):  # el más nuevo abajo
 			notice.adjustSize()
 			y -= notice.height()
@@ -4138,9 +4154,10 @@ class MainWindow(QMainWindow):
 			y -= spacing
 
 	def _ensure_side_card(self, attr: str, obj_name: str, html: str):
-		"""Crea (si hace falta) y actualiza una tarjeta fija del sidebar."""
-		host = getattr(self, "_sidebar_widget", None)
-		if host is None:
+		"""Crea/actualiza una tarjeta fija dentro del layout, nunca como overlay."""
+		host = getattr(self, "_side_cards_host", None)
+		layout = getattr(self, "_side_cards_layout", None)
+		if host is None or layout is None:
 			return getattr(self, attr, None)
 		card = getattr(self, attr, None)
 		if card is None:
@@ -4153,10 +4170,13 @@ class MainWindow(QMainWindow):
 				f"#{obj_name} {{ background: #eef6ff; border: 1px solid #4a90d9; border-radius: 8px;"
 				" padding: 9px 11px; color: #1f3b5b; font-size: 11px; }"
 			)
+			layout.addWidget(card)
 		card.setText(html)
-		card.setFixedWidth(max(180, host.width() - 20))
-		card.adjustSize()
+		card.setMinimumWidth(180)
+		card.setMaximumWidth(16777215)
 		card.show()
+		setattr(self, attr, card)
+		host.setVisible(self._active_detached_console != "modern")
 		return card
 
 	def _refresh_persistent_patient_card(self):
@@ -4172,6 +4192,8 @@ class MainWindow(QMainWindow):
 				if c is not None:
 					c.deleteLater()
 					setattr(self, name, None)
+			if getattr(self, "_side_cards_host", None) is not None:
+				self._side_cards_host.setVisible(False)
 			self._reposition_fading_notices()
 			return
 		# Refrescar los textos fuente sin reentrar en esta función.
@@ -4187,7 +4209,18 @@ class MainWindow(QMainWindow):
 			"_results_card", "resultsCard",
 			f"<b>Resultados en vivo</b><br>{res_txt}",
 		)
+		self._sync_epar_modern_clinical_panels()
 		self._reposition_fading_notices()
+
+	def _sync_epar_modern_clinical_panels(self):
+		"""Copia la lectura clínica vigente a los paneles superiores Modern."""
+		console = self._epar_modern_console
+		if console is None:
+			return
+		patient = getattr(self, "patient_data_label", None)
+		results = getattr(self, "main_metrics_readout", None)
+		console.set_patient_html(patient.text() if patient is not None else "")
+		console.set_results_html(results.text() if results is not None else "")
 
 	def _restore_window_layout(self):
 		geom = self._ui_settings.value("window_geometry", None)
@@ -5072,6 +5105,10 @@ class MainWindow(QMainWindow):
 		ui_l.addWidget(enable_tooltips)
 		ui_l.addWidget(compact_controls)
 		ui_l.addWidget(epar_plus_start)
+		epar_modern_start = QCheckBox("Iniciar con EPar+ Modern")
+		epar_modern_start.setChecked(bool(self._ui_settings.value("epar_modern/detached", False, type=bool)))
+		epar_modern_start.setToolTip("Inicia con la consola LCARS compacta; sus CONTROLES se pueden ocultar.")
+		ui_l.addWidget(epar_modern_start)
 		tab_interfaz_left.addWidget(ui_box)
 		self._cfg_visual_box.setVisible(True)
 		tab_interfaz_left.addWidget(self._cfg_visual_box)
@@ -5365,7 +5402,9 @@ class MainWindow(QMainWindow):
 		self._ui_show_helpers = bool(show_helpers.isChecked())
 		self._ui_enable_tooltips = bool(enable_tooltips.isChecked())
 		self._ui_compact_controls = bool(compact_controls.isChecked())
-		self._ui_settings.setValue("epar_plus/detached", bool(epar_plus_start.isChecked()))
+		modern_start = bool(epar_modern_start.isChecked())
+		self._ui_settings.setValue("epar_modern/detached", modern_start)
+		self._ui_settings.setValue("epar_plus/detached", bool(epar_plus_start.isChecked()) and not modern_start)
 		self._dual_pipeline_auto_enabled = bool(dual_pipeline_auto.isChecked())
 		self._trust_localizer_fast_fbp = bool(trust_fast_fbp.isChecked())
 		self._apply_global_ui_preferences()
@@ -5409,12 +5448,16 @@ class MainWindow(QMainWindow):
 			self.detach_epar_plus_console()
 
 	def _update_epar_plus_study_text(self, path: str):
-		console = self._epar_plus_console
-		if console is not None:
-			console.set_study_text(os.path.basename(path.strip()) if path.strip() else "SIN ESTUDIO")
+		text = os.path.basename(path.strip()) if path.strip() else "SIN ESTUDIO"
+		for console in (self._epar_plus_console, self._epar_modern_console):
+			if console is not None:
+				console.set_study_text(text)
 
 	def bring_epar_plus_console_to_front(self):
 		"""Recupera la consola desacoplada desde la ventana principal."""
+		if self._active_detached_console == "modern" and self._epar_modern_console is not None:
+			self._epar_modern_console.bring_to_front()
+			return
 		console = self._epar_plus_console
 		if console is None or self.main_splitter.indexOf(self._sidebar_widget) >= 0:
 			self.detach_epar_plus_console()
@@ -5428,6 +5471,8 @@ class MainWindow(QMainWindow):
 			self._epar_plus_console.activateWindow()
 			return
 		from ui.epar_plus_console import EParPlusConsole
+		if self._active_detached_console == "modern":
+			self.dock_epar_modern_console()
 		self._epar_plus_docked_sizes = self.main_splitter.sizes()
 		console = self._epar_plus_console or EParPlusConsole(self)
 		if self._epar_plus_console is None:
@@ -5441,7 +5486,9 @@ class MainWindow(QMainWindow):
 		console.set_status_text(self._progress_bar.format() or "LISTO")
 		console.bring_to_front()
 		self.main_splitter.setSizes([0, max(1, self.width())])
+		self._active_detached_console = "plus"
 		self.epar_plus_btn.setText("Acoplar controles")
+		self._epar_plus_front_btn.setText("◉ EPar +")
 		self._epar_plus_front_btn.setVisible(True)
 		self._ui_settings.setValue("epar_plus/detached", True)
 		self._ui_settings.sync()
@@ -5462,9 +5509,69 @@ class MainWindow(QMainWindow):
 		if len(sizes) != 2 or sizes[0] <= 0:
 			sizes = [300, 1260]
 		self.main_splitter.setSizes(sizes)
+		self._active_detached_console = ""
 		self.epar_plus_btn.setText("Desacoplar controles (EPar +)")
 		self._epar_plus_front_btn.setVisible(False)
 		self._ui_settings.setValue("epar_plus/detached", False)
+		self._ui_settings.sync()
+
+	def toggle_epar_modern_console(self):
+		if self._active_detached_console == "modern":
+			self.dock_epar_modern_console()
+		else:
+			self.detach_epar_modern_console()
+
+	def detach_epar_modern_console(self):
+		"""Desacopla el sidebar en la consola LCARS EPar+ Modern."""
+		if self._active_detached_console == "modern" and self._epar_modern_console is not None:
+			self._epar_modern_console.bring_to_front()
+			return
+		if self._active_detached_console == "plus":
+			self.dock_epar_plus_console()
+		from ui.epar_modern_console import EParModernConsole
+		self._epar_plus_docked_sizes = self.main_splitter.sizes()
+		console = self._epar_modern_console or EParModernConsole(self)
+		if self._epar_modern_console is None:
+			console.dockRequested.connect(self.dock_epar_modern_console)
+			self._epar_modern_console = console
+		self._sidebar_widget.setMaximumWidth(16777215)
+		console.take_sidebar(self._sidebar_widget)
+		console.restore_safe_geometry(self._ui_settings.value("epar_modern/geometry", None))
+		console.set_study_text(os.path.basename(self.file_edit.text().strip()) if self.file_edit.text().strip() else "SIN ESTUDIO")
+		console.set_status_text(self._progress_bar.format() or "SISTEMA LISTO")
+		self._sync_epar_modern_clinical_panels()
+		self._side_cards_host.setVisible(False)
+		console.bring_to_front()
+		self.main_splitter.setSizes([0, max(1, self.width())])
+		self._active_detached_console = "modern"
+		self.epar_modern_btn.setText("Acoplar controles EPar+ Modern")
+		self._epar_plus_front_btn.setText("◉ EPar+ Modern")
+		self._epar_plus_front_btn.setVisible(True)
+		self._ui_settings.setValue("epar_plus/detached", False)
+		self._ui_settings.setValue("epar_modern/detached", True)
+		self._ui_settings.sync()
+
+	def dock_epar_modern_console(self):
+		console = self._epar_modern_console
+		if console is None:
+			return
+		self._ui_settings.setValue("epar_modern/geometry", console.saveGeometry())
+		sidebar = console.release_sidebar()
+		console.hide()
+		if sidebar is not None:
+			sidebar.setMaximumWidth(560)
+			self.main_splitter.insertWidget(0, sidebar)
+			sidebar.show()
+		self._side_cards_host.setVisible(
+			getattr(self, "_patient_card", None) is not None or getattr(self, "_results_card", None) is not None
+		)
+		sizes = self._epar_plus_docked_sizes if len(self._epar_plus_docked_sizes) == 2 else [300, 1260]
+		self.main_splitter.setSizes(sizes)
+		self._active_detached_console = ""
+		self.epar_modern_btn.setText("Desacoplar controles (EPar+ Modern)")
+		self._epar_plus_front_btn.setText("◉ EPar +")
+		self._epar_plus_front_btn.setVisible(False)
+		self._ui_settings.setValue("epar_modern/detached", False)
 		self._ui_settings.sync()
 
 	def closeEvent(self, event):
@@ -5479,9 +5586,14 @@ class MainWindow(QMainWindow):
 		console = self._epar_plus_console
 		if console is not None:
 			self._ui_settings.setValue("epar_plus/geometry", console.saveGeometry())
+		modern = self._epar_modern_console
+		if modern is not None:
+			self._ui_settings.setValue("epar_modern/geometry", modern.saveGeometry())
 		self._save_window_layout()
 		if console is not None:
 			console.close_for_app()
+		if modern is not None:
+			modern.close_for_app()
 		super().closeEvent(event)
 
 	def _check_unsaved_study(self) -> bool:
@@ -6069,6 +6181,11 @@ class MainWindow(QMainWindow):
 				return c
 		return ""
 
+	def _dialog_parent(self):
+		mode = getattr(self, "_active_detached_console", "")
+		console = getattr(self, "_epar_modern_console" if mode == "modern" else "_epar_plus_console", None)
+		return console if console is not None and console.isVisible() else self
+
 	def _select_dicom_paths(
 		self,
 		*,
@@ -6081,9 +6198,9 @@ class MainWindow(QMainWindow):
 		start_dir = start_dir_override if start_dir_override and os.path.isdir(start_dir_override) else self._default_dicom_start_dir()
 		flt = "DICOM (*.dcm *.DCM *.dicom *.DICOM *.ima *.IMA);;Todos (*.*)"
 		if allow_multiple:
-			paths, _ = QFileDialog.getOpenFileNames(self, title, start_dir, flt)
+			paths, _ = QFileDialog.getOpenFileNames(self._dialog_parent(), title, start_dir, flt)
 		else:
-			path, _ = QFileDialog.getOpenFileName(self, title, start_dir, flt)
+			path, _ = QFileDialog.getOpenFileName(self._dialog_parent(), title, start_dir, flt)
 			paths = [path] if path else []
 		valid_paths = [p for p in paths if p and os.path.exists(p)]
 		if max_files is not None and len(valid_paths) > int(max_files):
@@ -6634,7 +6751,7 @@ class MainWindow(QMainWindow):
 	def _load_ecg_file(self):
 		from core.ecg_extractor import compare_ecg_data, extract_ecg
 		path, _ = QFileDialog.getOpenFileName(
-			self,
+			self._dialog_parent(),
 			"Cargar ECG de 12 derivaciones",
 			"",
 			"ECG (*.pdf *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp *.scp *.dcm *.dicom);;"
@@ -8954,9 +9071,9 @@ class MainWindow(QMainWindow):
 		if label:
 			self._progress_bar.setFormat(label)
 			self.statusBar().showMessage(label)
-		console = self._epar_plus_console
-		if console is not None:
-			console.set_status_text(label or self._progress_bar.format())
+		for console in (self._epar_plus_console, self._epar_modern_console):
+			if console is not None:
+				console.set_status_text(label or self._progress_bar.format())
 		QApplication.processEvents()
 
 	def _schedule_deferred_hq_render(
@@ -9051,7 +9168,7 @@ class MainWindow(QMainWindow):
 		default_name = f"sincro_casos_experimentales_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 		start_dir = os.path.join(getattr(self, "output_dir", "") or "", default_name)
 		path, _ = QFileDialog.getSaveFileName(
-			self, "Exportar datos poblacionales", start_dir, "CSV (*.csv)"
+			self._dialog_parent(), "Exportar datos poblacionales", start_dir, "CSV (*.csv)"
 		)
 		if not path:
 			return
@@ -10501,7 +10618,7 @@ class MainWindow(QMainWindow):
 		from core.dicom_export import save_ungated_dicom
 		default_name = os.path.join(self.output_dir, "ungated_perfusion.dcm")
 		path, _ = QFileDialog.getSaveFileName(
-			self,
+			self._dialog_parent(),
 			"Guardar desgatillado DICOM",
 			default_name,
 			"DICOM (*.dcm);;Todos (*.*)",
@@ -13610,6 +13727,7 @@ class MainWindow(QMainWindow):
 
 	def _on_polar_screen_cmap_changed(self, name):
 		self.polar_perf_screen_cmap = str(name)
+		self._set_preview_background("polar_perfusion_directa", self.polar_perf_screen_cmap)
 		strip = getattr(self, "polar_screen_color_strip", None)
 		if strip is not None:
 			strip.set_cmap(self.polar_perf_screen_cmap)
@@ -14041,7 +14159,7 @@ class MainWindow(QMainWindow):
 		try:
 			default_path = os.path.join(self.presets_dir, "cine_crudo_visual_config.json")
 			path, _flt = QFileDialog.getSaveFileName(
-				self, "Guardar configuración visual cine_crudo", default_path,
+				self._dialog_parent(), "Guardar configuración visual cine_crudo", default_path,
 				"Configuración JSON (*.json);;Todos los archivos (*.*)",
 			)
 			if not path:
@@ -14064,7 +14182,7 @@ class MainWindow(QMainWindow):
 	def _load_cine_crudo_visual_config(self):
 		try:
 			path, _flt = QFileDialog.getOpenFileName(
-				self, "Cargar configuración visual cine_crudo", self.presets_dir,
+				self._dialog_parent(), "Cargar configuración visual cine_crudo", self.presets_dir,
 				"Configuración JSON (*.json);;Todos los archivos (*.*)",
 			)
 			if not path:
@@ -15157,7 +15275,7 @@ class MainWindow(QMainWindow):
 			method = str(self.cine_crudo_motion_result.get("method_auto_selected") or self.cine_crudo_motion_result.get("method") or "manual")
 			default_base = os.path.join(self.output_dir, f"motion_correction_{method}")
 			path, _flt = QFileDialog.getSaveFileName(
-				self, "Exportar corrección de movimiento", default_base,
+				self._dialog_parent(), "Exportar corrección de movimiento", default_base,
 				"CSV de shifts (*.csv);;Todos los archivos (*.*)",
 			)
 			if not path:
@@ -15220,7 +15338,7 @@ class MainWindow(QMainWindow):
 			from PyQt6.QtWidgets import QFileDialog
 			from core.raw_projections import apply_shifts_to_projections
 			path, _flt = QFileDialog.getOpenFileName(
-				self, "Importar corrección", self.output_dir,
+				self._dialog_parent(), "Importar corrección", self.output_dir,
 				"Corrección (*.csv *.npz);;CSV de shifts (*.csv);;NPZ (*.npz);;Todos los archivos (*.*)",
 			)
 			if not path:
@@ -15361,7 +15479,7 @@ class MainWindow(QMainWindow):
 			base_name = os.path.splitext(os.path.basename(source_path))[0]
 			default_path = os.path.join(self.output_dir, f"{base_name}_MOTIONCORR_{method}.dcm")
 			path, _flt = QFileDialog.getSaveFileName(
-				self, "Grabar DICOM corregido", default_path,
+				self._dialog_parent(), "Grabar DICOM corregido", default_path,
 				"DICOM (*.dcm);;Todos los archivos (*.*)",
 			)
 			if not path:
@@ -15679,7 +15797,7 @@ class MainWindow(QMainWindow):
 				start_dir = str(settings.value("smart_load/last_folder", "", type=str) or "")
 			except Exception:
 				start_dir = ""
-		folder = QFileDialog.getExistingDirectory(self, "Carpeta con SPECT + CT/ATT del paciente", start_dir)
+		folder = QFileDialog.getExistingDirectory(self._dialog_parent(), "Carpeta con SPECT + CT/ATT del paciente", start_dir)
 		if not folder:
 			return
 		if settings is not None:
@@ -19246,6 +19364,18 @@ class MainWindow(QMainWindow):
 			QMessageBox.warning(self, "SINCRO", f"No se pudieron generar los cortes:\n{exc}")
 			return False
 
+	def _set_preview_background(self, name: str, cmap_name: str | None = None):
+		color = "#000000"
+		if cmap_name is not None:
+			rgb = self._montage_cmap_lut(cmap_name)[0]
+			color = "#{:02x}{:02x}{:02x}".format(*(int(channel) for channel in rgb))
+		label = self.preview_labels.get(name)
+		if label is not None:
+			label.setStyleSheet(f"background:{color}; color:#ddd; border:1px solid #444;")
+		scroller = self._preview_scrollers.get(name)
+		if scroller is not None:
+			scroller.viewport().setStyleSheet(f"background:{color};")
+
 	def _montage_cmap_lut(self, name):
 		"""LUT uint8 (256,3) del colormap (incluye los .col registrados)."""
 		import matplotlib
@@ -20235,6 +20365,7 @@ class MainWindow(QMainWindow):
 		montaje + columna de comparacion_ejes) y la tira del LUT."""
 		name = str(name)
 		self.cine_crudo_montage_cmap = name
+		self._set_preview_background("comparacion_ejes", name)
 		for combo_name in ("cine_crudo_montage_cmap_combo", "compare_axes_color_cmap_combo"):
 			combo = getattr(self, combo_name, None)
 			if combo is not None and combo.currentText() != name:
@@ -20507,6 +20638,7 @@ class MainWindow(QMainWindow):
 
 	def _on_cine_crudo_screen_cmap_changed(self, name):
 		self.cine_crudo_screen_cmap = str(name)
+		self._set_preview_background("cine_crudo", self.cine_crudo_screen_cmap)
 		strip = getattr(self, "cine_crudo_screen_color_strip", None)
 		if strip is not None:
 			strip.set_cmap(self.cine_crudo_screen_cmap)
@@ -20718,7 +20850,7 @@ class MainWindow(QMainWindow):
 			QMessageBox.warning(self, "SINCRO", "No hay montaje para exportar. Generalo primero con 'Ver montaje'.")
 			return
 		suggested = os.path.join(self.output_dir, "montaje_clinico.png")
-		path, _flt = QFileDialog.getSaveFileName(self, "Guardar montaje clínico", suggested, "Imagen PNG (*.png)")
+		path, _flt = QFileDialog.getSaveFileName(self._dialog_parent(), "Guardar montaje clínico", suggested, "Imagen PNG (*.png)")
 		if not path:
 			return
 		if not path.lower().endswith(".png"):
@@ -20808,7 +20940,7 @@ class MainWindow(QMainWindow):
 			source = self.cine_crudo_cut_study or self.cine_crudo_raw_study_for_recon or self.study
 			base_patient = str(getattr(source, "patient_id", "") or getattr(source, "patient_name", "") or "study")
 			base_patient = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in base_patient)[:32] or "study"
-			folder = QFileDialog.getExistingDirectory(self, "Guardar ejes DICOM", self.output_dir)
+			folder = QFileDialog.getExistingDirectory(self._dialog_parent(), "Guardar ejes DICOM", self.output_dir)
 			if not folder:
 				return
 			paths = save_cardiac_axes_dicoms(
@@ -22499,7 +22631,7 @@ class MainWindow(QMainWindow):
 				start_dir = str(settings.value("smart_load/last_folder", "", type=str) or "")
 			except Exception:
 				start_dir = ""
-		folder = QFileDialog.getExistingDirectory(self, "Carpeta con los cortes SA gatillados reconstruidos", start_dir)
+		folder = QFileDialog.getExistingDirectory(self._dialog_parent(), "Carpeta con los cortes SA gatillados reconstruidos", start_dir)
 		if not folder:
 			return
 		if settings is not None:
@@ -23557,7 +23689,7 @@ class MainWindow(QMainWindow):
 			parts.append(study_date)
 		suggested = "_".join(parts) + ".html"
 		dest, _ = QFileDialog.getSaveFileName(
-			self,
+			self._dialog_parent(),
 			"Guardar informe HTML como...",
 			suggested,
 			"Archivos HTML (*.html);;Todos (*.*)",
@@ -23582,7 +23714,7 @@ class MainWindow(QMainWindow):
 	def verify_html_integrity(self):
 		"""Verifica la integridad de un archivo HTML contra su hash registrado."""
 		path, _ = QFileDialog.getOpenFileName(
-			self, "Seleccionar HTML para verificar...",
+			self._dialog_parent(), "Seleccionar HTML para verificar...",
 			self.output_dir,
 			"Archivos HTML (*.html);;Todos (*.*)",
 		)
@@ -23664,7 +23796,7 @@ class MainWindow(QMainWindow):
 			QMessageBox.information(self, "SINCRO", "Todavía no hay PDF generado. Procesá un estudio primero.")
 			return
 		dest, _ = QFileDialog.getSaveFileName(
-			self,
+			self._dialog_parent(),
 			"Guardar informe PDF como...",
 			"informe_sincro.pdf",
 			"Archivos PDF (*.pdf);;Todos (*.*)",

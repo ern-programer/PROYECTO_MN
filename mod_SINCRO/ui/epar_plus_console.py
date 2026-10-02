@@ -1,9 +1,10 @@
 """Consola flotante EPar + que aloja el sidebar real de GammaSync."""
 from __future__ import annotations
 
-from PyQt6.QtCore import QByteArray, QPoint, Qt, pyqtSignal
-from PyQt6.QtGui import QCloseEvent, QGuiApplication
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtCore import QByteArray, QEvent, QPoint, QTimer, Qt, pyqtSignal
+from PyQt6 import sip
+from PyQt6.QtGui import QCloseEvent, QGuiApplication, QWindow
+from PyQt6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QSizeGrip, QVBoxLayout, QWidget
 
 
 class EParPlusConsole(QWidget):
@@ -12,9 +13,10 @@ class EParPlusConsole(QWidget):
     dockRequested = pyqtSignal()
 
     def __init__(self, owner):
-        super().__init__(None, Qt.WindowType.Window)
+        super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self._owner = owner
         self._closing_for_app = False
+        self._drag_offset = None
         self.setObjectName("eparPlusConsole")
         self.setWindowTitle("GammaSync — EPar +")
         self.setMinimumSize(620, 520)
@@ -42,6 +44,7 @@ class EParPlusConsole(QWidget):
 
         pill = QFrame()
         pill.setObjectName("eparPlusPill")
+        self._header = pill
         pill_layout = QVBoxLayout(pill)
         pill_layout.setContentsMargins(12, 8, 8, 8)
         pill_layout.setSpacing(5)
@@ -73,6 +76,8 @@ class EParPlusConsole(QWidget):
         self._sidebar_layout = QVBoxLayout(self._sidebar_host)
         self._sidebar_layout.setContentsMargins(0, 0, 0, 0)
         root.addWidget(self._sidebar_host, 1)
+        root.addWidget(QSizeGrip(self), 0, Qt.AlignmentFlag.AlignRight)
+        QApplication.instance().installEventFilter(self)
 
     def _add_action(self, layout, text: str, callback, primary: bool = False) -> QPushButton:
         btn = QPushButton(text)
@@ -80,6 +85,34 @@ class EParPlusConsole(QWidget):
         btn.clicked.connect(callback)
         layout.addWidget(btn)
         return btn
+
+    def eventFilter(self, watched, event):
+        if watched is self._header or (isinstance(watched, QLabel) and self._header.isAncestorOf(watched)):
+            if event.type() == event.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                return True
+            if event.type() == event.Type.MouseMove and self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+                self.move(event.globalPosition().toPoint() - self._drag_offset)
+                return True
+            if event.type() == event.Type.MouseButtonRelease:
+                self._drag_offset = None
+                return True
+        if event.type() == QEvent.Type.Show and self.isVisible():
+            if isinstance(watched, QWindow) and watched.transientParent() is self._owner.windowHandle():
+                watched.setTransientParent(self.windowHandle())
+            elif isinstance(watched, QWidget) and watched.isWindow() and watched.parentWidget() is not None and watched.parentWidget().window() is self._owner:
+                watched.winId()
+                watched.windowHandle().setTransientParent(self.windowHandle())
+                QTimer.singleShot(0, lambda w=watched: self._place_dialog_above(w))
+        return super().eventFilter(watched, event)
+
+    def _place_dialog_above(self, window: QWidget) -> None:
+        if sip.isdeleted(self) or sip.isdeleted(window) or not self.isVisible() or not window.isVisible():
+            return
+        if window.windowHandle() is not None and self.windowHandle() is not None:
+            window.windowHandle().setTransientParent(self.windowHandle())
+        window.raise_()
+        window.activateWindow()
 
     def _show_images(self) -> None:
         """Trae al frente la ventana principal y maximiza el área de imágenes."""

@@ -316,6 +316,14 @@ class RangeSlider(QWidget):
 			p.drawRoundedRect(QRectF(cx - 9, y - 6, 18, 12), 3, 3)
 
 
+def _cmap_background_color(name: str, invert: bool = False) -> QColor:
+	cmap = _resolve_cmap(name)
+	if invert:
+		cmap = cmap.reversed()
+	rgb = (np.clip(np.asarray(cmap(0.0))[:3], 0.0, 1.0) * 255.0).astype(np.uint8)
+	return QColor(*(int(channel) for channel in rgb))
+
+
 class GateMontageLabel(QLabel):
 	"""Mosaico de todos los gates de un slice con ROIs superpuestos.
 
@@ -377,7 +385,7 @@ class GateMontageLabel(QLabel):
 
 	def paintEvent(self, event):
 		painter = QPainter(self)
-		painter.fillRect(self.rect(), QColor("#111111"))
+		painter.fillRect(self.rect(), _cmap_background_color(self._cmap_name, self._invert_cmap))
 		self._cell_rects = []
 		if self._cube is None or self._cube.ndim != 4:
 			painter.setPen(QColor("#dddddd"))
@@ -476,7 +484,8 @@ class RoiImageLabel(QLabel):
 		self.setMinimumSize(360, 360)
 		self.setMouseTracking(True)
 		self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-		self.setStyleSheet("background:#111; color:#ddd; border:1px solid #444;")
+		self._background_color = QColor("#000000")
+		self.setStyleSheet("background:#000; color:#ddd; border:1px solid #444;")
 		self.setCursor(Qt.CursorShape.CrossCursor)
 		self._base_pixmap: Optional[QPixmap] = None
 		self._frame_shape: tuple[int, int] | None = None
@@ -527,6 +536,14 @@ class RoiImageLabel(QLabel):
 	def set_slice_index(self, slice_index: int):
 		self._slice_index = int(slice_index)
 
+	def set_background_cmap(self, name: str, invert: bool = False):
+		self._background_color = _cmap_background_color(name, invert)
+		border = "2px solid #d61f1f" if self.property("activeHighlight") else "1px solid #444"
+		style = f"background:{self._background_color.name()}; color:#ddd; border:{border};"
+		if self.styleSheet() != style:
+			self.setStyleSheet(style)
+			self.update()
+
 	def set_frame(
 		self,
 		frame: np.ndarray | None,
@@ -536,6 +553,7 @@ class RoiImageLabel(QLabel):
 		window_low: float = 0.0,
 		window_high: float = 1.0,
 	):
+		self.set_background_cmap(cmap_name, invert_cmap)
 		if frame is None:
 			self._base_pixmap = None
 			self._frame_shape = None
@@ -675,7 +693,7 @@ class RoiImageLabel(QLabel):
 
 	def paintEvent(self, event):
 		painter = QPainter(self)
-		painter.fillRect(self.rect(), QColor("#111111"))
+		painter.fillRect(self.rect(), self._background_color)
 
 		if self._base_pixmap is None:
 			painter.setPen(QColor("#dddddd"))
@@ -1083,6 +1101,7 @@ class CineWidget(QWidget):
 		self.cmap_combo.currentIndexChanged.connect(self._update_view)
 		self.invert_cmap_check = QCheckBox("Invertir")
 		self.invert_cmap_check.toggled.connect(self._update_view)
+		self._update_view()
 
 		self.gate_label = QLabel("Gate: -")
 		self.slice_label = QLabel("Slice: -")
@@ -1869,10 +1888,8 @@ class CineWidget(QWidget):
 		self._refresh_ui_visibility()
 
 	def set_active_highlight(self, active: bool):
-		if active:
-			self.preview.setStyleSheet("background:#111; color:#ddd; border:2px solid #d61f1f;")
-		else:
-			self.preview.setStyleSheet("background:#111; color:#ddd; border:1px solid #444;")
+		self.preview.setProperty("activeHighlight", bool(active))
+		self.preview.set_background_cmap(str(self.cmap_combo.currentText()), self.invert_cmap_check.isChecked())
 
 	def set_manual_rois(self, rois: dict[int, tuple[float, float, float, float]] | None):
 		old_sources = dict(self._roi_source)
@@ -2665,6 +2682,8 @@ class CineWidget(QWidget):
 		slider.setValue(value)
 
 	def _update_view(self, *args):
+		if hasattr(self, "invert_cmap_check"):
+			self.preview.set_background_cmap(str(self.cmap_combo.currentText()), self.invert_cmap_check.isChecked())
 		if self._cube is None:
 			return
 		gate = int(self.gate_slider.value())
