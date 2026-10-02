@@ -1,10 +1,12 @@
 """EPar+ Modern: consola LCARS compacta, independiente de EPar +."""
 from __future__ import annotations
 
-from PyQt6.QtCore import QByteArray, QEvent, QPoint, QTime, QTimer, Qt, pyqtSignal
+from pathlib import Path
+
+from PyQt6.QtCore import QByteArray, QEvent, QPoint, QSize, QTime, QTimer, Qt, pyqtSignal
 from PyQt6 import sip
-from PyQt6.QtGui import QCloseEvent, QFont, QGuiApplication, QTextDocument, QWindow
-from PyQt6.QtWidgets import QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizeGrip, QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtGui import QCloseEvent, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap, QTextDocument, QWindow
+from PyQt6.QtWidgets import QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizeGrip, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 from version import __version__
 
 
@@ -18,6 +20,14 @@ class EParModernConsole(QWidget):
         self._owner = owner
         self._closing_for_app = False
         self._drag_offset = None
+        self._raw_preview_frames = []
+        self._raw_preview_scaled_frames = []
+        self._raw_preview_index = 0
+        self._raw_preview_direction = 1
+        self._raw_preview_timer = QTimer(self)
+        self._raw_preview_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._raw_preview_timer.setInterval(35)
+        self._raw_preview_timer.timeout.connect(self._advance_raw_preview)
         self._clinical_labels = []
         self._clinical_font_sizes = {}
         self._clinical_resize_timer = QTimer(self)
@@ -62,9 +72,20 @@ class EParModernConsole(QWidget):
         nav.setToolTip("Mostrar u ocultar los controles de procesamiento.")
         pill_grid.addWidget(nav, 0, 0, 1, 2)
 
-        self._load_btn = self._button("CARGAR", owner.load_one_or_two_studies, "blue")
+        self._restart_btn = QPushButton()
+        self._restart_btn.setObjectName("modernRestartButton")
+        self._restart_btn.setIcon(QIcon(str(Path(__file__).parent / "icons" / "power.svg")))
+        self._restart_btn.setIconSize(QSize(20, 20))
+        self._restart_btn.setFixedSize(40, 40)
+        self._restart_btn.setToolTip("Reiniciar sesión")
+        self._restart_btn.setAccessibleName("Reiniciar sesión")
+        self._restart_btn.clicked.connect(owner.restart_workspace_state)
+        pill_grid.addWidget(self._restart_btn, 0, 0, 1, 2, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._restart_btn.raise_()
+
+        self._load_btn = self._button("CARGAR", owner.load_modern_studies, "blue")
         pill_grid.addWidget(self._load_btn, 1, 0, 1, 2)
-        self._process_btn = self._button("PROCESAR", owner.process_current, "amber")
+        self._process_btn = self._button("PROCESAR", owner.open_modern_processing, "amber")
         pill_grid.addWidget(self._process_btn, 2, 0)
         self._dock_btn = self._button("ACOPLAR", self.dockRequested.emit, "blue")
         pill_grid.addWidget(self._dock_btn, 2, 1)
@@ -110,7 +131,16 @@ class EParModernConsole(QWidget):
         self._status_label.setTextFormat(Qt.TextFormat.RichText)
         self._status_label.setWordWrap(True)
         self._status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        status_layout.addWidget(self._status_label, 1)
+        self._results_stack = QStackedWidget()
+        self._results_stack.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self._results_stack.addWidget(self._status_label)
+        self._raw_preview_label = QLabel()
+        self._raw_preview_label.setObjectName("modernRawPreview")
+        self._raw_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._raw_preview_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self._raw_preview_label.setStyleSheet("background:black; border:none;")
+        self._results_stack.addWidget(self._raw_preview_label)
+        status_layout.addWidget(self._results_stack, 1)
         self._progress_label = QLabel("SISTEMA LISTO")
         self._progress_label.setObjectName("progressText")
         status_layout.addWidget(self._progress_label)
@@ -194,6 +224,8 @@ class EParModernConsole(QWidget):
         return btn
 
     def eventFilter(self, watched, event):
+        if watched is self._raw_preview_label and event.type() == QEvent.Type.Resize:
+            self._scale_raw_preview()
         if event.type() == QEvent.Type.Resize and any(watched is label for label, _ in self._clinical_labels):
             self._clinical_resize_timer.start(0)
         if watched is self._drag_handle or watched is self._header or (isinstance(watched, QLabel) and self._header.isAncestorOf(watched)):
@@ -265,6 +297,8 @@ class EParModernConsole(QWidget):
         QFrame#modernPill QPushButton#opsCap { background:#d8bb78; color:#2a2b2d; border-radius:0; padding:8px; font-weight:800; }
         QFrame#modernPill QPushButton#navCap:hover { background:#c9d2bf; }
         QFrame#modernPill QPushButton#opsCap:hover { background:#e4ca8c; }
+        QFrame#modernPill QPushButton#modernRestartButton { background:#e51d20; color:white; border-radius:0; border-top-left-radius:20px; border-right:3px solid #121722; border-bottom:3px solid #121722; padding:0; min-height:37px; max-height:37px; font-family:'Segoe UI Symbol'; font-size:22px; font-weight:400; }
+        QFrame#modernPill QPushButton#modernRestartButton:hover { background:#ff3538; }
         QFrame#studyPanel { background:#85a4a8; border-top-left-radius:18px; border-bottom-left-radius:5px; }
         QLabel#microTitle, QLabel#microValue { color:#263136; background:transparent; font-weight:800; font-size:9px; }
         QLabel#studyText { color:#102127; background:transparent; font-weight:600; font-size:10px; }
@@ -330,6 +364,85 @@ class EParModernConsole(QWidget):
         self._status_label.setText(html or "SIN RESULTADOS: PROCESÁ EL ESTUDIO")
         self._clinical_resize_timer.start(0)
 
+    def set_raw_preview(self, frames) -> None:
+        self._raw_preview_timer.stop()
+        self._raw_preview_frames = list(frames)
+        self._raw_preview_index = 0
+        self._raw_preview_direction = 1
+        if not self._raw_preview_frames:
+            self.stop_raw_preview()
+            return
+        self._results_stack.setCurrentWidget(self._raw_preview_label)
+        self._scale_raw_preview()
+        if self.isVisible() and len(self._raw_preview_frames) > 1:
+            self._raw_preview_timer.start()
+
+    def compose_raw_preview_pair(self, left_frame, right_frame, left_label, right_label):
+        height = max(left_frame.height(), right_frame.height())
+        left_frame = left_frame.scaledToHeight(height, Qt.TransformationMode.SmoothTransformation)
+        right_frame = right_frame.scaledToHeight(height, Qt.TransformationMode.SmoothTransformation)
+        gap = 4
+        title_height = 16
+        right_x = left_frame.width() + gap
+        canvas = QPixmap(right_x + right_frame.width(), height + title_height)
+        canvas.fill(QColor("black"))
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        font = painter.font()
+        font.setPixelSize(9)
+        painter.setFont(font)
+        painter.fillRect(0, 0, canvas.width(), title_height, QColor("#07171f"))
+        painter.setPen(QColor("#d9b86f"))
+        painter.drawText(4, 12, str(left_label))
+        painter.drawText(right_x + 4, 12, str(right_label))
+        painter.drawPixmap(0, title_height, left_frame)
+        painter.drawPixmap(right_x, title_height, right_frame)
+        painter.end()
+        return canvas
+
+    def _scale_raw_preview(self) -> None:
+        if not self._raw_preview_frames:
+            return
+        size = self._raw_preview_label.contentsRect().size()
+        if size.isEmpty():
+            return
+        self._raw_preview_scaled_frames = [
+            frame.scaled(size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            for frame in self._raw_preview_frames
+        ]
+        self._raw_preview_label.setPixmap(self._raw_preview_scaled_frames[self._raw_preview_index])
+
+    def _advance_raw_preview(self) -> None:
+        count = len(self._raw_preview_scaled_frames)
+        if count < 2:
+            return
+        next_index = self._raw_preview_index + self._raw_preview_direction
+        if next_index >= count - 1:
+            next_index = count - 1
+            self._raw_preview_direction = -1
+        elif next_index <= 0:
+            next_index = 0
+            self._raw_preview_direction = 1
+        self._raw_preview_index = next_index
+        self._raw_preview_label.setPixmap(self._raw_preview_scaled_frames[next_index])
+
+    def stop_raw_preview(self) -> None:
+        self._raw_preview_timer.stop()
+        self._raw_preview_frames = []
+        self._raw_preview_scaled_frames = []
+        self._raw_preview_label.clear()
+        self._results_stack.setCurrentWidget(self._status_label)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if len(self._raw_preview_frames) > 1:
+            self._scale_raw_preview()
+            self._raw_preview_timer.start()
+
+    def hideEvent(self, event):
+        self._raw_preview_timer.stop()
+        super().hideEvent(event)
+
     def bring_to_front(self) -> None:
         if self.isMinimized():
             self.showNormal()
@@ -357,6 +470,7 @@ class EParModernConsole(QWidget):
         self.move(QPoint(area.left() + 24, area.top() + 24))
 
     def close_for_app(self) -> None:
+        self.stop_raw_preview()
         self._closing_for_app = True
         self.close()
 

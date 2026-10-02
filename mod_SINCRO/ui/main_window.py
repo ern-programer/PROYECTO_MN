@@ -4221,6 +4221,73 @@ class MainWindow(QMainWindow):
 		results = getattr(self, "main_metrics_readout", None)
 		console.set_patient_html(patient.text() if patient is not None else "")
 		console.set_results_html(results.text() if results is not None else "")
+		if getattr(self, "metrics", None):
+			console.stop_raw_preview()
+
+	def load_modern_studies(self):
+		self.hide()
+		self._modern_preview_loading = True
+		self._modern_raw_preview_pending = False
+		try:
+			self.load_one_or_two_studies()
+		finally:
+			self._modern_preview_loading = False
+			if self._modern_raw_preview_pending:
+				self._modern_raw_preview_pending = False
+				self._refresh_modern_raw_preview()
+			elif self.study is not None and bool(getattr(self.study, "reconstructed", True)):
+				self._epar_modern_console.stop_raw_preview()
+
+	def _refresh_modern_raw_preview(self):
+		console = self._epar_modern_console
+		if console is None or self._active_detached_console != "modern":
+			return
+		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
+			console.stop_raw_preview()
+			return
+		if not getattr(self, "_modern_raw_preview_enabled", True) or self.metrics:
+			return
+		render_meta = getattr(self, "_cine_crudo_dual_render_meta", {})
+		try:
+			primary_label = self._cine_crudo_stage_display(self.study) or "Esfuerzo"
+			frames, _, _ = self._build_cine_crudo_frames_for_study(self.study, None, "UngGat", primary_label)
+			secondary = self._secondary_cine_crudo_study()
+			if secondary is not None:
+				secondary_label = self._cine_crudo_stage_display(secondary) or "Reposo"
+				secondary_frames, _, _ = self._build_cine_crudo_frames_for_study(secondary, None, "UngGat", secondary_label)
+				if frames and secondary_frames:
+					count = max(len(frames), len(secondary_frames))
+					frames = [
+						console.compose_raw_preview_pair(
+							frames[round(index * (len(frames) - 1) / max(1, count - 1))],
+							secondary_frames[round(index * (len(secondary_frames) - 1) / max(1, count - 1))],
+							primary_label, secondary_label,
+						)
+						for index in range(count)
+					]
+			console.set_raw_preview(frames)
+			console.set_status_text("Cine crudo · Rebote · 35 ms")
+		except Exception as exc:
+			console.stop_raw_preview()
+			self._log(f"[WARN Modern preview] {exc}")
+			console.set_status_text("No se pudo preparar el cine crudo")
+		finally:
+			self._cine_crudo_dual_render_meta = render_meta
+
+	def open_modern_processing(self):
+		self.showMaximized()
+		self.raise_()
+		self.activateWindow()
+		self._pending_dual_raw_load = False
+		self.process_current()
+
+	def _begin_modern_raw_processing(self):
+		self._modern_raw_preview_enabled = False
+		console = self._epar_modern_console
+		if console is not None:
+			console.stop_raw_preview()
+			console.set_results_html("Sin resultados todavía: procesamiento en curso.")
+			console.set_status_text("Procesando crudo...")
 
 	def _restore_window_layout(self):
 		geom = self._ui_settings.value("window_geometry", None)
@@ -5552,12 +5619,15 @@ class MainWindow(QMainWindow):
 		self._ui_settings.setValue("epar_plus/detached", False)
 		self._ui_settings.setValue("epar_modern/detached", True)
 		self._ui_settings.sync()
+		self._refresh_modern_raw_preview()
+		self.hide()
 
 	def dock_epar_modern_console(self):
 		console = self._epar_modern_console
 		if console is None:
 			return
 		self._ui_settings.setValue("epar_modern/geometry", console.saveGeometry())
+		console.stop_raw_preview()
 		sidebar = console.release_sidebar()
 		console.hide()
 		if sidebar is not None:
@@ -5575,6 +5645,9 @@ class MainWindow(QMainWindow):
 		self._epar_plus_front_btn.setVisible(False)
 		self._ui_settings.setValue("epar_modern/detached", False)
 		self._ui_settings.sync()
+		self.showMaximized()
+		self.raise_()
+		self.activateWindow()
 
 	def closeEvent(self, event):
 		if self._last_browse_dir:
@@ -8293,6 +8366,11 @@ class MainWindow(QMainWindow):
 			self.pipeline_history.reset()
 
 	def restart_workspace_state(self):
+		self._modern_raw_preview_enabled = True
+		self._modern_raw_preview_pending = False
+		if self._epar_modern_console is not None:
+			self._epar_modern_console.stop_raw_preview()
+			self._epar_modern_console.set_status_text("Listo")
 		self._reset_session_data()
 		self.file_edit.clear()
 		self._sync_manual_rois({})
@@ -8707,6 +8785,25 @@ class MainWindow(QMainWindow):
 			# --- Modo crudo: proyecciones (no reconstruido) → panel QC + cine + gating ---
 			self._apply_gated_controls_state()
 			if not bool(getattr(self.study, "reconstructed", True)):
+				if getattr(self, "_modern_preview_loading", False):
+					self._clear_compare_state()
+					self.metrics = None
+					self.phase_result = None
+					self.cine_crudo_corrected_projections = None
+					self.cine_crudo_motion_result = None
+					self.cine_crudo_seed = None
+					self.cine_crudo_band_upper = None
+					self.cine_crudo_band_lower = None
+					self.cine_crudo_ref_index = None
+					self.cine_crudo_timer.stop()
+					self.cine_crudo_playing = False
+					self.cine_crudo_frames = []
+					self._last_primary_path = primary_abs
+					self._modern_raw_preview_enabled = True
+					self._modern_raw_preview_pending = True
+					self._refresh_readonly_results_panel()
+					self._set_progress(100, "Crudo cargado · Preview Modern")
+					return
 				self._handle_raw_projections_loaded(path, t_total)
 				return
 			is_gated = int(np.asarray(self.study.cube).shape[0]) >= 3
@@ -15923,7 +16020,7 @@ class MainWindow(QMainWindow):
 		raw_r = detected.get(("raw", "rest"))
 		have_raw = bool(raw_s or raw_r)
 
-		if self.study is None and have_raw:
+		if (self.study is None or getattr(self, "_modern_preview_loading", False)) and have_raw:
 			primary = raw_s or raw_r
 			self.file_edit.setText(primary["files"][0])
 			# Con ambas etapas crudas, diferir el arranque del cine a la 2da carga.
@@ -17376,6 +17473,7 @@ class MainWindow(QMainWindow):
 		# (reorientación, cortes, metadatos) según la etapa elegida.
 		self.cine_crudo_raw_study_for_recon = raw_study
 		self._cine_crudo_recon_stage = stage
+		self._begin_modern_raw_processing()
 		# Detener el cine del crudo: si sigue corriendo, el timer pisaría la imagen de
 		# reconstrucción en la pestaña (incluso durante el diálogo modal por processEvents).
 		self.cine_crudo_timer.stop()
@@ -22885,6 +22983,10 @@ class MainWindow(QMainWindow):
 			# Con dos etapas crudas cargadas, arrancar con el selector en "Ambas":
 			# las herramientas (corrección/recon/reorient/cortes) procesan las dos.
 			self._set_active_cine_crudo_stage("both", refresh_view=False)
+			if getattr(self, "_modern_preview_loading", False):
+				self._refresh_readonly_results_panel()
+				self._set_progress(100, "Crudo dual cargado · Preview Modern")
+				return
 			# Al cargar la segunda etapa cruda, refrescar de inmediato la pestaña
 			# superior para que muestre Stress/Rest apilados.
 			self._refresh_cine_crudo_view()
