@@ -67,20 +67,21 @@ class EParModernConsole(QWidget):
         pill_grid.setVerticalSpacing(5)
 
         nav = self._button("CONTROLES", self.toggle_controls, "blue")
+        self._controls_btn = nav
         nav.setObjectName("navCap")
         nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         nav.setToolTip("Mostrar u ocultar los controles de procesamiento.")
         pill_grid.addWidget(nav, 0, 0, 1, 2)
 
-        self._restart_btn = QPushButton()
+        self._restart_btn = QPushButton(pill)
         self._restart_btn.setObjectName("modernRestartButton")
         self._restart_btn.setIcon(QIcon(str(Path(__file__).parent / "icons" / "power.svg")))
         self._restart_btn.setIconSize(QSize(20, 20))
-        self._restart_btn.setFixedSize(40, 40)
+        self._restart_btn.setFixedSize(42, 42)
         self._restart_btn.setToolTip("Reiniciar sesión")
         self._restart_btn.setAccessibleName("Reiniciar sesión")
         self._restart_btn.clicked.connect(owner.restart_workspace_state)
-        pill_grid.addWidget(self._restart_btn, 0, 0, 1, 2, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._restart_btn.move(nav.pos() - QPoint(2, 2))
         self._restart_btn.raise_()
 
         self._load_btn = self._button("CARGAR", owner.load_modern_studies, "blue")
@@ -224,6 +225,9 @@ class EParModernConsole(QWidget):
         return btn
 
     def eventFilter(self, watched, event):
+        if watched is self._controls_btn and event.type() in (QEvent.Type.Move, QEvent.Type.Resize, QEvent.Type.Show):
+            self._restart_btn.move(self._controls_btn.pos() - QPoint(2, 2))
+            self._restart_btn.raise_()
         if watched is self._raw_preview_label and event.type() == QEvent.Type.Resize:
             self._scale_raw_preview()
         if event.type() == QEvent.Type.Resize and any(watched is label for label, _ in self._clinical_labels):
@@ -297,7 +301,7 @@ class EParModernConsole(QWidget):
         QFrame#modernPill QPushButton#opsCap { background:#d8bb78; color:#2a2b2d; border-radius:0; padding:8px; font-weight:800; }
         QFrame#modernPill QPushButton#navCap:hover { background:#c9d2bf; }
         QFrame#modernPill QPushButton#opsCap:hover { background:#e4ca8c; }
-        QFrame#modernPill QPushButton#modernRestartButton { background:#e51d20; color:white; border-radius:0; border-top-left-radius:20px; border-right:3px solid #121722; border-bottom:3px solid #121722; padding:0; min-height:37px; max-height:37px; font-family:'Segoe UI Symbol'; font-size:22px; font-weight:400; }
+        QFrame#modernPill QPushButton#modernRestartButton { background:#e51d20; color:white; border-radius:0; border-top-left-radius:20px; border-right:3px solid #121722; border-bottom:3px solid #121722; padding:0; min-height:39px; max-height:39px; font-family:'Segoe UI Symbol'; font-size:22px; font-weight:400; }
         QFrame#modernPill QPushButton#modernRestartButton:hover { background:#ff3538; }
         QFrame#studyPanel { background:#85a4a8; border-top-left-radius:18px; border-bottom-left-radius:5px; }
         QLabel#microTitle, QLabel#microValue { color:#263136; background:transparent; font-weight:800; font-size:9px; }
