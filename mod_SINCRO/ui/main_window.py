@@ -4063,8 +4063,15 @@ class MainWindow(QMainWindow):
 		tab_name = str(tab_name or "")
 		if tab_name not in heavy_tabs:
 			return
+		show_busy_cursor = tab_name in {"comparacion_ejes", "panel_funcional_gated", "guia_fase_vi", "polar_perfusion_directa"}
 		if self._is_tab_render_ready(tab_name):
-			self._load_preview(tab_name)
+			if show_busy_cursor:
+				self._begin_background_busy()
+			try:
+				self._load_preview(tab_name)
+			finally:
+				if show_busy_cursor:
+					self._end_background_busy()
 			return
 		self._lazy_render_pending_tabs.add(tab_name)
 		if self._deferred_hq_running:
@@ -4077,8 +4084,10 @@ class MainWindow(QMainWindow):
 		msg = f"Render bajo demanda: {', '.join(sorted(pending))}"
 		if reason:
 			msg += f" ({reason})"
-		self._set_progress(86, msg)
+		if show_busy_cursor:
+			self._begin_background_busy()
 		try:
+			self._set_progress(86, msg)
 			if self.compare_bundle is not None:
 				self._write_outputs_for_bundle(self.compare_bundle, self.compare_output_dir, target_tabs=pending)
 			self._write_outputs(target_tabs=pending)
@@ -4088,6 +4097,9 @@ class MainWindow(QMainWindow):
 			self._load_previews_selected(pending)
 		except Exception as exc:
 			self._log(f"[WARN] Lazy render falló ({', '.join(sorted(pending))}): {exc}")
+		finally:
+			if show_busy_cursor:
+				self._end_background_busy()
 
 	def _log(self, message: str):
 		self.log_box.append(message)
@@ -5634,6 +5646,8 @@ class MainWindow(QMainWindow):
 		self._sync_epar_modern_clinical_panels()
 		self._side_cards_host.setVisible(False)
 		self._set_lower_cine_band_visible(False)
+		console.set_top_mode(True)
+		console._top_pin_btn.setChecked(True)
 		console.bring_to_front()
 		self.main_splitter.setSizes([0, max(1, self.width())])
 		self._active_detached_console = "modern"
@@ -7990,21 +8004,25 @@ class MainWindow(QMainWindow):
 		# guard study/seg porque el crudo puede tener cortes sin segmentación.
 		# Solo se re-renderiza si algo del montaje cambió desde el último render.
 		if tab_name == "comparacion_ejes" and self.cine_crudo_axes_for_export:
-			# Si el montaje vino de carga directa SA y se editó el ROI intestinal,
-			# reconstruir los cortes para que reflejen la sustracción actual.
-			self._maybe_rebuild_sa_direct_montage()
-			# Ídem para el montaje crudo: re-cortar SA/HLA/VLA con el intestino actual.
-			self._maybe_rebuild_crudo_montage()
-			sig = self._montage_signature()
-			already = (
-				self.cine_crudo_preview_mode == "sa_montage"
-				and self.preview_pixmaps.get("comparacion_ejes") is not None
-				and getattr(self, "_montage_last_signature", None) == sig
-			)
-			if already:
-				self._apply_preview_zoom("comparacion_ejes")
-			else:
-				self._show_cine_crudo_sa_montage()
+			self._begin_background_busy()
+			try:
+				# Si el montaje vino de carga directa SA y se editó el ROI intestinal,
+				# reconstruir los cortes para que reflejen la sustracción actual.
+				self._maybe_rebuild_sa_direct_montage()
+				# Ídem para el montaje crudo: re-cortar SA/HLA/VLA con el intestino actual.
+				self._maybe_rebuild_crudo_montage()
+				sig = self._montage_signature()
+				already = (
+					self.cine_crudo_preview_mode == "sa_montage"
+					and self.preview_pixmaps.get("comparacion_ejes") is not None
+					and getattr(self, "_montage_last_signature", None) == sig
+				)
+				if already:
+					self._apply_preview_zoom("comparacion_ejes")
+				else:
+					self._show_cine_crudo_sa_montage()
+			finally:
+				self._end_background_busy()
 			return
 		if self.study is None or self.seg is None:
 			return
@@ -9292,7 +9310,7 @@ class MainWindow(QMainWindow):
 				gif_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "rockford-boulder-dash.gif")
 				movie = QMovie(gif_path, parent=self)
 				movie.setCacheMode(QMovie.CacheMode.CacheAll)
-				movie.setScaledSize(QSize(40, 40))
+				movie.setScaledSize(QSize(32, 32))
 				movie.frameChanged.connect(self._update_background_busy_cursor)
 				self._busy_cursor_movie = movie
 			if movie.isValid():

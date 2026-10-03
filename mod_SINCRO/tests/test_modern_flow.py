@@ -929,6 +929,146 @@ def test_compare_raw_preview_does_not_generate_qc_or_start_main_cine():
     assert window.dual_mode_active
     assert state.calls == ["readouts"]
 
+@pytest.mark.parametrize("tab_name", ["polar_perfusion_directa", "panel_funcional_gated", "guia_fase_vi", "comparacion_ejes", "curva_fevi"])
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("fails", [False, True])
+def test_requested_lazy_tabs_restore_rockford_after_loading(tab_name, cached, fails):
+    calls = []
+
+    def load(*args, **kwargs):
+        calls.append("work")
+        if fails:
+            raise RuntimeError("synthetic render failure")
+
+    window = SimpleNamespace(
+        study=object(), seg=object(), phase_result=object(), compare_bundle=None,
+        _lazy_render_pending_tabs=set(), _deferred_hq_running=False,
+        _is_tab_render_ready=lambda name: cached,
+        _load_preview=load, _write_outputs=load,
+        _load_previews_selected=lambda pending: calls.append("loaded"),
+        _set_progress=lambda *args: calls.append("progress"),
+        _log=lambda message: calls.append("error"),
+        _begin_background_busy=lambda: calls.append("busy"),
+        _end_background_busy=lambda: calls.append("restore"),
+    )
+    _bind(window, "_request_lazy_tab_render")
+    if cached and fails:
+        with pytest.raises(RuntimeError, match="synthetic"):
+            window._request_lazy_tab_render(tab_name)
+    else:
+        window._request_lazy_tab_render(tab_name)
+    if tab_name == "curva_fevi":
+        assert "busy" not in calls and "restore" not in calls
+    else:
+        assert calls[0] == "busy" and calls[-1] == "restore"
+        assert calls.count("busy") == calls.count("restore") == 1
+    assert "work" in calls
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("failure_stage", [None, "rebuild", "display"])
+def test_montage_tab_restores_rockford_after_rebuild_or_display(cached, failure_stage):
+    calls = []
+
+    def action(name, stage):
+        calls.append(name)
+        if failure_stage == stage:
+            raise RuntimeError("synthetic montage failure")
+
+    window = SimpleNamespace(
+        tabs=SimpleNamespace(tabText=lambda index: "Montaje clínico"),
+        _tab_name_from_title=lambda title: "comparacion_ejes",
+        cine_crudo_axes_for_export=True, cine_crudo_preview_mode="sa_montage",
+        preview_pixmaps={"comparacion_ejes": object()},
+        _montage_last_signature="current" if cached else "old",
+        _montage_signature=lambda: "current",
+        _maybe_rebuild_sa_direct_montage=lambda: action("rebuild-sa", "rebuild"),
+        _maybe_rebuild_crudo_montage=lambda: calls.append("rebuild-crudo"),
+        _apply_preview_zoom=lambda name: action("zoom", "display"),
+        _show_cine_crudo_sa_montage=lambda: action("render", "display"),
+        _begin_background_busy=lambda: calls.append("busy"),
+        _end_background_busy=lambda: calls.append("restore"),
+    )
+    _bind(window, "_on_preview_tab_changed")
+    if failure_stage is not None:
+        with pytest.raises(RuntimeError, match="synthetic"):
+            window._on_preview_tab_changed(0)
+    else:
+        window._on_preview_tab_changed(0)
+    assert calls[0] == "busy" and calls[-1] == "restore"
+    assert calls.count("busy") == calls.count("restore") == 1
+    if failure_stage != "rebuild":
+        assert ("zoom" if cached else "render") in calls
+
+
+@pytest.mark.parametrize("active, reuse", [("", False), ("", True), ("plus", False), ("plus", True), ("modern", True)])
+def test_modern_opens_anchored_at_top_without_overriding_existing_choice(monkeypatch, active, reuse):
+    calls = []
+    control = SimpleNamespace(setText=lambda text: None, setVisible=lambda visible: None)
+    console = SimpleNamespace(
+        dockRequested=SimpleNamespace(connect=lambda callback: None),
+        take_sidebar=lambda sidebar: None,
+        restore_safe_geometry=lambda geometry: calls.append("geometry"),
+        set_study_text=lambda text: None, set_status_text=lambda text: None,
+        set_top_mode=lambda enabled: calls.append(("top", enabled)),
+        _top_pin_btn=SimpleNamespace(setChecked=lambda checked: calls.append(("pin", checked))),
+        bring_to_front=lambda: calls.append("front"),
+    )
+    monkeypatch.setitem(sys.modules, "ui.epar_modern_console", SimpleNamespace(EParModernConsole=lambda owner: console))
+    window = SimpleNamespace(
+        _active_detached_console=active, _epar_modern_console=console if reuse else None,
+        dock_epar_plus_console=lambda: calls.append("dock-plus"),
+        dock_epar_modern_console=lambda: None,
+        main_splitter=SimpleNamespace(sizes=lambda: [300, 1000], setSizes=lambda sizes: None),
+        _sidebar_widget=SimpleNamespace(setMaximumWidth=lambda width: None),
+        _ui_settings=SimpleNamespace(value=lambda *args: None, setValue=lambda *args: None, sync=lambda: None),
+        file_edit=SimpleNamespace(text=lambda: ""),
+        _progress_bar=SimpleNamespace(format=lambda: "SISTEMA LISTO"),
+        _sync_epar_modern_clinical_panels=lambda: None,
+        _side_cards_host=control, _set_lower_cine_band_visible=lambda visible: None,
+        width=lambda: 1300, epar_modern_btn=control, _epar_plus_front_btn=control,
+        _refresh_modern_raw_preview=lambda: None, hide=lambda: calls.append("hide-main"),
+    )
+    _bind(window, "detach_epar_modern_console")
+    window.detach_epar_modern_console()
+    if active == "modern":
+        assert calls == ["front"]
+    else:
+        assert calls == (["dock-plus"] if active == "plus" else []) + ["geometry", ("top", True), ("pin", True), "front", "hide-main"]
+        assert window._active_detached_console == "modern"
+
+
+def test_rockford_gif_has_transparent_background_in_every_frame():
+    from PIL import Image
+
+    with Image.open(ROOT / "assets" / "rockford-boulder-dash.gif") as animation:
+        assert animation.n_frames == 35
+        assert animation.info["loop"] == 0
+        for frame_index in range(animation.n_frames):
+            animation.seek(frame_index)
+            alpha = animation.convert("RGBA").getchannel("A")
+            width, height = alpha.size
+            for border in ((0, 0, width, 1), (0, height - 1, width, height),
+                           (0, 0, 1, height), (width - 1, 0, width, height)):
+                assert alpha.crop(border).getextrema() == (0, 0), frame_index
+            assert alpha.getextrema() == (0, 255), frame_index
+            assert animation.info["duration"] > 0
+
+
+def test_rockford_black_eye_pixels_are_transparent():
+    import numpy as np
+    from PIL import Image
+
+    with Image.open(ROOT / "assets" / "rockford-boulder-dash.gif") as animation:
+        for frame_index in range(animation.n_frames):
+            animation.seek(frame_index)
+            frame = animation.convert("RGBA")
+            for eye_box in ((190, 148, 246, 220), (366, 148, 422, 220)):
+                pixels = np.asarray(frame.crop(eye_box))
+                opaque_black = np.all(pixels[:, :, :3] == 0, axis=2) & (pixels[:, :, 3] > 0)
+                assert not opaque_black.any(), frame_index
+
+
 @pytest.mark.parametrize("valid_gif", [True, False])
 def test_rockford_busy_cursor_animates_and_restores_nested_calls(valid_gif):
     calls = []
@@ -967,7 +1107,7 @@ def test_rockford_busy_cursor_animates_and_restores_nested_calls(valid_gif):
     window._begin_background_busy()
     window._begin_background_busy()
     assert calls.count("push") == calls.count("load-gif") == 1
-    assert ("size", (40, 40)) in calls
+    assert ("size", (32, 32)) in calls
     assert "paint" in calls
     assert ("start" in calls) == valid_gif
     if valid_gif:
