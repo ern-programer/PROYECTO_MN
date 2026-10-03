@@ -1038,7 +1038,7 @@ class CineWidget(QWidget):
 		self._intestinal_draw_role = "target"
 		self._intestinal_attenuation_pct = 60
 		self._intestinal_feather_px = 2
-		self._intestinal_scope_mode = "slice"
+		self._intestinal_scope_mode = "all_slices"
 		self._intestinal_apply_enabled = False
 		self._tooltips_cache: dict[QWidget, str] = {}
 		self._helpers_visible = True
@@ -1179,6 +1179,7 @@ class CineWidget(QWidget):
 		self.intestinal_scope_combo.addItem("Slice actual", "slice")
 		self.intestinal_scope_combo.addItem("Todos los slices", "all_slices")
 		self.intestinal_scope_combo.addItem("Gate actual + todos slices", "gate_slices")
+		self.intestinal_scope_combo.setCurrentIndex(self.intestinal_scope_combo.findData(self._intestinal_scope_mode))
 		self.intestinal_scope_combo.currentIndexChanged.connect(self._on_intestinal_scope_changed)
 		self.intestinal_atten_slider = QSlider(Qt.Orientation.Horizontal)
 		self.intestinal_atten_slider.setRange(0, 100)

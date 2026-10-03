@@ -1,6 +1,8 @@
 """Modern load/preview wiring without creating QApplication or real output files."""
 import ast
 import os
+import subprocess
+import sys
 from pathlib import Path
 from time import perf_counter
 from types import SimpleNamespace, MethodType
@@ -60,6 +62,191 @@ def test_load_hides_main_and_prepares_preview_after_loading():
     assert state.frames == [0, 1, 2]
     assert not window._modern_preview_loading
     assert not window._modern_raw_preview_pending
+
+
+@pytest.mark.parametrize("mode", ["modern", "plus", ""])
+def test_asynchrony_layout_is_exclusive_to_modern(mode):
+    calls = []
+    window = SimpleNamespace(
+        _active_detached_console=mode,
+        _epar_modern_console=SimpleNamespace(toggle_asynchrony=lambda: calls.append("modern")),
+        _toggle_lower_cine_band=lambda: calls.append("legacy"),
+    )
+    _bind(window, "toggle_modern_asynchrony")
+    window.toggle_modern_asynchrony()
+    assert calls == ["modern" if mode == "modern" else "legacy"]
+
+
+def test_modern_asynchrony_real_widgets_restore_legacy_layout(tmp_path):
+    script = r'''
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+import numpy as np
+from PyQt6.QtCore import QPoint, QRect, QSettings
+from PyQt6.QtWidgets import QApplication, QGridLayout, QLabel, QPushButton, QToolButton, QVBoxLayout, QWidget
+import ui.floating_toolbar as toolbar_module
+from ui.cine_widget import CineWidget
+from ui.epar_modern_asynchrony import EParModernAsynchrony
+from ui.epar_modern_console import EParModernConsole
+
+app = QApplication([])
+folder = Path(sys.argv[1])
+settings = QSettings(str(folder / 'isolated.ini'), QSettings.Format.IniFormat)
+toolbar_module.QSettings = lambda *args: settings
+owner = QWidget()
+owner.winId()
+owner._ui_settings = settings
+owner.cine = CineWidget(compact_viewer=True)
+owner.cine_compare = CineWidget(compact_viewer=True, is_compare=True)
+for cine in (owner.cine, owner.cine_compare):
+    assert cine.intestinal_scope() == 'all_slices'
+    assert cine.intestinal_scope_combo.currentData() == 'all_slices'
+    assert cine.intestinal_scope_combo.currentText() == 'Todos los slices'
+    cine.set_intestinal_scope('slice')
+    assert cine.intestinal_scope_combo.currentData() == 'slice'
+    cine.set_intestinal_scope('all_slices')
+owner.cine.set_compare_viewer(owner.cine_compare)
+owner.cine.gate_slider.valueChanged.connect(owner.cine_compare.gate_slider.setValue)
+owner.cine.slice_slider.valueChanged.connect(owner.cine_compare.slice_slider.setValue)
+owner.cine.cmap_combo.currentTextChanged.connect(owner.cine_compare.cmap_combo.setCurrentText)
+owner.main_metrics_readout = QLabel('PSD: 12.5 / BW: 34.0')
+owner.asynchrony_review_btn = QPushButton('Vista asincronia')
+owner._roi_manual_btn = QToolButton()
+calls = []
+owner._on_cine_panel_activated = lambda stage: calls.append(stage)
+owner._roi_manual_btn.clicked.connect(lambda: calls.append('manual'))
+owner._toolbar_group_menus = {'roi_manual_por_slice': (
+    SimpleNamespace(toggle_near=lambda anchor: calls.append('manual')),
+    owner._roi_manual_btn,
+)}
+owner.asynchrony_review_btn.clicked.connect(lambda: calls.append('review'))
+legacy = QVBoxLayout(owner)
+owner._lower_cine_panel = QWidget()
+legacy.addWidget(owner._lower_cine_panel)
+owner._lower_cine_panel.show()
+for widget in (owner.cine, owner.main_metrics_readout, owner.asynchrony_review_btn, owner._roi_manual_btn):
+    legacy.addWidget(widget)
+axis_y, axis_x = np.mgrid[-1:1:40j, -1:1:40j]
+ring = np.exp(-((np.hypot(axis_x, axis_y) - .55) / .09) ** 2)
+cube = np.stack([np.stack([ring * (1 + gate / 8)] * 5) for gate in range(8)])
+owner.cine.set_cube(cube)
+owner.cine_compare.set_cube(cube.copy())
+owner.cine.set_phase_title('Esfuerzo')
+owner.cine_compare.set_phase_title('Reposo')
+for name in ('restart_workspace_state', 'load_modern_studies', 'open_modern_processing',
+             'open_ui_preferences_dialog', 'open_pdf', 'open_html_report'):
+    setattr(owner, name, lambda: None)
+owner.toggle_modern_asynchrony = lambda: console.toggle_asynchrony()
+console = EParModernConsole(owner)
+console.show()
+original_layouts = {}
+def layout_state(layout):
+    if isinstance(layout, QGridLayout):
+        return {layout.getItemPosition(index): (layout.itemAt(index).widget(), layout.itemAt(index).layout())
+                for index in range(layout.count())}
+    return [(layout.itemAt(index).widget(), layout.itemAt(index).layout())
+            for index in range(layout.count())]
+def remember_layout(layout):
+    if layout is None or layout in original_layouts:
+        return
+    original_layouts[layout] = layout_state(layout)
+    for index in range(layout.count()):
+        item = layout.itemAt(index)
+        remember_layout(item.layout())
+        if item.widget() is not None:
+            remember_layout(item.widget().layout())
+remember_layout(owner.layout())
+console._asynchrony_btn.click()
+panel = console._asynchrony_panel
+saved = list(panel._borrowed)
+assert len(saved) >= 25
+panel.resize(1120, 590)
+panel.show()
+app.processEvents()
+assert owner.cine.preview.window() is panel
+assert owner.cine_compare.preview.window() is panel
+assert owner._lower_cine_panel.isHidden()
+assert owner.cine.preview.width() >= 140
+assert owner.cine_compare.preview.width() >= 140
+initial = owner.cine.gate_slider.value()
+owner.cine.gate_next_btn.click()
+assert owner.cine.gate_slider.value() == initial + 1
+assert owner.cine_compare.gate_slider.value() == initial + 1
+owner.cine.range_slider.set_values(10, 120)
+assert owner.cine._window_low == .1
+assert owner.cine_compare._window_low == 0
+panel._manual_buttons[1].click()
+assert calls[-2:] == ['secondary', 'manual']
+owner.asynchrony_review_btn.click()
+assert calls[-1] == 'review'
+panel._stage_buttons[0].click()
+assert panel._stage_panels[1].isHidden()
+panel._stage_buttons[2].click()
+assert not panel._stage_panels[1].isHidden()
+for size in ((1120, 590), (920, 540)):
+    panel.resize(*size)
+    app.processEvents()
+    for cine in (owner.cine, owner.cine_compare):
+        assert cine.preview.width() >= 140 and cine.preview.height() >= 140
+        assert cine.range_slider.width() == 28 and cine.range_slider.height() >= 140
+        preview_rect = QRect(cine.preview.mapToGlobal(QPoint()), cine.preview.size())
+        slider_rect = QRect(cine.range_slider.mapToGlobal(QPoint()), cine.range_slider.size())
+        assert not preview_rect.intersects(slider_rect)
+    assert abs(owner.cine.preview.height() - owner.cine_compare.preview.height()) <= 1
+    assert str(owner.cine.current_gate_index() + 1) in panel._primary_position.text()
+    panel.grab().save(str(folder / ('modern_asynchrony_%sx%s.png' % size)))
+owner.cine_compare.set_cube(None)
+panel.refresh_state()
+assert not panel._stage_buttons[1].isEnabled()
+assert not panel._manual_buttons[1].isEnabled()
+assert panel._stage_summary.text() == 'Esfuerzo'
+panel._select_stage('secondary')
+assert panel._stage_filter == 'both'
+owner.cine.set_cube(None)
+owner.main_metrics_readout.setText('Sin resultados: procesa el estudio.')
+console.set_patient_html('Sin estudio cargado.')
+console.set_results_html(owner.main_metrics_readout.text())
+assert console._study_label.text() == 'Sin estudio cargado.'
+assert console._status_label.text() == 'Sin resultados: procesa el estudio.'
+assert panel._stage_summary.text() == 'SIN ESTUDIO'
+assert all(not button.isEnabled() for button in panel._manual_buttons)
+assert all(not button.isEnabled() for button in panel._stage_buttons[:2])
+owner.cine.stop_playback()
+console.release_asynchrony()
+assert console._asynchrony_panel is None
+assert not owner._lower_cine_panel.isHidden()
+assert not panel._borrowed
+for saved_widget in saved:
+    widget, parent, layout, index, grid, alignment, stretch, minimum, maximum, policy, stylesheet, hidden, text, role = saved_widget
+    assert widget.parentWidget() is parent
+    assert widget.minimumSize() == minimum
+    assert widget.maximumSize() == maximum
+    assert widget.sizePolicy() == policy
+    assert widget.styleSheet() == stylesheet
+    found = panel._locate(parent.layout(), widget)
+    assert found is not None
+    assert found[0] is layout
+    assert layout.itemAt(found[1]).alignment() == alignment
+    if grid is not None:
+        assert layout.getItemPosition(found[1]) == grid
+for layout, entries in original_layouts.items():
+    assert layout_state(layout) == entries, type(layout).__name__
+assert owner.cine.preview.size().width() == 160
+assert owner.asynchrony_review_btn.text() == 'Vista asincronia'
+assert owner.cine.range_slider.values() == (10, 120)
+console._asynchrony_btn.click()
+assert console._asynchrony_panel is not None
+console.release_asynchrony()
+console.close_for_app()
+print('Real Qt controls: navigation, ROI routing, stage filtering, per-stage window and legacy restore OK')
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)], cwd=ROOT,
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+        capture_output=True, text=True, timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_cancel_preserves_existing_preview():
@@ -220,9 +407,37 @@ def test_preview_bounces_without_repeating_endpoints_or_rescaling():
     assert displayed == [1, 2, 1, 0, 1, 2]
 
 
+@pytest.mark.parametrize("with_cards", [False, True])
+def test_empty_session_refresh_clears_modern_clinical_readouts(with_cards):
+    window, state = _window()
+    window.study = None
+    window.metrics = None
+    state.results = "PSD: 99 / BW: 180 - previous patient"
+    state.patient = "Previous patient"
+    window._epar_modern_console.set_patient_html = lambda text: setattr(state, "patient", text)
+    window._sidebar_widget = object()
+    window.patient_data_label = SimpleNamespace(text=lambda: "Sin estudio cargado.")
+    window.main_metrics_readout = SimpleNamespace(text=lambda: "Sin resultados: procesá el estudio.")
+    deleted = []
+    for attr in ("_patient_card", "_results_card"):
+        setattr(window, attr, SimpleNamespace(deleteLater=lambda name=attr: deleted.append(name)) if with_cards else None)
+    window._side_cards_host = SimpleNamespace(setVisible=lambda visible: setattr(state, "cards_visible", visible))
+    window._reposition_fading_notices = lambda: None
+    _bind(window, "_sync_epar_modern_clinical_panels")
+    _bind(window, "_refresh_persistent_patient_card")
+    window._refresh_persistent_patient_card()
+    assert state.patient == "Sin estudio cargado."
+    assert state.results == "Sin resultados: procesá el estudio."
+    assert not state.cards_visible
+    assert window._patient_card is None and window._results_card is None
+    assert len(deleted) == (2 if with_cards else 0)
+
+
 def test_restart_clears_floating_cine_and_reenables_next_load():
     window, state = _window()
     state.frames = ["previous-preview"]
+    state.results = "PSD: 99 / BW: 180 - previous patient"
+    state.cubes = ["primary", "secondary"]
     window._modern_raw_preview_enabled = False
     window._modern_raw_preview_pending = True
     cleared = SimpleNamespace(clear=lambda: None)
@@ -235,13 +450,26 @@ def test_restart_clears_floating_cine_and_reenables_next_load():
     window.summary_clinical = cleared
     window.summary_technical = cleared
     window.summary_executive = cleared
-    window._refresh_readonly_results_panel = lambda: None
-    window._refresh_persistent_patient_card = lambda: None
+    window._refresh_readonly_results_panel = lambda: setattr(state, "source_results", "Sin resultados: procesá el estudio.")
+    window._sidebar_widget = object()
+    window.patient_data_label = SimpleNamespace(text=lambda: "Sin estudio cargado.")
+    window.main_metrics_readout = SimpleNamespace(text=lambda: state.source_results)
+    window._patient_card = None
+    window._results_card = None
+    window._reposition_fading_notices = lambda: None
+    window._epar_modern_console.set_patient_html = lambda text: setattr(state, "patient", text)
+    def results_updated(text):
+        assert state.cubes == [None, None]
+        state.results = text
+    window._epar_modern_console.set_results_html = results_updated
+    _bind(window, "_sync_epar_modern_clinical_panels")
+    _bind(window, "_refresh_persistent_patient_card")
     window.preview_movies = {}
     window.preview_pixmaps = {"previous": 1}
     window.preview_labels = {}
     window.gate_dropout_status = SimpleNamespace(setText=lambda text: None)
-    window.cine = SimpleNamespace(set_cube=lambda cube: None)
+    window.cine = SimpleNamespace(set_cube=lambda cube: state.cubes.__setitem__(0, cube))
+    window.cine_compare = SimpleNamespace(set_cube=lambda cube: state.cubes.__setitem__(1, cube))
     window._refresh_cine_source_selector = lambda: None
     window._progress_bar = SimpleNamespace(setValue=lambda value: None, setFormat=lambda text: None)
     window.log_box = cleared
@@ -253,3 +481,6 @@ def test_restart_clears_floating_cine_and_reenables_next_load():
     assert window._modern_raw_preview_enabled
     assert not window._modern_raw_preview_pending
     assert window.study is None and not window.preview_pixmaps
+    assert state.cubes == [None, None]
+    assert state.patient == "Sin estudio cargado."
+    assert state.results == "Sin resultados: procesá el estudio."

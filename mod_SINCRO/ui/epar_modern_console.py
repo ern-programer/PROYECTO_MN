@@ -30,6 +30,7 @@ class EParModernConsole(QWidget):
         self._raw_preview_timer.timeout.connect(self._advance_raw_preview)
         self._clinical_labels = []
         self._clinical_font_sizes = {}
+        self._asynchrony_panel = None
         self._clinical_resize_timer = QTimer(self)
         self._clinical_resize_timer.setSingleShot(True)
         self._clinical_resize_timer.timeout.connect(self._fit_clinical_text)
@@ -66,12 +67,21 @@ class EParModernConsole(QWidget):
         pill_grid.setHorizontalSpacing(5)
         pill_grid.setVerticalSpacing(5)
 
+        nav_host = QWidget()
+        nav_layout = QVBoxLayout(nav_host)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(4)
         nav = self._button("CONTROLES", self.toggle_controls, "blue")
         self._controls_btn = nav
         nav.setObjectName("navCap")
         nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         nav.setToolTip("Mostrar u ocultar los controles de procesamiento.")
-        pill_grid.addWidget(nav, 0, 0, 1, 2)
+        nav_layout.addWidget(nav)
+        self._asynchrony_btn = self._button("ASINCRONÍA", owner.toggle_modern_asynchrony, "blue")
+        self._asynchrony_btn.setObjectName("asyncCap")
+        self._asynchrony_btn.setToolTip("Abrir el panel lateral de asincronía.")
+        nav_layout.addWidget(self._asynchrony_btn, 1)
+        pill_grid.addWidget(nav_host, 0, 0, 1, 2)
 
         self._restart_btn = QPushButton(pill)
         self._restart_btn.setObjectName("modernRestartButton")
@@ -81,7 +91,7 @@ class EParModernConsole(QWidget):
         self._restart_btn.setToolTip("Reiniciar sesión")
         self._restart_btn.setAccessibleName("Reiniciar sesión")
         self._restart_btn.clicked.connect(owner.restart_workspace_state)
-        self._restart_btn.move(nav.pos() - QPoint(2, 2))
+        self._restart_btn.move(nav.mapTo(pill, QPoint(0, 0)) - QPoint(2, 2))
         self._restart_btn.raise_()
 
         self._load_btn = self._button("CARGAR", owner.load_modern_studies, "blue")
@@ -226,7 +236,7 @@ class EParModernConsole(QWidget):
 
     def eventFilter(self, watched, event):
         if watched is self._controls_btn and event.type() in (QEvent.Type.Move, QEvent.Type.Resize, QEvent.Type.Show):
-            self._restart_btn.move(self._controls_btn.pos() - QPoint(2, 2))
+            self._restart_btn.move(self._controls_btn.mapTo(self._header, QPoint(0, 0)) - QPoint(2, 2))
             self._restart_btn.raise_()
         if watched is self._raw_preview_label and event.type() == QEvent.Type.Resize:
             self._scale_raw_preview()
@@ -300,6 +310,7 @@ class EParModernConsole(QWidget):
         QFrame#modernPill QPushButton#navCap { background:#b8c2ad; color:#2a2b2d; border-radius:0; border-top-left-radius:20px; border-bottom-left-radius:6px; padding:8px; font-weight:800; }
         QFrame#modernPill QPushButton#opsCap { background:#d8bb78; color:#2a2b2d; border-radius:0; padding:8px; font-weight:800; }
         QFrame#modernPill QPushButton#navCap:hover { background:#c9d2bf; }
+        QFrame#modernPill QPushButton#asyncCap { background:#b8c2ad; color:#2a2b2d; border-radius:0; border-bottom-left-radius:6px; font-weight:800; }
         QFrame#modernPill QPushButton#opsCap:hover { background:#e4ca8c; }
         QFrame#modernPill QPushButton#modernRestartButton { background:#e51d20; color:white; border-radius:0; border-top-left-radius:20px; border-right:3px solid #121722; border-bottom:3px solid #121722; padding:0; min-height:39px; max-height:39px; font-family:'Segoe UI Symbol'; font-size:22px; font-weight:400; }
         QFrame#modernPill QPushButton#modernRestartButton:hover { background:#ff3538; }
@@ -335,6 +346,21 @@ class EParModernConsole(QWidget):
         self._sidebar_host.setVisible(not self._sidebar_host.isVisible())
         self.adjustSize()
 
+    def toggle_asynchrony(self) -> None:
+        if self._asynchrony_panel is None:
+            from ui.epar_modern_asynchrony import EParModernAsynchrony
+            self._asynchrony_panel = EParModernAsynchrony(self._owner, self)
+        if self._asynchrony_panel.isVisible():
+            self._asynchrony_panel.hide()
+        else:
+            self._asynchrony_panel.open_near_console()
+
+    def release_asynchrony(self) -> None:
+        if self._asynchrony_panel is not None:
+            self._asynchrony_panel.restore_controls()
+            self._asynchrony_panel.deleteLater()
+            self._asynchrony_panel = None
+
     def _show_images(self) -> None:
         self._owner.showMaximized()
         self._owner.raise_()
@@ -347,6 +373,7 @@ class EParModernConsole(QWidget):
         sidebar.show()
 
     def release_sidebar(self) -> QWidget | None:
+        self.release_asynchrony()
         item = self._sidebar_layout.takeAt(0)
         sidebar = item.widget() if item is not None else None
         if sidebar is not None:
@@ -367,6 +394,8 @@ class EParModernConsole(QWidget):
     def set_results_html(self, html: str) -> None:
         self._status_label.setText(html or "SIN RESULTADOS: PROCESÁ EL ESTUDIO")
         self._clinical_resize_timer.start(0)
+        if self._asynchrony_panel is not None:
+            self._asynchrony_panel.refresh_state()
 
     def set_raw_preview(self, frames) -> None:
         self._raw_preview_timer.stop()
@@ -474,6 +503,7 @@ class EParModernConsole(QWidget):
         self.move(QPoint(area.left() + 24, area.top() + 24))
 
     def close_for_app(self) -> None:
+        self.release_asynchrony()
         self.stop_raw_preview()
         self._closing_for_app = True
         self.close()

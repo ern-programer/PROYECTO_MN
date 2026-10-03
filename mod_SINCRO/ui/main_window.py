@@ -4194,6 +4194,7 @@ class MainWindow(QMainWindow):
 					setattr(self, name, None)
 			if getattr(self, "_side_cards_host", None) is not None:
 				self._side_cards_host.setVisible(False)
+			self._sync_epar_modern_clinical_panels()
 			self._reposition_fading_notices()
 			return
 		# Refrescar los textos fuente sin reentrar en esta función.
@@ -5589,6 +5590,12 @@ class MainWindow(QMainWindow):
 			self.dock_epar_modern_console()
 		else:
 			self.detach_epar_modern_console()
+
+	def toggle_modern_asynchrony(self):
+		if self._active_detached_console == "modern" and self._epar_modern_console is not None:
+			self._epar_modern_console.toggle_asynchrony()
+		else:
+			self._toggle_lower_cine_band()
 
 	def detach_epar_modern_console(self):
 		"""Desacopla el sidebar en la consola LCARS EPar+ Modern."""
@@ -8382,7 +8389,6 @@ class MainWindow(QMainWindow):
 		self.summary_technical.clear()
 		self.summary_executive.clear()
 		self._refresh_readonly_results_panel()
-		self._refresh_persistent_patient_card()
 		for movie in list(self.preview_movies.values()):
 			movie.stop()
 		self.preview_movies.clear()
@@ -8398,7 +8404,9 @@ class MainWindow(QMainWindow):
 		except Exception:
 			pass
 		self.cine.set_cube(None)
+		self.cine_compare.set_cube(None)
 		self._refresh_cine_source_selector()
+		self._refresh_persistent_patient_card()
 		self._progress_bar.setValue(0)
 		self._progress_bar.setFormat("Listo")
 		self.log_box.clear()
