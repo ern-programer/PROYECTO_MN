@@ -51,7 +51,7 @@ class EParModernConsole(QWidget):
         self._raw_preview_direction = 1
         self._raw_preview_timer = QTimer(self)
         self._raw_preview_timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._raw_preview_timer.setInterval(35)
+        self._raw_preview_timer.setInterval(70)
         self._raw_preview_timer.timeout.connect(self._advance_raw_preview)
         self._clinical_labels = []
         self._clinical_font_sizes = {}

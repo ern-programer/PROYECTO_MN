@@ -4260,27 +4260,55 @@ class MainWindow(QMainWindow):
 				self._modern_raw_preview_pending = False
 				self._refresh_modern_raw_preview()
 			elif self.study is not None and bool(getattr(self.study, "reconstructed", True)):
-				self._epar_modern_console.stop_raw_preview()
+				self._refresh_modern_raw_preview()
+
+	def _build_modern_sa_preview_frames(self, study_obj):
+		cube_data = getattr(study_obj, "cube", None)
+		if cube_data is None:
+			return []
+		cube = np.asarray(cube_data, dtype=np.float64)
+		if cube.ndim != 4 or any(size == 0 for size in cube.shape):
+			return []
+		cube = np.clip(np.nan_to_num(cube, nan=0.0, posinf=0.0, neginf=0.0), 0.0, None)
+		if cube.shape[0] >= 3:
+			images = list(cube[:, cube.shape[1] // 2])
+		else:
+			images = list(cube.sum(axis=0))
+		maximum = max(float(np.max(images)), 1e-9)
+		from viz.colormaps import get_phase_cmap
+		cmap = get_phase_cmap("french")
+		return [
+			self._rgb_frame_to_qpixmap_raw(np.ascontiguousarray((cmap(np.clip(image / maximum, 0.0, 1.0))[..., :3] * 255).astype(np.uint8)))
+			for image in images
+		]
 
 	def _refresh_modern_raw_preview(self):
 		console = self._epar_modern_console
 		if console is None or self._active_detached_console != "modern":
 			return
-		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
+		if self.study is None:
 			console.stop_raw_preview()
 			return
-		if not getattr(self, "_modern_raw_preview_enabled", True) or self.metrics:
-			return
+		is_sa = bool(getattr(self.study, "reconstructed", True))
 		render_meta = getattr(self, "_cine_crudo_dual_render_meta", {})
 		try:
 			self._refresh_readonly_results_panel()
 			self._sync_epar_modern_clinical_panels()
-			primary_label = self._cine_crudo_stage_display(self.study) or "Esfuerzo"
-			frames, _, _ = self._build_cine_crudo_frames_for_study(self.study, None, "UngGat", primary_label)
-			secondary = self._secondary_cine_crudo_study()
+			if not getattr(self, "_modern_raw_preview_enabled", True) or self.metrics:
+				return
+			primary_label = self._cine_crudo_stage_display(self.study) or ("Etapa 1" if is_sa else "Esfuerzo")
+			if is_sa:
+				frames = self._build_modern_sa_preview_frames(self.study)
+				secondary = self._second_stage_study()
+			else:
+				frames, _, _ = self._build_cine_crudo_frames_for_study(self.study, None, "UngGat", primary_label)
+				secondary = self._secondary_cine_crudo_study()
 			if secondary is not None:
-				secondary_label = self._cine_crudo_stage_display(secondary) or "Reposo"
-				secondary_frames, _, _ = self._build_cine_crudo_frames_for_study(secondary, None, "UngGat", secondary_label)
+				secondary_label = self._cine_crudo_stage_display(secondary) or ("Etapa 2" if is_sa else "Reposo")
+				if bool(getattr(secondary, "reconstructed", False)):
+					secondary_frames = self._build_modern_sa_preview_frames(secondary)
+				else:
+					secondary_frames, _, _ = self._build_cine_crudo_frames_for_study(secondary, None, "UngGat", secondary_label)
 				if frames and secondary_frames:
 					count = max(len(frames), len(secondary_frames))
 					frames = [
@@ -4291,12 +4319,16 @@ class MainWindow(QMainWindow):
 						)
 						for index in range(count)
 					]
+			if not frames:
+				console.stop_raw_preview()
+				console.set_status_text("Sin imágenes disponibles para el preview")
+				return
 			console.set_raw_preview(frames)
-			console.set_status_text("Cine crudo · Rebote · 35 ms")
+			console.set_status_text("Cine SA · Rebote · 70 ms" if is_sa else "Cine crudo · Rebote · 70 ms")
 		except Exception as exc:
 			console.stop_raw_preview()
 			self._log(f"[WARN Modern preview] {exc}")
-			console.set_status_text("No se pudo preparar el cine crudo")
+			console.set_status_text("No se pudo preparar el cine SA" if is_sa else "No se pudo preparar el cine crudo")
 		finally:
 			self._cine_crudo_dual_render_meta = render_meta
 
@@ -8875,6 +8907,8 @@ class MainWindow(QMainWindow):
 					preserved_compare_stage = str(self.compare_bundle.get("stage") or "rest")
 				else:
 					preserved_compare_path = str(self.compare_bundle.get("path", "") or "").strip()
+			elif getattr(self, "compare_raw_study", None) is not None and bool(getattr(self.compare_raw_study, "reconstructed", False)):
+				preserved_compare_path = str(getattr(self, "compare_raw_path", "") or "").strip()
 			if self._last_primary_path and os.path.abspath(self._last_primary_path) != primary_abs:
 				# Si cambia el estudio primario, se limpia el contexto compare previo.
 				self._clear_compare_state()
@@ -8906,26 +8940,28 @@ class MainWindow(QMainWindow):
 			self._refresh_tab_enabled_states()
 			# --- Modo crudo: proyecciones (no reconstruido) → panel QC + cine + gating ---
 			self._apply_gated_controls_state()
+			if getattr(self, "_modern_preview_loading", False):
+				self._clear_compare_state()
+				self.metrics = None
+				self.phase_result = None
+				self.seg = None
+				self.cine_crudo_corrected_projections = None
+				self.cine_crudo_motion_result = None
+				self.cine_crudo_seed = None
+				self.cine_crudo_band_upper = None
+				self.cine_crudo_band_lower = None
+				self.cine_crudo_ref_index = None
+				self.cine_crudo_timer.stop()
+				self.cine_crudo_playing = False
+				self.cine_crudo_frames = []
+				self._last_primary_path = primary_abs
+				self._modern_raw_preview_enabled = True
+				self._modern_raw_preview_pending = True
+				self._refresh_readonly_results_panel()
+				study_kind = "SA" if bool(getattr(self.study, "reconstructed", True)) else "Crudo"
+				self._set_progress(100, f"{study_kind} cargado · Preview Modern")
+				return
 			if not bool(getattr(self.study, "reconstructed", True)):
-				if getattr(self, "_modern_preview_loading", False):
-					self._clear_compare_state()
-					self.metrics = None
-					self.phase_result = None
-					self.cine_crudo_corrected_projections = None
-					self.cine_crudo_motion_result = None
-					self.cine_crudo_seed = None
-					self.cine_crudo_band_upper = None
-					self.cine_crudo_band_lower = None
-					self.cine_crudo_ref_index = None
-					self.cine_crudo_timer.stop()
-					self.cine_crudo_playing = False
-					self.cine_crudo_frames = []
-					self._last_primary_path = primary_abs
-					self._modern_raw_preview_enabled = True
-					self._modern_raw_preview_pending = True
-					self._refresh_readonly_results_panel()
-					self._set_progress(100, "Crudo cargado · Preview Modern")
-					return
 				self._handle_raw_projections_loaded(path, t_total)
 				return
 			is_gated = int(np.asarray(self.study.cube).shape[0]) >= 3
@@ -19180,50 +19216,54 @@ class MainWindow(QMainWindow):
 		if raw_study is None or getattr(raw_study, "reconstructed", True):
 			QMessageBox.information(self, "SINCRO", "TRUST: cargá primero un estudio crudo gated en la pestaña de procesamiento.")
 			return
-		stages = self._cine_crudo_target_stages()
-		self._log(f"[TRUST] Pipeline automático desde crudo · etapas: {', '.join(stages)}.")
+		self._begin_background_busy()
 		try:
-			self.statusBar().showMessage("TRUST: reconstruyendo…", 4000)
-		except Exception:
-			pass
-		# 1 · PROCESAR: recon raw base (FBP) para tener las líneas Base/Ápex.
-		# B-lite: si está activo en Configuración → TRUST, este localizador se
-		# fuerza a FBP rápido (el método real se aplica en la feta del paso 2).
-		if self._reconstruct_cine_crudo_raw(
-			force_fbp_localizer=bool(getattr(self, "_trust_localizer_fast_fbp", True))
-		) is False:
-			self._log("[TRUST] Detenido: falló Recon raw.")
-			return
-		# 2 · RECONSTRUIR y FILTRAR: feta axial entre Base/Ápex.
-		if self._reconstruct_cine_crudo_raw(feta_only=True) is False:
-			self._log("[TRUST] Detenido: falló Reconstruir y filtrar (feta).")
-			return
-		# 3 · REORIENTAR automático por etapa (esfuerzo/reposo secuencial: la 2da
-		# hereda semilla + zoom bloqueado de la 1ra).
-		ok_any = False
-		for stage in stages:
-			if self._auto_reorient_single_stage(stage):
-				ok_any = True
-			else:
-				self._log(f"[TRUST][WARN] Reorientación automática falló en {stage}.")
-		if not ok_any:
-			QMessageBox.warning(self, "SINCRO", "TRUST: la reorientación automática no produjo resultados. Reorientá manualmente con '3 · REORIENTAR'.")
-			return
-		# 4 · PROCESAR fase/FEVI (con dos etapas procesa ambas y arma la comparación).
-		try:
-			self._process_cine_crudo_reconstruction()
-		except Exception as exc:
-			self._log(f"[TRUST][WARN] Procesar automático falló: {exc}")
-			return
-		self._log("[TRUST] Pipeline completo.")
-		try:
-			self._show_fading_notice(
-				"TRUST completado",
-				"Pipeline automático desde crudo finalizado.\n1·Procesar → 2·Reconstruir → 3·Reorientar → 4·Procesar",
-				variant="success",
-			)
-		except Exception:
-			pass
+			stages = self._cine_crudo_target_stages()
+			self._log(f"[TRUST] Pipeline automático desde crudo · etapas: {', '.join(stages)}.")
+			try:
+				self.statusBar().showMessage("TRUST: reconstruyendo…", 4000)
+			except Exception:
+				pass
+			# 1 · PROCESAR: recon raw base (FBP) para tener las líneas Base/Ápex.
+			# B-lite: si está activo en Configuración → TRUST, este localizador se
+			# fuerza a FBP rápido (el método real se aplica en la feta del paso 2).
+			if self._reconstruct_cine_crudo_raw(
+				force_fbp_localizer=bool(getattr(self, "_trust_localizer_fast_fbp", True))
+			) is False:
+				self._log("[TRUST] Detenido: falló Recon raw.")
+				return
+			# 2 · RECONSTRUIR y FILTRAR: feta axial entre Base/Ápex.
+			if self._reconstruct_cine_crudo_raw(feta_only=True) is False:
+				self._log("[TRUST] Detenido: falló Reconstruir y filtrar (feta).")
+				return
+			# 3 · REORIENTAR automático por etapa (esfuerzo/reposo secuencial: la 2da
+			# hereda semilla + zoom bloqueado de la 1ra).
+			ok_any = False
+			for stage in stages:
+				if self._auto_reorient_single_stage(stage):
+					ok_any = True
+				else:
+					self._log(f"[TRUST][WARN] Reorientación automática falló en {stage}.")
+			if not ok_any:
+				QMessageBox.warning(self, "SINCRO", "TRUST: la reorientación automática no produjo resultados. Reorientá manualmente con '3 · REORIENTAR'.")
+				return
+			# 4 · PROCESAR fase/FEVI (con dos etapas procesa ambas y arma la comparación).
+			try:
+				self._process_cine_crudo_reconstruction()
+			except Exception as exc:
+				self._log(f"[TRUST][WARN] Procesar automático falló: {exc}")
+				return
+			self._log("[TRUST] Pipeline completo.")
+			try:
+				self._show_fading_notice(
+					"TRUST completado",
+					"Pipeline automático desde crudo finalizado.\n1·Procesar → 2·Reconstruir → 3·Reorientar → 4·Procesar",
+					variant="success",
+				)
+			except Exception:
+				pass
+		finally:
+			self._end_background_busy()
 
 	def _auto_reorient_single_stage(self, stage: str) -> bool:
 		"""Reorientación AUTOMÁTICA (auto_orient_lv, sin diálogo) para el pipeline TRUST.
@@ -22713,7 +22753,7 @@ class MainWindow(QMainWindow):
 		if not bool(getattr(self.study, "reconstructed", True)):
 			self._load_compare_raw_study_from_path(compare_path)
 			return
-		if self.metrics is not None:
+		if self.metrics is not None or getattr(self, "_modern_preview_loading", False):
 			self._load_compare_study_from_path(compare_path)
 
 	def _build_sa_direct_clinical_montage(self, primary_stage: str, compare_stage: str | None):
@@ -22856,8 +22896,8 @@ class MainWindow(QMainWindow):
 		_assign(primary_stage, gated_p, ungated_p)
 		_center_stripes(primary_stage, gated_p)
 
-		if compare_stage is not None and self.compare_bundle is not None:
-			comp_study = self.compare_bundle.get("study")
+		comp_study = self._second_stage_study() if compare_stage is not None else None
+		if comp_study is not None:
 			comp_cube = _intestinal_cube(getattr(comp_study, "cube", None), self.cine_compare) if comp_study is not None else None
 			gated_c, ungated_c = _cuts(comp_cube, comp_study) if comp_cube is not None else (None, None)
 			if gated_c is not None:
@@ -22879,7 +22919,7 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_gate_from = 1
 		self.cine_crudo_gate_to = max(1, n_gates_out)
 		self._refresh_montage_gated_source_enabled()
-		dual = compare_stage is not None and self.compare_bundle is not None
+		dual = compare_stage is not None and comp_study is not None
 		# Recordar las etapas y la firma intestinal para poder reconstruir el
 		# montaje si el usuario edita el ROI intestinal después de cargar.
 		self._sa_direct_montage_stages = (primary_stage, compare_stage)
@@ -23135,7 +23175,7 @@ class MainWindow(QMainWindow):
 			# etapa procesada y visible (la 1ra siempre carga bien).
 			try:
 				self._load_compare_study_from_path(sel[1])
-				compare_loaded = self.compare_bundle is not None
+				compare_loaded = self._second_stage_study() is not None
 			except Exception as exc:
 				self._log(f"[SA][WARN] La 2da etapa no se pudo cargar/procesar: {exc}")
 		self._log(f"[SA] Cortes SA reconstruidos cargados directo: {os.path.basename(primary)}.")
@@ -23699,9 +23739,24 @@ class MainWindow(QMainWindow):
 			if not self._check_stage_zoom_consistency(preloaded):
 				self._set_progress(0, "Cancelado")
 				return
+			if getattr(self, "_modern_preview_loading", False):
+				self.compare_label = os.path.splitext(os.path.basename(path))[0]
+				self.compare_bundle = None
+				self.compare_raw_study = preloaded
+				self.compare_raw_path = str(path)
+				self.compare_metrics = None
+				self.compare_ef = None
+				self.dual_mode_active = True
+				self._modern_raw_preview_pending = True
+				self._refresh_readonly_results_panel()
+				self._set_progress(100, "Segunda etapa cargada · Preview Modern")
+				return
 			bundle = self._process_secondary_bundle(path, preloaded_study=preloaded)
 			self._log_timing_if_slow("Comparación: carga DICOM + segmentación + fase", t_stage)
 			self.compare_bundle = bundle
+			if getattr(self, "compare_raw_study", None) is preloaded or bool(getattr(getattr(self, "compare_raw_study", None), "reconstructed", False)):
+				self.compare_raw_study = None
+				self.compare_raw_path = ""
 			self.compare_metrics = bundle["metrics"]
 			self.compare_ef = bundle["ef"]
 			self.compare_label = bundle["label"]

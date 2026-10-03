@@ -140,6 +140,8 @@ def _window():
         raise_=lambda: None, activateWindow=lambda: None,
         _cine_crudo_stage_display=lambda study: study.stage,
         _secondary_cine_crudo_study=lambda: None,
+        _second_stage_study=lambda: None,
+        _build_modern_sa_preview_frames=lambda study: ["sa-preview"],
         _build_cine_crudo_frames_for_study=lambda *args: ([0, 1, 2], None, None),
         _refresh_readonly_results_panel=lambda: state.calls.append("patient-data"),
         _sync_epar_modern_clinical_panels=lambda: state.calls.append("modern-data"),
@@ -801,6 +803,15 @@ print('Real Qt controls: navigation, ROI routing, stage filtering, per-stage win
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_modern_preview_timer_uses_70_ms_interval():
+    source = ast.parse((ROOT / "ui" / "epar_modern_console.py").read_text(encoding="utf-8"))
+    intervals = [
+        call.args[0].value for call in ast.walk(source)
+        if isinstance(call, ast.Call) and ast.unparse(call.func) == "self._raw_preview_timer.setInterval"
+    ]
+    assert intervals == [70]
+
+
 def test_cancel_preserves_existing_preview():
     window, state = _window()
     state.frames = ["existing"]
@@ -822,16 +833,58 @@ def test_failed_load_resets_loading_flag():
     assert not window._modern_preview_loading
 
 
-def test_reconstructed_load_clears_previous_raw_preview():
+def test_reconstructed_load_refreshes_patient_and_replaces_previous_raw_preview():
     window, state = _window()
     state.frames = ["previous-raw"]
 
     def load():
-        window.study = SimpleNamespace(reconstructed=True)
+        window.study = SimpleNamespace(reconstructed=True, stage="Reposo")
 
     window.load_one_or_two_studies = load
     window.load_modern_studies()
-    assert state.stopped and not state.frames
+    assert state.frames == ["sa-preview"]
+    assert "Cine SA" in state.status
+    assert state.calls == ["patient-data", "modern-data"]
+
+
+@pytest.mark.parametrize("stage", ["Reposo", "Esfuerzo"])
+@pytest.mark.parametrize("dual", [False, True])
+def test_modern_sa_preview_supports_single_or_both_stages(stage, dual):
+    window, state = _window()
+    window.study = SimpleNamespace(reconstructed=True, stage=stage)
+    secondary = SimpleNamespace(reconstructed=True, stage="Reposo" if stage == "Esfuerzo" else "Esfuerzo")
+    window._second_stage_study = lambda: secondary if dual else None
+    window._build_modern_sa_preview_frames = lambda study: [0, 1, 2] if study is window.study else [10, 11, 12, 13, 14]
+    window._build_cine_crudo_frames_for_study = lambda *args: pytest.fail("SA must not use projection rendering")
+    window._epar_modern_console.compose_raw_preview_pair = lambda *args: args
+    window._refresh_modern_raw_preview()
+    assert state.calls == ["patient-data", "modern-data"]
+    assert "Cine SA" in state.status
+    assert state.status.endswith("70 ms")
+    if dual:
+        assert state.frames[0] == (0, 10, stage, secondary.stage)
+        assert state.frames[-1] == (2, 14, stage, secondary.stage)
+    else:
+        assert state.frames == [0, 1, 2]
+
+
+@pytest.mark.parametrize("gates, slices", [(1, 5), (4, 5), (4, 4), (4, 1)])
+def test_modern_sa_frames_use_gates_or_slices_without_mutating_cube(gates, slices):
+    import numpy as np
+    from viz.colormaps import get_phase_cmap
+    cube = np.arange(gates * slices * 16, dtype=float).reshape(gates, slices, 4, 4)
+    original = cube.copy()
+    window = SimpleNamespace(_rgb_frame_to_qpixmap_raw=lambda rgb: rgb.copy())
+    _bind(window, "_build_modern_sa_preview_frames", np=np)
+    frames = window._build_modern_sa_preview_frames(SimpleNamespace(cube=cube))
+    assert len(frames) == (gates if gates >= 3 else slices)
+    assert all(frame.dtype == np.uint8 and frame.shape[-1] == 3 for frame in frames)
+    assert frames[0].shape == (4, 4, 3)
+    images = cube[:, slices // 2] if gates >= 3 else cube.sum(axis=0)
+    maximum = max(float(images.max()), 1e-9)
+    expected = (get_phase_cmap("french")(images / maximum)[..., :3] * 255).astype(np.uint8)
+    assert all(np.array_equal(frame, image) for frame, image in zip(frames, expected))
+    assert np.array_equal(cube, original)
 
 
 def test_dual_preview_preserves_both_endpoints_with_unequal_counts():
@@ -880,9 +933,10 @@ def test_open_processing_keeps_preview_until_reconstruction():
     assert not state.frames
 
 
-@pytest.mark.parametrize("preview_only", [False, True])
-def test_process_current_raw_fast_path_is_exclusive_to_modern(preview_only):
+@pytest.mark.parametrize("preview_only, reconstructed", [(False, False), (True, False), (True, True)])
+def test_process_current_preview_fast_path_is_exclusive_to_modern(preview_only, reconstructed):
     window, state = _window()
+    window.study.reconstructed = reconstructed
     path = str(ROOT / "version.py")
     window.file_edit = SimpleNamespace(text=lambda: path)
     window._async_skip_compare_reprocess = False
@@ -906,9 +960,37 @@ def test_process_current_raw_fast_path_is_exclusive_to_modern(preview_only):
         assert "qc" not in state.calls
         assert "clear-compare" in state.calls
         assert window.metrics is None and window.phase_result is None
+        assert window.seg is None
         assert window._modern_raw_preview_pending and window._modern_raw_preview_enabled
     else:
         assert state.calls == ["qc"]
+
+
+@pytest.mark.parametrize("patient_ok, zoom_ok", [(True, True), (False, True), (True, False)])
+def test_compare_sa_preview_keeps_patient_guards_and_defers_processing(patient_ok, zoom_ok):
+    calls = []
+    study = SimpleNamespace(reconstructed=True)
+    window = SimpleNamespace(
+        _modern_preview_loading=True,
+        _set_progress=lambda *args: None,
+        _check_second_stage_patient=lambda value: patient_ok,
+        _check_stage_zoom_consistency=lambda value: zoom_ok,
+        _process_secondary_bundle=lambda *args, **kwargs: pytest.fail("Preview must not process the secondary SA"),
+        _refresh_readonly_results_panel=lambda: calls.append("patient"),
+        _log=lambda *args: None,
+        compare_bundle=None,
+    )
+    _bind(window, "_load_compare_study_from_path", dicom_loader=SimpleNamespace(load=lambda *args, **kwargs: study))
+    window._load_compare_study_from_path("rest_sa.dcm")
+    if patient_ok and zoom_ok:
+        assert window.compare_bundle is None
+        assert window.compare_raw_study is study
+        assert window.compare_raw_path == "rest_sa.dcm"
+        assert window.compare_metrics is None and window.compare_ef is None
+        assert window._modern_raw_preview_pending and window.dual_mode_active
+        assert calls == ["patient"]
+    else:
+        assert window.compare_bundle is None and not calls
 
 
 def test_compare_raw_preview_does_not_generate_qc_or_start_main_cine():
@@ -965,6 +1047,59 @@ def test_requested_lazy_tabs_restore_rockford_after_loading(tab_name, cached, fa
     assert "work" in calls
 
 
+@pytest.mark.parametrize("secondary_state", ["none", "pending", "processed"])
+def test_sa_montage_builds_cuts_from_pending_or_processed_secondary(secondary_state):
+    import numpy as np
+    primary = SimpleNamespace(cube=np.full((4, 6, 8, 8), 2.0))
+    secondary = SimpleNamespace(cube=np.full((4, 6, 8, 8), 7.0))
+    window = SimpleNamespace(
+        study=primary, cine=None, cine_compare=None,
+        compare_bundle={"study": secondary} if secondary_state == "processed" else None,
+        compare_raw_study=secondary if secondary_state == "pending" else None,
+        cine_crudo_stripe_start_by_stage={},
+        _apply_intestinal_mask_to_cube=lambda cube, widget: cube,
+        _montage_available_gates=lambda: 4,
+        _refresh_montage_gated_source_enabled=lambda: None,
+        _sa_direct_intestinal_sig=lambda: "current",
+        _log=lambda *args: None,
+    )
+    _bind(window, "_second_stage_study")
+    _bind(window, "_build_sa_direct_clinical_montage", np=np)
+    compare_stage = None if secondary_state == "none" else "rest"
+    window._build_sa_direct_clinical_montage("stress", compare_stage)
+    assert set(window.cine_crudo_axes_for_export_stress) == {"SA", "HLA", "VLA"}
+    assert window._sa_direct_montage_stages == ("stress", compare_stage)
+    assert window._cine_crudo_recon_stage == "stress"
+    if compare_stage:
+        assert set(window.cine_crudo_axes_for_export_rest) == {"SA", "HLA", "VLA"}
+        assert window.cine_crudo_axes_for_export_rest["SA"].max() == 7.0
+        assert window.cine_crudo_axes_for_export_ungated_rest["SA"].max() == 28.0
+
+
+@pytest.mark.parametrize("dual", [False, True])
+def test_sa_selected_load_builds_montage_during_modern_preview(dual):
+    method = METHODS["_load_sa_recon_direct"]
+    start = next(index for index, statement in enumerate(method.body)
+                 if ast.unparse(statement) == "self.file_edit.setText(primary)")
+    selected_load = ast.parse("def load_selected_sa(self):\n    pass").body[0]
+    selected_load.body = method.body[start:]
+    namespace = {"os": os, "primary": "stress.dcm", "sel": ["stress.dcm", "rest.dcm"] if dual else ["stress.dcm"],
+                 "candidates": [("stress", "stress.dcm", "stress", True), ("rest", "rest.dcm", "rest", True)]}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[selected_load], type_ignores=[])), "<selected-sa-load>", "exec"), namespace)
+    calls = []
+    window = SimpleNamespace(
+        _modern_preview_loading=True, study=object(), metrics=None,
+        file_edit=SimpleNamespace(setText=lambda path: None),
+        process_current=lambda: calls.append("preview-load"),
+        _load_compare_study_from_path=lambda path: calls.append("secondary-preview"),
+        _second_stage_study=lambda: object() if dual else None,
+        _build_sa_direct_clinical_montage=lambda *stages: calls.append(stages),
+        _log=lambda *args: None,
+    )
+    namespace["load_selected_sa"](window)
+    assert calls == (["preview-load", "secondary-preview", ("stress", "rest")] if dual else ["preview-load", ("stress", None)])
+
+
 @pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize("failure_stage", [None, "rebuild", "display"])
 def test_montage_tab_restores_rockford_after_rebuild_or_display(cached, failure_stage):
@@ -999,6 +1134,62 @@ def test_montage_tab_restores_rockford_after_rebuild_or_display(cached, failure_
     assert calls.count("busy") == calls.count("restore") == 1
     if failure_stage != "rebuild":
         assert ("zoom" if cached else "render") in calls
+
+
+@pytest.mark.parametrize("fail_raw, fail_feta, auto_ok, fail_process", [
+    (False, False, True, False),
+    (True, False, True, False),
+    (False, True, True, False),
+    (False, False, False, False),
+    (False, False, True, True),
+])
+def test_trust_pipeline_wraps_whole_flow_with_rockford(fail_raw, fail_feta, auto_ok, fail_process):
+    calls = []
+
+    def recon(*, force_fbp_localizer=False, feta_only=False):
+        calls.append(("recon", force_fbp_localizer, feta_only))
+        if not feta_only and fail_raw:
+            return False
+        if feta_only and fail_feta:
+            return False
+        return True
+
+    def process():
+        calls.append("process")
+        if fail_process:
+            raise RuntimeError("synthetic trust failure")
+
+    window = SimpleNamespace(
+        _cine_crudo_recon_target=lambda: (SimpleNamespace(reconstructed=False), None, None, None),
+        _begin_background_busy=lambda: calls.append("busy"),
+        _end_background_busy=lambda: calls.append("restore"),
+        _cine_crudo_target_stages=lambda: ["reposo", "esfuerzo"],
+        _log=lambda message: calls.append(("log", message)),
+        statusBar=lambda: SimpleNamespace(showMessage=lambda text, timeout=0: calls.append(("status", text))),
+        _reconstruct_cine_crudo_raw=recon,
+        _trust_localizer_fast_fbp=True,
+        _auto_reorient_single_stage=lambda stage: auto_ok,
+        _process_cine_crudo_reconstruction=process,
+        _show_fading_notice=lambda *args, **kwargs: calls.append("notice"),
+    )
+    _bind(window, "_run_trust_pipeline", QMessageBox=SimpleNamespace(
+        information=lambda *args: calls.append("info"),
+        warning=lambda *args: calls.append("warn"),
+    ))
+    window._run_trust_pipeline()
+
+    assert calls[0] == "busy" and calls[-1] == "restore"
+    assert calls.count("busy") == calls.count("restore") == 1
+    if fail_raw:
+        assert "process" not in calls
+    if fail_feta:
+        assert "process" not in calls
+    if not auto_ok:
+        assert "warn" in calls and "process" not in calls
+    if fail_process:
+        assert "notice" not in calls
+    if not (fail_raw or fail_feta or (not auto_ok) or fail_process):
+        assert "notice" in calls and "process" in calls
 
 
 @pytest.mark.parametrize("active, reuse", [("", False), ("", True), ("plus", False), ("plus", True), ("modern", True)])
