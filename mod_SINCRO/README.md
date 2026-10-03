@@ -71,6 +71,35 @@ Ver `requirements.txt`. Todas las dependencias son estándar (pydicom, numpy, sc
 
 ## Uso rápido (loader)
 
+### Instalación En Windows
+
+```powershell
+py -3.13 -m venv .venv
+& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+& .\.venv\Scripts\python.exe main.py
+```
+
+EPar+ Modern anclada usa `WindowStaysOnTopHint` de PyQt6 para mantenerse encima
+de las aplicaciones del escritorio normal. La vigilancia existente de 100 ms
+reafirma su orden sin activar la ventana ni quitar el foco a otra aplicación;
+no lo hace mientras hay diálogos propios o menús abiertos. Desanclar retira
+esa prioridad. El preview crudo activa el ancla automáticamente.
+
+No requiere dependencias adicionales, PowerToys, permisos de administrador,
+cambios de registro, políticas de grupo ni desactivar UAC. El instalador no
+debe solicitar elevación por esta función. No hay garantía sobre el escritorio
+seguro de UAC, la pantalla de bloqueo, aplicaciones con pantalla completa
+exclusiva ni otras ventanas que también impongan prioridad siempre encima.
+
+Comprobación de instalación: abrir Modern, activar modo superior y ancla,
+cambiar entre VS Code, Explorador y un navegador maximizado; la consola debe
+seguir visible sin robar foco. Abrir Configuración y comprobar que su diálogo
+queda accesible; desanclar y comprobar el autoocultado. Cargar crudo de reposo,
+esfuerzo y ambas etapas: verificar nombre, ID, accession y fecha en la ficha,
+antes de procesar. Los campos DICOM ausentes se muestran como `N/D`.
+
+### Ejecución Del Loader
+
 ```bash
 python -m core.dicom_loader "ruta/al/REST_IRNCG_SA001_DS.dcm"
 ```

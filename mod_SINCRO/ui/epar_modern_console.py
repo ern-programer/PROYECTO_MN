@@ -218,7 +218,9 @@ class EParModernConsole(QWidget):
             button.setStyleSheet("QToolButton { background:#7898a1; border:0; border-radius:4px; } QToolButton:checked { background:#d8bb78; } QToolButton:disabled { background:#52666b; }")
             slim_l.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
         slim_l.addWidget(self._button("□", self._show_images, "blue"))
-        slim_l.addWidget(self._button("×", self.dockRequested.emit, "red"))
+        close_button = self._button("×", self.close, "red")
+        close_button.setToolTip("Cerrar GammaSync")
+        slim_l.addWidget(close_button)
         pill_grid.addWidget(slim, 0, 9, 2, 1)
 
         time_panel = QFrame()
@@ -342,6 +344,12 @@ class EParModernConsole(QWidget):
 
     def _set_top_pinned(self, pinned: bool) -> None:
         self._top_pin_btn.setToolTip("Desanclar y permitir autoocultado" if pinned else "Anclar desplegada")
+        was_visible = self.isVisible()
+        geometry = self.geometry()
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, pinned)
+        self.setGeometry(geometry)
+        if was_visible:
+            self.show()
         if pinned:
             self._top_hide_timer.stop()
             self._expand_top_console()
@@ -370,8 +378,18 @@ class EParModernConsole(QWidget):
         elif self.isVisible() and not self.isMinimized():
             if self._top_pin_btn.isChecked() or self._top_interaction_active():
                 self._top_hide_timer.stop()
+                if self._top_pin_btn.isChecked() and not self._top_owned_window_active():
+                    self.raise_()
             elif not self._top_hide_timer.isActive():
                 self._top_hide_timer.start()
+
+    def _top_owned_window_active(self) -> bool:
+        app = QApplication.instance()
+        return (app.activeModalWidget() is not None or app.activePopupWidget() is not None
+                or any(window is not self and window is not self._top_tab and window.isVisible()
+                      and window.parentWidget() is not None
+                      and (window.parentWidget() is self or self.isAncestorOf(window.parentWidget()))
+                       for window in app.topLevelWidgets()))
 
     def _expand_top_console(self) -> None:
         if not self._top_mode:
@@ -383,6 +401,7 @@ class EParModernConsole(QWidget):
         self.show()
         self._position_top_console()
         self.raise_()
+        self.activateWindow()
         if was_collapsed:
             target = self.pos()
             self._top_slide.setStartValue(target - QPoint(0, self.height() - 6))
@@ -597,6 +616,9 @@ class EParModernConsole(QWidget):
         if not self._raw_preview_frames:
             self.stop_raw_preview()
             return
+        if self._top_mode:
+            self._top_pin_btn.setChecked(True)
+            self._expand_top_console()
         self._results_stack.setCurrentWidget(self._raw_preview_label)
         self._scale_raw_preview()
         if self.isVisible() and len(self._raw_preview_frames) > 1:
@@ -716,4 +738,4 @@ class EParModernConsole(QWidget):
             event.accept()
             return
         event.ignore()
-        self.dockRequested.emit()
+        self._owner.request_application_close()

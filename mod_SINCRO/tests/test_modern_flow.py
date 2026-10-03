@@ -43,6 +43,8 @@ def _window():
         _cine_crudo_stage_display=lambda study: study.stage,
         _secondary_cine_crudo_study=lambda: None,
         _build_cine_crudo_frames_for_study=lambda *args: ([0, 1, 2], None, None),
+        _refresh_readonly_results_panel=lambda: state.calls.append("patient-data"),
+        _sync_epar_modern_clinical_panels=lambda: state.calls.append("modern-data"),
         _log=lambda *args: None,
     )
     for name in ("load_modern_studies", "_refresh_modern_raw_preview", "open_modern_processing", "_begin_modern_raw_processing"):
@@ -61,6 +63,7 @@ def test_load_hides_main_and_prepares_preview_after_loading():
     window.load_modern_studies()
     assert not state.visible
     assert state.frames == [0, 1, 2]
+    assert state.calls == ["patient-data", "modern-data"]
     assert not window._modern_preview_loading
     assert not window._modern_raw_preview_pending
 
@@ -76,6 +79,176 @@ def test_asynchrony_layout_is_exclusive_to_modern(mode):
     _bind(window, "toggle_modern_asynchrony")
     window.toggle_modern_asynchrony()
     assert calls == ["modern" if mode == "modern" else "legacy"]
+
+
+@pytest.mark.parametrize("top_mode, frames", [(True, [0, 1]), (False, [0, 1]), (True, [])])
+def test_raw_preview_pins_top_console_until_user_unpins(top_mode, frames):
+    source = ast.parse((ROOT / "ui" / "epar_modern_console.py").read_text(encoding="utf-8"))
+    console_class = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "EParModernConsole")
+    method = next(node for node in console_class.body if isinstance(node, ast.FunctionDef) and node.name == "set_raw_preview")
+    namespace = {}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(ROOT / "ui" / "epar_modern_console.py"), "exec"), namespace)
+    calls = []
+    pin = SimpleNamespace(checked=False)
+    console = SimpleNamespace(
+        _top_mode=top_mode,
+        _top_pin_btn=SimpleNamespace(setChecked=lambda checked: setattr(pin, "checked", checked)),
+        _expand_top_console=lambda: calls.append("expand"),
+        _raw_preview_timer=SimpleNamespace(stop=lambda: None, start=lambda: calls.append("start")),
+        _results_stack=SimpleNamespace(setCurrentWidget=lambda widget: calls.append("preview")),
+        _raw_preview_label=object(),
+        _scale_raw_preview=lambda: None,
+        isVisible=lambda: True,
+        stop_raw_preview=lambda: calls.append("clear"),
+    )
+    namespace["set_raw_preview"](console, frames)
+    assert pin.checked == bool(top_mode and frames)
+    assert calls == (["expand", "preview", "start"] if top_mode and frames else ["preview", "start"] if frames else ["clear"])
+    console._top_pin_btn.setChecked(False)
+    assert not pin.checked
+
+
+def test_main_close_in_modern_only_hides_images():
+    calls = []
+    window = SimpleNamespace(
+        _active_detached_console="modern", _application_close_requested=False,
+        hide=lambda: calls.append("hide-images"),
+        _epar_modern_console=SimpleNamespace(bring_to_front=lambda: calls.append("modern")),
+    )
+    _bind(window, "closeEvent")
+    window.closeEvent(SimpleNamespace(ignore=lambda: calls.append("ignore")))
+    assert calls == ["ignore", "hide-images", "modern"]
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_modern_application_exit_respects_main_close_confirmation(accepted):
+    calls = []
+    window = SimpleNamespace(_application_close_requested=False)
+
+    def close():
+        assert window._application_close_requested
+        calls.append("close")
+        return accepted
+
+    window.close = close
+    application = SimpleNamespace(instance=lambda: SimpleNamespace(quit=lambda: calls.append("quit")))
+    _bind(window, "request_application_close", QApplication=application)
+    window.request_application_close()
+    assert calls == (["close", "quit"] if accepted else ["close"])
+    assert not window._application_close_requested
+
+
+@pytest.mark.parametrize("cancel", [True, False])
+def test_application_close_preserves_cleanup_and_cancel(cancel):
+    calls = []
+    window = SimpleNamespace(
+        _active_detached_console="modern", _application_close_requested=True,
+        _last_browse_dir="", _check_unsaved_study=lambda: cancel,
+        _epar_plus_console=None,
+        _epar_modern_console=SimpleNamespace(saveGeometry=lambda: "geometry", close_for_app=lambda: calls.append("close-modern")),
+        _ui_settings=SimpleNamespace(setValue=lambda *args: calls.append("settings")),
+        _save_window_layout=lambda: calls.append("layout"),
+    )
+    _bind(window, "closeEvent", super=lambda: SimpleNamespace(closeEvent=lambda event: calls.append("accept")))
+    window.closeEvent(SimpleNamespace(ignore=lambda: calls.append("ignore")))
+    assert calls == (["ignore"] if cancel else ["settings", "layout", "close-modern", "accept"])
+
+
+@pytest.mark.parametrize("closing_for_app", [True, False])
+def test_modern_close_routes_to_application_exit_not_docking(closing_for_app):
+    source = ast.parse((ROOT / "ui" / "epar_modern_console.py").read_text(encoding="utf-8"))
+    console_class = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "EParModernConsole")
+    method = next(node for node in console_class.body if isinstance(node, ast.FunctionDef) and node.name == "closeEvent")
+    namespace = {"QCloseEvent": object}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(ROOT / "ui" / "epar_modern_console.py"), "exec"), namespace)
+    calls = []
+    console = SimpleNamespace(
+        _closing_for_app=closing_for_app,
+        _owner=SimpleNamespace(request_application_close=lambda: calls.append("exit")),
+    )
+    event = SimpleNamespace(accept=lambda: calls.append("accept"), ignore=lambda: calls.append("ignore"))
+    namespace["closeEvent"](console, event)
+    assert calls == (["accept"] if closing_for_app else ["ignore", "exit"])
+
+
+@pytest.mark.parametrize("pinned, visible", [(True, True), (True, False), (False, True), (False, False)])
+def test_pin_controls_topmost_and_preserves_geometry(pinned, visible):
+    source = ast.parse((ROOT / "ui" / "epar_modern_console.py").read_text(encoding="utf-8"))
+    console_class = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "EParModernConsole")
+    method = next(node for node in console_class.body if isinstance(node, ast.FunctionDef) and node.name == "_set_top_pinned")
+    flag = object()
+    namespace = {"Qt": SimpleNamespace(WindowType=SimpleNamespace(WindowStaysOnTopHint=flag))}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "<pin>", "exec"), namespace)
+    calls = []
+    geometry = object()
+    console = SimpleNamespace(
+        _top_pin_btn=SimpleNamespace(setToolTip=lambda text: None),
+        isVisible=lambda: visible, geometry=lambda: geometry,
+        setWindowFlag=lambda value, enabled: calls.append((value, enabled)),
+        setGeometry=lambda value: calls.append(("geometry", value)),
+        show=lambda: calls.append("show"),
+        _top_hide_timer=SimpleNamespace(stop=lambda: calls.append("stop-hide")),
+        _expand_top_console=lambda: calls.append("expand"),
+    )
+    namespace["_set_top_pinned"](console, pinned)
+    assert calls[:2] == [(flag, pinned), ("geometry", geometry)]
+    assert ("show" in calls) == visible
+    assert ("expand" in calls) == pinned
+    assert ("stop-hide" in calls) == pinned
+
+
+@pytest.mark.parametrize("pinned, owned_window", [(True, False), (True, True), (False, False)])
+def test_pinned_watch_reasserts_order_without_stealing_focus(pinned, owned_window):
+    source = ast.parse((ROOT / "ui" / "epar_modern_console.py").read_text(encoding="utf-8"))
+    console_class = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "EParModernConsole")
+    method = next(node for node in console_class.body if isinstance(node, ast.FunctionDef) and node.name == "_watch_top_console")
+    namespace = {"QAbstractAnimation": SimpleNamespace(State=SimpleNamespace(Running=1))}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "<watch>", "exec"), namespace)
+    calls = []
+    console = SimpleNamespace(
+        _top_mode=True, _top_collapsed=False,
+        _top_slide=SimpleNamespace(state=lambda: 0),
+        _position_top_console=lambda: None, isVisible=lambda: True, isMinimized=lambda: False,
+        _top_pin_btn=SimpleNamespace(isChecked=lambda: pinned),
+        _top_interaction_active=lambda: False, _top_owned_window_active=lambda: owned_window,
+        _top_hide_timer=SimpleNamespace(stop=lambda: calls.append("stop-hide"),
+                                       isActive=lambda: False, start=lambda: calls.append("start-hide")),
+        raise_=lambda: calls.append("raise"),
+    )
+    namespace["_watch_top_console"](console)
+    assert ("raise" in calls) == (pinned and not owned_window)
+    assert ("start-hide" in calls) == (not pinned)
+
+
+@pytest.mark.parametrize("stages", [("Reposo",), ("Esfuerzo",), ("Esfuerzo", "Reposo")])
+def test_preview_patient_fields_are_available_before_processing(stages):
+    import copy
+    method = copy.deepcopy(METHODS["_refresh_readonly_results_panel"])
+    end = next(index for index, node in enumerate(method.body) if isinstance(node, ast.Assign)
+               and any(isinstance(target, ast.Name) and target.id == "ef" for target in node.targets))
+    method.body = method.body[:end]
+    namespace = {}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "<patient-data>", "exec"), namespace)
+    studies = [SimpleNamespace(patient_name="APELLIDO^NOMBRE", patient_id="ID-123", study_date="20261003",
+                               accession_number=f"ACC-{stage}", stage=stage) for stage in stages]
+    texts = []
+    window = SimpleNamespace(
+        study=studies[0], metrics=None, phase_result=None,
+        file_edit=SimpleNamespace(text=lambda: ""),
+        patient_data_label=SimpleNamespace(setText=lambda text: texts.append(text)),
+        _second_stage_study=lambda: studies[1] if len(studies) == 2 else None,
+        _cine_crudo_stage_display=lambda study: study.stage,
+        _phase_label_from_path=lambda *args: "Estudio",
+        _patient_biometrics_line=lambda study: "",
+    )
+    _bind(window, "_format_dicom_date")
+    _bind(window, "_study_context")
+    namespace["_refresh_readonly_results_panel"](window)
+    text = texts[-1]
+    for value in ("APELLIDO NOMBRE", "ID-123", "03/10/2026", "Tipo: " + " + ".join(stages)):
+        assert value in text
+    for stage in stages:
+        assert f"ACC-{stage}" in text
 
 
 def test_modern_asynchrony_real_widgets_restore_legacy_layout(tmp_path):
@@ -480,6 +653,88 @@ def test_compare_raw_preview_does_not_generate_qc_or_start_main_cine():
     assert window.dual_mode_active
     assert state.calls == ["readouts"]
 
+@pytest.mark.parametrize("mode", ["perfusion", "cine"])
+def test_apply_polar_math_keeps_rendered_result_without_changing_scale(mode):
+    calls = []
+    window = SimpleNamespace(
+        _polar_cine_cart_cache={"frames": ["polar-maps"], "disk_cmap": "odyssey_cool"},
+        polar_perf_screen_cmap="odyssey_cool", polar_view_mode=mode,
+        _begin_background_busy=lambda: calls.append("busy"),
+        _end_background_busy=lambda: calls.append("restore"),
+        _set_polar_view_mode=lambda value: calls.append(("mode", value)),
+        _rebuild_polar_cine_frames_screen=lambda: calls.append("render-result") or True,
+        _load_preview=lambda name: calls.append("reload-old-gif"),
+    )
+    _bind(window, "_apply_polar_math")
+    window._apply_polar_math()
+    assert calls == (["busy", ("mode", "cine"), "render-result", "restore"]
+                     if mode == "perfusion" else ["busy", "render-result", "restore"])
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_apply_polar_math_restores_cursor_on_render_failure(raises):
+    calls = []
+
+    def render():
+        if raises:
+            raise RuntimeError("render failed")
+        return False
+
+    window = SimpleNamespace(
+        _polar_cine_cart_cache={"frames": ["polar-maps"]}, polar_view_mode="cine",
+        _begin_background_busy=lambda: calls.append("busy"),
+        _end_background_busy=lambda: calls.append("restore"),
+        _rebuild_polar_cine_frames_screen=render,
+        statusBar=lambda: SimpleNamespace(showMessage=lambda *args: calls.append("failure")),
+    )
+    _bind(window, "_apply_polar_math")
+    if raises:
+        with pytest.raises(RuntimeError, match="render failed"):
+            window._apply_polar_math()
+    else:
+        window._apply_polar_math()
+    assert calls[0] == "busy" and calls[-1] == "restore"
+    assert ("failure" in calls) == (not raises)
+
+
+def test_polar_screen_scale_keeps_view_mode_and_uses_compare_rerender():
+    calls = []
+    window = SimpleNamespace(
+        polar_view_mode="perfusion",
+        compare_bundle=object(),
+        polar_perf_screen_cmap="odyssey_cool",
+        polar_screen_color_strip=SimpleNamespace(set_cmap=lambda name: calls.append(("strip", name))),
+        polar_perf_view_perf_btn=None,
+        polar_perf_view_cine_btn=None,
+        _set_preview_background=lambda name, cmap: calls.append(("bg", name, cmap)),
+        _rebuild_polar_cine_frames_screen=lambda: calls.append("cine") or True,
+        _rerender_polar_perfusion_screen=lambda: calls.append("single") or True,
+        _rerender_polar_perfusion_compare_screen=lambda: calls.append("compare") or True,
+    )
+    _bind(window, "_on_polar_screen_cmap_changed")
+    window._on_polar_screen_cmap_changed("odyssey_SPECT")
+    assert window.polar_view_mode == "perfusion"
+    assert ("bg", "polar_perfusion_directa", "odyssey_SPECT") in calls
+    assert "compare" in calls and "single" not in calls and "cine" not in calls
+
+def test_polar_screen_scale_in_cine_does_not_flip_mode():
+    calls = []
+    window = SimpleNamespace(
+        polar_view_mode="cine",
+        compare_bundle=object(),
+        polar_perf_screen_cmap="odyssey_cool",
+        polar_screen_color_strip=None,
+        polar_perf_view_perf_btn=None,
+        polar_perf_view_cine_btn=None,
+        _set_preview_background=lambda name, cmap: calls.append(("bg", name, cmap)),
+        _rebuild_polar_cine_frames_screen=lambda: calls.append("cine") or True,
+        _rerender_polar_perfusion_screen=lambda: calls.append("single") or True,
+        _rerender_polar_perfusion_compare_screen=lambda: calls.append("compare") or True,
+    )
+    _bind(window, "_on_polar_screen_cmap_changed")
+    window._on_polar_screen_cmap_changed("hot")
+    assert window.polar_view_mode == "cine"
+    assert "cine" in calls and "compare" not in calls and "single" not in calls
 
 def test_readouts_switch_to_results_when_metrics_arrive():
     window, state = _window()

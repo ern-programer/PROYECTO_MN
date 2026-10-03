@@ -13,6 +13,10 @@ matplotlib>=3.7
 reportlab>=4.0
 PyQt6>=6.5
 
+# EPar+ Modern anclada: WindowStaysOnTopHint de PyQt6, sin paquetes extra.
+# Windows: no requiere administrador, cambios de registro ni PowerToys.
+# Instalacion y limites del escritorio seguro/pantalla completa: README.md.
+
 # --- Lectura de ECG (contexto clínico, pestaña ECG) ---
 # pypdf: lee la capa de texto de PDFs digitales (sin OCR).
 # pymupdf (fitz): renderiza PDF escaneado a imagen para OCR.

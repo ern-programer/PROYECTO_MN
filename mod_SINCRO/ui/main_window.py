@@ -285,6 +285,10 @@ class MainWindow(QMainWindow):
 		self._active_detached_console = ""
 		self._epar_plus_docked_sizes = [300, 1260]
 		self._epar_plus_closing_app = False
+		self._application_close_requested = False
+		self._lower_cine_hidden_for_modern = False
+		self._lower_cine_hidden_saved_sizes = None
+		self._busy_cursor_depth = 0
 		self.setWindowTitle(f"GammaSync v{__version__} - Interfaz de procesado")
 		screen = QApplication.primaryScreen()
 		if screen is not None:
@@ -3716,7 +3720,7 @@ class MainWindow(QMainWindow):
 				stime = ""
 			bio_line = self._patient_biometrics_line(study)
 			self.patient_data_label.setText(
-				f"<b>{ctx['patient_name']}</b> (ID: {ctx['patient_id']})<br>"
+				f"<b>{ctx['patient_name'].replace('^', ' ')}</b> (ID: {ctx['patient_id']})<br>"
 				f"Sexo: {g('patient_sex')} &nbsp;|&nbsp; Nac.: {birth}<br>"
 				f"{bio_line}"
 				f"Estudio: {ctx['study_date']} {stime}<br>"
@@ -3755,9 +3759,10 @@ class MainWindow(QMainWindow):
 			cell = "padding:1px 8px 1px 0;"
 			bio_line = self._patient_biometrics_line(study)
 			self.patient_data_label.setText(
-				f"<b>{ctx1['patient_name']}</b> (ID: {ctx1['patient_id']})<br>"
+				f"<b>{ctx1['patient_name'].replace('^', ' ')}</b> (ID: {ctx1['patient_id']})<br>"
 				f"Sexo: {gg(study, 'patient_sex')} &nbsp;|&nbsp; Nac.: {birth}<br>"
 				f"{bio_line}"
+				f"Tipo: {lbl1} + {lbl2}<br>"
 				f"<table style='border-spacing:0;'>"
 				f"<tr><td style='{cell}'></td>"
 				f"<td style='{cell}'><b>{lbl1}</b></td>"
@@ -3765,6 +3770,9 @@ class MainWindow(QMainWindow):
 				f"<tr><td style='{cell}'>Fecha:</td>"
 				f"<td style='{cell}'>{ctx1['study_date']} {stime_of(study)}</td>"
 				f"<td style='{cell}'>{ctx2['study_date']} {stime_of(second)}</td></tr>"
+				f"<tr><td style='{cell}'>Accession:</td>"
+				f"<td style='{cell}'>{gg(study, 'accession_number')}</td>"
+				f"<td style='{cell}'>{gg(second, 'accession_number')}</td></tr>"
 				f"<tr><td style='{cell}'>Serie:</td>"
 				f"<td style='{cell}'>{gg(study, 'series_description')}</td>"
 				f"<td style='{cell}'>{gg(second, 'series_description')}</td></tr>"
@@ -4252,6 +4260,8 @@ class MainWindow(QMainWindow):
 			return
 		render_meta = getattr(self, "_cine_crudo_dual_render_meta", {})
 		try:
+			self._refresh_readonly_results_panel()
+			self._sync_epar_modern_clinical_panels()
 			primary_label = self._cine_crudo_stage_display(self.study) or "Esfuerzo"
 			frames, _, _ = self._build_cine_crudo_frames_for_study(self.study, None, "UngGat", primary_label)
 			secondary = self._secondary_cine_crudo_study()
@@ -5622,6 +5632,7 @@ class MainWindow(QMainWindow):
 		console.set_status_text(self._progress_bar.format() or "SISTEMA LISTO")
 		self._sync_epar_modern_clinical_panels()
 		self._side_cards_host.setVisible(False)
+		self._set_lower_cine_band_visible(False)
 		console.bring_to_front()
 		self.main_splitter.setSizes([0, max(1, self.width())])
 		self._active_detached_console = "modern"
@@ -5649,6 +5660,7 @@ class MainWindow(QMainWindow):
 		self._side_cards_host.setVisible(
 			getattr(self, "_patient_card", None) is not None or getattr(self, "_results_card", None) is not None
 		)
+		self._set_lower_cine_band_visible(True)
 		sizes = self._epar_plus_docked_sizes if len(self._epar_plus_docked_sizes) == 2 else [300, 1260]
 		self.main_splitter.setSizes(sizes)
 		self._active_detached_console = ""
@@ -5661,7 +5673,20 @@ class MainWindow(QMainWindow):
 		self.raise_()
 		self.activateWindow()
 
+	def request_application_close(self):
+		self._application_close_requested = True
+		try:
+			if self.close():
+				QApplication.instance().quit()
+		finally:
+			self._application_close_requested = False
+
 	def closeEvent(self, event):
+		if self._active_detached_console == "modern" and not self._application_close_requested:
+			event.ignore()
+			self.hide()
+			self._epar_modern_console.bring_to_front()
+			return
 		if self._last_browse_dir:
 			settings = getattr(self, "_ui_settings", None)
 			if settings:
@@ -5693,7 +5718,7 @@ class MainWindow(QMainWindow):
 		except Exception:
 			pass
 		btn = QMessageBox.question(
-			self, "Estudio sin guardar",
+			self._dialog_parent(), "Estudio sin guardar",
 			"El estudio actual NO tiene un PDF guardado.\n\n"
 			"¿Guardar el informe antes de salir?",
 			QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
@@ -9257,6 +9282,24 @@ class MainWindow(QMainWindow):
 				console.set_status_text(label or self._progress_bar.format())
 		QApplication.processEvents()
 
+	def _begin_background_busy(self) -> None:
+		self._busy_cursor_depth = int(getattr(self, "_busy_cursor_depth", 0)) + 1
+		if self._busy_cursor_depth == 1:
+			QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+
+	def _end_background_busy(self) -> None:
+		depth = int(getattr(self, "_busy_cursor_depth", 0))
+		if depth <= 0:
+			self._busy_cursor_depth = 0
+			return
+		depth -= 1
+		self._busy_cursor_depth = depth
+		if depth == 0:
+			try:
+				QApplication.restoreOverrideCursor()
+			except Exception:
+				pass
+
 	def _schedule_deferred_hq_render(
 		self,
 		job: str,
@@ -9277,6 +9320,7 @@ class MainWindow(QMainWindow):
 		if self._deferred_hq_running:
 			return
 		self._deferred_hq_running = True
+		self._begin_background_busy()
 		run_generation = int(self._deferred_hq_generation)
 		job = str(self._deferred_hq_job or "").strip().lower()
 		self._deferred_hq_job = ""
@@ -9318,6 +9362,7 @@ class MainWindow(QMainWindow):
 				except Exception as exc:
 					self._log(f"[WARN] Render HQ diferido (comparación) falló: {exc}")
 		finally:
+			self._end_background_busy()
 			self._deferred_hq_running = False
 			if self._lazy_render_pending_tabs and self.study is not None and self.seg is not None and self.phase_result is not None:
 				pending = set(self._lazy_render_pending_tabs)
@@ -12798,23 +12843,36 @@ class MainWindow(QMainWindow):
 				ax.text(c, c + r * 0.98, "BASE", ha="center", va="top", color=perf_subtle, fontsize=7, fontweight="bold")
 
 			fig_pp, axes_pp = plt.subplots(1, 2, figsize=(12.0, 6.0), facecolor=perf_bg)
-			for ax_pp, img_pp, ttl in [
-				(axes_pp[0], cart_raw, "Perfusión polar directa (crudo)"),
-				(axes_pp[1], cart_smooth, f"Perfusión polar directa ({self.polar_perf_smooth_method_combo.currentText()} {smooth_strength:.2f})"),
-			]:
+			for ax_index, (ax_pp, img_pp, ttl) in enumerate([
+				(axes_pp[0], cart_raw, ""),
+				(axes_pp[1], cart_smooth, ""),
+			]):
 				ax_pp.set_facecolor(perf_bg)
 				ax_pp.set_aspect("equal")
 				ax_pp.set_xticks([])
 				ax_pp.set_yticks([])
 				im_pp = ax_pp.imshow(img_pp, cmap=cmap_polar_perf, vmin=0.0, vmax=1.0)
 				_annotate_polar_guides(ax_pp, int(img_pp.shape[0]))
-				ax_pp.set_title(ttl, color=perf_fg, fontsize=10, fontweight="bold")
+				if ttl:
+					ax_pp.set_title(ttl, color=perf_fg, fontsize=10, fontweight="bold")
+				if ax_index == 1:
+					ax_pp.text(
+						0.5,
+						-0.08,
+						f"Filtro aplicado: {self.polar_perf_smooth_method_combo.currentText()} {smooth_strength:.2f}",
+						transform=ax_pp.transAxes,
+						ha="center",
+						va="top",
+						color=perf_subtle,
+						fontsize=8.5,
+						fontweight="bold",
+					)
 				cbar = fig_pp.colorbar(im_pp, ax=ax_pp, fraction=0.046, pad=0.03)
 				cbar.set_ticks([])
 				cbar.outline.set_edgecolor("white")
 				cbar.ax.set_facecolor(perf_bg)
 			fig_pp.suptitle(f"Mapa polar de perfusión (apex en centro, base en borde) — {study_context_label} — rotación {rotation_deg:+d}°", color=perf_fg, fontsize=11.5, fontweight="bold")
-			fig_pp.text(0.5, 0.02, "Reconstrucción polar continua desde short-axis: 'aplastado' apex->base", ha="center", color=perf_subtle, fontsize=8.6)
+			fig_pp.text(0.5, 0.02, "Reconstrucción polar continua desde short-axis (apex->base)", ha="center", color=perf_subtle, fontsize=8.6)
 			self._stamp_export_figure(fig_pp, active_cine_widget)
 			fig_pp.savefig(os.path.join(self.output_dir, "polar_perfusion_directa.png"), dpi=185, bbox_inches="tight", facecolor=fig_pp.get_facecolor())
 			plt.close(fig_pp)
@@ -12874,7 +12932,7 @@ class MainWindow(QMainWindow):
 				ax_g.set_yticks([])
 				ax_g.imshow(cart_g, cmap=cmap_polar_perf, vmin=0.0, vmax=1.0)
 				_annotate_polar_guides(ax_g, int(cart_g.shape[0]))
-				ax_g.set_title(f"{label_text} gate {gate_index + 1}/{int(study_cube_all.shape[0])}", color=perf_fg, fontsize=10, fontweight="bold")
+				# Sin título por panel para evitar superposición en comparativa.
 				fig_g.tight_layout()
 				fig_g.canvas.draw()
 				w, h = fig_g.canvas.get_width_height()
@@ -12906,7 +12964,7 @@ class MainWindow(QMainWindow):
 				ax_mx.set_yticks([])
 				ax_mx.imshow(cart_m, cmap=cmap_polar_perf, vmin=0.0, vmax=1.0)
 				_annotate_polar_guides(ax_mx, int(cart_m.shape[0]))
-				ax_mx.set_title(f"{label_text} gate {gate_index + 1}", color=perf_fg, fontsize=10, fontweight="bold")
+				# Sin título por panel para evitar superposición en comparativa.
 				fig_mx.tight_layout()
 				fig_mx.canvas.draw()
 				w, h = fig_mx.canvas.get_width_height()
@@ -13907,15 +13965,59 @@ class MainWindow(QMainWindow):
 		return col
 
 	def _on_polar_screen_cmap_changed(self, name):
+		previous_mode = str(getattr(self, "polar_view_mode", "perfusion") or "perfusion")
 		self.polar_perf_screen_cmap = str(name)
 		self._set_preview_background("polar_perfusion_directa", self.polar_perf_screen_cmap)
 		strip = getattr(self, "polar_screen_color_strip", None)
 		if strip is not None:
 			strip.set_cmap(self.polar_perf_screen_cmap)
-		if self.polar_view_mode == "cine":
+		if previous_mode == "cine":
 			self._rebuild_polar_cine_frames_screen()
 		else:
-			self._rerender_polar_perfusion_screen()
+			if self.compare_bundle is not None:
+				self._rerender_polar_perfusion_compare_screen()
+			else:
+				self._rerender_polar_perfusion_screen()
+		if self.polar_view_mode != previous_mode:
+			self.polar_view_mode = previous_mode
+			if self.polar_perf_view_perf_btn is not None:
+				self.polar_perf_view_perf_btn.setChecked(previous_mode == "perfusion")
+			if self.polar_perf_view_cine_btn is not None:
+				self.polar_perf_view_cine_btn.setChecked(previous_mode == "cine")
+
+	def _rerender_polar_perfusion_compare_screen(self) -> bool:
+		"""Re-render comparativo de PERFUSIÓN POLAR usando el cmap de pantalla.
+
+		Aplica el cmap de forma temporal para reconstruir solo esta pestaña y luego
+		restaura la preferencia de informe para no persistir cambios no deseados.
+		"""
+		if self.compare_bundle is None:
+			return False
+		combo = getattr(self, "report_cmap_polar_perf", None)
+		if combo is None:
+			return False
+		target_tab = {"polar_perfusion_directa"}
+		left_label, right_label = self._dual_compare_labels()
+		old_cmap = str(combo.currentText())
+		new_cmap = str(getattr(self, "polar_perf_screen_cmap", old_cmap) or old_cmap)
+		try:
+			if old_cmap != new_cmap:
+				combo.blockSignals(True)
+				combo.setCurrentText(new_cmap)
+				combo.blockSignals(False)
+			self._write_outputs(target_tabs=target_tab)
+			self._write_outputs_for_bundle(self.compare_bundle, self.compare_output_dir, target_tabs=target_tab)
+			self._compose_dual_tab_images(left_label, right_label, target_tabs=target_tab)
+			self._load_preview("polar_perfusion_directa")
+			return True
+		except Exception as exc:
+			self._log(f"[WARN] No se pudo recolorear comparativa PERFUSIÓN POLAR: {exc}")
+			return False
+		finally:
+			if str(combo.currentText()) != old_cmap:
+				combo.blockSignals(True)
+				combo.setCurrentText(old_cmap)
+				combo.blockSignals(False)
 
 	def _draw_polar_guides(self, ax, canvas_size: int):
 		import matplotlib.pyplot as plt
@@ -13964,7 +14066,8 @@ class MainWindow(QMainWindow):
 		ax.set_yticks([])
 		ax.imshow(cart, cmap=cmap_name, vmin=0.0, vmax=1.0)
 		self._draw_polar_guides(ax, int(cart.shape[0]))
-		ax.set_title(title, color=perf_fg, fontsize=10, fontweight="bold")
+		if title:
+			ax.set_title(title, color=perf_fg, fontsize=10, fontweight="bold")
 		fig.tight_layout()
 		fig.canvas.draw()
 		w, h = fig.canvas.get_width_height()
@@ -13993,7 +14096,7 @@ class MainWindow(QMainWindow):
 				gate_idx = 0
 				for pnl in panels:
 					cart = self._polar_pm_to_cartesian(pnl["pm"])
-					bufs.append(self._render_polar_cart_panel(cart, str(pnl.get("title", "")), cmap_name))
+					bufs.append(self._render_polar_cart_panel(cart, "", cmap_name))
 					role = pnl.get("role")
 					if role:
 						role_pm[role] = np.asarray(pnl["pm"], dtype=np.float32)
@@ -14006,7 +14109,7 @@ class MainWindow(QMainWindow):
 					if pm_math is not None:
 						math_label = f"{a_name} {op_name} {b_name} gate {gate_idx + 1}"
 						cart_m = self._polar_pm_to_cartesian(pm_math)
-						bufs.append(self._render_polar_cart_panel(cart_m, math_label, cmap_name))
+						bufs.append(self._render_polar_cart_panel(cart_m, "", cmap_name))
 				if not bufs:
 					continue
 				if len(bufs) == 1:
@@ -14054,19 +14157,22 @@ class MainWindow(QMainWindow):
 			perf_subtle = "#9ca3af"
 
 			fig_pp, axes_pp = plt.subplots(1, 2, figsize=(12.0, 6.0), facecolor=perf_bg)
-			for ax_pp, img_pp, ttl in [
-				(axes_pp[0], cart_raw, "Perfusión polar directa (crudo)"),
-				(axes_pp[1], cart_smooth, f"Perfusión polar directa ({smooth_desc})"),
-			]:
+			for ax_index, (ax_pp, img_pp, ttl) in enumerate([
+				(axes_pp[0], cart_raw, ""),
+				(axes_pp[1], cart_smooth, ""),
+			]):
 				ax_pp.set_facecolor(perf_bg)
 				ax_pp.set_aspect("equal")
 				ax_pp.set_xticks([])
 				ax_pp.set_yticks([])
 				ax_pp.imshow(img_pp, cmap=cmap_name, vmin=0.0, vmax=1.0)
 				self._draw_polar_guides(ax_pp, int(img_pp.shape[0]))
-				ax_pp.set_title(ttl, color=perf_fg, fontsize=10, fontweight="bold")
+				if ttl:
+					ax_pp.set_title(ttl, color=perf_fg, fontsize=10, fontweight="bold")
+				if ax_index == 1:
+					ax_pp.text(0.5, -0.08, f"Filtro aplicado: {smooth_desc}", transform=ax_pp.transAxes, ha="center", va="top", color=perf_subtle, fontsize=8.5, fontweight="bold")
 			fig_pp.suptitle(f"Mapa polar de perfusión (apex en centro, base en borde) — {label} — rotación {rotation_deg:+d}°", color=perf_fg, fontsize=11.5, fontweight="bold")
-			fig_pp.text(0.5, 0.02, "Reconstrucción polar continua desde short-axis: 'aplastado' apex->base", ha="center", color=perf_subtle, fontsize=8.6)
+			fig_pp.text(0.5, 0.02, "Reconstrucción polar continua desde short-axis (apex->base)", ha="center", color=perf_subtle, fontsize=8.6)
 			fig_pp.canvas.draw()
 			w, h = fig_pp.canvas.get_width_height()
 			buf = np.frombuffer(fig_pp.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)[..., :3].copy()
@@ -14190,23 +14296,25 @@ class MainWindow(QMainWindow):
 		return None
 
 	def _on_polar_math_changed(self, *args):
-		"""Recalcula el cine polar en vivo al cambiar operación/términos math."""
-		if self.polar_view_mode != "cine":
-			return
-		if not getattr(self, "_polar_cine_cart_cache", None):
-			return
-		self._rebuild_polar_cine_frames_screen()
-		self._load_preview("polar_perfusion_directa")
+		"""Cambios en combos math no recalculan en vivo; aplicar con el botón.
+
+		Esto evita re-renders costosos en cada cambio de término/operación.
+		"""
+		return
 
 	def _apply_polar_math(self):
 		"""Botón Aplicar: fuerza la vista Cine y recalcula la operación math."""
 		if not getattr(self, "_polar_cine_cart_cache", None):
 			self.statusBar().showMessage("No hay cine polar cargado para aplicar la operación", 4000)
 			return
-		if self.polar_view_mode != "cine":
-			self._set_polar_view_mode("cine")
-		self._rebuild_polar_cine_frames_screen()
-		self._load_preview("polar_perfusion_directa")
+		self._begin_background_busy()
+		try:
+			if self.polar_view_mode != "cine":
+				self._set_polar_view_mode("cine")
+			if not self._rebuild_polar_cine_frames_screen():
+				self.statusBar().showMessage("No se pudo renderizar la operación polar", 4000)
+		finally:
+			self._end_background_busy()
 
 	# --- Cine crudo (proyecciones SPECT) ---
 	def _rgb_frame_to_qpixmap_raw(self, rgb: np.ndarray) -> QPixmap:
@@ -22222,6 +22330,8 @@ class MainWindow(QMainWindow):
 
 	def _toggle_lower_cine_band(self):
 		"""Colapsa/expande la banda inferior dejando solo su header delgado."""
+		if bool(getattr(self, "_lower_cine_hidden_for_modern", False)):
+			return
 		splitter = getattr(self, "right_splitter", None)
 		if splitter is None:
 			return
@@ -22242,6 +22352,8 @@ class MainWindow(QMainWindow):
 	def _collapse_lower_cine_band_initial(self):
 		"""Fuerza la banda de asincronía a su estado colapsado inicial (barra azul
 		fina), sin importar el layout restaurado de la sesión anterior."""
+		if bool(getattr(self, "_lower_cine_hidden_for_modern", False)):
+			return
 		splitter = getattr(self, "right_splitter", None)
 		if splitter is None:
 			return
@@ -22253,6 +22365,34 @@ class MainWindow(QMainWindow):
 		header_h = max(28, self._lower_band_header_widget.sizeHint().height())
 		total = sum(splitter.sizes()) or 1060
 		splitter.setSizes([max(0, total - header_h), header_h])
+
+	def _set_lower_cine_band_visible(self, visible: bool) -> None:
+		"""Muestra u oculta toda la banda inferior de asincronía en la ventana principal."""
+		panel = getattr(self, "_lower_cine_panel", None)
+		splitter = getattr(self, "right_splitter", None)
+		if panel is None or splitter is None:
+			return
+		visible = bool(visible)
+		if visible:
+			if panel.isVisible():
+				self._lower_cine_hidden_for_modern = False
+				return
+			panel.setVisible(True)
+			saved = getattr(self, "_lower_cine_hidden_saved_sizes", None)
+			if isinstance(saved, list) and len(saved) == 2 and sum(saved) > 0:
+				splitter.setSizes(saved)
+			else:
+				splitter.setSizes([840, 220])
+			self._lower_cine_hidden_for_modern = False
+			return
+		if not panel.isVisible():
+			self._lower_cine_hidden_for_modern = True
+			return
+		self._lower_cine_hidden_saved_sizes = splitter.sizes()
+		panel.setVisible(False)
+		total = sum(self._lower_cine_hidden_saved_sizes) or sum(splitter.sizes()) or max(1, self.height())
+		splitter.setSizes([total, 0])
+		self._lower_cine_hidden_for_modern = True
 
 	def _rebuild_tabs_for_mode(self):
 		current_title = self.tabs.tabText(self.tabs.currentIndex()) if self.tabs.count() > 0 else ""
@@ -23403,7 +23543,8 @@ class MainWindow(QMainWindow):
 				ax.imshow(img)
 				ax.set_xticks([])
 				ax.set_yticks([])
-				ax.set_title(title, color="#e2e8f0", fontsize=11, fontweight="bold")
+				if name != "polar_perfusion_directa":
+					ax.set_title(title, color="#e2e8f0", fontsize=11, fontweight="bold")
 			fig.suptitle(f"Comparativa {name} — {self._patient_banner_text(include_stage=False)}", color="#f8fafc", fontsize=12, fontweight="bold")
 			fig.tight_layout(rect=(0, 0, 1, 0.95))
 			fig.savefig(left_path, dpi=150, bbox_inches="tight")
