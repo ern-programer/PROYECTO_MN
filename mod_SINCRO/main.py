@@ -6,10 +6,76 @@ Uso:
 """
 from __future__ import annotations
 
+import hashlib
+import os
 import sys
 
 from core.console_utf8 import enable_utf8
 from version import __version__
+
+
+def _activate_existing_window(window) -> None:
+    if window._active_detached_console in ("modern", "plus"):
+        window.bring_epar_plus_console_to_front()
+        return
+    if window.isMinimized():
+        window.showNormal()
+    else:
+        window.show()
+    window.raise_()
+    window.activateWindow()
+
+
+def _claim_application_instance(app, activate):
+    from PyQt6.QtCore import QLockFile, QStandardPaths
+    from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+
+    user_key = hashlib.sha256(os.path.expanduser("~").encode("utf-8")).hexdigest()[:16]
+    server_name = f"Gammasys.GammaSync.{user_key}"
+    lock = QLockFile(os.path.join(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.TempLocation), f"GammaSync-{user_key}.lock"))
+    lock.setStaleLockTime(0)
+    server = QLocalServer(app)
+    server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
+
+    def accept_connections():
+        while server.hasPendingConnections():
+            connection = server.nextPendingConnection()
+
+            def receive_request(connection=connection):
+                if connection.canReadLine() and bytes(connection.readLine()).strip() == b"activate":
+                    activate()
+                    connection.disconnectFromServer()
+
+            connection.readyRead.connect(receive_request)
+            connection.disconnected.connect(connection.deleteLater)
+            connection.write(f"{os.getpid()}\n".encode("ascii"))
+            receive_request()
+
+    server.newConnection.connect(accept_connections)
+    if lock.tryLock(0):
+        if not server.listen(server_name):
+            lock.unlock()
+            raise RuntimeError("No se pudo iniciar el canal de activación de GammaSync.")
+        server._instance_lock = lock
+        app.aboutToQuit.connect(server.close)
+        app.aboutToQuit.connect(lock.unlock)
+        return server
+
+    socket = QLocalSocket()
+    socket.connectToServer(server_name)
+    if not socket.waitForConnected(1500):
+        raise RuntimeError("No se pudo contactar la instancia existente de GammaSync.")
+    if socket.waitForReadyRead(1000) and os.name == "nt":
+        try:
+            import ctypes
+            process_id = int(bytes(socket.readLine()).strip())
+            ctypes.windll.user32.AllowSetForegroundWindow(process_id)
+        except (ValueError, OSError, AttributeError):
+            pass
+    if socket.write(b"activate\n") < 0 or (socket.bytesToWrite() and not socket.waitForBytesWritten(1500)):
+        raise RuntimeError("No se pudo activar la instancia existente de GammaSync.")
+    socket.disconnectFromServer()
+    return None
 
 
 def main(argv: list[str]) -> int:
@@ -57,6 +123,25 @@ def main(argv: list[str]) -> int:
     app.setApplicationVersion(__version__)
     app.setOrganizationName("Gammasys")
 
+    window = None
+    activation_pending = False
+
+    def activate_existing():
+        nonlocal activation_pending
+        if window is None:
+            activation_pending = True
+        else:
+            _activate_existing_window(window)
+
+    try:
+        instance_server = _claim_application_instance(app, activate_existing)
+    except RuntimeError as exc:
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.warning(None, "GammaSync", str(exc))
+        return 3
+    if instance_server is None:
+        return 0
+
     # Tema visual: se aplica el tema guardado por el usuario (default "classic"
     # = nativo). El QSS moderno queda como opción seleccionable desde el panel de
     # Configuración. Si falta el .qss, el tema moderno cae a nativo sin romper.
@@ -67,6 +152,8 @@ def main(argv: list[str]) -> int:
 
     window = MainWindow(initial_path=file_path)
     window.show()
+    if activation_pending:
+        _activate_existing_window(window)
     return app.exec()
 
 

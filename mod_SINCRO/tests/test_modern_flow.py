@@ -24,6 +24,104 @@ def _bind(window, name, **globals_dict):
     setattr(window, name, MethodType(namespace[name], window))
 
 
+@pytest.mark.parametrize("mode, minimized", [("modern", False), ("plus", False), ("", True), ("", False)])
+def test_second_launch_recovers_active_ui_without_creating_or_docking(mode, minimized):
+    source = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+    method = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "_activate_existing_window")
+    namespace = {}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "<activate-existing>", "exec"), namespace)
+    calls = []
+    window = SimpleNamespace(
+        _active_detached_console=mode,
+        bring_epar_plus_console_to_front=lambda: calls.append("console"),
+        isMinimized=lambda: minimized, showNormal=lambda: calls.append("restore"),
+        show=lambda: calls.append("show"), raise_=lambda: calls.append("raise"),
+        activateWindow=lambda: calls.append("activate"),
+    )
+    namespace["_activate_existing_window"](window)
+    assert calls == (["console"] if mode else ["restore" if minimized else "show", "raise", "activate"])
+
+
+@pytest.mark.parametrize("primary, connected, listen_ok", [(True, False, True), (False, True, True), (False, False, True), (True, False, False)])
+def test_instance_server_claim_or_notify_without_starting_duplicate(monkeypatch, primary, connected, listen_ok):
+    import hashlib
+    source = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+    method = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "_claim_application_instance")
+    calls = []
+    handler = SimpleNamespace(callback=None)
+    server = SimpleNamespace(
+        setSocketOptions=lambda options: None,
+        newConnection=SimpleNamespace(connect=lambda callback: setattr(handler, "callback", callback)),
+        listen=lambda name: calls.append(("listen", name)) or listen_ok,
+        close=lambda: calls.append("close"),
+        hasPendingConnections=lambda: False,
+    )
+    server_factory = lambda app: server
+    server_factory.SocketOption = SimpleNamespace(UserAccessOption=1)
+    lock = SimpleNamespace(
+        setStaleLockTime=lambda timeout: None, tryLock=lambda timeout: primary,
+        unlock=lambda: calls.append("unlock"),
+    )
+    paths = SimpleNamespace(StandardLocation=SimpleNamespace(TempLocation=1), writableLocation=lambda location: str(ROOT))
+    monkeypatch.setitem(sys.modules, "PyQt6.QtCore", SimpleNamespace(QLockFile=lambda path: lock, QStandardPaths=paths))
+    socket = SimpleNamespace(
+        connectToServer=lambda name: calls.append(("connect", name)),
+        waitForConnected=lambda timeout: connected, waitForReadyRead=lambda timeout: False,
+        write=lambda data: calls.append(("write", data)) or len(data), bytesToWrite=lambda: 0,
+        disconnectFromServer=lambda: calls.append("disconnect"),
+    )
+    monkeypatch.setitem(sys.modules, "PyQt6.QtNetwork", SimpleNamespace(QLocalServer=server_factory, QLocalSocket=lambda: socket))
+    namespace = dict(os=os, hashlib=hashlib)
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "<single-instance>", "exec"), namespace)
+    app = SimpleNamespace(aboutToQuit=SimpleNamespace(connect=lambda callback: calls.append("cleanup")))
+    if primary and not listen_ok:
+        with pytest.raises(RuntimeError, match="canal"):
+            namespace["_claim_application_instance"](app, lambda: None)
+        assert calls[-1] == "unlock"
+        return
+    if not primary and not connected:
+        with pytest.raises(RuntimeError, match="contactar"):
+            namespace["_claim_application_instance"](app, lambda: None)
+        return
+    result = namespace["_claim_application_instance"](app, lambda: None)
+    assert (result is server) == primary
+    assert ("cleanup" in calls) == primary
+    assert (("write", b"activate\n") in calls) == (not primary)
+    if not primary:
+        assert not any(isinstance(call, tuple) and call[0] == "listen" for call in calls)
+        assert result is None and calls[-1] == "disconnect"
+
+
+def test_instance_server_real_qt_core_ipc_between_processes():
+    code = '''
+import os
+import sys
+import subprocess
+import main as entry
+from PyQt6.QtCore import QCoreApplication, QTimer
+app = QCoreApplication([])
+key = 'GammaSync-IPC-test-' + str(os.getpid())
+entry.os.path.expanduser = lambda path: key
+activated = []
+server = entry._claim_application_instance(app, lambda: (activated.append(True), app.quit()))
+assert server is not None
+child_code = '\\n'.join([
+    'import main as entry',
+    'from PyQt6.QtCore import QCoreApplication',
+    'app = QCoreApplication([])',
+    'entry.os.path.expanduser = lambda path: ' + repr(key),
+    'assert entry._claim_application_instance(app, lambda: None) is None',
+])
+child = subprocess.Popen([sys.executable, '-c', child_code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+QTimer.singleShot(6000, app.quit)
+app.exec()
+output, errors = child.communicate(timeout=8)
+assert child.returncode == 0 and activated, (child.returncode, activated, output, errors)
+'''
+    result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def _window():
     state = SimpleNamespace(frames=[], stopped=False, status="", results="", visible=True, calls=[])
     console = SimpleNamespace(
@@ -171,6 +269,111 @@ def test_modern_close_routes_to_application_exit_not_docking(closing_for_app):
     assert calls == (["accept"] if closing_for_app else ["ignore", "exit"])
 
 
+def test_modern_mockup_actions_positions_and_existing_callbacks():
+    source = ast.parse((ROOT / "ui" / "epar_modern_console.py").read_text(encoding="utf-8"))
+    console_class = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "EParModernConsole")
+    init = next(node for node in console_class.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+    calls = []
+    owner = SimpleNamespace(
+        open_modern_processing=lambda: calls.append("process"), open_amyloid_window=lambda: calls.append("planar"),
+        open_amyloid_spect_window=lambda: calls.append("spect"), open_ui_preferences_dialog=lambda: calls.append("config"),
+    )
+    console = SimpleNamespace(
+        dockRequested=SimpleNamespace(emit=lambda: calls.append("dock")),
+        _button=lambda text, callback, role: SimpleNamespace(text=text, callback=callback, role=role),
+    )
+    expected = {
+        "_process_btn": ("PROCESAR", "green", (2, 0)),
+        "_amyloid_planar_btn": ("AMYLOIDOSIS\nPLANAR", "amyloidPlanar", None),
+        "_amyloid_spect_btn": ("AMYLOIDOSIS\nSPECT / CT", "amyloidSpect", None),
+        "_config_btn": ("CONFIG.", "blue", (2, 9, 1, 2)),
+        "_dock_btn": ("ACOPLAR", "mint", (2, 11)),
+    }
+    namespace = dict(self=console, owner=owner)
+    for name, (text, role, position) in expected.items():
+        assignment = next(node for node in init.body if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Attribute) and target.attr == name for target in node.targets))
+        exec(compile(ast.Module(body=[assignment], type_ignores=[]), "<modern-mockup>", "exec"), namespace)
+        button = getattr(console, name)
+        assert (button.text, button.role) == (text, role)
+        button.callback()
+        if position is not None:
+            placement = next(node.value for node in init.body if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                             and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == "addWidget"
+                             and isinstance(node.value.args[0], ast.Attribute) and node.value.args[0].attr == name)
+            assert tuple(ast.literal_eval(arg) for arg in placement.args[1:]) == position
+    assert calls == ["process", "planar", "spect", "config", "dock"]
+    assert any(isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+               and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == "setColumnMinimumWidth"
+               and [ast.literal_eval(arg) for arg in node.value.args] == [1, 75] for node in init.body)
+    assert any(isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+               and isinstance(node.value.func, ast.Attribute) and isinstance(node.value.func.value, ast.Name)
+               and node.value.func.value.id == "amyloid_layout" and node.value.func.attr == "setSpacing"
+               and ast.literal_eval(node.value.args[0]) == 3 for node in init.body)
+
+
+@pytest.mark.parametrize("initially_hidden", [False, True])
+def test_modern_moves_amyloid_actions_out_of_sidebar_and_restores_visibility(initially_hidden):
+    source = ast.parse((ROOT / "ui" / "epar_modern_console.py").read_text(encoding="utf-8"))
+    console_class = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "EParModernConsole")
+    namespace = {"QWidget": object}
+    calls = []
+    buttons = [SimpleNamespace(isHidden=lambda: initially_hidden, hide=lambda: calls.append("hide"),
+                               setVisible=lambda visible: calls.append(("visible", visible))) for index in range(2)]
+    sidebar = SimpleNamespace(setParent=lambda parent: None, show=lambda: None)
+    console = SimpleNamespace(
+        _owner=SimpleNamespace(amyloid_btn=buttons[0], amyloid_spect_btn=buttons[1]),
+        _sidebar_host=SimpleNamespace(hide=lambda: None),
+        _sidebar_layout=SimpleNamespace(addWidget=lambda widget: None, takeAt=lambda index: SimpleNamespace(widget=lambda: sidebar)),
+        set_top_mode=lambda enabled: None, release_asynchrony=lambda: None,
+    )
+    for name in ("take_sidebar", "release_sidebar"):
+        method = next(node for node in console_class.body if isinstance(node, ast.FunctionDef) and node.name == name)
+        exec(compile(ast.Module(body=[method], type_ignores=[]), "<amyloid-sidebar>", "exec"), namespace)
+    namespace["take_sidebar"](console, sidebar)
+    assert calls == ["hide", "hide"]
+    assert namespace["release_sidebar"](console) is sidebar
+    assert calls[-2:] == [("visible", not initially_hidden)] * 2
+    assert console._amyloid_sidebar_visibility == []
+
+
+def test_modern_exit_marks_closing_before_teardown_and_disposes_independent_tab():
+    source = ast.parse((ROOT / "ui" / "epar_modern_console.py").read_text(encoding="utf-8"))
+    console_class = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "EParModernConsole")
+    method = next(node for node in console_class.body if isinstance(node, ast.FunctionDef) and node.name == "close_for_app")
+    calls = []
+    console = SimpleNamespace(
+        _closing_for_app=False,
+        _top_tab=SimpleNamespace(hide=lambda: calls.append("hide-tab"), close=lambda: calls.append("close-tab"),
+                                 deleteLater=lambda: calls.append("delete-tab")),
+        set_top_mode=lambda enabled: calls.append(("top-mode", enabled, console._closing_for_app)),
+        release_asynchrony=lambda: calls.append("release"), stop_raw_preview=lambda: calls.append("stop-preview"),
+        _clinical_resize_timer=SimpleNamespace(stop=lambda: calls.append("stop-resize")),
+        close=lambda: calls.append("close-modern"),
+    )
+    namespace = {"QApplication": SimpleNamespace(instance=lambda: SimpleNamespace(removeEventFilter=lambda obj: calls.append("remove-filter")))}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "<modern-exit>", "exec"), namespace)
+    namespace["close_for_app"](console)
+    assert calls == ["hide-tab", ("top-mode", False, True), "release", "stop-preview", "stop-resize",
+                     "remove-filter", "close-tab", "delete-tab", "close-modern"]
+    namespace["close_for_app"](console)
+    assert calls.count("close-tab") == calls.count("delete-tab") == calls.count("close-modern") == 1
+
+
+@pytest.mark.parametrize("method_name", ["_watch_top_console", "_expand_top_console", "_keep_top_tab_above", "_collapse_top_console", "bring_to_front", "eventFilter"])
+def test_pending_modern_callbacks_cannot_resurrect_ui_during_exit(method_name):
+    source = ast.parse((ROOT / "ui" / "epar_modern_console.py").read_text(encoding="utf-8"))
+    console_class = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "EParModernConsole")
+    method = next(node for node in console_class.body if isinstance(node, ast.FunctionDef) and node.name == method_name)
+    namespace = {}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "<pending-exit>", "exec"), namespace)
+    console = SimpleNamespace(_closing_for_app=True)
+    if method_name == "eventFilter":
+        assert namespace[method_name](console, None, None) is False
+    else:
+        namespace[method_name](console)
+
+
 @pytest.mark.parametrize("pinned, visible", [(True, True), (True, False), (False, True), (False, False)])
 def test_pin_controls_topmost_and_preserves_geometry(pinned, visible):
     source = ast.parse((ROOT / "ui" / "epar_modern_console.py").read_text(encoding="utf-8"))
@@ -197,6 +400,30 @@ def test_pin_controls_topmost_and_preserves_geometry(pinned, visible):
     assert ("stop-hide" in calls) == pinned
 
 
+def test_top_tab_is_independent_of_console_native_visibility_and_cleaned_up():
+    source = ast.parse((ROOT / "ui" / "epar_modern_console.py").read_text(encoding="utf-8"))
+    console_class = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "EParModernConsole")
+    init = next(node for node in console_class.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+    tab_index = next(index for index, node in enumerate(init.body) if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Attribute) and target.attr == "_top_tab" for target in node.targets))
+    calls = []
+    tab = SimpleNamespace(deleteLater=lambda: calls.append("delete-tab"))
+
+    def widget_factory(parent, flags):
+        assert parent is None
+        assert flags == 15
+        return tab
+
+    console = SimpleNamespace(destroyed=SimpleNamespace(connect=lambda callback: calls.append(callback)))
+    namespace = dict(self=console, QWidget=widget_factory, Qt=SimpleNamespace(WindowType=SimpleNamespace(
+        Tool=1, FramelessWindowHint=2, WindowStaysOnTopHint=4, WindowDoesNotAcceptFocus=8)))
+    exec(compile(ast.Module(body=init.body[tab_index:tab_index + 2], type_ignores=[]), "<top-tab>", "exec"), namespace)
+    assert console._top_tab is tab
+    assert calls == [tab.deleteLater]
+    calls[0]()
+    assert calls[-1] == "delete-tab"
+
+
 @pytest.mark.parametrize("pinned, owned_window", [(True, False), (True, True), (False, False)])
 def test_pinned_watch_reasserts_order_without_stealing_focus(pinned, owned_window):
     source = ast.parse((ROOT / "ui" / "epar_modern_console.py").read_text(encoding="utf-8"))
@@ -208,6 +435,9 @@ def test_pinned_watch_reasserts_order_without_stealing_focus(pinned, owned_windo
     console = SimpleNamespace(
         _top_mode=True, _top_collapsed=False,
         _top_slide=SimpleNamespace(state=lambda: 0),
+        _top_tab=SimpleNamespace(hide=lambda: calls.append("tab-hide")),
+        _top_open_timer=SimpleNamespace(stop=lambda: calls.append("stop-open")),
+        _keep_top_tab_above=lambda: calls.append("tab-show"),
         _position_top_console=lambda: None, isVisible=lambda: True, isMinimized=lambda: False,
         _top_pin_btn=SimpleNamespace(isChecked=lambda: pinned),
         _top_interaction_active=lambda: False, _top_owned_window_active=lambda: owned_window,
@@ -215,9 +445,54 @@ def test_pinned_watch_reasserts_order_without_stealing_focus(pinned, owned_windo
                                        isActive=lambda: False, start=lambda: calls.append("start-hide")),
         raise_=lambda: calls.append("raise"),
     )
-    namespace["_watch_top_console"](console)
+    for cycle in range(10):
+        namespace["_watch_top_console"](console)
+    assert "tab-show" not in calls
     assert ("raise" in calls) == (pinned and not owned_window)
     assert ("start-hide" in calls) == (not pinned)
+
+
+@pytest.mark.parametrize("top_mode, collapsed, visible, minimized", [
+    (False, True, False, False), (False, False, True, False),
+    (True, True, True, False), (True, False, True, False),
+    (True, True, False, True), (True, True, False, False),
+])
+def test_top_tab_is_shown_only_for_hidden_collapsed_top_console(top_mode, collapsed, visible, minimized):
+    source = ast.parse((ROOT / "ui" / "epar_modern_console.py").read_text(encoding="utf-8"))
+    console_class = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "EParModernConsole")
+    method = next(node for node in console_class.body if isinstance(node, ast.FunctionDef) and node.name == "_keep_top_tab_above")
+    namespace = {}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "<top-tab-visibility>", "exec"), namespace)
+    calls = []
+    console = SimpleNamespace(
+        _top_mode=top_mode, _top_collapsed=collapsed,
+        isVisible=lambda: visible, isMinimized=lambda: minimized,
+        _top_tab=SimpleNamespace(show=lambda: calls.append("show"), raise_=lambda: calls.append("raise"),
+                                 hide=lambda: calls.append("hide")),
+    )
+    namespace["_keep_top_tab_above"](console)
+    assert calls == (["show", "raise"] if top_mode and collapsed and not visible and not minimized else ["hide"])
+
+
+@pytest.mark.parametrize("top_mode", [False, True])
+def test_top_watch_clears_stale_collapse_and_hover_when_console_visible(top_mode):
+    source = ast.parse((ROOT / "ui" / "epar_modern_console.py").read_text(encoding="utf-8"))
+    console_class = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "EParModernConsole")
+    method = next(node for node in console_class.body if isinstance(node, ast.FunctionDef) and node.name == "_watch_top_console")
+    namespace = {"QAbstractAnimation": SimpleNamespace(State=SimpleNamespace(Running=1))}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "<stale-top-watch>", "exec"), namespace)
+    calls = []
+    console = SimpleNamespace(
+        _top_mode=top_mode, _top_collapsed=True,
+        isVisible=lambda: True, isMinimized=lambda: False,
+        _top_tab=SimpleNamespace(hide=lambda: calls.append("hide")),
+        _top_open_timer=SimpleNamespace(stop=lambda: calls.append("stop-open")),
+        _top_slide=SimpleNamespace(state=lambda: 1),
+    )
+    namespace["_watch_top_console"](console)
+    assert calls == ["hide", "stop-open"]
+    if top_mode:
+        assert not console._top_collapsed
 
 
 @pytest.mark.parametrize("stages", [("Reposo",), ("Esfuerzo",), ("Esfuerzo", "Reposo")])
@@ -311,7 +586,8 @@ owner.cine_compare.set_cube(cube.copy())
 owner.cine.set_phase_title('Esfuerzo')
 owner.cine_compare.set_phase_title('Reposo')
 for name in ('restart_workspace_state', 'load_modern_studies', 'open_modern_processing',
-             'open_ui_preferences_dialog', 'open_pdf', 'open_html_report'):
+             'open_ui_preferences_dialog', 'open_pdf', 'open_html_report',
+             'open_amyloid_window', 'open_amyloid_spect_window'):
     setattr(owner, name, lambda: None)
 owner.toggle_modern_asynchrony = lambda: console.toggle_asynchrony()
 console = EParModernConsole(owner)
@@ -652,6 +928,60 @@ def test_compare_raw_preview_does_not_generate_qc_or_start_main_cine():
     assert window.compare_raw_study is secondary
     assert window.dual_mode_active
     assert state.calls == ["readouts"]
+
+@pytest.mark.parametrize("valid_gif", [True, False])
+def test_rockford_busy_cursor_animates_and_restores_nested_calls(valid_gif):
+    calls = []
+    signal = SimpleNamespace(callback=None)
+    pixmap = SimpleNamespace(isNull=lambda: False, width=lambda: 40, height=lambda: 40)
+    movie = SimpleNamespace(
+        setCacheMode=lambda value: None, setScaledSize=lambda size: calls.append(("size", size)),
+        frameChanged=SimpleNamespace(connect=lambda callback: setattr(signal, "callback", callback)),
+        isValid=lambda: valid_gif, jumpToFrame=lambda frame: calls.append(("frame", frame)),
+        start=lambda: calls.append("start"), stop=lambda: calls.append("stop"),
+        currentPixmap=lambda: pixmap,
+    )
+
+    def movie_factory(path, parent):
+        assert Path(path).name == "rockford-boulder-dash.gif" and Path(path).is_file()
+        calls.append("load-gif")
+        return movie
+
+    movie_factory.CacheMode = SimpleNamespace(CacheAll=1)
+    window = SimpleNamespace(_busy_cursor_depth=0, _busy_cursor_movie=None)
+    application = SimpleNamespace(
+        setOverrideCursor=lambda cursor: calls.append("push"),
+        changeOverrideCursor=lambda cursor: calls.append(("cursor", cursor)),
+        restoreOverrideCursor=lambda: calls.append("restore"),
+        processEvents=lambda flags: calls.append("paint"),
+    )
+    globals_dict = dict(
+        QApplication=application, QMovie=movie_factory,
+        QSize=lambda width, height: (width, height), QCursor=lambda pix, x, y: (pix, x, y),
+        Qt=SimpleNamespace(CursorShape=SimpleNamespace(WaitCursor=1)),
+        QEventLoop=SimpleNamespace(ProcessEventsFlag=SimpleNamespace(ExcludeUserInputEvents=1)),
+        __file__=str(ROOT / "ui" / "main_window.py"),
+    )
+    for name in ("_begin_background_busy", "_update_background_busy_cursor", "_end_background_busy"):
+        _bind(window, name, **globals_dict)
+    window._begin_background_busy()
+    window._begin_background_busy()
+    assert calls.count("push") == calls.count("load-gif") == 1
+    assert ("size", (40, 40)) in calls
+    assert "paint" in calls
+    assert ("start" in calls) == valid_gif
+    if valid_gif:
+        assert ("cursor", (pixmap, 20, 20)) in calls
+        signal.callback(1)
+    window._end_background_busy()
+    assert "restore" not in calls and "stop" not in calls
+    window._end_background_busy()
+    assert calls[-2:] == ["stop", "restore"]
+    final_calls = list(calls)
+    signal.callback(2)
+    window._end_background_busy()
+    assert calls == final_calls
+
 
 @pytest.mark.parametrize("mode", ["perfusion", "cine"])
 def test_apply_polar_math_keeps_rendered_result_without_changing_scale(mode):

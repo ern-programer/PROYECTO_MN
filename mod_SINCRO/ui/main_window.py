@@ -289,6 +289,7 @@ class MainWindow(QMainWindow):
 		self._lower_cine_hidden_for_modern = False
 		self._lower_cine_hidden_saved_sizes = None
 		self._busy_cursor_depth = 0
+		self._busy_cursor_movie = None
 		self.setWindowTitle(f"GammaSync v{__version__} - Interfaz de procesado")
 		screen = QApplication.primaryScreen()
 		if screen is not None:
@@ -9286,6 +9287,27 @@ class MainWindow(QMainWindow):
 		self._busy_cursor_depth = int(getattr(self, "_busy_cursor_depth", 0)) + 1
 		if self._busy_cursor_depth == 1:
 			QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+			movie = getattr(self, "_busy_cursor_movie", None)
+			if movie is None:
+				gif_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "rockford-boulder-dash.gif")
+				movie = QMovie(gif_path, parent=self)
+				movie.setCacheMode(QMovie.CacheMode.CacheAll)
+				movie.setScaledSize(QSize(40, 40))
+				movie.frameChanged.connect(self._update_background_busy_cursor)
+				self._busy_cursor_movie = movie
+			if movie.isValid():
+				movie.jumpToFrame(0)
+				movie.start()
+				self._update_background_busy_cursor()
+			QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+
+	def _update_background_busy_cursor(self, _frame: int = 0) -> None:
+		movie = getattr(self, "_busy_cursor_movie", None)
+		if int(getattr(self, "_busy_cursor_depth", 0)) <= 0 or movie is None:
+			return
+		pixmap = movie.currentPixmap()
+		if not pixmap.isNull():
+			QApplication.changeOverrideCursor(QCursor(pixmap, pixmap.width() // 2, pixmap.height() // 2))
 
 	def _end_background_busy(self) -> None:
 		depth = int(getattr(self, "_busy_cursor_depth", 0))
@@ -9295,6 +9317,9 @@ class MainWindow(QMainWindow):
 		depth -= 1
 		self._busy_cursor_depth = depth
 		if depth == 0:
+			movie = getattr(self, "_busy_cursor_movie", None)
+			if movie is not None:
+				movie.stop()
 			try:
 				QApplication.restoreOverrideCursor()
 			except Exception:
@@ -14073,6 +14098,8 @@ class MainWindow(QMainWindow):
 		w, h = fig.canvas.get_width_height()
 		buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)[..., :3].copy()
 		plt.close(fig)
+		if int(getattr(self, "_busy_cursor_depth", 0)) > 0:
+			QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 		return buf
 
 	def _rebuild_polar_cine_frames_screen(self) -> bool:

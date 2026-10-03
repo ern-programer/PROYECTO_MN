@@ -79,6 +79,11 @@ py -3.13 -m venv .venv
 & .\.venv\Scripts\python.exe main.py
 ```
 
+GammaSync admite una sola instancia por usuario. Volver a abrir el programa
+recupera la interfaz existente: si Modern está autoocultado, se despliega;
+si está minimizado, se restaura. Los segundos arranques solo recuperan la UI,
+sin crear otro estudio ni otra ventana principal. No requiere paquetes extra.
+
 EPar+ Modern anclada usa `WindowStaysOnTopHint` de PyQt6 para mantenerse encima
 de las aplicaciones del escritorio normal. La vigilancia existente de 100 ms
 reafirma su orden sin activar la ventana ni quitar el foco a otra aplicación;
