@@ -279,6 +279,7 @@ class MainWindow(QMainWindow):
 
 	def __init__(self, initial_path: str | None = None):
 		super().__init__()
+		self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
 		self._epar_plus_console = None
 		self._epar_modern_console = None
 		self._active_detached_console = ""
@@ -605,6 +606,7 @@ class MainWindow(QMainWindow):
 		central = QWidget()
 		self.setCentralWidget(central)
 		self.setObjectName("sincroMainWindow")
+		self._build_main_window_controls()
 
 		splitter = QSplitter(Qt.Orientation.Horizontal)
 		splitter.setChildrenCollapsible(False)
@@ -4279,6 +4281,9 @@ class MainWindow(QMainWindow):
 		self.showMaximized()
 		self.raise_()
 		self.activateWindow()
+		console = self._epar_modern_console
+		if console is not None:
+			console.collapse_for_processing()
 		self._pending_dual_raw_load = False
 		self.process_current()
 
@@ -7879,6 +7884,71 @@ class MainWindow(QMainWindow):
 		# Grilla comparacion_ejes DEPRECADA (reemplazada por el Montaje clínico).
 		# No se regenera; la tab queda a cargo del montaje.
 		return
+
+	def _build_main_window_controls(self):
+		self._main_window_controls_host = QWidget(self)
+		self._main_window_controls_host.setObjectName("mainWindowControlsHost")
+		self._main_window_controls_host.setStyleSheet(
+			"QWidget#mainWindowControlsHost { background:#121722; border:1px solid #2e3a4a; border-radius:8px; }"
+			"QToolButton { color:#dce6ea; background:#1a2431; border:1px solid #304055; border-radius:6px; font-weight:700; }"
+			"QToolButton:hover { background:#27384c; }"
+			"QToolButton#mainCloseBtn { background:#8a2c2c; border-color:#9f3a3a; }"
+			"QToolButton#mainCloseBtn:hover { background:#b23a3a; }"
+		)
+		controls_layout = QHBoxLayout(self._main_window_controls_host)
+		controls_layout.setContentsMargins(6, 4, 6, 4)
+		controls_layout.setSpacing(4)
+
+		self._main_minimize_btn = QToolButton(self._main_window_controls_host)
+		self._main_minimize_btn.setText("−")
+		self._main_minimize_btn.setToolTip("Minimizar")
+		self._main_minimize_btn.setFixedSize(28, 24)
+		self._main_minimize_btn.clicked.connect(self.showMinimized)
+		controls_layout.addWidget(self._main_minimize_btn)
+
+		self._main_maximize_btn = QToolButton(self._main_window_controls_host)
+		self._main_maximize_btn.setText("□")
+		self._main_maximize_btn.setToolTip("Maximizar")
+		self._main_maximize_btn.setFixedSize(28, 24)
+		self._main_maximize_btn.clicked.connect(self._toggle_main_maximize)
+		controls_layout.addWidget(self._main_maximize_btn)
+
+		self._main_close_btn = QToolButton(self._main_window_controls_host)
+		self._main_close_btn.setObjectName("mainCloseBtn")
+		self._main_close_btn.setText("×")
+		self._main_close_btn.setToolTip("Cerrar")
+		self._main_close_btn.setFixedSize(28, 24)
+		self._main_close_btn.clicked.connect(self.close)
+		controls_layout.addWidget(self._main_close_btn)
+
+		self._update_main_window_controls_state()
+		self._position_main_window_controls()
+		self._main_window_controls_host.raise_()
+
+	def _position_main_window_controls(self):
+		if not hasattr(self, "_main_window_controls_host"):
+			return
+		margin = 10
+		host = self._main_window_controls_host
+		host.adjustSize()
+		host.move(self.width() - host.width() - margin, margin)
+
+	def _toggle_main_maximize(self):
+		if self.isMaximized():
+			self.showNormal()
+		else:
+			self.showMaximized()
+		self._update_main_window_controls_state()
+
+	def _update_main_window_controls_state(self):
+		if not hasattr(self, "_main_maximize_btn"):
+			return
+		if self.isMaximized():
+			self._main_maximize_btn.setText("❐")
+			self._main_maximize_btn.setToolTip("Restaurar")
+		else:
+			self._main_maximize_btn.setText("□")
+			self._main_maximize_btn.setToolTip("Maximizar")
 
 	def _on_preview_tab_changed(self, index: int):
 		if index < 0:
@@ -22247,9 +22317,16 @@ class MainWindow(QMainWindow):
 
 	def resizeEvent(self, event):
 		super().resizeEvent(event)
+		self._position_main_window_controls()
 		for name in list(self.preview_labels.keys()):
 			if name in self.preview_pixmaps:
 				self._apply_preview_zoom(name)
+
+	def changeEvent(self, event):
+		super().changeEvent(event)
+		if event.type() == event.Type.WindowStateChange:
+			self._update_main_window_controls_state()
+			self._position_main_window_controls()
 
 	def show_audit_validation_help(self):
 		doc_path = os.path.join(

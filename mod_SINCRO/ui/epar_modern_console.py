@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QByteArray, QEvent, QPoint, QSize, QTime, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QAbstractAnimation, QByteArray, QEasingCurve, QEvent, QPoint, QPropertyAnimation, QSize, QTime, QTimer, Qt, pyqtSignal
 from PyQt6 import sip
-from PyQt6.QtGui import QCloseEvent, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap, QTextDocument, QWindow
-from PyQt6.QtWidgets import QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizeGrip, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
+from PyQt6.QtGui import QCloseEvent, QColor, QCursor, QFont, QGuiApplication, QIcon, QPainter, QPixmap, QTextDocument, QWindow
+from PyQt6.QtWidgets import QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizeGrip, QSizePolicy, QStackedWidget, QToolButton, QVBoxLayout, QWidget
 from version import __version__
 
 
@@ -20,6 +20,30 @@ class EParModernConsole(QWidget):
         self._owner = owner
         self._closing_for_app = False
         self._drag_offset = None
+        self._top_mode = False
+        self._top_collapsed = False
+        self._top_geometry = None
+        self._top_screen = None
+        self._top_slide = QPropertyAnimation(self, b"pos", self)
+        self._top_slide.setDuration(180)
+        self._top_slide.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._top_tab = QWidget(self, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self._top_tab.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._top_tab.setFixedSize(180, 6)
+        self._top_tab.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._top_tab.setToolTip("Desplegar EPar+ Modern")
+        self._top_tab.setStyleSheet("background:#85a4a8; border-bottom:2px solid #d8bb78;")
+        self._top_open_timer = QTimer(self)
+        self._top_open_timer.setSingleShot(True)
+        self._top_open_timer.setInterval(250)
+        self._top_open_timer.timeout.connect(self._expand_top_console)
+        self._top_hide_timer = QTimer(self)
+        self._top_hide_timer.setSingleShot(True)
+        self._top_hide_timer.setInterval(600)
+        self._top_hide_timer.timeout.connect(self._collapse_top_console)
+        self._top_watch_timer = QTimer(self)
+        self._top_watch_timer.setInterval(100)
+        self._top_watch_timer.timeout.connect(self._watch_top_console)
         self._raw_preview_frames = []
         self._raw_preview_scaled_frames = []
         self._raw_preview_index = 0
@@ -63,24 +87,34 @@ class EParModernConsole(QWidget):
         pill.setObjectName("modernPill")
         self._header = pill
         pill_grid = QGridLayout(pill)
-        pill_grid.setContentsMargins(8, 8, 8, 8)
+        pill_grid.setContentsMargins(8, 6, 8, 8)
         pill_grid.setHorizontalSpacing(5)
-        pill_grid.setVerticalSpacing(5)
+        pill_grid.setVerticalSpacing(3)
 
         nav_host = QWidget()
+        nav_host.setObjectName("navHost")
         nav_layout = QVBoxLayout(nav_host)
         nav_layout.setContentsMargins(0, 0, 0, 0)
-        nav_layout.setSpacing(4)
+        nav_layout.setSpacing(0)
         nav = self._button("CONTROLES", self.toggle_controls, "blue")
         self._controls_btn = nav
         nav.setObjectName("navCap")
         nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        nav.setFixedHeight(42)
         nav.setToolTip("Mostrar u ocultar los controles de procesamiento.")
-        nav_layout.addWidget(nav)
+        self._controls_slot = QWidget(nav_host)
+        self._controls_slot.setFixedHeight(42)
+        nav_layout.addWidget(self._controls_slot, 0)
+        nav.setParent(pill)
         self._asynchrony_btn = self._button("ASINCRONÍA", owner.toggle_modern_asynchrony, "blue")
         self._asynchrony_btn.setObjectName("asyncCap")
         self._asynchrony_btn.setToolTip("Abrir el panel lateral de asincronía.")
-        nav_layout.addWidget(self._asynchrony_btn, 1)
+        self._asynchrony_slot = QWidget(nav_host)
+        self._asynchrony_slot.setMinimumHeight(124)
+        nav_layout.addWidget(self._asynchrony_slot, 1)
+        self._asynchrony_btn.setParent(pill)
+        nav_layout.setStretch(0, 0)
+        nav_layout.setStretch(1, 1)
         pill_grid.addWidget(nav_host, 0, 0, 1, 2)
 
         self._restart_btn = QPushButton(pill)
@@ -91,14 +125,16 @@ class EParModernConsole(QWidget):
         self._restart_btn.setToolTip("Reiniciar sesión")
         self._restart_btn.setAccessibleName("Reiniciar sesión")
         self._restart_btn.clicked.connect(owner.restart_workspace_state)
-        self._restart_btn.move(nav.mapTo(pill, QPoint(0, 0)) - QPoint(2, 2))
-        self._restart_btn.raise_()
 
         self._load_btn = self._button("CARGAR", owner.load_modern_studies, "blue")
+        self._load_btn.setObjectName("loadCap")
         pill_grid.addWidget(self._load_btn, 1, 0, 1, 2)
+        self._position_navigation_buttons()
         self._process_btn = self._button("PROCESAR", owner.open_modern_processing, "amber")
+        self._process_btn.setObjectName("processCap")
         pill_grid.addWidget(self._process_btn, 2, 0)
         self._dock_btn = self._button("ACOPLAR", self.dockRequested.emit, "blue")
+        self._dock_btn.setObjectName("dockCap")
         pill_grid.addWidget(self._dock_btn, 2, 1)
 
         study_panel = QFrame()
@@ -163,6 +199,24 @@ class EParModernConsole(QWidget):
         slim_l.setContentsMargins(3, 3, 3, 3)
         slim_l.setSpacing(3)
         slim_l.addWidget(self._button("−", self.showMinimized, "blue"))
+        self._top_mode_btn = QToolButton()
+        self._top_mode_btn.setIcon(QIcon(str(Path(__file__).parent / "icons" / "panel-top.svg")))
+        self._top_mode_btn.setCheckable(True)
+        self._top_mode_btn.setToolTip("Modo autoocultable en el borde superior")
+        self._top_mode_btn.setAccessibleName("Modo autoocultable")
+        self._top_mode_btn.toggled.connect(self.set_top_mode)
+        self._top_pin_btn = QToolButton()
+        self._top_pin_btn.setIcon(QIcon(str(Path(__file__).parent / "icons" / "anchor.svg")))
+        self._top_pin_btn.setCheckable(True)
+        self._top_pin_btn.setEnabled(False)
+        self._top_pin_btn.setToolTip("Anclar desplegada")
+        self._top_pin_btn.setAccessibleName("Anclar desplegada")
+        self._top_pin_btn.toggled.connect(self._set_top_pinned)
+        for button in (self._top_mode_btn, self._top_pin_btn):
+            button.setFixedSize(28, 24)
+            button.setIconSize(QSize(18, 18))
+            button.setStyleSheet("QToolButton { background:#7898a1; border:0; border-radius:4px; } QToolButton:checked { background:#d8bb78; } QToolButton:disabled { background:#52666b; }")
+            slim_l.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
         slim_l.addWidget(self._button("□", self._show_images, "blue"))
         slim_l.addWidget(self._button("×", self.dockRequested.emit, "red"))
         pill_grid.addWidget(slim, 0, 9, 2, 1)
@@ -234,16 +288,148 @@ class EParModernConsole(QWidget):
         btn.clicked.connect(callback)
         return btn
 
+    def _position_navigation_buttons(self):
+        position = self._controls_slot.mapTo(self._header, QPoint(0, 0))
+        self._controls_btn.setGeometry(position.x(), position.y(), self._controls_slot.width(), 42)
+        self._controls_btn.raise_()
+        self._restart_btn.move(position - QPoint(2, 4))
+        self._restart_btn.raise_()
+        async_position = self._asynchrony_slot.mapTo(self._header, QPoint(0, 0)) + QPoint(0, 3)
+        async_height = self._load_btn.y() - async_position.y() - 3
+        if async_height > 0:
+            self._asynchrony_btn.setGeometry(async_position.x(), async_position.y(), self._asynchrony_slot.width(), async_height)
+            self._asynchrony_btn.raise_()
+
+    def set_top_mode(self, enabled: bool) -> None:
+        if enabled == self._top_mode:
+            return
+        self._top_mode = enabled
+        self._top_mode_btn.setChecked(enabled)
+        self._top_pin_btn.setEnabled(enabled)
+        if enabled:
+            self._top_geometry = self.geometry()
+            self._top_screen = self.screen()
+            self._top_collapsed = False
+            self._position_top_console()
+            self._top_watch_timer.start()
+        else:
+            self._top_slide.stop()
+            self._top_open_timer.stop()
+            self._top_hide_timer.stop()
+            self._top_watch_timer.stop()
+            self._top_tab.hide()
+            was_collapsed = self._top_collapsed
+            self._top_collapsed = False
+            self._top_pin_btn.setChecked(False)
+            if self._top_geometry is not None:
+                self.setGeometry(self._top_geometry)
+                self.ensure_on_screen()
+            if was_collapsed:
+                self.show()
+
+    def _position_top_console(self) -> None:
+        if not self._top_mode:
+            return
+        screen = self._top_screen
+        if screen not in QGuiApplication.screens():
+            screen = QGuiApplication.primaryScreen()
+            self._top_screen = screen
+        if screen is None:
+            return
+        area = screen.availableGeometry()
+        self.move(area.left() + (area.width() - self.width()) // 2, area.top())
+        self._top_tab.move(area.left() + (area.width() - self._top_tab.width()) // 2, area.top())
+
+    def _set_top_pinned(self, pinned: bool) -> None:
+        self._top_pin_btn.setToolTip("Desanclar y permitir autoocultado" if pinned else "Anclar desplegada")
+        if pinned:
+            self._top_hide_timer.stop()
+            self._expand_top_console()
+
+    def _top_interaction_active(self) -> bool:
+        app = QApplication.instance()
+        return (self.frameGeometry().contains(QCursor.pos()) or self._drag_offset is not None
+                or app.activeModalWidget() is not None or app.activePopupWidget() is not None
+                or any(window is not self._top_tab and window is not self and window.isVisible()
+                       and (window.parentWidget() is self or (window.parentWidget() is not None
+                           and self.isAncestorOf(window.parentWidget()))) for window in app.topLevelWidgets()))
+
+    def _watch_top_console(self) -> None:
+        if not self._top_mode:
+            return
+        if self._top_slide.state() == QAbstractAnimation.State.Running:
+            return
+        self._position_top_console()
+        if self._top_collapsed:
+            self._keep_top_tab_above()
+            if self._top_tab.frameGeometry().contains(QCursor.pos()):
+                if not self._top_open_timer.isActive():
+                    self._top_open_timer.start()
+            else:
+                self._top_open_timer.stop()
+        elif self.isVisible() and not self.isMinimized():
+            if self._top_pin_btn.isChecked() or self._top_interaction_active():
+                self._top_hide_timer.stop()
+            elif not self._top_hide_timer.isActive():
+                self._top_hide_timer.start()
+
+    def _expand_top_console(self) -> None:
+        if not self._top_mode:
+            return
+        self._top_open_timer.stop()
+        was_collapsed = self._top_collapsed
+        self._top_collapsed = False
+        self._top_tab.hide()
+        self.show()
+        self._position_top_console()
+        self.raise_()
+        if was_collapsed:
+            target = self.pos()
+            self._top_slide.setStartValue(target - QPoint(0, self.height() - 6))
+            self._top_slide.setEndValue(target)
+            self._top_slide.start()
+
+    def collapse_for_processing(self) -> None:
+        self._collapse_top_console(force=True)
+
+    def _keep_top_tab_above(self) -> None:
+        if self._top_mode and self._top_collapsed:
+            self._top_tab.show()
+            self._top_tab.raise_()
+
+    def _collapse_top_console(self, force: bool = False) -> None:
+        if not self._top_mode or self.isMinimized():
+            return
+        if not force and (self._top_pin_btn.isChecked() or self._top_interaction_active()):
+            return
+        self._top_open_timer.stop()
+        self._top_slide.stop()
+        self._top_collapsed = True
+        self.hide()
+        self._position_top_console()
+        self._keep_top_tab_above()
+
     def eventFilter(self, watched, event):
-        if watched is self._controls_btn and event.type() in (QEvent.Type.Move, QEvent.Type.Resize, QEvent.Type.Show):
-            self._restart_btn.move(self._controls_btn.mapTo(self._header, QPoint(0, 0)) - QPoint(2, 2))
-            self._restart_btn.raise_()
+        if self._top_mode and self._top_collapsed and watched is not self._top_tab and event.type() in (QEvent.Type.Show, QEvent.Type.WindowActivate):
+            if isinstance(watched, QWindow) or (isinstance(watched, QWidget) and watched.isWindow()):
+                QTimer.singleShot(0, self._keep_top_tab_above)
+        if watched is self._top_tab and self._top_mode:
+            if event.type() == QEvent.Type.Enter:
+                self._top_open_timer.start()
+            elif event.type() == QEvent.Type.Leave:
+                self._top_open_timer.stop()
+            elif event.type() == QEvent.Type.MouseButtonPress:
+                self._expand_top_console()
+        if watched in (self._controls_slot, self._controls_slot.parentWidget(), self._asynchrony_slot, self._load_btn, self._header) and event.type() in (QEvent.Type.Move, QEvent.Type.Resize, QEvent.Type.Show):
+            self._position_navigation_buttons()
         if watched is self._raw_preview_label and event.type() == QEvent.Type.Resize:
             self._scale_raw_preview()
         if event.type() == QEvent.Type.Resize and any(watched is label for label, _ in self._clinical_labels):
             self._clinical_resize_timer.start(0)
         if watched is self._drag_handle or watched is self._header or (isinstance(watched, QLabel) and self._header.isAncestorOf(watched)):
             if event.type() == event.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                if self._top_mode:
+                    return True
                 self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
                 if watched is self._drag_handle:
                     self._drag_handle.setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -307,10 +493,12 @@ class EParModernConsole(QWidget):
         return """
         QWidget#eparModernConsole { background:#0a0c12; color:#c9d4d8; font-family:'Arial Narrow','Bahnschrift Condensed','Segoe UI'; }
         QFrame#modernPill { background:#121722; border:1px solid #343945; border-radius:10px; }
-        QFrame#modernPill QPushButton#navCap { background:#b8c2ad; color:#2a2b2d; border-radius:0; border-top-left-radius:20px; border-bottom-left-radius:6px; padding:8px; font-weight:800; }
-        QFrame#modernPill QPushButton#opsCap { background:#d8bb78; color:#2a2b2d; border-radius:0; padding:8px; font-weight:800; }
+        QWidget#navHost { background:transparent; }
+        QFrame#modernPill QPushButton#navCap { background:#bac2ad; color:#1f2328; border-radius:0; border-top-left-radius:18px; border-top-right-radius:10px; padding:8px; font-weight:800; }
+        QFrame#modernPill QPushButton#asyncCap { background:#c6e8bf; color:#1f2328; border-radius:0; border-bottom-left-radius:10px; border-bottom-right-radius:10px; font-weight:800; }
+        QFrame#modernPill QPushButton#opsCap { background:#d8bb78; color:#2a2b2d; border-radius:0; border-top-right-radius:8px; border-bottom-right-radius:8px; padding:8px; font-weight:800; }
         QFrame#modernPill QPushButton#navCap:hover { background:#c9d2bf; }
-        QFrame#modernPill QPushButton#asyncCap { background:#b8c2ad; color:#2a2b2d; border-radius:0; border-bottom-left-radius:6px; font-weight:800; }
+        QFrame#modernPill QPushButton#asyncCap:hover { background:#d3efcd; }
         QFrame#modernPill QPushButton#opsCap:hover { background:#e4ca8c; }
         QFrame#modernPill QPushButton#modernRestartButton { background:#e51d20; color:white; border-radius:0; border-top-left-radius:20px; border-right:3px solid #121722; border-bottom:3px solid #121722; padding:0; min-height:39px; max-height:39px; font-family:'Segoe UI Symbol'; font-size:22px; font-weight:400; }
         QFrame#modernPill QPushButton#modernRestartButton:hover { background:#ff3538; }
@@ -327,6 +515,9 @@ class EParModernConsole(QWidget):
         QLabel#dateText { color:#b6a77d; background:transparent; font-size:9px; }
         QLabel#brandText { color:#958861; background:transparent; font-size:10px; font-weight:700; }
         QFrame#modernPill QPushButton { border:none; border-radius:13px; padding:7px 10px; min-height:20px; color:#172028; font-weight:800; }
+        QFrame#modernPill QPushButton#loadCap { border-radius:0; border-top-left-radius:12px; border-bottom-left-radius:12px; background:#86a8b3; }
+        QFrame#modernPill QPushButton#processCap { border-top-left-radius:14px; border-top-right-radius:14px; }
+        QFrame#modernPill QPushButton#dockCap { border-top-left-radius:14px; border-top-right-radius:14px; }
         QFrame#modernPill QPushButton[lcarsRole='blue'] { background:#7898a1; }
         QFrame#modernPill QPushButton[lcarsRole='teal'] { background:#5aa69f; }
         QFrame#modernPill QPushButton[lcarsRole='cyan'] { background:#1692aa; }
@@ -373,6 +564,7 @@ class EParModernConsole(QWidget):
         sidebar.show()
 
     def release_sidebar(self) -> QWidget | None:
+        self.set_top_mode(False)
         self.release_asynchrony()
         item = self._sidebar_layout.takeAt(0)
         sidebar = item.widget() if item is not None else None
@@ -468,15 +660,25 @@ class EParModernConsole(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if self._top_mode:
+            self._top_collapsed = False
+            self._top_tab.hide()
+            self._position_top_console()
         if len(self._raw_preview_frames) > 1:
             self._scale_raw_preview()
             self._raw_preview_timer.start()
 
     def hideEvent(self, event):
+        self._top_slide.stop()
+        if not self._top_collapsed:
+            self._top_tab.hide()
+        self._top_hide_timer.stop()
         self._raw_preview_timer.stop()
         super().hideEvent(event)
 
     def bring_to_front(self) -> None:
+        if self._top_mode:
+            self._expand_top_console()
         if self.isMinimized():
             self.showNormal()
         else:
@@ -503,6 +705,7 @@ class EParModernConsole(QWidget):
         self.move(QPoint(area.left() + 24, area.top() + 24))
 
     def close_for_app(self) -> None:
+        self.set_top_mode(False)
         self.release_asynchrony()
         self.stop_raw_preview()
         self._closing_for_app = True

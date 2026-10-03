@@ -31,6 +31,7 @@ def _window():
         stop_raw_preview=lambda: (setattr(state, "frames", []), setattr(state, "stopped", True)),
         set_status_text=lambda text: setattr(state, "status", text),
         set_results_html=lambda text: setattr(state, "results", text),
+        collapse_for_processing=lambda: state.calls.append("collapse-modern"),
     )
     primary = SimpleNamespace(reconstructed=False, stage="Esfuerzo")
     window = SimpleNamespace(
@@ -83,7 +84,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
-from PyQt6.QtCore import QPoint, QRect, QSettings
+from PyQt6.QtCore import QPoint, QRect, QSettings, QEvent, Qt
+from PyQt6.QtGui import QCursor
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QGridLayout, QLabel, QPushButton, QToolButton, QVBoxLayout, QWidget
 import ui.floating_toolbar as toolbar_module
 from ui.cine_widget import CineWidget
@@ -140,7 +143,96 @@ for name in ('restart_workspace_state', 'load_modern_studies', 'open_modern_proc
 owner.toggle_modern_asynchrony = lambda: console.toggle_asynchrony()
 console = EParModernConsole(owner)
 console.show()
+for size in ((960, 300), (1500, 700)):
+    console.resize(*size)
+    app.processEvents()
+    slot_position = console._controls_slot.mapTo(console._header, QPoint())
+    async_slot_position = console._asynchrony_slot.mapTo(console._header, QPoint())
+    controls_rect = console._controls_btn.geometry()
+    reset_rect = console._restart_btn.geometry()
+    async_rect = console._asynchrony_btn.geometry()
+    load_rect = console._load_btn.geometry()
+    assert controls_rect.bottomRight() == slot_position + QPoint(console._controls_slot.width() - 1, 41)
+    assert controls_rect.size() == console._controls_slot.size()
+    assert reset_rect.bottomRight() == slot_position + QPoint(39, 37)
+    assert reset_rect.width() == reset_rect.height() == 42
+    assert async_rect.y() == async_slot_position.y() + 3
+    assert load_rect.y() - async_rect.bottom() - 1 == 3
 original_layouts = {}
+normal_geometry = console.geometry()
+console._top_mode_btn.click()
+assert console._top_mode and console._top_pin_btn.isEnabled()
+area = console.screen().availableGeometry()
+assert console.y() == area.top()
+assert abs(console.geometry().center().x() - area.center().x()) <= 1
+QCursor.setPos(area.bottomRight() + QPoint(100, 100))
+console._collapse_top_console()
+assert console._top_collapsed and console._top_tab.isVisible() and not console.isVisible()
+assert console._top_tab.height() == 6
+console._top_tab.grab().save(str(folder / 'modern_top_tab.png'))
+app.sendEvent(console._top_tab, QEvent(QEvent.Type.Enter))
+app.sendEvent(console._top_tab, QEvent(QEvent.Type.Leave))
+assert not console._top_open_timer.isActive()
+QTest.qWait(300)
+assert console._top_collapsed
+QCursor.setPos(console._top_tab.geometry().center())
+app.sendEvent(console._top_tab, QEvent(QEvent.Type.Enter))
+assert console._top_open_timer.isActive()
+QTest.qWait(500)
+assert console.isVisible() and not console._top_collapsed and not console._top_tab.isVisible()
+assert console.y() == area.top()
+assert not console._top_mode_btn.icon().isNull() and not console._top_pin_btn.icon().isNull()
+console._top_pin_btn.click()
+console.grab().save(str(folder / 'modern_top_pinned.png'))
+QCursor.setPos(console.geometry().center())
+console.collapse_for_processing()
+assert console._top_collapsed and not console.isVisible()
+assert console._top_pin_btn.isChecked() and console._top_tab.isVisible()
+assert console._top_tab.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+assert console._top_tab.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+processing_window = QWidget()
+processing_window.showMaximized()
+processing_window.raise_()
+processing_window.activateWindow()
+app.processEvents()
+assert console._top_tab.isVisible()
+from PyQt6.QtGui import QGuiApplication
+if QGuiApplication.platformName() == 'windows':
+    import ctypes
+    from ctypes import wintypes
+    get_style = ctypes.windll.user32.GetWindowLongW
+    get_style.argtypes = [wintypes.HWND, ctypes.c_int]
+    get_style.restype = ctypes.c_long
+    assert get_style(int(console._top_tab.winId()), -20) & 0x8
+processing_window.hide()
+console.bring_to_front()
+QTest.qWait(220)
+assert console._top_pin_btn.isChecked() and not console._top_collapsed
+QCursor.setPos(area.bottomRight() + QPoint(100, 100))
+console._collapse_top_console()
+assert console.isVisible() and not console._top_collapsed
+console._top_pin_btn.click()
+dialog = QWidget(console, Qt.WindowType.Dialog)
+dialog.show()
+app.processEvents()
+console._collapse_top_console()
+assert not console._top_collapsed
+dialog.hide()
+console._watch_top_console()
+assert console._top_hide_timer.isActive()
+QTest.qWait(750)
+assert console._top_collapsed
+console.bring_to_front()
+QTest.qWait(220)
+assert console.isVisible() and not console._top_collapsed
+console.showMinimized()
+app.processEvents()
+assert console.isMinimized() and not console._top_tab.isVisible()
+console.showNormal()
+console._top_mode_btn.click()
+assert not console._top_mode and not console._top_watch_timer.isActive()
+assert console.geometry() == normal_geometry
+assert not console._top_tab.isVisible()
 def layout_state(layout):
     if isinstance(layout, QGridLayout):
         return {layout.getItemPosition(index): (layout.itemAt(index).widget(), layout.itemAt(index).layout())
@@ -238,7 +330,18 @@ assert owner.cine.range_slider.values() == (10, 120)
 console._asynchrony_btn.click()
 assert console._asynchrony_panel is not None
 console.release_asynchrony()
+console.set_top_mode(True)
+QCursor.setPos(area.bottomRight() + QPoint(100, 100))
+console._collapse_top_console()
+assert console._top_tab.isVisible()
+console.release_sidebar()
+assert not console._top_mode and not console._top_tab.isVisible()
+assert console.geometry() == normal_geometry
+console.set_top_mode(True)
+console._collapse_top_console()
 console.close_for_app()
+assert not console._top_tab.isVisible()
+assert not console._top_watch_timer.isActive()
 print('Real Qt controls: navigation, ROI routing, stage filtering, per-stage window and legacy restore OK')
 '''
     result = subprocess.run(
@@ -317,7 +420,7 @@ def test_open_processing_keeps_preview_until_reconstruction():
     state.frames = ["preview"]
     window.process_current = lambda: state.calls.append("process")
     window.open_modern_processing()
-    assert state.visible and state.calls == ["process"]
+    assert state.visible and state.calls == ["collapse-modern", "process"]
     assert state.frames == ["preview"]
     assert not window._pending_dual_raw_load
     window._begin_modern_raw_processing()
