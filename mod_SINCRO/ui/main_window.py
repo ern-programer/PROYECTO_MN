@@ -4777,10 +4777,11 @@ class MainWindow(QMainWindow):
 		- Crudo sin reconstruir → proyecciones (A,H,W) como vista giratoria natural.
 		Devuelve None si no hay estudio para esa etapa.
 		"""
-		if stage == "rest":
-			study = self._secondary_cine_crudo_study()
-		else:
-			study = getattr(self, "cine_crudo_raw_study_for_recon", None) or self.study
+		primary = self.study
+		if bool(getattr(primary, "reconstructed", True)):
+			primary = getattr(self, "cine_crudo_raw_study_for_recon", None) or primary
+		primary_stage = "rest" if self._cine_crudo_stage_display(primary) == "Reposo" else "stress"
+		study = primary if stage == primary_stage else self._secondary_cine_crudo_study()
 		if study is None:
 			return None
 		# 1) Volumen reconstruido, si la reconstrucción vigente es de esta etapa.
@@ -8358,6 +8359,7 @@ class MainWindow(QMainWindow):
 		widgets ni preferencias de UI (que en un arranque fresco se recargan de
 		QSettings)."""
 		self._stop_all_session_timers()
+		self._raw_bg_spec = {}
 		self._clear_compare_state()
 		# Sesión dual: limpiar AMBAS etapas (los `= None` legacy de abajo solo
 		# alcanzan la etapa del slot activo vía properties).
@@ -14679,6 +14681,10 @@ class MainWindow(QMainWindow):
 				matrix_txt_sc = ""
 		else:
 			matrix_txt_sc = ""
+		bg_label = self._cine_crudo_stage_display(study_obj)
+		bg_stage = "rest" if bg_label == "Reposo" or (not bg_label and study_obj is self._secondary_cine_crudo_study()) else "stress"
+		if getattr(self, "_raw_bg_spec", {}).get(bg_stage):
+			projections = self._apply_raw_bg_to_recon_cube(projections, bg_stage, for_preview=True)
 		if source == "UngGat":
 			from core.raw_projections import ungate_projections
 			frames_arr = ungate_projections(projections)
@@ -14696,6 +14702,8 @@ class MainWindow(QMainWindow):
 		corrected_frames_arr = None
 		if (compare_on or diff_on) and corrected_projections is not None:
 			corr = np.asarray(corrected_projections, dtype=np.float64)
+			if getattr(self, "_raw_bg_spec", {}).get(bg_stage):
+				corr = self._apply_raw_bg_to_recon_cube(corr, bg_stage, for_preview=True)
 			if source == "UngGat":
 				from core.raw_projections import ungate_projections
 				corrected_frames_arr = ungate_projections(corr)
@@ -17643,20 +17651,21 @@ class MainWindow(QMainWindow):
 
 	# ------------------------------------------------ sustracción de fondo (crudo → cadena)
 	def set_raw_background_subtraction(self, stage: str, projections, spec: dict):
-		"""Registra una sustracción de fondo del crudo para que alimente la reconstrucción.
+		"""Registra el fondo por etapa y actualiza los cines; chain alimenta la recon.
 
-		La invoca la ventana de reconstrucción cuando el impacto elegido es
-		"toda la cadena". ``projections`` es la imagen ungated ya restada (solo para
-		referencia visual); lo que consume la recon es ``spec`` (método, nivel,
-		polígonos), reaplicado sobre el cubo gated con el escalado por gate.
+		``projections`` es referencia visual. El cine y la recon consumen ``spec``
+		(método, nivel, polígonos), con escalado por gate. El impacto visual no
+		altera las proyecciones que alimentan la reconstrucción.
 		"""
 		if not spec:
 			return
 		self._raw_bg_spec[str(stage)] = dict(spec)
+		self._refresh_cine_crudo_view()
+		self._refresh_modern_raw_preview()
 		try:
 			self._log(
-				f"[fondo crudo→cadena] {stage}: modo={spec.get('method')} nivel={float(spec.get('level', 0.0)):.1f}. "
-				"Se aplicará al reconstruir esta etapa."
+				f"[fondo crudo] {stage}: modo={spec.get('method')} nivel={float(spec.get('level', 0.0)):.1f} "
+				f"impacto={spec.get('impact')}."
 			)
 		except Exception:
 			pass
@@ -17669,8 +17678,10 @@ class MainWindow(QMainWindow):
 			self._raw_bg_spec.clear()
 		else:
 			self._raw_bg_spec.pop(str(stage), None)
+		self._refresh_cine_crudo_view()
+		self._refresh_modern_raw_preview()
 
-	def _apply_raw_bg_to_recon_cube(self, projections: np.ndarray, stage: str) -> np.ndarray:
+	def _apply_raw_bg_to_recon_cube(self, projections: np.ndarray, stage: str, *, for_preview: bool = False) -> np.ndarray:
 		"""Aplica la sustracción de fondo registrada al cubo de entrada de la recon.
 
 		El nivel se midió sobre proyecciones ungated (suma de gates); para el cubo
@@ -17678,7 +17689,7 @@ class MainWindow(QMainWindow):
 		modo que la suma sobre gates coincida con lo que se ve en el MIP crudo.
 		"""
 		spec = getattr(self, "_raw_bg_spec", {}).get(str(stage))
-		if not spec or str(spec.get("impact")) != "chain":
+		if not spec or (not for_preview and str(spec.get("impact")) != "chain"):
 			return projections
 		arr = np.asarray(projections, dtype=np.float64)
 		if arr.ndim < 2:

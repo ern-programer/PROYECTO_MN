@@ -10,16 +10,18 @@ opción de método (constante / localizado) e impacto (solo visual / toda la cad
 El motor que realmente alimenta la reconstrucción vive en ``main_window``
 (``_raw_bg_spec`` / ``set_raw_background_subtraction`` / ``_apply_raw_bg_to_recon_cube``);
 aquí solo está la UI de dibujo del ROI + los controles. Es una ventana no modal,
-en vivo/en memoria, con una etapa a la vez (selector Esfuerzo/Reposo).
+en vivo/en memoria, con Esfuerzo y Reposo lado a lado.
 """
 from __future__ import annotations
 
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
+from ui.epar_dialog import EParDialog
+from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPixmap, QPen, QPolygonF
 from PyQt6.QtWidgets import (
 	QComboBox,
-	QDialog,
+	QCheckBox,
+	QDoubleSpinBox,
 	QHBoxLayout,
 	QLabel,
 	QPushButton,
@@ -65,8 +67,31 @@ def _colormap(name: str = "odyssey_cool"):
 	return None
 
 
+class ImpactSwitch(QCheckBox):
+	def __init__(self, parent=None):
+		super().__init__(parent)
+		self.setFixedSize(46, 28)
+		self.setCursor(Qt.CursorShape.PointingHandCursor)
+		self.setAccessibleName("Impacto de sustracción de fondo")
+		self.setToolTip("Desactivado: solo visual. Activado: toda la cadena.")
+
+	def hitButton(self, position):
+		return self.rect().contains(position)
+
+	def paintEvent(self, event):
+		painter = QPainter(self)
+		painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+		painter.setOpacity(1.0 if self.isEnabled() else 0.4)
+		painter.setPen(Qt.PenStyle.NoPen)
+		painter.setBrush(QColor("#56bca6" if self.isChecked() else "#66727c"))
+		painter.drawRoundedRect(QRectF(1, 4, 44, 20), 10, 10)
+		painter.setBrush(QColor("#ffffff"))
+		painter.drawEllipse(QRectF(26 if self.isChecked() else 4, 6, 16, 16))
+
+
 class MipView(QWidget):
 	"""Cine de proyecciones crudas en vivo (QLabel + QImage) con dibujo de ROI."""
+	roiChanged = pyqtSignal()
 
 	def __init__(self, parent=None):
 		super().__init__(parent)
@@ -126,6 +151,12 @@ class MipView(QWidget):
 		self._draft_polygon = []
 		self._render_current()
 
+	def set_polygons(self, background, heart):
+		self._bg_polygon = list(background)
+		self._heart_polygon = list(heart)
+		self._draft_polygon = []
+		self._render_current()
+
 	def background_polygon(self) -> list[tuple[float, float]]:
 		return list(self._bg_polygon)
 
@@ -175,6 +206,7 @@ class MipView(QWidget):
 		self._draft_polygon = []
 		self._draw_mode = None
 		self._render_current()
+		self.roiChanged.emit()
 
 	def set_source(self, kind: str, array: np.ndarray, status: str = ""):
 		"""kind='proj' (proyecciones crudas (A,H,W)); otros kinds no dibujan ROI."""
@@ -197,6 +229,11 @@ class MipView(QWidget):
 		else:
 			self._image_label.setText("Sin datos para MIP")
 		self._status_label.setText(status)
+		self._render_current()
+
+	def set_display_max(self, maximum: float):
+		self._disp_max = max(float(maximum), 1e-9)
+		self._rgba_cache = [None] * len(self._frames)
 		self._render_current()
 
 	def clear(self, message: str = "Sin estudio"):
@@ -301,15 +338,13 @@ class MipView(QWidget):
 		self._render_current()
 
 
-class BackgroundSubtractionWindow(QDialog):
-	"""Ventana no modal para la sustracción de fondo manual (ROI) sobre el crudo."""
+class BackgroundSubtractionPanel(QWidget):
+	previewChanged = pyqtSignal()
 
-	def __init__(self, main_window):
-		super().__init__(main_window)
+	def __init__(self, main_window, stage: str, label: str, parent=None):
+		super().__init__(parent)
 		self._main = main_window
-		self.setWindowTitle("Sustracción de fondo (ROI) · crudo")
-		self.setModal(False)
-		self.resize(560, 700)
+		self._stage = stage
 		# Base cruda y spec por etapa (para poder alternar etapas sin perder estado).
 		self._bg_base: dict[str, np.ndarray | None] = {"stress": None, "rest": None}
 		self._bg_spec: dict[str, dict | None] = {"stress": None, "rest": None}
@@ -319,24 +354,12 @@ class BackgroundSubtractionWindow(QDialog):
 		root.setContentsMargins(8, 8, 8, 8)
 		root.setSpacing(6)
 
-		header = QLabel(
-			"Sustracción de fondo manual sobre el crudo (proyecciones que rotan). Dibujá la zona "
-			"SIN corazón para medir el piso de cuentas; opcionalmente el corazón para el modo localizado. "
-			"Clic en la imagen para pausar/reanudar la rotación. Hacela ANTES de reconstruir."
-		)
-		header.setWordWrap(True)
-		header.setStyleSheet("color:#94a3b8;")
+		header = QLabel(label)
+		header.setStyleSheet("font-size:16px; font-weight:600; color:" + ("#ff9a5a" if stage == "stress" else "#5ad1ff") + ";")
 		root.addWidget(header)
 
-		stage_row = QHBoxLayout()
-		stage_row.setSpacing(4)
-		stage_row.addWidget(QLabel("Etapa:"))
-		self.stage_combo = QComboBox()
-		self.stage_combo.currentIndexChanged.connect(self._on_stage_changed)
-		stage_row.addWidget(self.stage_combo, 1)
-		root.addLayout(stage_row)
-
 		self.mip = MipView(self)
+		self.mip.roiChanged.connect(self._bg_preview)
 		root.addWidget(self.mip, 1)
 
 		method_row = QHBoxLayout()
@@ -346,29 +369,39 @@ class BackgroundSubtractionWindow(QDialog):
 		self.bg_method_combo.addItem("Constante (ROI fondo)", "constant")
 		self.bg_method_combo.addItem("Localizado (corazón + fondo)", "localized")
 		self.bg_method_combo.currentIndexChanged.connect(lambda *_: self._refresh_bg_widgets())
+		self.bg_method_combo.currentIndexChanged.connect(self._bg_preview)
 		method_row.addWidget(self.bg_method_combo, 1)
 		root.addLayout(method_row)
 
 		impact_row = QHBoxLayout()
 		impact_row.setSpacing(4)
-		impact_row.addWidget(QLabel("Impacto:"))
-		self.bg_impact_combo = QComboBox()
-		self.bg_impact_combo.addItem("Solo visual", "visual")
-		self.bg_impact_combo.addItem("Toda la cadena", "chain")
-		self.bg_impact_combo.setToolTip(
-			"Solo visual: aclara el MIP crudo, no cambia lo que se reconstruye.\n"
-			"Toda la cadena: la resta alimenta la reconstrucción de esta etapa."
-		)
-		impact_row.addWidget(self.bg_impact_combo, 1)
+		impact_row.addWidget(QLabel("Solo visual"))
+		self.bg_impact_switch = ImpactSwitch(self)
+		self.bg_impact_switch.toggled.connect(self._bg_preview)
+		impact_row.addWidget(self.bg_impact_switch)
+		impact_row.addWidget(QLabel("Toda la cadena"))
+		impact_row.addStretch(1)
 		root.addLayout(impact_row)
+
+		amount_row = QHBoxLayout()
+		amount_row.addWidget(QLabel("Sustracción:"))
+		self.bg_amount_spin = QDoubleSpinBox()
+		self.bg_amount_spin.setRange(0.0, 200.0)
+		self.bg_amount_spin.setValue(100.0)
+		self.bg_amount_spin.setSingleStep(5.0)
+		self.bg_amount_spin.setSuffix(" %")
+		self.bg_amount_spin.setToolTip("Porcentaje del nivel medido en la ROI de fondo")
+		self.bg_amount_spin.valueChanged.connect(self._bg_preview)
+		amount_row.addWidget(self.bg_amount_spin, 1)
+		root.addLayout(amount_row)
 
 		roi_row = QHBoxLayout()
 		roi_row.setSpacing(4)
 		self.bg_roi_btn = QPushButton("ROI fondo")
-		self.bg_roi_btn.setToolTip("Dibujá el polígono de fondo (zona SIN corazón). Clic derecho para cerrar.")
+		self.bg_roi_btn.setToolTip("Activa la resta constante: dibujá el fondo (zona SIN corazón). Clic derecho para cerrar.")
 		self.bg_roi_btn.clicked.connect(lambda: self._bg_draw("background"))
 		self.heart_roi_btn = QPushButton("ROI corazón")
-		self.heart_roi_btn.setToolTip("Solo en modo localizado: marcá el corazón. La resta se limita a esa zona.")
+		self.heart_roi_btn.setToolTip("Activa el modo localizado: marcá el corazón. La resta se limita a esa zona.")
 		self.heart_roi_btn.clicked.connect(lambda: self._bg_draw("heart"))
 		roi_row.addWidget(self.bg_roi_btn)
 		roi_row.addWidget(self.heart_roi_btn)
@@ -377,6 +410,7 @@ class BackgroundSubtractionWindow(QDialog):
 		action_row = QHBoxLayout()
 		action_row.setSpacing(4)
 		self.bg_apply_btn = QPushButton("Aplicar")
+		self.bg_apply_btn.setObjectName("backgroundApply")
 		self.bg_apply_btn.clicked.connect(self._bg_apply)
 		self.bg_clear_btn = QPushButton("Limpiar")
 		self.bg_clear_btn.clicked.connect(self._bg_clear)
@@ -389,45 +423,14 @@ class BackgroundSubtractionWindow(QDialog):
 		self.bg_status_label.setStyleSheet("color:#94a3b8; font-size:10px;")
 		root.addWidget(self.bg_status_label)
 
-		bottom = QHBoxLayout()
-		self.refresh_btn = QPushButton("↻ Actualizar")
-		self.refresh_btn.clicked.connect(self.refresh)
-		bottom.addWidget(self.refresh_btn)
-		bottom.addStretch(1)
-		self.close_btn = QPushButton("Cerrar")
-		self.close_btn.clicked.connect(self.close)
-		bottom.addWidget(self.close_btn)
-		root.addLayout(bottom)
-
 	# ------------------------------------------------------------------ etapas
-	def _available_stages(self) -> list[tuple[str, str]]:
-		out: list[tuple[str, str]] = []
-		for stage, label in (("stress", "Esfuerzo"), ("rest", "Reposo")):
-			if self._main._prep_mip_source_for_stage(stage) is not None:
-				out.append((stage, label))
-		return out
-
 	def _current_stage(self) -> str | None:
-		data = self.stage_combo.currentData()
-		return str(data) if data else None
-
-	def _on_stage_changed(self, *_a):
-		self.mip.clear_polygons()
-		self._load_stage_mip()
+		return self._stage
 
 	def refresh(self):
-		"""Reconstruye el selector de etapas y recarga el MIP de la etapa activa."""
-		stages = self._available_stages()
-		cur = self._current_stage()
-		self.stage_combo.blockSignals(True)
-		self.stage_combo.clear()
-		for stage, label in stages:
-			self.stage_combo.addItem(label, stage)
-		if cur:
-			idx = self.stage_combo.findData(cur)
-			if idx >= 0:
-				self.stage_combo.setCurrentIndex(idx)
-		self.stage_combo.blockSignals(False)
+		self._bg_base[self._stage] = None
+		self._bg_spec[self._stage] = dict(getattr(self._main, "_raw_bg_spec", {}).get(self._stage, {})) or None
+		self.mip.clear_polygons()
 		self._load_stage_mip()
 
 	def _load_stage_mip(self):
@@ -451,25 +454,46 @@ class BackgroundSubtractionWindow(QDialog):
 			return
 		self._proj_status[stage] = status
 		base = self._bg_base.get(stage)
+		if base is None:
+			base = np.asarray(arr, dtype=np.float64).copy()
+			self._bg_base[stage] = base
 		self.mip.set_source("proj", base if base is not None else arr, status)
 		self._set_controls_enabled(True)
 		self._refresh_bg_widgets()
+		spec = self._bg_spec.get(stage)
+		if spec:
+			for combo, key in ((self.bg_method_combo, "method"),):
+				combo.blockSignals(True)
+				combo.setCurrentIndex(combo.findData(spec[key]))
+				combo.blockSignals(False)
+			self.bg_impact_switch.blockSignals(True)
+			self.bg_impact_switch.setChecked(spec.get("impact") == "chain")
+			self.bg_impact_switch.blockSignals(False)
+			self.bg_amount_spin.blockSignals(True)
+			self.bg_amount_spin.setValue(float(spec.get("amount_pct", 100.0)))
+			self.bg_amount_spin.blockSignals(False)
+			self.mip.set_polygons(spec.get("bg_polygon", []), spec.get("heart_polygon", []))
+			self._bg_preview()
+			self.set_bg_status("Fondo aplicado restaurado.")
+		self._refresh_bg_widgets()
+		self.previewChanged.emit()
 
 	# ------------------------------------------------------------- UI helpers
 	def _set_controls_enabled(self, enabled: bool):
-		for w in (self.bg_method_combo, self.bg_impact_combo, self.bg_roi_btn, self.bg_apply_btn, self.bg_clear_btn):
+		for w in (self.bg_method_combo, self.bg_impact_switch, self.bg_amount_spin, self.bg_roi_btn, self.bg_apply_btn, self.bg_clear_btn):
 			w.setEnabled(enabled)
 		self._refresh_bg_widgets()
 
 	def _refresh_bg_widgets(self):
-		localized = self._bg_method() == "localized"
-		self.heart_roi_btn.setEnabled(localized and self.mip.kind() == "proj")
+		enabled = self.mip.kind() == "proj"
+		self.bg_roi_btn.setEnabled(enabled)
+		self.heart_roi_btn.setEnabled(enabled)
 
 	def _bg_method(self) -> str:
 		return str(self.bg_method_combo.currentData() or "constant")
 
 	def _bg_impact(self) -> str:
-		return str(self.bg_impact_combo.currentData() or "visual")
+		return "chain" if self.bg_impact_switch.isChecked() else "visual"
 
 	def set_bg_status(self, text: str):
 		self.bg_status_label.setText(text or "")
@@ -479,6 +503,9 @@ class BackgroundSubtractionWindow(QDialog):
 		if self.mip.kind() != "proj":
 			self.set_bg_status("El fondo se dibuja sobre el crudo (proyecciones que rotan).")
 			return
+		method = "localized" if mode == "heart" else "constant"
+		self.bg_method_combo.setCurrentIndex(self.bg_method_combo.findData(method))
+		self._refresh_bg_widgets()
 		self.mip.set_draw_mode(mode)
 		etiqueta = "fondo (zona SIN corazón)" if mode == "background" else "corazón"
 		self.set_bg_status(f"Marcá la ROI de {etiqueta}. Clic para agregar vértices, clic derecho para cerrar.")
@@ -490,7 +517,6 @@ class BackgroundSubtractionWindow(QDialog):
 			base = self._bg_base.get(stage)
 			if base is not None:
 				self.mip.set_source("proj", base, self._proj_status.get(stage, ""))
-			self._bg_base[stage] = None
 			self._bg_spec[stage] = None
 			if hasattr(self._main, "clear_raw_background_subtraction"):
 				try:
@@ -498,8 +524,9 @@ class BackgroundSubtractionWindow(QDialog):
 				except Exception:
 					pass
 		self.set_bg_status("Fondo limpiado.")
+		self.previewChanged.emit()
 
-	def _bg_apply(self):
+	def _bg_preview(self, *_args):
 		from core.raw_background import (
 			measure_background_level,
 			polygon_mask,
@@ -528,7 +555,8 @@ class BackgroundSubtractionWindow(QDialog):
 		h, w = int(base.shape[-2]), int(base.shape[-1])
 		bg_mask = polygon_mask((h, w), bg_poly)
 		mean_img = base.mean(axis=0)
-		level = measure_background_level(mean_img, bg_mask, stat="median")
+		amount_pct = float(self.bg_amount_spin.value())
+		level = measure_background_level(mean_img, bg_mask, stat="median") * amount_pct / 100.0
 		method = self._bg_method()
 		if method == "localized":
 			heart_poly = mip.heart_polygon()
@@ -552,11 +580,85 @@ class BackgroundSubtractionWindow(QDialog):
 			"bg_polygon": list(bg_poly),
 			"heart_polygon": list(mip.heart_polygon()),
 			"shape": (h, w),
+			"amount_pct": amount_pct,
 		}
-		if impact == "chain" and hasattr(self._main, "set_raw_background_subtraction"):
-			try:
-				self._main.set_raw_background_subtraction(stage, subtracted, self._bg_spec[stage])
-				msg += " · alimentará la reconstrucción"
-			except Exception as exc:  # pragma: no cover - defensivo
-				msg += f" · [chain error: {exc}]"
-		self.set_bg_status(msg)
+		self.set_bg_status(msg + " · sin aplicar")
+		self.previewChanged.emit()
+		return True
+
+	def _bg_apply(self):
+		if not self._bg_preview():
+			return False
+		stage = self._current_stage()
+		try:
+			self._main.set_raw_background_subtraction(stage, self.mip.frames_stack(), self._bg_spec[stage])
+		except Exception as exc:
+			self.set_bg_status(f"No se pudo aplicar el fondo: {exc}")
+			return False
+		self.set_bg_status("Aplicado al cine y a la reconstrucción." if self._bg_impact() == "chain" else "Aplicado al cine (solo visual).")
+		return True
+
+
+class BackgroundSubtractionWindow(EParDialog):
+	def __init__(self, main_window):
+		super().__init__(main_window, title="FONDO · ROI", accent="#589d8a",
+			settings=getattr(main_window, "_ui_settings", None), geometry_key="dialogs/background_roi/geometry")
+		self._main = main_window
+		self.setObjectName("backgroundRoiDialog")
+		self.apply_compact_style()
+		self.setStyleSheet(self.styleSheet() + """
+		QDialog#backgroundRoiDialog QPushButton#backgroundApply { background:#90e277; color:#172028; font-weight:600; }
+		QDialog#backgroundRoiDialog QPushButton#backgroundApply:hover { background:#a5ed90; }
+		""")
+		self.setModal(False)
+		self.resize(1040, 700)
+		self.setMinimumSize(760, 580)
+		root = self.content_layout
+		self.common_scale_check = QCheckBox("Escala común")
+		self.common_scale_check.setChecked(True)
+		self.common_scale_check.setToolTip("Misma escala de cuentas para esfuerzo y reposo")
+		self.common_scale_check.toggled.connect(self._sync_display_scale)
+		root.addWidget(self.common_scale_check)
+		columns = QHBoxLayout()
+		self._panels = {}
+		for stage, label in (("stress", "Esfuerzo"), ("rest", "Reposo")):
+			panel = BackgroundSubtractionPanel(main_window, stage, label, self)
+			panel.previewChanged.connect(self._sync_display_scale)
+			self._panels[stage] = panel
+			columns.addWidget(panel, 1)
+		root.addLayout(columns, 1)
+		bottom = QHBoxLayout()
+		self.refresh_btn = QPushButton("Restaurar aplicado")
+		self.refresh_btn.clicked.connect(self.refresh)
+		bottom.addWidget(self.refresh_btn)
+		bottom.addStretch(1)
+		self.apply_close_btn = QPushButton("Aplicar y cerrar")
+		self.apply_close_btn.setObjectName("backgroundApply")
+		self.apply_close_btn.clicked.connect(self._apply_and_close)
+		bottom.addWidget(self.apply_close_btn)
+		self.close_btn = QPushButton("Cerrar")
+		self.close_btn.clicked.connect(self.close)
+		bottom.addWidget(self.close_btn)
+		root.addLayout(bottom)
+
+	def refresh(self):
+		for panel in self._panels.values():
+			panel.refresh()
+		self._sync_display_scale()
+
+	def _sync_display_scale(self, *_args):
+		maxima = {}
+		for stage, panel in self._panels.items():
+			base = panel._bg_base.get(stage)
+			if base is not None and base.size:
+				finite = base[np.isfinite(base)]
+				maxima[stage] = max(float(np.percentile(finite, 99.5)) if finite.size else 0.0, 1e-9)
+		for stage, maximum in maxima.items():
+			self._panels[stage].mip.set_display_max(max(maxima.values()) if self.common_scale_check.isChecked() else maximum)
+
+	def _apply_and_close(self):
+		for panel in self._panels.values():
+			if panel.mip.kind() == "proj" and (panel.mip.background_polygon() or panel.mip.heart_polygon()):
+				if not panel._bg_apply():
+					return
+		self.close()
