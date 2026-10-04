@@ -1452,8 +1452,17 @@ def test_empty_session_refresh_clears_modern_clinical_readouts(with_cards):
     assert len(deleted) == (2 if with_cards else 0)
 
 
-def test_restart_clears_floating_cine_and_reenables_next_load():
+@pytest.mark.parametrize("mode", ["modern", "plus", ""])
+@pytest.mark.parametrize("main_visible", [False, True])
+def test_restart_clears_floating_cine_and_reenables_next_load(mode, main_visible):
     window, state = _window()
+    window._active_detached_console = mode
+    state.visible = main_visible
+    def bring_modern_front():
+        assert not state.visible
+        assert window.study is None
+        state.calls.append("modern-front")
+    window._epar_modern_console.bring_to_front = bring_modern_front
     state.frames = ["previous-preview"]
     state.results = "PSD: 99 / BW: 180 - previous patient"
     state.cubes = ["primary", "secondary"]
@@ -1503,3 +1512,5 @@ def test_restart_clears_floating_cine_and_reenables_next_load():
     assert state.cubes == [None, None]
     assert state.patient == "Sin estudio cargado."
     assert state.results == "Sin resultados: procesá el estudio."
+    assert state.visible == (False if mode == "modern" else main_visible)
+    assert ("modern-front" in state.calls) == (mode == "modern")

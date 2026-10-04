@@ -8559,6 +8559,9 @@ class MainWindow(QMainWindow):
 		self._log("RESTART: sesión limpia, lista para cargar estudios nuevos.")
 		self._last_primary_path = ""
 		self.statusBar().showMessage("Sesión reiniciada")
+		if getattr(self, "_active_detached_console", "") == "modern" and self._epar_modern_console is not None:
+			self.hide()
+			self._epar_modern_console.bring_to_front()
 
 	def _hash_payload(self, payload: dict) -> str:
 		blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
