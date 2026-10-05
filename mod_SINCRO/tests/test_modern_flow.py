@@ -24,6 +24,619 @@ def _bind(window, name, **globals_dict):
     setattr(window, name, MethodType(namespace[name], window))
 
 
+def test_montage_selection_does_not_write_png_or_gif():
+    calls = []
+    pix = SimpleNamespace(save=lambda *args: calls.append("save"))
+    window = SimpleNamespace(
+        _montage_gray_cache={"rows_meta": [{"selection_key": "REPOSO:SA", "selected": False}]},
+        cine_crudo_selected_stripes={"REPOSO:SA"}, _montage_panel_px=512,
+        _montage_pix_from_gray=lambda cmap: pix, preview_labels={},
+        output_dir="unused", _montage_cine_frames=[pix, pix],
+    )
+    _bind(window, "_recolor_montage_from_cache")
+    _bind(window, "_refresh_montage_selection_overlay")
+    window._refresh_montage_selection_overlay()
+    assert window._montage_gray_cache["rows_meta"][0]["selected"]
+    assert calls == []
+
+
+@pytest.mark.parametrize("zoom, ratio, expected", [(0.2, 1, 160), (0.2, 2, 320), (0.5, 1, 384), (1, 1, 512), (2, 2, 512)])
+def test_montage_render_resolution_tracks_visible_pixels(zoom, ratio, expected):
+    import numpy as np
+    window = SimpleNamespace(preview_zoom={"comparacion_ejes": zoom}, preview_labels={"comparacion_ejes": SimpleNamespace(devicePixelRatioF=lambda: ratio)})
+    _bind(window, "_montage_display_panel_px", np=np)
+    assert window._montage_display_panel_px() == expected
+
+
+def test_montage_settle_reuses_render_at_visible_resolution():
+    calls = []
+    window = SimpleNamespace(
+        cine_crudo_preview_mode="sa_montage", _montage_gray_cache={"geom": (160,)},
+        _montage_last_signature="current", _montage_signature=lambda: "current",
+        _montage_display_panel_px=lambda: 160, preview_labels={"comparacion_ejes": object()},
+        _apply_preview_zoom=lambda name: calls.append("smooth-display"),
+        _show_cine_crudo_sa_montage=lambda **kwargs: calls.append("rebuild"),
+    )
+    _bind(window, "_render_montage_hq")
+    window._render_montage_hq()
+    assert calls == ["smooth-display"] and window._montage_panel_px == 160
+
+
+def test_montage_overlay_reuses_color_pixmap_without_lut_or_files():
+    calls = []
+    base = SimpleNamespace(copy=lambda: calls.append("copy") or object())
+    window = SimpleNamespace(
+        _montage_gray_cache={"base_pixmap": base}, preview_labels={}, _montage_panel_px=512,
+        _paint_montage_overlays=lambda *args: calls.append("overlay"),
+        _montage_pix_from_gray=lambda *args: pytest.fail("selection recomputed LUT"),
+    )
+    _bind(window, "_recolor_montage_from_cache")
+    window._recolor_montage_from_cache("cool", persist=False, overlays_only=True)
+    assert calls == ["copy", "overlay"]
+
+
+@pytest.mark.parametrize("move_plane", [False, True])
+def test_montage_triangulation_updates_only_changed_planes(move_plane):
+    import numpy as np
+    from core.cardiac_reorientation import anatomical_cuts_gated, triangulation_views
+    calls = []
+    class Pixmap:
+        def __init__(self, pixels):
+            self.pixels = pixels
+        def copy(self):
+            return Pixmap(self.pixels.copy())
+    class Image:
+        Format = SimpleNamespace(Format_RGB888=1)
+        def __init__(self, buffer, width, height, stride, format):
+            self.pixels = np.frombuffer(buffer, dtype=np.uint8).reshape(height, width, 3).copy()
+    class Painter:
+        def __init__(self, pixmap):
+            self.pixmap = pixmap
+        def drawImage(self, left, top, image):
+            calls.append((left, top))
+            height, width = image.pixels.shape[:2]
+            self.pixmap.pixels[top:top + height, left:left + width] = image.pixels
+        def end(self):
+            pass
+    volumes = {key.upper(): value[0] / 315 for key, value in anatomical_cuts_gated(np.arange(315).reshape(1, 5, 7, 9)).items()}
+    stages = {stage: volumes for stage in ("ESFUERZO", "REPOSO")}
+    metadata = []
+    for column, (stage, stage_volumes) in enumerate(stages.items()):
+        for row, (axis, view) in enumerate(triangulation_views(stage_volumes, [0.5] * 3).items()):
+            metadata.append({"stage": stage, "axis": axis, "index": view["index"], "cross": view["cross"],
+                             "image_geom": (120 + column * 60, row * 60, 50, 50)})
+    gray = np.full((180, 240), 12, dtype=np.uint8)
+    original = gray.copy()
+    pixels = np.repeat(gray[..., None], 3, axis=2)
+    point = [0.25, 0.5, 0.5] if move_plane else [0.5, 0.52, 0.5]
+    lut = np.repeat(np.arange(256, dtype=np.uint8)[:, None], 3, axis=1)
+    window = SimpleNamespace(
+        _montage_gray_cache={"geom": (160,), "image_signature": "current", "gate": None,
+                            "tri_views": metadata, "gray": gray, "base_pixmap": Pixmap(pixels)},
+        _montage_panel_px=160, _montage_signature=lambda **kwargs: "current",
+        _montage_tri_volumes=stages, _montage_tri_points={stage: point for stage in stages},
+        _montage_tri_stage="REPOSO", _montage_cmap_lut=lambda *args: calls.append("LUT") or lut,
+        _refresh_montage_selection_overlay=lambda: calls.append("overlay"),
+    )
+    _bind(window, "_update_montage_triangulation_from_cache", np=np, QImage=Image, QPainter=Painter)
+    assert window._update_montage_triangulation_from_cache()
+    np.testing.assert_array_equal(gray[:, :120], original[:, :120])
+    np.testing.assert_array_equal(window._montage_gray_cache["base_pixmap"].pixels[:, :120], pixels[:, :120])
+    assert calls == (["LUT", (120, 0), (180, 0), "overlay"] if move_plane else ["overlay"])
+    for view in metadata:
+        expected = triangulation_views(volumes, point)[view["axis"]]
+        assert view["index"] == expected["index"] and view["cross"] == expected["cross"]
+    if move_plane:
+        assert np.any(gray[:50, 120:170] != original[:50, 120:170])
+        np.testing.assert_array_equal(gray[60:, :], original[60:, :])
+        np.testing.assert_array_equal(window._montage_gray_cache["base_pixmap"].pixels[:50, 120:170, 0], gray[:50, 120:170])
+
+
+@pytest.mark.parametrize("reason", ["window", "resolution", "gate"])
+def test_montage_partial_update_invalidates_changed_image_state(reason):
+    window = SimpleNamespace(
+        _montage_gray_cache={"tri_views": [object()], "base_pixmap": object(), "geom": (160,), "image_signature": "current", "gate": None},
+        _montage_panel_px=128 if reason == "resolution" else 160,
+        _montage_signature=lambda **kwargs: "new" if reason == "window" else "current",
+        cine_crudo_montage_source="gated" if reason == "gate" else "ungated",
+        cine_crudo_montage_cine_playing=reason == "gate",
+    )
+    _bind(window, "_update_montage_triangulation_from_cache")
+    assert not window._update_montage_triangulation_from_cache()
+
+
+def test_montage_return_to_tab_prefers_live_image_to_stale_png():
+    calls = []
+    window = SimpleNamespace(
+        cine_crudo_preview_mode="sa_montage", preview_labels={"comparacion_ejes": object()},
+        preview_pixmaps={"comparacion_ejes": object()}, _apply_preview_zoom=lambda name: calls.append(name),
+    )
+    _bind(window, "_load_compare_axes_preview")
+    window._load_compare_axes_preview()
+    assert calls == ["comparacion_ejes"]
+
+
+def test_montage_png_export_renders_latest_state_in_hq(tmp_path):
+    calls = []
+    source = tmp_path / "sa_montage.png"
+    target = tmp_path / "export.png"
+    source.write_bytes(b"previous-state")
+    window = SimpleNamespace(
+        cine_crudo_axes_for_export=True, cine_crudo_preview_mode="sa_montage", output_dir=str(tmp_path),
+        _montage_panel_px=160, _dialog_parent=lambda: None, _log=lambda message: None,
+    )
+    def render(**kwargs):
+        assert window._montage_panel_px == 512 and window._montage_cine_frames_sig is None
+        assert kwargs == {"navigate": False, "persist": True}
+        source.write_bytes(b"current-state-hq")
+        calls.append("render")
+    window._show_cine_crudo_sa_montage = render
+    _bind(window, "_export_cine_crudo_montage_png",
+          QFileDialog=SimpleNamespace(getSaveFileName=lambda *args: (str(target), "")),
+          QMessageBox=SimpleNamespace(information=lambda *args: None, warning=lambda *args: pytest.fail(str(args))))
+    window._export_cine_crudo_montage_png()
+    assert target.read_bytes() == b"current-state-hq" and calls == ["render"]
+
+
+def test_montage_pdf_report_materializes_current_hq_image():
+    method = METHODS["_generate_pdf_report"]
+    stop = next(index for index, statement in enumerate(method.body) if isinstance(statement, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "pdf_path" for target in statement.targets))
+    selected = ast.parse("def prepare_report(self):\n    pass").body[0]
+    assert isinstance(selected, ast.FunctionDef)
+    selected.body = method.body[:stop]
+    namespace = {}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[selected], type_ignores=[])), "<report-preparation>", "exec"), namespace)
+    calls = []
+    window = SimpleNamespace(study=object(), seg=object(), cine_crudo_preview_mode="sa_montage", cine_crudo_axes_for_export=True,
+                             _show_cine_crudo_sa_montage=lambda **kwargs: calls.append(kwargs))
+    namespace["prepare_report"](window)
+    assert window._montage_panel_px == 512
+    assert calls == [{"navigate": False, "persist": True}]
+
+
+def test_montage_signature_separates_cursor_from_actual_image_changes():
+    window = SimpleNamespace(cine_crudo_axes_for_export={}, cine_crudo_axes_for_export_ungated={"SA": object()})
+    _bind(window, "_montage_signature")
+    initial = window._montage_signature(include_navigation=False)
+    window._montage_tri_points = {"ESFUERZO": [0.2, 0.3, 0.4]}
+    window._montage_tri_focus = "HLA"
+    window.cine_crudo_selected_stripes = {"REPOSO:SA"}
+    assert window._montage_signature(include_navigation=False) == initial
+    window.cine_crudo_axes_for_export_ungated = {"SA": object()}
+    assert window._montage_signature(include_navigation=False) != initial
+    initial = window._montage_signature(include_navigation=False)
+    window.cine_crudo_montage_lin_high = 0.5
+    assert window._montage_signature(include_navigation=False) != initial
+
+
+def test_montage_direct_lut_keeps_masked_background_and_clean_overlay_base():
+    import numpy as np
+    class Image:
+        Format = SimpleNamespace(Format_RGB888=1)
+        def __init__(self, buffer, width, height, stride, format):
+            self.pixels = np.frombuffer(buffer, dtype=np.uint8).reshape(height, width, 3).copy()
+    class Pixmap:
+        def __init__(self, pixels):
+            self.pixels = pixels
+        @staticmethod
+        def fromImage(image):
+            return Pixmap(image.pixels)
+        def copy(self):
+            return Pixmap(self.pixels.copy())
+    gray = np.array([[0, 12, 40], [80, 120, 255]], dtype=np.uint8)
+    mask = np.array([[False, True, True], [True, False, True]])
+    lut = np.repeat(np.arange(256, dtype=np.uint8)[:, None], 3, axis=1)
+    lut[0] = [12, 24, 36]
+    expected = np.zeros((2, 3, 3), dtype=np.uint8)
+    expected[mask] = lut[gray[mask]]
+    window = SimpleNamespace(_montage_gray_cache={"gray": gray, "mask": mask}, _montage_cmap_lut=lambda name: lut,
+                             _paint_montage_overlays=lambda pix, cache: pix.pixels.__setitem__((0, 0), [255, 0, 0]))
+    _bind(window, "_montage_pix_from_gray", np=np, QImage=Image, QPixmap=Pixmap)
+    pix = window._montage_pix_from_gray("cool")
+    np.testing.assert_array_equal(window._montage_gray_cache["base_pixmap"].pixels, expected)
+    assert list(pix.pixels[0, 0]) == [255, 0, 0]
+    assert list(window._montage_gray_cache["base_pixmap"].pixels[0, 0]) == [0, 0, 0]
+
+
+@pytest.mark.parametrize("panel", [128, 160, 256, 512])
+@pytest.mark.parametrize("zoom", [0.2, 0.5, 1.0])
+def test_montage_cached_hq_cine_preserves_zoom_after_interactive_render(panel, zoom):
+    class Size:
+        def __init__(self, width, height):
+            self._width, self._height = width, height
+        def width(self):
+            return self._width
+        def height(self):
+            return self._height
+    frames = [SimpleNamespace(size=lambda: Size(7200, 3600), width=lambda: 7200, height=lambda: 3600) for _ in range(8)]
+    displayed = []
+    window = SimpleNamespace(
+        _montage_panel_px=panel, _montage_cine_frames=frames,
+        preview_labels={"comparacion_ejes": object()}, preview_pixmaps={}, preview_base_sizes={},
+        preview_zoom={"comparacion_ejes": zoom}, _select_tab_by_title=lambda name: None,
+    )
+    def display(name, fast=False):
+        base = window.preview_base_sizes[name]
+        displayed.append((round(base.width() * window.preview_zoom[name]), round(base.height() * window.preview_zoom[name])))
+    window._apply_preview_zoom = display
+    _bind(window, "_montage_display_base_size", QSize=Size)
+    _bind(window, "_blit_montage_cine_frame")
+    for index in range(8):
+        window.cine_crudo_montage_cine_frame = index
+        window._blit_montage_cine_frame()
+        assert window.preview_pixmaps["comparacion_ejes"] is frames[index]
+    assert displayed == [(round(7200 * zoom), round(3600 * zoom))] * 8
+    assert window.preview_zoom["comparacion_ejes"] == zoom
+    assert window._montage_panel_px == panel
+
+
+@pytest.mark.parametrize("source_stage", ["ESFUERZO", "REPOSO"])
+@pytest.mark.parametrize("offset", [0, 1])
+def test_linked_triangulation_points_preserve_corresponding_planes(source_stage, offset):
+    import numpy as np
+    from core.cardiac_reorientation import linked_triangulation_points, triangulation_views
+    volumes = {
+        "ESFUERZO": {axis: np.zeros((5, 5, 5)) for axis in ("SA", "VLA", "HLA")},
+        "REPOSO": {axis: np.zeros((9, 9, 9)) for axis in ("SA", "VLA", "HLA")},
+    }
+    point = [0.5 + offset / 8] * 3 if source_stage == "REPOSO" else [0.5] * 3
+    linked = linked_triangulation_points(volumes, source_stage, point, {axis: offset for axis in ("SA", "VLA", "HLA")})
+    assert linked["ESFUERZO"] == [0.5] * 3
+    assert linked["REPOSO"] == [0.5 + offset / 8] * 3
+    for view in triangulation_views(volumes["ESFUERZO"], linked["ESFUERZO"]).values():
+        assert view["index"] == 2
+    for view in triangulation_views(volumes["REPOSO"], linked["REPOSO"]).values():
+        assert view["index"] == 4 + offset
+
+
+def test_triangulation_points_match_anatomical_slices():
+    import numpy as np
+    from core.cardiac_reorientation import anatomical_cuts_gated, triangulation_views, triangulation_point
+    cube = np.zeros((1, 5, 7, 9))
+    cube[0, 1, 4, 6] = 99.0
+    axes = {key.upper(): value[0] for key, value in anatomical_cuts_gated(cube).items()}
+    point = [1 / 4, 4 / 6, 6 / 8]
+    views = triangulation_views(axes, point)
+    for axis, view in views.items():
+        image = view["image"]
+        horizontal, vertical = view["cross"]
+        assert image[round(vertical * (image.shape[0] - 1)), round(horizontal * (image.shape[1] - 1))] == 99.0
+        np.testing.assert_allclose(triangulation_point(axis, horizontal, vertical, point), point)
+
+
+@pytest.mark.parametrize("axis, dimension", [("SA", 0), ("VLA", 2), ("HLA", 1)])
+@pytest.mark.parametrize("step", [-1, 1, -100, 100])
+def test_triangulation_wheel_clamps_without_moving_strips(axis, dimension, step):
+    import numpy as np
+    calls = []
+    window = SimpleNamespace(
+        _montage_tri_focus=axis, _montage_tri_stage="REPOSO",
+        _montage_tri_volumes={"REPOSO": {axis: np.zeros((5, 7, 9))}},
+        _montage_tri_points={"REPOSO": [0.5, 0.5, 0.5], "ESFUERZO": [0.2, 0.3, 0.4]},
+        cine_crudo_stripe_start_by_stage={"REPOSO": {"SA": 3}},
+        _schedule_montage_refresh=lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    _bind(window, "_set_montage_triangulation_point")
+    _bind(window, "_navigate_montage_triangulation", np=np)
+    assert window._navigate_montage_triangulation(step)
+    expected = [0.5, 0.5, 0.5]
+    expected[dimension] = float(np.clip(2 - step, 0, 4)) / 4
+    assert window._montage_tri_points["REPOSO"] == expected
+    assert window._montage_tri_points["ESFUERZO"] == [0.2, 0.3, 0.4]
+    assert window.cine_crudo_stripe_start_by_stage == {"REPOSO": {"SA": 3}}
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("zoom", [0.25, 1.0, 2.0])
+def test_triangulation_hit_test_uses_scaled_letterbox_geometry(zoom):
+    view = {"axis": "HLA", "box": (800, 300, 200, 200), "image_geom": (800, 350, 200, 100)}
+    label = SimpleNamespace(width=lambda: 1100 * zoom, height=lambda: 700 * zoom)
+    window = SimpleNamespace(_montage_gray_cache={"geom": (150, 4, 16, 100, 40, 154, 170, 1, 1100, 700), "tri_views": [view]}, preview_labels={})
+    _bind(window, "_montage_triangulation_at_event")
+    event = SimpleNamespace(pos=lambda: SimpleNamespace(x=lambda: 900 * zoom, y=lambda: 400 * zoom))
+    assert window._montage_triangulation_at_event(event, label) == (view, 900.0, 400.0)
+    event.pos = lambda: SimpleNamespace(x=lambda: 400 * zoom, y=lambda: 400 * zoom)
+    assert window._montage_triangulation_at_event(event, label) is None
+
+
+def test_montage_fast_timer_coalesces_without_starving_updates():
+    calls = []
+    active = [False]
+    def start(interval):
+        calls.append(("render", interval))
+        active[0] = True
+    window = SimpleNamespace(
+        cine_crudo_preview_mode="sa_montage",
+        _montage_display_panel_px=lambda: 512,
+        _montage_refresh_timer=SimpleNamespace(start=start, isActive=lambda: active[0]),
+        _montage_hq_timer=SimpleNamespace(start=lambda interval: calls.append(("hq", interval)), stop=lambda: calls.append("stop")),
+    )
+    _bind(window, "_schedule_montage_refresh")
+    for _ in range(20):
+        window._schedule_montage_refresh(8, fast=True)
+    assert calls.count(("render", 16)) == 1
+    assert calls.count(("hq", 400)) == 20
+    window._schedule_montage_refresh(0)
+    assert window._montage_panel_px == 512
+    assert calls[-2:] == ["stop", ("render", 0)]
+
+
+@pytest.mark.parametrize("dual", [False, True])
+def test_montage_compositor_reuses_resized_tiles_and_fits_triangulation(monkeypatch, dual):
+    import numpy as np
+    from PIL import Image
+    calls = []
+    original = Image.Image.resize
+    def resize(image, *args, **kwargs):
+        calls.append(image.size)
+        return original(image, *args, **kwargs)
+    monkeypatch.setattr(Image.Image, "resize", resize)
+    image = np.ones((7, 9)) * 0.7
+    views = {axis: {"image": image, "index": 2, "cross": (0.25, 0.75), "cache_key": axis} for axis in ("SA", "VLA", "HLA")}
+    rows = [{"tag": "", "prefix": "SA", "selected": True, "used_cols": 1,
+             "panels": [{"col": 0, "img": image, "cache_key": "cut"}]}] * 3
+    window = SimpleNamespace(_montage_panel_px=192, _montage_tri_views=views)
+    if dual:
+        rows *= 2
+        rest = {axis: {**view, "image": image + 0.1, "cache_key": ("REPOSO", axis)} for axis, view in views.items()}
+        window._montage_tri_views_by_stage = {"ESFUERZO": views, "REPOSO": rest}
+    window._montage_pix_from_gray = lambda cmap: window._montage_gray_cache["gray"]
+    _bind(window, "_composite_montage_pixmap", np=np)
+    first = window._composite_montage_pixmap(rows, 1, "cool", "Patient").copy()
+    assert len(calls) == (7 if dual else 4)
+    second = window._composite_montage_pixmap(rows, 1, "cool", "Patient")
+    assert len(calls) == (7 if dual else 4)
+    np.testing.assert_array_equal(first, second)
+    metadata = window._montage_gray_cache["tri_views"]
+    assert len(metadata) == (6 if dual else 3)
+    if dual:
+        for stress_view, rest_view in zip(metadata[:3], metadata[3:]):
+            assert stress_view["stage"] == "ESFUERZO" and rest_view["stage"] == "REPOSO"
+            assert stress_view["axis"] == rest_view["axis"]
+            assert stress_view["box"][0] + stress_view["box"][2] < rest_view["box"][0]
+            assert stress_view["box"][1:] == rest_view["box"][1:]
+    for view in window._montage_gray_cache["tri_views"]:
+        left, top, width, height = view["image_geom"]
+        assert left + width <= second.shape[1] and top + height <= second.shape[0]
+        assert second[top:top + height, left:left + width].min() > 0
+    window._montage_panel_px = 512
+    window._composite_montage_pixmap(rows, 1, "cool", "Patient")
+    assert len(calls) == (19 if dual else 10)
+
+
+@pytest.mark.parametrize("stage", ["ESFUERZO", "REPOSO"])
+@pytest.mark.parametrize("axis, dimension", [("SA", 0), ("HLA", 1), ("VLA", 2)])
+def test_dual_triangulation_wheel_updates_both_stages(stage, axis, dimension):
+    import numpy as np
+    calls = []
+    window = SimpleNamespace(
+        _montage_tri_focus=axis, _montage_tri_stage=stage,
+        _montage_tri_volumes={phase: {name: np.zeros((9, 9, 9)) for name in ("SA", "HLA", "VLA")} for phase in ("ESFUERZO", "REPOSO")},
+        _montage_tri_points={"ESFUERZO": [0.5] * 3, "REPOSO": [0.625] * 3},
+        cine_crudo_rest_offset={"SA": 1, "HLA": 1, "VLA": 1},
+        cine_crudo_stripe_start_by_stage={"ESFUERZO": {"SA": 2}, "REPOSO": {"SA": 3}},
+        _schedule_montage_refresh=lambda *args, **kwargs: calls.append("render"),
+    )
+    _bind(window, "_set_montage_triangulation_point")
+    _bind(window, "_navigate_montage_triangulation", np=np)
+    assert window._navigate_montage_triangulation(1)
+    expected = [0.5] * 3
+    expected[dimension] = 0.375
+    assert window._montage_tri_points["ESFUERZO"] == expected
+    np.testing.assert_allclose(window._montage_tri_points["REPOSO"], np.asarray(expected) + 0.125)
+    assert window.cine_crudo_stripe_start_by_stage == {"ESFUERZO": {"SA": 2}, "REPOSO": {"SA": 3}}
+    assert calls == ["render"]
+
+
+@pytest.mark.parametrize("stage", ["ESFUERZO", "REPOSO"])
+@pytest.mark.parametrize("axis", ["SA", "VLA", "HLA"])
+def test_dual_triangulation_click_selects_phase_and_links_point(stage, axis):
+    import numpy as np
+    from core.cardiac_reorientation import triangulation_point
+    calls = []
+    view = {"axis": axis, "stage": stage, "image_geom": (400, 200, 100, 100)}
+    qt = SimpleNamespace(MouseButton=SimpleNamespace(MiddleButton=2, LeftButton=1), KeyboardModifier=SimpleNamespace(AltModifier=4, ControlModifier=1))
+    window = SimpleNamespace(
+        cine_crudo_preview_mode="sa_montage", _montage_tri_stage="ESFUERZO",
+        _montage_tri_points={"ESFUERZO": [0.5] * 3, "REPOSO": [0.5] * 3},
+        _montage_tri_volumes={phase: {name: np.zeros((5, 7, 9)) for name in ("SA", "HLA", "VLA")} for phase in ("ESFUERZO", "REPOSO")},
+        _montage_triangulation_at_event=lambda *args, **kwargs: (view, 425, 260),
+        _schedule_montage_refresh=lambda *args, **kwargs: calls.append("render"),
+        _log=lambda message: pytest.fail(message),
+    )
+    event = SimpleNamespace(button=lambda: 1, modifiers=lambda: 0, accept=lambda: calls.append("accepted"))
+    _bind(window, "_set_montage_triangulation_point")
+    _bind(window, "_on_cine_crudo_mouse_press_safe", np=np, Qt=qt)
+    window._on_cine_crudo_mouse_press_safe(event)
+    expected = triangulation_point(axis, 25 / 99, 60 / 99, [0.5] * 3)
+    assert window._montage_tri_stage == stage and window._montage_tri_focus == axis
+    assert window._montage_tri_points == {"ESFUERZO": expected, "REPOSO": expected}
+    assert calls == ["render", "accepted"]
+
+
+def test_triangulation_handles_isotropic_long_axis_stacks():
+    import numpy as np
+    from scipy.ndimage import zoom
+    from core.cardiac_reorientation import anatomical_cuts_gated, triangulation_views
+    cube = np.zeros((1, 5, 7, 9))
+    cube[0, 1, 4, 6] = 1.0
+    original = anatomical_cuts_gated(cube)
+    isotropic = anatomical_cuts_gated(zoom(cube, (1, 13 / 5, 1, 1), order=1))
+    axes = {"SA": original["sa"][0], "VLA": isotropic["vla"][0], "HLA": isotropic["hla"][0]}
+    for view in triangulation_views(axes, [1 / 4, 4 / 6, 6 / 8]).values():
+        image = view["image"]
+        horizontal, vertical = view["cross"]
+        assert image[round(vertical * (image.shape[0] - 1)), round(horizontal * (image.shape[1] - 1))] == 1.0
+
+
+@pytest.mark.parametrize("selection", [None, set(), {"ESFUERZO:VLA"}])
+def test_montage_normalization_reused_for_strips_but_invalidated_by_window(monkeypatch, selection):
+    import numpy as np
+    from core.cardiac_reorientation import anatomical_cuts_gated
+    axes = {key.upper(): value for key, value in anatomical_cuts_gated(np.arange(315).reshape(1, 5, 7, 9)).items()}
+    calls = []
+    percentiles = []
+    original = np.percentile
+    def percentile(*args, **kwargs):
+        percentiles.append(args[1])
+        return original(*args, **kwargs)
+    monkeypatch.setattr(np, "percentile", percentile)
+    window = SimpleNamespace(
+        cine_crudo_montage_source="ungated", cine_crudo_montage_crop_mode="limits",
+        cine_crudo_rest_offset={"SA": 0, "VLA": 0, "HLA": 0},
+        cine_crudo_stripe_start_by_stage={"ESFUERZO": {"SA": 1, "VLA": 1, "HLA": 1}}, MONTAGE_LAYOUTS={"denso": {"per_strip": 3}},
+        _montage_axes_for_source=lambda: (axes, {}), _cine_crudo_cut_thickness_px=lambda: 1,
+        _patient_banner_text=lambda **kwargs: "Patient", _montage_signature=lambda: (),
+        _composite_montage_pixmap=lambda rows, *args, **kwargs: calls.append(rows) or object(),
+        _last_cine_crudo_preview_mode="sa_montage", _montage_panel_px=256,
+        preview_labels={}, _log=lambda message: None,
+    )
+    if selection is not None:
+        window.cine_crudo_selected_stripes = selection
+    def fail(*args):
+        pytest.fail(str(args))
+    _bind(window, "_set_montage_triangulation_point")
+    _bind(window, "_show_cine_crudo_sa_montage", np=np, QMessageBox=SimpleNamespace(information=fail, warning=fail))
+    window._show_cine_crudo_sa_montage(navigate=False)
+    assert len(percentiles) == 6
+    volumes = dict(window._montage_tri_volumes["ESFUERZO"])
+    window.cine_crudo_stripe_start_by_stage["ESFUERZO"]["SA"] = 2
+    window._show_cine_crudo_sa_montage(navigate=False)
+    assert len(percentiles) == 6
+    expected_selected = {"ESFUERZO:SA"} if selection is None else selection
+    assert {row["selection_key"] for row in calls[0] if row["selected"]} == expected_selected
+    assert {row["selection_key"] for row in calls[1] if row["selected"]} == expected_selected
+    assert all(window._montage_tri_volumes["ESFUERZO"][axis] is volume for axis, volume in volumes.items())
+    assert len(calls) == 2 and calls[0][0]["idxs"] != calls[1][0]["idxs"]
+    window.cine_crudo_montage_win_high = 95.0
+    window._show_cine_crudo_sa_montage(navigate=False)
+    assert len(percentiles) == 12
+    assert all(window._montage_tri_volumes["ESFUERZO"][axis] is not volume for axis, volume in volumes.items())
+
+
+@pytest.mark.parametrize("selected, ctrl, expected", [
+    ({"REPOSO:SA"}, True, set()),
+    ({"REPOSO:SA", "ESFUERZO:SA"}, True, {"ESFUERZO:SA"}),
+    (set(), True, {"REPOSO:SA"}),
+    ({"ESFUERZO:SA"}, True, {"ESFUERZO:SA", "REPOSO:SA"}),
+    ({"ESFUERZO:SA"}, False, {"REPOSO:SA"}),
+])
+def test_montage_strip_click_can_deselect_last_strip(selected, ctrl, expected):
+    rows = [
+        {"selection_key": "REPOSO:SA", "prefix": "SA", "tag": "REPOSO", "selected": "REPOSO:SA" in selected},
+        {"selection_key": "ESFUERZO:SA", "prefix": "SA", "tag": "ESFUERZO", "selected": "ESFUERZO:SA" in selected},
+    ]
+    refreshes = []
+    messages = []
+    qt = SimpleNamespace(MouseButton=SimpleNamespace(MiddleButton=2, LeftButton=1), KeyboardModifier=SimpleNamespace(AltModifier=4, ControlModifier=1))
+    window = SimpleNamespace(
+        cine_crudo_preview_mode="sa_montage", cine_crudo_selected_stripes=set(selected),
+        _montage_gray_cache={"rows_meta": rows},
+        _montage_triangulation_at_event=lambda *args, **kwargs: None,
+        _montage_selection_key_at_event=lambda *args, **kwargs: "REPOSO:SA",
+        _recolor_montage_from_cache=lambda *args, **kwargs: refreshes.append(kwargs),
+        _schedule_montage_refresh=lambda *args, **kwargs: None,
+        cine_crudo_axes_for_export_rest={}, _log=messages.append,
+        statusBar=lambda: SimpleNamespace(showMessage=lambda *args: None),
+    )
+    event = SimpleNamespace(button=lambda: 1, modifiers=lambda: int(ctrl),
+                            pos=lambda: SimpleNamespace(x=lambda: 100), accept=lambda: None)
+    _bind(window, "_refresh_montage_selection_overlay")
+    _bind(window, "_on_cine_crudo_mouse_press_safe", Qt=qt)
+    window._on_cine_crudo_mouse_press_safe(event)
+    assert window.cine_crudo_selected_stripes == expected
+    assert {row["selection_key"] for row in rows if row["selected"]} == expected
+    assert refreshes == [{"persist": False, "overlays_only": True}]
+    assert not any("[WARN]" in message for message in messages)
+
+
+@pytest.mark.parametrize("focused", [True, False])
+def test_montage_wheel_routes_to_selected_view_or_strips(focused):
+    import numpy as np
+    calls = []
+    qt = SimpleNamespace(KeyboardModifier=SimpleNamespace(ControlModifier=1, NoModifier=0))
+    window = SimpleNamespace(
+        cine_crudo_preview_mode="sa_montage", _montage_tri_focus="SA" if focused else None,
+        _montage_tri_stage="REPOSO", _montage_tri_volumes={"REPOSO": {"SA": np.zeros((5, 7, 9))}},
+        _montage_tri_points={"REPOSO": [0.5, 0.5, 0.5]},
+        cine_crudo_selected_stripes={"REPOSO:SA"}, cine_crudo_stripe_start_by_stage={"REPOSO": {"SA": 5}},
+        _schedule_montage_refresh=lambda *args, **kwargs: calls.append("render"),
+        _log=lambda message: pytest.fail(message),
+    )
+    event = SimpleNamespace(modifiers=lambda: 0, angleDelta=lambda: SimpleNamespace(y=lambda: 120), accept=lambda: calls.append("accepted"))
+    _bind(window, "_set_montage_triangulation_point")
+    _bind(window, "_navigate_montage_triangulation", np=np)
+    _bind(window, "_on_cine_crudo_mouse_wheel_safe", np=np, Qt=qt)
+    window._on_cine_crudo_mouse_wheel_safe(event)
+    assert window._montage_tri_points["REPOSO"][0] == (0.25 if focused else 0.5)
+    assert window.cine_crudo_stripe_start_by_stage["REPOSO"]["SA"] == (5 if focused else 4)
+    assert calls == ["render", "accepted"]
+
+
+@pytest.mark.parametrize("axis", ["SA", "VLA", "HLA"])
+def test_triangulation_click_routes_before_strip_selection(axis):
+    import numpy as np
+    from core.cardiac_reorientation import triangulation_point
+    calls = []
+    view = {"axis": axis, "image_geom": (400, 200, 100, 100)}
+    qt = SimpleNamespace(MouseButton=SimpleNamespace(MiddleButton=2, LeftButton=1), KeyboardModifier=SimpleNamespace(AltModifier=4, ControlModifier=1))
+    window = SimpleNamespace(
+        cine_crudo_preview_mode="sa_montage", _montage_tri_stage="REPOSO",
+        _montage_tri_points={"REPOSO": [0.5, 0.5, 0.5]},
+        _montage_triangulation_at_event=lambda *args, **kwargs: (view, 425, 260),
+        _schedule_montage_refresh=lambda *args, **kwargs: calls.append("render"),
+        _montage_drag_axis="SA", _montage_drag_mode=None, _montage_drag_start_x=0,
+        _log=lambda message: pytest.fail(message),
+    )
+    event = SimpleNamespace(button=lambda: 1, modifiers=lambda: 0, accept=lambda: calls.append("accepted"))
+    _bind(window, "_set_montage_triangulation_point")
+    _bind(window, "_on_cine_crudo_mouse_press_safe", np=np, Qt=qt)
+    window._on_cine_crudo_mouse_press_safe(event)
+    assert window._montage_tri_focus == axis and window._montage_drag_axis is None
+    assert window._montage_tri_points["REPOSO"] == triangulation_point(axis, 25 / 99, 60 / 99, [0.5, 0.5, 0.5])
+    assert calls == ["render", "accepted"]
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_montage_cine_uses_updated_geometry_instead_of_old_frames(cached):
+    calls = []
+    window = SimpleNamespace(
+        cine_crudo_montage_cine_playing=True, cine_crudo_montage_cine_frame=0,
+        _montage_cine_frames=[object(), object()], _montage_cine_frames_sig="new" if cached else "old",
+        _montage_cine_signature=lambda: "new", _blit_montage_cine_frame=lambda: calls.append("blit"),
+        _show_cine_crudo_sa_montage=lambda **kwargs: calls.append("render"),
+        _montage_display_panel_px=lambda: 160,
+    )
+    _bind(window, "_advance_montage_cine_frame")
+    window._advance_montage_cine_frame()
+    assert calls == ["blit" if cached else "render"]
+    assert window.cine_crudo_montage_cine_frame == 1
+
+
+def test_montage_cine_timer_does_not_reenter_during_preload():
+    window = SimpleNamespace(_montage_cine_preloading=True)
+    _bind(window, "_advance_montage_cine_frame")
+    window._advance_montage_cine_frame()
+
+
+def test_triangulation_double_click_recenters_without_resetting_strips():
+    calls = []
+    window = SimpleNamespace(
+        cine_crudo_preview_mode="sa_montage", _montage_tri_stage="REPOSO",
+        _montage_tri_points={"REPOSO": [0.1, 0.2, 0.3]},
+        _montage_triangulation_at_event=lambda *args, **kwargs: ({"axis": "VLA"}, 0, 0),
+        _schedule_montage_refresh=lambda *args, **kwargs: calls.append("render"),
+        cine_crudo_stripe_start_by_stage={"REPOSO": {"VLA": 4}},
+    )
+    _bind(window, "_set_montage_triangulation_point")
+    _bind(window, "_on_cine_crudo_mouse_double_click_safe")
+    window._on_cine_crudo_mouse_double_click_safe(SimpleNamespace(accept=lambda: calls.append("accepted")))
+    assert window._montage_tri_focus == "VLA"
+    assert window._montage_tri_points["REPOSO"] == [0.5, 0.5, 0.5]
+    assert window.cine_crudo_stripe_start_by_stage == {"REPOSO": {"VLA": 4}}
+    assert calls == ["render", "accepted"]
+
+
 @pytest.mark.parametrize("mode, minimized", [("modern", False), ("plus", False), ("", True), ("", False)])
 def test_second_launch_recovers_active_ui_without_creating_or_docking(mode, minimized):
     source = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))

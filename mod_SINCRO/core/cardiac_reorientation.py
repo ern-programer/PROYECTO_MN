@@ -613,6 +613,56 @@ def sa_stack(reo: np.ndarray) -> np.ndarray:
     return np.stack([sa_slice(reo, k) for k in range(reo.shape[0])], axis=0)
 
 
+def triangulation_views(volumes: dict, point=None) -> dict:
+    """Oriented 3D SA/VLA/HLA slices at a shared normalized (k, j, i) point.
+
+    Endpoint-normalized coordinates also cover the isotropic long-axis stacks
+    generated from the same cropped SA volume.
+    """
+    position = np.clip(np.asarray(point if point is not None else (0.5, 0.5, 0.5), dtype=float), 0.0, 1.0)
+    output = {}
+    for axis, dimension, cross in (("SA", 0, (2, 1)), ("VLA", 2, (0, 1)), ("HLA", 1, (2, 0))):
+        volume = np.asarray(volumes[axis])
+        if volume.ndim != 3 or any(size == 0 for size in volume.shape):
+            raise ValueError("Triangulation requires nonempty SA/VLA/HLA volumes")
+        index = int(round(float(position[dimension]) * (volume.shape[0] - 1)))
+        horizontal, vertical = float(position[cross[0]]), float(position[cross[1]])
+        if axis == "HLA":
+            vertical = 1.0 - vertical
+        output[axis] = {"image": volume[index], "index": index, "cross": (horizontal, vertical), "dimension": dimension}
+    return output
+
+
+def triangulation_point(axis: str, horizontal: float, vertical: float, point=None):
+    """Update the two in-plane coordinates, keeping the selected plane fixed."""
+    position = np.clip(np.asarray(point if point is not None else (0.5, 0.5, 0.5), dtype=float), 0.0, 1.0).copy()
+    if axis == "SA":
+        position[2], position[1] = horizontal, vertical
+    elif axis == "VLA":
+        position[0], position[1] = horizontal, vertical
+    elif axis == "HLA":
+        position[2], position[0] = horizontal, 1.0 - vertical
+    else:
+        raise ValueError("Unknown triangulation axis")
+    return np.clip(position, 0.0, 1.0).tolist()
+
+
+def linked_triangulation_points(volumes_by_stage: dict, source_stage: str, point, rest_offsets=None) -> dict:
+    """Link relative coordinates using the existing manual rest slice offsets."""
+    position = np.clip(np.asarray(point, dtype=float), 0.0, 1.0)
+    shift = np.zeros(3, dtype=float)
+    if "ESFUERZO" in volumes_by_stage and "REPOSO" in volumes_by_stage:
+        rest = volumes_by_stage["REPOSO"]
+        offsets = rest_offsets or {}
+        for axis, dimension in (("SA", 0), ("HLA", 1), ("VLA", 2)):
+            shift[dimension] = float(offsets.get(axis, 0)) / max(1, rest[axis].shape[0] - 1)
+    shared = np.clip(position - (shift if source_stage == "REPOSO" else 0.0), 0.0, 1.0)
+    return {
+        stage: np.clip(shared + (shift if stage == "REPOSO" else 0.0), 0.0, 1.0).tolist()
+        for stage in volumes_by_stage
+    }
+
+
 def anatomical_cuts_gated(reo_gated: np.ndarray) -> dict:
     """Devuelve pilas SA/HLA/VLA gated con la convención Xeleris/Odyssey.
 

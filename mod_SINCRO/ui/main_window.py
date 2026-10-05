@@ -518,9 +518,8 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_focused_stripe: str = "ESFUERZO:SA"
 		self._montage_refresh_timer = QTimer(self)
 		self._montage_refresh_timer.setSingleShot(True)
-		self._montage_refresh_timer.timeout.connect(self._show_cine_crudo_sa_montage)
-		# Fast-pass: durante la interacción se rinde a baja resolución (ágil) y al
-		# soltar se re-rinde en HQ 512px (nítido). panel px efectivo del lienzo.
+		self._montage_refresh_timer.timeout.connect(self._render_montage_interactive)
+		# Resolución de pantalla adaptativa; exportación e informes usan 512px.
 		self._montage_panel_px: int = 512
 		self._montage_hq_timer = QTimer(self)
 		self._montage_hq_timer.setSingleShot(True)
@@ -8482,6 +8481,15 @@ class MainWindow(QMainWindow):
 		self._montage_focus_selection_key = "ESFUERZO:SA"
 		self.cine_crudo_focused_stripe = "ESFUERZO:SA"
 		self._montage_render_meta = {}
+		self._montage_tri_points = {}
+		self._montage_tri_stage = "ESFUERZO"
+		self._montage_tri_focus = None
+		self._montage_tri_views = {}
+		self._montage_tri_views_by_stage = {}
+		self._montage_tri_volumes = {}
+		self._montage_volume_cache = {}
+		self._montage_cut_cache = {}
+		self._montage_tile_cache = {}
 		self.cine_crudo_selected_stripe = "SA"
 		self.cine_crudo_selected_stripes = {"ESFUERZO:SA"}
 		self.cine_crudo_focused_stripe = "ESFUERZO:SA"
@@ -13588,6 +13596,9 @@ class MainWindow(QMainWindow):
 		# Si hay un montaje generado, se muestra; si no, la tab queda vacía.
 		name = "comparacion_ejes"
 		label = self.preview_labels[name]
+		if str(getattr(self, "cine_crudo_preview_mode", "")) == "sa_montage" and self.preview_pixmaps.get(name) is not None:
+			self._apply_preview_zoom(name)
+			return
 		montage_png = os.path.join(self.output_dir, "sa_montage.png")
 		if str(getattr(self, "cine_crudo_preview_mode", "")) == "sa_montage" and os.path.isfile(montage_png):
 			pix = QPixmap(montage_png)
@@ -13798,6 +13809,10 @@ class MainWindow(QMainWindow):
 		# informe debe salir igual con los datos e imágenes de perfusión obtenidos.
 		if self.study is None or self.seg is None:
 			return
+		if getattr(self, "cine_crudo_preview_mode", None) == "sa_montage" and getattr(self, "cine_crudo_axes_for_export", None):
+			self._montage_panel_px = 512
+			self._montage_cine_frames_sig = None
+			self._show_cine_crudo_sa_montage(navigate=False, persist=True)
 		pdf_path = os.path.join(self.output_dir, "informe_sincro.pdf")
 		params = {
 			"threshold": float(self.threshold_spin.value()),
@@ -14026,6 +14041,9 @@ class MainWindow(QMainWindow):
 	def _set_preview_zoom(self, name: str, value: float):
 		self.preview_zoom[name] = max(0.20, min(5.00, float(value)))
 		self._apply_preview_zoom(name)
+		if name == "comparacion_ejes" and getattr(self, "cine_crudo_preview_mode", None) == "sa_montage":
+			if hasattr(self, "_montage_hq_timer"):
+				self._montage_hq_timer.start(400)
 
 	def _build_polar_screen_color_column(self) -> QWidget:
 		"""Columna de color pegada al preview del mapa polar de perfusión: solo cmap
@@ -19820,6 +19838,14 @@ class MainWindow(QMainWindow):
 		cell_h = TITLE_H + PANEL + PAD
 		W = LEFT + cols * cell_w + PAD
 		H = TOP + rows * cell_h + PAD
+		tri_views = getattr(self, "_montage_tri_views", {}) or {}
+		tri_groups = getattr(self, "_montage_tri_views_by_stage", {}) or {}
+		if not tri_groups and tri_views:
+			tri_groups = {getattr(self, "_montage_tri_stage", "ESFUERZO"): tri_views}
+		tri_size = max(PANEL, int((H - TOP - PAD) / 3) - TITLE_H - PAD)
+		tri_left = W + PAD
+		if tri_groups:
+			W = tri_left + len(tri_groups) * (tri_size + PAD)
 		gray = np.zeros((H, W), dtype=np.uint8)
 		mask = np.zeros((H, W), dtype=bool)
 
@@ -19877,26 +19903,32 @@ class MainWindow(QMainWindow):
 							rayitas.append((int(x_pos), oy, int(x_pos), oy + nh))
 					row["_rayitas"] = rayitas
 
+		def _tile(image, side, key=None):
+			cache = getattr(self, "_montage_tile_cache", {})
+			cache_key = (key, side, str(getattr(self, "cine_crudo_montage_interp", "Bilineal")), montage_smooth)
+			if key is not None and PANEL < 512 and cache_key in cache:
+				return cache[cache_key]
+			image = np.clip(np.asarray(image, dtype=np.float32), 0.0, 1.0)
+			if _gauss is not None:
+				image = np.clip(_gauss(image, sigma=montage_smooth), 0.0, 1.0)
+			scale = min(side / image.shape[1], side / image.shape[0])
+			width, height = max(1, round(image.shape[1] * scale)), max(1, round(image.shape[0] * scale))
+			resized = np.asarray(Image.fromarray(image, mode="F").resize((width, height), resample))
+			result = (np.clip(resized * 255, 0, 255).astype(np.uint8), width, height)
+			if key is not None and PANEL < 512:
+				if len(cache) >= 128:
+					cache.pop(next(iter(cache)))
+				cache[cache_key] = result
+				self._montage_tile_cache = cache
+			return result
+
 		panel_boxes = []
 		for r, row in enumerate(rows_data):
 			for p in row["panels"]:
 				c = int(p["col"])
 				if c >= cols:
 					continue
-				img = np.clip(np.asarray(p["img"], dtype=np.float32), 0.0, 1.0)
-				if _gauss is not None:
-					img = np.clip(_gauss(img, sigma=montage_smooth), 0.0, 1.0).astype(np.float32)
-				ih, iw = int(img.shape[0]), int(img.shape[1])
-				# Preservar relación de aspecto (evita VLA/HLA estirados); letterbox negro centrado.
-				scale = min(PANEL / max(1, iw), PANEL / max(1, ih))
-				nw = max(1, int(round(iw * scale)))
-				nh = max(1, int(round(ih * scale)))
-				try:
-					# Interpolar en float (mode 'F') evita bandas de cuantización.
-					rimg = np.asarray(Image.fromarray(img, mode="F").resize((nw, nh), resample))
-				except Exception:
-					rimg = img[:nh, :nw]
-				idx8 = np.clip(np.asarray(rimg) * 255.0, 0.0, 255.0).astype(np.uint8)
+				idx8, nw, nh = _tile(p["img"], PANEL, p.get("cache_key"))
 				y0 = TOP + r * cell_h + TITLE_H
 				x0 = LEFT + c * cell_w
 				oy = y0 + (PANEL - nh) // 2
@@ -19912,13 +19944,28 @@ class MainWindow(QMainWindow):
 				"selection_key": row.get("selection_key", f"{row['tag'] or 'ESFUERZO'}:{row['prefix']}"),
 				"selected": bool(row["selected"]),
 				"used_cols": int(row["used_cols"]),
+				"idxs": list(row.get("idxs", [])),
 				"_ref_geom": row.get("_ref_geom"),
 				"_rayitas": row.get("_rayitas"),
 			}
 			for row in rows_data
 		]
+		tri_meta = []
+		for column, (stage, views) in enumerate(tri_groups.items()):
+			column_left = tri_left + column * (tri_size + PAD)
+			for index, (axis, view) in enumerate(views.items()):
+				idx8, width, height = _tile(view["image"], tri_size, view.get("cache_key"))
+				top = TOP + index * (tri_size + TITLE_H + PAD) + TITLE_H
+				left = column_left + (tri_size - width) // 2
+				image_top = top + (tri_size - height) // 2
+				gray[image_top:image_top + height, left:left + width] = idx8
+				mask[image_top:image_top + height, left:left + width] = True
+				tri_meta.append({"axis": axis, "stage": stage, "index": view["index"], "box": (column_left, top, tri_size, tri_size),
+					"image_geom": (left, image_top, width, height), "cross": view["cross"]})
 		self._montage_gray_cache = {
 			"gray": gray, "mask": mask, "panel_boxes": panel_boxes, "rows_meta": rows_meta,
+			"tri_views": tri_meta,
+			"tri_stage": getattr(self, "_montage_tri_stage", "ESFUERZO"),
 			"geom": (PANEL, PAD, TITLE_H, LEFT, TOP, cell_w, cell_h, f, W, H, REF_W),
 			"suptitle": str(suptitle),
 		}
@@ -19934,11 +19981,12 @@ class MainWindow(QMainWindow):
 		gray = cache["gray"]
 		mask = cache["mask"]
 		H, W = gray.shape
-		rgb = np.zeros((H, W, 3), dtype=np.uint8)
-		rgb[mask] = lut[gray[mask]]
+		rgb = lut[gray]
+		rgb[~mask] = 0
 		buf = rgb.tobytes()
 		qimg = QImage(buf, W, H, 3 * W, QImage.Format.Format_RGB888)
 		pix = QPixmap.fromImage(qimg)
+		cache["base_pixmap"] = pix.copy()
 		self._paint_montage_overlays(pix, cache)
 		return pix
 
@@ -19956,7 +20004,7 @@ class MainWindow(QMainWindow):
 		for row in cache.get("rows_meta", []):
 			key = str(row.get("selection_key", f"{row.get('tag') or 'ESFUERZO'}:{row.get('prefix', 'SA')}"))
 			row["selected"] = key in selected
-		self._recolor_montage_from_cache(str(getattr(self, "cine_crudo_montage_cmap", "odyssey_cool")))
+		self._recolor_montage_from_cache(str(getattr(self, "cine_crudo_montage_cmap", "odyssey_cool")), persist=False, overlays_only=True)
 
 	def _paint_montage_overlays(self, pix, cache):
 		"""Título, rótulos de eje rotados, recuadro de tira activa, títulos de panel
@@ -19999,6 +20047,14 @@ class MainWindow(QMainWindow):
 			if row["selected"]:
 				painter.setPen(QPen(QColor("#ff4040"), max(1, round(f))))
 				painter.drawRect(QRect(LEFT - 1, row_top + TITLE_H - 1, used * cell_w - PAD + 1, PANEL + 1))
+			stage = str(row.get("tag") or "ESFUERZO")
+			view = next((view for view in cache.get("tri_views", [])
+				if view["axis"] == row["prefix"] and view["stage"] == stage), None)
+			if view is not None:
+				painter.setPen(QPen(QColor("#ff4040"), max(1, round(f))))
+				for column, index in enumerate(row.get("idxs", [])):
+					if index == view["index"]:
+						painter.drawRect(QRect(LEFT + column * cell_w, row_top + TITLE_H, PANEL, PANEL))
 			# Línea indicativa en la columna de referencia (si existe).
 			ref_geom = row.get("_ref_geom")
 			if ref_geom is not None and REF_W > 0:
@@ -20037,24 +20093,87 @@ class MainWindow(QMainWindow):
 				painter.setPen(QColor("#9cdcff"))
 				for (tx, ty, txt) in corners:
 					painter.drawText(x0 + int(tx * PANEL), y0 + int((1.0 - ty) * PANEL), str(txt))
+		for view in cache.get("tri_views", []):
+			left, top, width, height = view["box"]
+			image_left, image_top, image_width, image_height = view["image_geom"]
+			focused = (getattr(self, "_montage_tri_focus", None) == view["axis"]
+				and getattr(self, "_montage_tri_stage", "ESFUERZO") == view["stage"])
+			painter.setPen(QPen(QColor("#ff4040" if focused else "#589d8a"), max(1, round(f))))
+			painter.drawRect(QRect(left, top, width, height))
+			painter.setFont(f_panel)
+			painter.drawText(QRect(left, top - TITLE_H, width, TITLE_H), align_center,
+				f"{view['stage']} {view['axis']} {view['index'] + 1}")
+			cross_x = image_left + round(view["cross"][0] * (image_width - 1))
+			cross_y = image_top + round(view["cross"][1] * (image_height - 1))
+			painter.setPen(QPen(QColor("#ff4040"), max(1, round(f))))
+			painter.drawLine(image_left, cross_y, image_left + image_width - 1, cross_y)
+			painter.drawLine(cross_x, image_top, cross_x, image_top + image_height - 1)
 		painter.end()
 
+	def _montage_triangulation_at_event(self, event, source_label=None):
+		label = source_label or self.preview_labels.get("comparacion_ejes")
+		cache = getattr(self, "_montage_gray_cache", {}) or {}
+		if label is None or not cache or label.width() <= 0 or label.height() <= 0:
+			return None
+		canvas_width, canvas_height = cache["geom"][8:10]
+		horizontal = float(event.pos().x()) * canvas_width / label.width()
+		vertical = float(event.pos().y()) * canvas_height / label.height()
+		for view in cache.get("tri_views", []):
+			left, top, width, height = view["box"]
+			if left <= horizontal < left + width and top - cache["geom"][2] <= vertical < top + height:
+				return view, horizontal, vertical
+		return None
+
+	def _set_montage_triangulation_point(self, point, source_stage=None):
+		from core.cardiac_reorientation import linked_triangulation_points
+		stage = source_stage or getattr(self, "_montage_tri_stage", "ESFUERZO")
+		volumes = getattr(self, "_montage_tri_volumes", {}) or {}
+		if not hasattr(self, "_montage_tri_points"):
+			self._montage_tri_points = {}
+		if stage in volumes:
+			self._montage_tri_points.update(linked_triangulation_points(volumes, stage, point,
+				getattr(self, "cine_crudo_rest_offset", {})))
+		else:
+			self._montage_tri_points[stage] = list(point)
+
+	def _navigate_montage_triangulation(self, step):
+		axis = getattr(self, "_montage_tri_focus", None)
+		stage = getattr(self, "_montage_tri_stage", "ESFUERZO")
+		volumes = (getattr(self, "_montage_tri_volumes", {}) or {}).get(stage, {})
+		if axis not in volumes:
+			return False
+		dimension = {"SA": 0, "VLA": 2, "HLA": 1}[axis]
+		point = self._montage_tri_points.setdefault(stage, [0.5, 0.5, 0.5])
+		count = volumes[axis].shape[0]
+		current = int(round(point[dimension] * (count - 1)))
+		index = int(np.clip(current - step, 0, count - 1))
+		if index != current:
+			point[dimension] = index / max(1, count - 1)
+			self._set_montage_triangulation_point(point, source_stage=stage)
+			self._schedule_montage_refresh(10, fast=True)
+		return True
+
 	def _montage_display_base_size(self, pix):
-		"""Tamaño base del preview normalizado al equivalente 512px: así el tamaño
-		en pantalla es el mismo en fast-pass (256) y en HQ (512), sin salto de zoom."""
+		"""Normaliza a 512px para conservar tamaño y zoom entre resoluciones."""
 		panel = max(1, int(getattr(self, "_montage_panel_px", 512)))
 		factor = 512.0 / panel
 		return QSize(max(1, round(pix.width() * factor)), max(1, round(pix.height() * factor)))
 
-	def _recolor_montage_from_cache(self, cmap_name):
+	def _recolor_montage_from_cache(self, cmap_name, persist=True, overlays_only=False):
 		"""Recoloreo rápido (solo cambió el colormap): reusa el lienzo gris cacheado
 		y actualiza el preview sin re-ejecutar el pipeline del montaje."""
-		pix = self._montage_pix_from_gray(cmap_name)
+		cache = getattr(self, "_montage_gray_cache", {}) or {}
+		base = cache.get("base_pixmap") if overlays_only else None
+		if base is not None:
+			pix = base.copy()
+			self._paint_montage_overlays(pix, cache)
+		else:
+			pix = self._montage_pix_from_gray(cmap_name)
 		if pix is None:
 			self._show_cine_crudo_sa_montage()
 			return
 		# Persistir el PNG solo en HQ: evita dejar un archivo en baja resolución en disco.
-		if int(getattr(self, "_montage_panel_px", 512)) >= 512:
+		if persist and int(getattr(self, "_montage_panel_px", 512)) >= 512:
 			try:
 				pix.save(os.path.join(self.output_dir, "sa_montage.png"), "PNG")
 			except Exception:
@@ -20089,7 +20208,7 @@ class MainWindow(QMainWindow):
 		if self.cine_crudo_preview_mode == "sa_montage" and "comparacion_ejes" in self.preview_labels:
 			self._apply_preview_zoom("comparacion_ejes")
 
-	def _montage_signature(self):
+	def _montage_signature(self, include_navigation=True):
 		"""Firma del estado que afecta el render del montaje. Si no cambia, no se
 		vuelve a renderizar al reentrar a la pestaña Montaje clínico."""
 		def _ids(d):
@@ -20098,9 +20217,13 @@ class MainWindow(QMainWindow):
 			except Exception:
 				return ()
 		return (
+			str(getattr(self, "cine_crudo_montage_source", "ungated")),
 			_ids(self.cine_crudo_axes_for_export),
 			_ids(getattr(self, "cine_crudo_axes_for_export_stress", None)),
 			_ids(getattr(self, "cine_crudo_axes_for_export_rest", None)),
+			_ids(getattr(self, "cine_crudo_axes_for_export_ungated", None)),
+			_ids(getattr(self, "cine_crudo_axes_for_export_ungated_stress", None)),
+			_ids(getattr(self, "cine_crudo_axes_for_export_ungated_rest", None)),
 			int(getattr(self, "cine_crudo_gate_from", 1) or 1),
 			int(getattr(self, "cine_crudo_gate_to", 1) or 1),
 			str(getattr(self, "cine_crudo_montage_template", "denso")),
@@ -20121,8 +20244,11 @@ class MainWindow(QMainWindow):
 				for stage, values in (getattr(self, "cine_crudo_stripe_start_by_stage", {}) or {}).items()
 				for axis, start in (values or {}).items()
 			)),
-			tuple(sorted(getattr(self, "cine_crudo_selected_stripes", set()) or set())),
-			str(getattr(self, "cine_crudo_focused_stripe", "ESFUERZO:SA")),
+			tuple(sorted(getattr(self, "cine_crudo_selected_stripes", set()) or set())) if include_navigation else (),
+			str(getattr(self, "cine_crudo_focused_stripe", "ESFUERZO:SA")) if include_navigation else "",
+			str(getattr(self, "_montage_tri_stage", "ESFUERZO")) if include_navigation else "",
+			str(getattr(self, "_montage_tri_focus", "")) if include_navigation else "",
+			tuple(sorted((stage, tuple(point)) for stage, point in (getattr(self, "_montage_tri_points", {}) or {}).items())) if include_navigation else (),
 			tuple(sorted((str(k), int(v)) for k, v in (getattr(self, "cine_crudo_stripe_count", {}) or {}).items())),
 		)
 
@@ -20249,6 +20375,7 @@ class MainWindow(QMainWindow):
 			except Exception:
 				return ()
 		return (
+			self._montage_signature(),
 			_ids(self._montage_axes_for_source()[0]),
 			_ids(self._montage_axes_for_source()[1]),
 			int(getattr(self, "cine_crudo_gate_from", 1) or 1),
@@ -20260,6 +20387,9 @@ class MainWindow(QMainWindow):
 			str(getattr(self, "cine_crudo_montage_interp", "Bilineal")),
 			float(getattr(self, "cine_crudo_montage_smooth", 0.0) or 0.0),
 			str(getattr(self, "cine_crudo_montage_win_mode", "percentil")),
+			str(getattr(self, "_montage_tri_stage", "ESFUERZO")),
+			str(getattr(self, "_montage_tri_focus", "")),
+			tuple(sorted((stage, tuple(point)) for stage, point in (getattr(self, "_montage_tri_points", {}) or {}).items())),
 		)
 
 	def _ensure_montage_cine_frames(self) -> bool:
@@ -20282,6 +20412,7 @@ class MainWindow(QMainWindow):
 		frames = []
 		# Countdown de película vieja: overlay flotante 8→1 durante el preload.
 		countdown_overlay = self._create_montage_cine_countdown_overlay(span)
+		self._montage_cine_preloading = True
 		try:
 			QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
 			for i in range(span):
@@ -20293,12 +20424,16 @@ class MainWindow(QMainWindow):
 				if pix is None:
 					return False
 				frames.append(pix)
+				rendered_signature = self._montage_cine_signature()
 				QApplication.processEvents()  # no congelar la UI durante el preload
+				if self._montage_cine_signature() != rendered_signature:
+					return False
 		except Exception as exc:
 			self._log(f"[WARN] Preload del cine del montaje falló: {exc}")
 			return False
 		finally:
 			self._remove_montage_countdown_overlay(countdown_overlay)
+			self._montage_cine_preloading = False
 			try:
 				QApplication.restoreOverrideCursor()
 			except Exception:
@@ -20307,7 +20442,7 @@ class MainWindow(QMainWindow):
 			self.cine_crudo_montage_cine_playing = prev_playing
 			self.cine_crudo_montage_cine_frame = prev_frame
 		self._montage_cine_frames = frames
-		self._montage_cine_frames_sig = sig
+		self._montage_cine_frames_sig = self._montage_cine_signature()
 		self._log(f"Cine del montaje: {span} frames pre-renderizados en memoria.")
 		return True
 
@@ -20357,7 +20492,7 @@ class MainWindow(QMainWindow):
 		if "comparacion_ejes" in self.preview_labels:
 			self.cine_crudo_preview_mode = "sa_montage"
 			self.preview_pixmaps["comparacion_ejes"] = pix
-			self.preview_base_sizes["comparacion_ejes"] = self._montage_display_base_size(pix)
+			self.preview_base_sizes["comparacion_ejes"] = pix.size()
 			self._apply_preview_zoom("comparacion_ejes", fast=False)
 			self._select_tab_by_title("comparacion_ejes")
 
@@ -20374,6 +20509,8 @@ class MainWindow(QMainWindow):
 		self._update_montage_cine_toggle_text()
 
 	def _advance_montage_cine_frame(self):
+		if bool(getattr(self, "_montage_cine_preloading", False)):
+			return
 		if not bool(getattr(self, "cine_crudo_montage_cine_playing", False)):
 			self._montage_cine_timer.stop()
 			return
@@ -20382,7 +20519,11 @@ class MainWindow(QMainWindow):
 			self._montage_cine_timer.stop()
 			return
 		self.cine_crudo_montage_cine_frame = (int(getattr(self, "cine_crudo_montage_cine_frame", 0)) + 1) % len(frames)
-		self._blit_montage_cine_frame()
+		if getattr(self, "_montage_cine_frames_sig", None) == self._montage_cine_signature():
+			self._blit_montage_cine_frame()
+		else:
+			self._montage_panel_px = self._montage_display_panel_px()
+			self._show_cine_crudo_sa_montage(navigate=False, persist=False)
 
 	def _step_montage_cine(self, delta: int):
 		"""Navega gate a gate (detiene el play para dar control manual)."""
@@ -20403,7 +20544,7 @@ class MainWindow(QMainWindow):
 	def _on_montage_cine_speed_changed(self, value: int):
 		self._montage_cine_timer.setInterval(max(40, int(value)))
 
-	def _show_cine_crudo_sa_montage(self, navigate: bool = True):
+	def _show_cine_crudo_sa_montage(self, navigate: bool = True, persist: bool = True):
 
 		"""Montaje clínico de TODOS los cortes SA/VLA/HLA (estilo MyoVation/Xeleris).
 
@@ -20494,6 +20635,25 @@ class MainWindow(QMainWindow):
 				return np.roll(np.roll(arr, sy, axis=0), sx, axis=1)
 
 			def _norm_vol(cube4d):
+				cache_key = (id(cube4d), gate_from, gate_to, _cine_gate,
+					str(getattr(self, "cine_crudo_montage_win_mode", "percentil")),
+					float(getattr(self, "cine_crudo_montage_lin_low", 0.0)),
+					float(getattr(self, "cine_crudo_montage_lin_high", 1.0)),
+					float(getattr(self, "cine_crudo_montage_win_low", 2.0)),
+					float(getattr(self, "cine_crudo_montage_win_high", 99.5)))
+				cache = getattr(self, "_montage_volume_cache", None)
+				if cache is None:
+					cache = self._montage_volume_cache = {}
+				cached = cache.get(cache_key)
+				if cached is not None and cached[0] is cube4d:
+					return cached[1]
+				self._montage_cut_cache = {}
+				self._montage_tile_cache = {}
+				def _remember(volume):
+					if len(cache) >= 12:
+						cache.pop(next(iter(cache)))
+					cache[cache_key] = (cube4d, volume)
+					return volume
 				arr4 = np.asarray(cube4d, dtype=np.float64)
 				if arr4.ndim != 4 or arr4.shape[0] <= 0:
 					return np.zeros((1, 1, 1), dtype=np.float64)
@@ -20520,14 +20680,14 @@ class MainWindow(QMainWindow):
 					w1 = max(0.0, min(2.0, float(getattr(self, "cine_crudo_montage_lin_high", 1.0))))
 					if w1 <= w0:
 						w1 = min(2.0, w0 + 0.01)
-					return np.clip((norm - w0) / max(1e-8, (w1 - w0)), 0.0, 1.0)
+					return _remember(np.clip((norm - w0) / max(1e-8, (w1 - w0)), 0.0, 1.0))
 				win_lo = float(getattr(self, "cine_crudo_montage_win_low", 2.0) or 0.0)
 				win_hi = float(getattr(self, "cine_crudo_montage_win_high", 99.5) or 100.0)
 				if win_hi <= win_lo:
 					win_hi = min(100.0, win_lo + 1.0)
 				p99 = float(np.percentile(v, win_hi)) if v.size else 1.0
 				p2 = float(np.percentile(v, win_lo)) if v.size else 0.0
-				return np.clip((v - p2) / max(p99 - p2, 1e-8), 0.0, 1.0)
+				return _remember(np.clip((v - p2) / max(p99 - p2, 1e-8), 0.0, 1.0))
 
 			def _voi_bounds(nk):
 				"""Rango base→ápex (k0,k1) según modo de recorte."""
@@ -20543,10 +20703,11 @@ class MainWindow(QMainWindow):
 				return 0, nk - 1  # el cubo SA ya viene recortado a límites
 
 			def _build_rows(ax_cubes, rest_offsets=None, stage_tag="ESFUERZO"):
-				sa_cube = np.asarray(ax_cubes.get("SA", []), dtype=np.float64)
+				sa_cube = np.asarray(ax_cubes.get("SA", []))
 				sa_v = _norm_vol(sa_cube)
 				vla_v = _norm_vol(np.asarray(ax_cubes.get("VLA", sa_cube)))
 				hla_v = _norm_vol(np.asarray(ax_cubes.get("HLA", sa_cube)))
+				self._montage_tri_volumes[stage_tag] = {"SA": sa_v, "VLA": vla_v, "HLA": hla_v}
 				# Rango base→ápex coherente para los tres ejes.
 				k0, k1 = _voi_bounds(int(sa_v.shape[0]))
 				# VLA/HLA recorren el eje largo → mapear el mismo % de rango.
@@ -20585,9 +20746,25 @@ class MainWindow(QMainWindow):
 				hla_idx = _window("HLA", hla_idx)
 				return [(sa_v, sa_idx, "SA"), (vla_v, vla_idx, "VLA"), (hla_v, hla_idx, "HLA")]
 
+			self._montage_tri_volumes = {}
 			stress_rows = _build_rows(stress_axes, stage_tag="ESFUERZO")
 			has_rest = bool(rest_axes)
 			rest_rows = _build_rows(rest_axes, self.cine_crudo_rest_offset, stage_tag="REPOSO") if has_rest else None
+			from core.cardiac_reorientation import triangulation_views
+			stage = getattr(self, "_montage_tri_stage", "ESFUERZO")
+			if stage not in self._montage_tri_volumes:
+				stage = "ESFUERZO"
+			self._montage_tri_stage = stage
+			if not hasattr(self, "_montage_tri_points"):
+				self._montage_tri_points = {}
+			self._set_montage_triangulation_point(self._montage_tri_points.get("ESFUERZO", [0.5, 0.5, 0.5]), source_stage="ESFUERZO")
+			self._montage_tri_views_by_stage = {}
+			for view_stage, volumes in self._montage_tri_volumes.items():
+				views = triangulation_views(volumes, self._montage_tri_points[view_stage])
+				for axis, view in views.items():
+					view["cache_key"] = (id(volumes[axis]), axis, view["index"], "tri")
+				self._montage_tri_views_by_stage[view_stage] = views
+			self._montage_tri_views = self._montage_tri_views_by_stage[stage]
 
 			thickness = self._cine_crudo_cut_thickness_px()
 			th_mm = float(getattr(self, "cine_crudo_cut_thickness_mm", 0.0) or 0.0)
@@ -20622,18 +20799,26 @@ class MainWindow(QMainWindow):
 			# Cortes finales (0..1, ya ventaneados/zoom/centrados) para el compositor.
 			selected_stripes = set(getattr(self, "cine_crudo_selected_stripes", set()) or set())
 			# Compatibilidad: sesiones previas sin selección por etapa.
-			if not selected_stripes:
+			if not hasattr(self, "cine_crudo_selected_stripes"):
 				selected_stripes = {f"ESFUERZO:{getattr(self, 'cine_crudo_selected_stripe', 'SA')}"}
 			rows_data = []
 			for (vol, idxs, prefix, tag) in ordered_rows:
 				panels = []
 				for c, k in enumerate(idxs):
-					img = vol[int(np.clip(k, 0, vol.shape[0] - 1))]
-					img = _zoom_cut(img, cut_zoom)
-					if center_cuts:
-						img = _center_cut(img)
+					cut_key = (id(vol), int(k), cut_zoom, center_cuts)
+					cut_cache = getattr(self, "_montage_cut_cache", {})
+					img = cut_cache.get(cut_key)
+					if img is None:
+						img = _zoom_cut(vol[int(np.clip(k, 0, vol.shape[0] - 1))], cut_zoom)
+						if center_cuts:
+							img = _center_cut(img)
+						if len(cut_cache) >= 256:
+							cut_cache.pop(next(iter(cut_cache)))
+						cut_cache[cut_key] = img
+						self._montage_cut_cache = cut_cache
 					panels.append({
 						"col": c,
+						"cache_key": cut_key,
 						"img": np.asarray(img, dtype=np.float64),
 						"title": f"{prefix} {k + 1}",
 						"corners": corner_map.get(prefix) if c == 0 else None,
@@ -20684,6 +20869,10 @@ class MainWindow(QMainWindow):
 
 			# Render en memoria (numpy RGB + QPainter): sin matplotlib ni PNG en cada cambio.
 			pix = self._composite_montage_pixmap(rows_data, int(cols), montage_cmap, suptitle, ref_views=ref_views)
+			cache = getattr(self, "_montage_gray_cache", None)
+			if cache is not None:
+				cache["image_signature"] = self._montage_signature(include_navigation=False)
+				cache["gate"] = _cine_gate
 			self.cine_crudo_preview_mode = "sa_montage"
 			# Al ENTRAR al montaje, restaurar el zoom por defecto configurado (la
 			# pantalla de markers lo fuerza a 40%). Solo en la transición de modo:
@@ -20694,7 +20883,7 @@ class MainWindow(QMainWindow):
 			# Firma del estado ya renderizado: al reentrar no se re-renderiza si no cambió.
 			self._montage_last_signature = self._montage_signature()
 			# Escribir sa_montage.png solo en HQ (reload al cambiar de pestaña y "Guardar PNG").
-			if int(getattr(self, "_montage_panel_px", 512)) >= 512:
+			if persist and int(getattr(self, "_montage_panel_px", 512)) >= 512:
 				try:
 					pix.save(os.path.join(self.output_dir, "sa_montage.png"), "PNG")
 				except Exception:
@@ -21231,10 +21420,9 @@ class MainWindow(QMainWindow):
 			QMessageBox.information(self, "SINCRO", "Primero generá los cortes y el montaje ('Ver montaje').")
 			return
 		src = os.path.join(self.output_dir, "sa_montage.png")
-		if self.cine_crudo_preview_mode != "sa_montage" or not os.path.exists(src):
-			# Forzar HQ 512: el PNG solo se escribe en render HQ.
-			self._montage_panel_px = 512
-			self._show_cine_crudo_sa_montage()
+		self._montage_panel_px = 512
+		self._montage_cine_frames_sig = None
+		self._show_cine_crudo_sa_montage(navigate=False, persist=True)
 		if not os.path.exists(src):
 			QMessageBox.warning(self, "SINCRO", "No hay montaje para exportar. Generalo primero con 'Ver montaje'.")
 			return
@@ -21889,6 +22077,24 @@ class MainWindow(QMainWindow):
 			# para desplazar su ventana de cortes (start).
 			try:
 				lbl = source_label or (event.widget() if hasattr(event, "widget") else None)
+				hit = self._montage_triangulation_at_event(event, source_label=lbl)
+				if hit is not None:
+					from core.cardiac_reorientation import triangulation_point
+					view, horizontal, vertical = hit
+					self._montage_tri_focus = view["axis"]
+					self._montage_tri_stage = view.get("stage", getattr(self, "_montage_tri_stage", "ESFUERZO"))
+					self._montage_drag_axis = None
+					self._montage_drag_mode = None
+					self._montage_drag_start_x = None
+					left, top, width, height = view["image_geom"]
+					if left <= horizontal < left + width and top <= vertical < top + height:
+						stage = self._montage_tri_stage
+						self._set_montage_triangulation_point(triangulation_point(view["axis"],
+							(horizontal - left) / max(1, width - 1), (vertical - top) / max(1, height - 1),
+							self._montage_tri_points[stage]), source_stage=stage)
+					self._schedule_montage_refresh(0, fast=True)
+					event.accept()
+					return
 				cache = getattr(self, "_montage_gray_cache", {}) or {}
 				rows_meta = cache.get("rows_meta", [])
 				selection_key = self._montage_selection_key_at_event(event, source_label=lbl)
@@ -21898,6 +22104,17 @@ class MainWindow(QMainWindow):
 				if row is None:
 					raise ValueError("fila de montaje no encontrada")
 				axis_click = str(row.get("prefix", "SA"))
+				self._montage_tri_focus = None
+				self._montage_tri_stage = str(row.get("tag") or "ESFUERZO")
+				volumes = (getattr(self, "_montage_tri_volumes", {}) or {}).get(self._montage_tri_stage, {})
+				if axis_click in volumes and row.get("idxs") and lbl is not None:
+					geometry = cache["geom"]
+					column = int((float(event.pos().x()) * geometry[8] / max(1, lbl.width()) - geometry[3]) // geometry[5])
+					if 0 <= column < len(row["idxs"]):
+						dimension = {"SA": 0, "VLA": 2, "HLA": 1}[axis_click]
+						point = self._montage_tri_points.setdefault(self._montage_tri_stage, [0.5, 0.5, 0.5])
+						point[dimension] = row["idxs"][column] / max(1, volumes[axis_click].shape[0] - 1)
+						self._set_montage_triangulation_point(point, source_stage=self._montage_tri_stage)
 				ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
 				selected = set(getattr(self, "cine_crudo_selected_stripes", set()) or set())
 				if ctrl:
@@ -21907,7 +22124,7 @@ class MainWindow(QMainWindow):
 						selected.add(selection_key)
 				else:
 					selected = {selection_key}
-				self.cine_crudo_selected_stripes = selected or {selection_key}
+				self.cine_crudo_selected_stripes = selected
 				self.cine_crudo_focused_stripe = selection_key
 				self._montage_focus_selection_key = selection_key
 				self._montage_drag_axis = axis_click
@@ -21922,6 +22139,7 @@ class MainWindow(QMainWindow):
 				# Para selección (sin mover cortes) redibujar SOLO el overlay desde
 				# caché: feedback visual inmediato, sin re-render de imágenes.
 				self._refresh_montage_selection_overlay()
+				self._schedule_montage_refresh(10, fast=True)
 				self._log(f"Montaje: tira activa {selection_key}" + (" (selección múltiple)" if ctrl else ""))
 				self.statusBar().showMessage(f"Montaje: tira activa {selection_key}", 1500)
 			except Exception as exc:
@@ -22066,7 +22284,8 @@ class MainWindow(QMainWindow):
 					w = float(lbl.width() if lbl else 1)
 					# Aproximar número de columnas visibles del render actual.
 					cols = int(getattr(self, "_montage_render_meta", {}).get("cols", 1) or 1)
-					px_per_col = max(1.0, w / max(1, cols))
+					geometry = (getattr(self, "_montage_gray_cache", {}) or {}).get("geom")
+					px_per_col = max(1.0, geometry[5] * w / geometry[8]) if geometry else max(1.0, w / max(1, cols))
 					dcols = int(round((float(event.pos().x()) - self._montage_drag_start_x) / px_per_col))
 					axis_name = str(self._montage_drag_axis)
 					cur = int(self._montage_drag_start_off)
@@ -22076,8 +22295,9 @@ class MainWindow(QMainWindow):
 					starts = (getattr(self, "cine_crudo_stripe_start_by_stage", {}) or {}).setdefault(
 						stage_tag, {"SA": 1, "VLA": 1, "HLA": 1}
 					)
-					starts[axis_name] = int(new_start)
-					self._schedule_montage_refresh(8, fast=True)
+					if int(starts.get(axis_name, 1)) != int(new_start):
+						starts[axis_name] = int(new_start)
+						self._schedule_montage_refresh(8, fast=True)
 				except Exception:
 					pass
 			event.accept()
@@ -22173,6 +22393,9 @@ class MainWindow(QMainWindow):
 			step = 1 if delta > 0 else (-1 if delta < 0 else 0)
 			if step == 0:
 				return
+			if self._navigate_montage_triangulation(step):
+				event.accept()
+				return
 			# Rueda: mueve TODAS las filas seleccionadas con Ctrl+click. Sin
 			# selección múltiple conserva el foco de la última tira clickeada.
 			keys = set(getattr(self, "cine_crudo_selected_stripes", set()) or set())
@@ -22233,6 +22456,16 @@ class MainWindow(QMainWindow):
 		if self.cine_crudo_preview_mode != "sa_montage":
 			return
 		try:
+			hit = self._montage_triangulation_at_event(event, source_label=source_label)
+			if hit is not None:
+				self._montage_tri_focus = hit[0]["axis"]
+				self._montage_tri_stage = hit[0].get("stage", getattr(self, "_montage_tri_stage", "ESFUERZO"))
+				volumes = getattr(self, "_montage_tri_volumes", {}) or {}
+				center_stage = "ESFUERZO" if "ESFUERZO" in volumes else self._montage_tri_stage
+				self._set_montage_triangulation_point([0.5, 0.5, 0.5], source_stage=center_stage)
+				self._schedule_montage_refresh(0, fast=True)
+				event.accept()
+				return
 			self.statusBar().showMessage("Montaje: doble click = reset tira activa", 1800)
 			# Reset de la tira seleccionada al inicio de ventana.
 			selection_key = str(getattr(self, "cine_crudo_focused_stripe", "") or next(iter(getattr(self, "cine_crudo_selected_stripes", set()) or set()), "ESFUERZO:SA"))
@@ -22247,30 +22480,100 @@ class MainWindow(QMainWindow):
 		except Exception as exc:
 			self._log(f"[WARN] Doble click en montaje falló: {exc}")
 
+	def _montage_display_panel_px(self):
+		zoom = max(0.20, float((getattr(self, "preview_zoom", {}) or {}).get("comparacion_ejes", 0.5)))
+		label = (getattr(self, "preview_labels", {}) or {}).get("comparacion_ejes")
+		ratio = float(label.devicePixelRatioF()) if label is not None and hasattr(label, "devicePixelRatioF") else 1.0
+		return max(128, min(512, int(np.ceil(512 * zoom * ratio * 1.5 / 16)) * 16))
+
+	def _update_montage_triangulation_from_cache(self):
+		from core.cardiac_reorientation import triangulation_views
+		from PIL import Image
+		cache = getattr(self, "_montage_gray_cache", {}) or {}
+		if not cache.get("tri_views") or cache.get("base_pixmap") is None:
+			return False
+		if cache["geom"][0] != self._montage_panel_px or cache.get("image_signature") != self._montage_signature(include_navigation=False):
+			return False
+		gate = None
+		if str(getattr(self, "cine_crudo_montage_source", "ungated")) == "gated":
+			frame = int(getattr(self, "cine_crudo_montage_cine_frame", 0))
+			if bool(getattr(self, "cine_crudo_montage_cine_playing", False)) or frame > 0:
+				gate = frame + 1
+		if cache.get("gate") != gate:
+			return False
+		groups = {stage: triangulation_views(volumes, self._montage_tri_points[stage])
+			for stage, volumes in self._montage_tri_volumes.items()}
+		changed = [(view, groups[view["stage"]][view["axis"]]) for view in cache["tri_views"]
+			if view["index"] != groups[view["stage"]][view["axis"]]["index"]]
+		if changed:
+			resample = {"Píxel": Image.NEAREST, "Bilineal": Image.BILINEAR, "Bicúbico": Image.BICUBIC,
+				"Hanning": Image.HAMMING, "Lanczos": Image.LANCZOS}.get(str(getattr(self, "cine_crudo_montage_interp", "Bilineal")), Image.BILINEAR)
+			lut = self._montage_cmap_lut(str(getattr(self, "cine_crudo_montage_cmap", "odyssey_cool")))
+			base = cache["base_pixmap"].copy()
+			painter = QPainter(base)
+			try:
+				for metadata, view in changed:
+					image = np.asarray(view["image"], dtype=np.float32)
+					sigma = float(getattr(self, "cine_crudo_montage_smooth", 0.0) or 0.0)
+					if sigma > 0:
+						from scipy.ndimage import gaussian_filter
+						image = gaussian_filter(image, sigma=sigma)
+					left, top, width, height = metadata["image_geom"]
+					resized = np.asarray(Image.fromarray(image, mode="F").resize((width, height), resample))
+					gray = np.clip(resized * 255, 0, 255).astype(np.uint8)
+					cache["gray"][top:top + height, left:left + width] = gray
+					rgb = np.ascontiguousarray(lut[gray])
+					buffer = rgb.tobytes()
+					qimage = QImage(buffer, width, height, width * 3, QImage.Format.Format_RGB888)
+					painter.drawImage(left, top, qimage)
+			finally:
+				painter.end()
+			cache["base_pixmap"] = base
+		for metadata in cache["tri_views"]:
+			view = groups[metadata["stage"]][metadata["axis"]]
+			metadata["index"], metadata["cross"] = view["index"], view["cross"]
+		self._montage_tri_views_by_stage = groups
+		self._montage_tri_views = groups[self._montage_tri_stage]
+		self._refresh_montage_selection_overlay()
+		self._montage_last_signature = self._montage_signature()
+		return True
+
+	def _render_montage_interactive(self):
+		if self.cine_crudo_preview_mode != "sa_montage":
+			return
+		if self._update_montage_triangulation_from_cache():
+			return
+		self._show_cine_crudo_sa_montage(navigate=False, persist=False)
+
 	def _schedule_montage_refresh(self, delay_ms: int = 20, fast: bool = False):
 		if self.cine_crudo_preview_mode != "sa_montage":
 			return
-		# Fast-pass: interacción continua (rueda/ventana/drag) rinde a baja resolución
-		# y agenda un re-render HQ 512px cuando el usuario suelta (~180ms de idle).
+		# Agrupar interacción; el settle solo mejora detalle visible, sin exportar.
 		if fast:
-			self._montage_panel_px = int(getattr(self, "_MONTAGE_PANEL_FAST", 256))
+			self._montage_panel_px = min(256, self._montage_display_panel_px())
 			if hasattr(self, "_montage_hq_timer"):
-				self._montage_hq_timer.start(180)
+				self._montage_hq_timer.start(400)
 		else:
-			self._montage_panel_px = 512
+			self._montage_panel_px = self._montage_display_panel_px()
 			if hasattr(self, "_montage_hq_timer"):
 				self._montage_hq_timer.stop()
 		if hasattr(self, "_montage_refresh_timer"):
-			self._montage_refresh_timer.start(max(0, int(delay_ms)))
+			if not fast or not self._montage_refresh_timer.isActive():
+				self._montage_refresh_timer.start(max(16 if fast else 0, int(delay_ms)))
 		else:
 			self._show_cine_crudo_sa_montage()
 
 	def _render_montage_hq(self):
-		"""Re-render nítido 512px tras terminar la interacción (fast-pass settle)."""
+		"""Detalle según zoom al detenerse, sin exportar ni reconstruir el cine."""
 		if self.cine_crudo_preview_mode != "sa_montage":
 			return
-		self._montage_panel_px = 512
-		self._show_cine_crudo_sa_montage()
+		self._montage_panel_px = self._montage_display_panel_px()
+		cache = getattr(self, "_montage_gray_cache", {}) or {}
+		if cache.get("geom", (None,))[0] == self._montage_panel_px and getattr(self, "_montage_last_signature", None) == self._montage_signature():
+			if "comparacion_ejes" in self.preview_labels:
+				self._apply_preview_zoom("comparacion_ejes")
+			return
+		self._show_cine_crudo_sa_montage(navigate=False, persist=False)
 
 	def _show_cine_crudo_montage_tips(self):
 		msg = (
