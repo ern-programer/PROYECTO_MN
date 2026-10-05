@@ -24,6 +24,54 @@ def _bind(window, name, **globals_dict):
     setattr(window, name, MethodType(namespace[name], window))
 
 
+@pytest.mark.parametrize("filename, class_name", [
+    ("amyloid_window.py", "AmyloidWindow"),
+    ("amyloid_spect_panel.py", "AmyloidSpectPanel"),
+])
+def test_amyloid_window_controls_minimize_and_close(filename, class_name):
+    source = ast.parse((ROOT / "ui" / filename).read_text(encoding="utf-8"))
+    window_class = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+    initializer = next(node for node in window_class.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+    start = next(index for index, node in enumerate(initializer.body)
+                 if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "window_controls" for target in node.targets))
+    end = next(index for index, node in enumerate(initializer.body[start:], start)
+               if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+               and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == "addLayout"
+               and any(isinstance(argument, ast.Name) and argument.id == "window_controls" for argument in node.value.args))
+    calls, widgets, layouts = [], [], []
+    class Button:
+        def __init__(self, parent):
+            self.parent = parent
+            self.clicked = SimpleNamespace(connect=lambda callback: setattr(self, "callback", callback))
+        def setIcon(self, icon):
+            self.icon = icon
+        def setToolTip(self, tooltip):
+            self.tooltip = tooltip
+        def setAccessibleName(self, name):
+            self.accessible_name = name
+        def setFixedSize(self, width, height):
+            self.size = (width, height)
+    controls = SimpleNamespace(addWidget=lambda widget, *args: widgets.append(widget))
+    window = SimpleNamespace(
+        _info_lbl=object(), showMinimized=lambda: calls.append("minimize"), close=lambda: calls.append("close"),
+        style=lambda: SimpleNamespace(standardIcon=lambda icon: icon),
+    )
+    namespace = {
+        "self": window, "root": SimpleNamespace(addLayout=layouts.append),
+        "QHBoxLayout": lambda: controls, "QLabel": lambda title: object(), "QToolButton": Button,
+        "QStyle": SimpleNamespace(StandardPixmap=SimpleNamespace(SP_TitleBarMinButton=1, SP_TitleBarCloseButton=2)),
+    }
+    exec(compile(ast.Module(body=initializer.body[start:end + 1], type_ignores=[]), filename, "exec"), namespace)
+    assert layouts == [controls]
+    assert len(widgets) == 3
+    for button, tooltip, icon in zip(widgets[-2:], ("Minimizar", "Cerrar"), (1, 2)):
+        assert button.parent is window
+        assert button.tooltip == button.accessible_name == tooltip
+        assert button.icon == icon and button.size == (28, 28)
+        button.callback()
+    assert calls == ["minimize", "close"]
+
+
 def test_montage_selection_does_not_write_png_or_gif():
     calls = []
     pix = SimpleNamespace(save=lambda *args: calls.append("save"))

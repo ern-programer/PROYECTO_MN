@@ -33,6 +33,8 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QSizePolicy,
     QLineEdit,
+    QToolButton,
+    QStyle,
 )
 
 from pydicom.dataset import Dataset
@@ -980,6 +982,7 @@ class AmyloidSpectPanel(QDialog):
         # poder minimizar/restaurar independiente de la ventana principal.
         self.setWindowFlags(
             Qt.WindowType.Window
+            | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowMinimizeButtonHint
             | Qt.WindowType.WindowMaximizeButtonHint
             | Qt.WindowType.WindowCloseButtonHint
@@ -1105,6 +1108,20 @@ class AmyloidSpectPanel(QDialog):
         root.setSpacing(6)
 
         flow_box = QGroupBox("Flujo clínico AMYLO SPECT / SPECT-CT")
+        window_controls = QHBoxLayout()
+        window_controls.addWidget(QLabel("AMYLO SPECT/CT"), 1)
+        for tooltip, icon, callback in (
+            ("Minimizar", QStyle.StandardPixmap.SP_TitleBarMinButton, self.showMinimized),
+            ("Cerrar", QStyle.StandardPixmap.SP_TitleBarCloseButton, self.close),
+        ):
+            button = QToolButton(self)
+            button.setIcon(self.style().standardIcon(icon))
+            button.setToolTip(tooltip)
+            button.setAccessibleName(tooltip)
+            button.setFixedSize(28, 28)
+            button.clicked.connect(callback)
+            window_controls.addWidget(button)
+        root.addLayout(window_controls)
         flow_box.setObjectName("eparFlowBox")
         flow = QGridLayout(flow_box)
         flow.setContentsMargins(8, 6, 8, 6)

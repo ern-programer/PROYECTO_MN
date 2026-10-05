@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
     QComboBox, QWidget, QSizePolicy, QMessageBox, QStackedWidget,
     QSlider, QFrame, QFileDialog, QTextEdit, QInputDialog, QCheckBox, QDoubleSpinBox,
+    QToolButton, QStyle,
 )
 import os
 
@@ -380,6 +381,7 @@ class AmyloidWindow(QDialog):
         self.setWindowTitle("SINCRO — Amiloidosis")
         self.setWindowFlags(
             self.windowFlags()
+            | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowMaximizeButtonHint
             | Qt.WindowType.WindowMinimizeButtonHint
             | Qt.WindowType.WindowMinMaxButtonsHint
@@ -443,7 +445,20 @@ class AmyloidWindow(QDialog):
         series = self._metadata["series"]
         self._info_lbl = QLabel(f"Paciente: {patient}  ·  Fecha: {date}  ·  Serie: {series}")
         self._info_lbl.setStyleSheet("font-size: 11px; color: #94a3b8; padding: 2px 0;")
-        root.addWidget(self._info_lbl)
+        window_controls = QHBoxLayout()
+        window_controls.addWidget(self._info_lbl, 1)
+        for tooltip, icon, callback in (
+            ("Minimizar", QStyle.StandardPixmap.SP_TitleBarMinButton, self.showMinimized),
+            ("Cerrar", QStyle.StandardPixmap.SP_TitleBarCloseButton, self.close),
+        ):
+            button = QToolButton(self)
+            button.setIcon(self.style().standardIcon(icon))
+            button.setToolTip(tooltip)
+            button.setAccessibleName(tooltip)
+            button.setFixedSize(28, 28)
+            button.clicked.connect(callback)
+            window_controls.addWidget(button)
+        root.addLayout(window_controls)
 
         # ── Toolbar ────────────────────────────────────────────────
         toolbar_frame = QFrame()
