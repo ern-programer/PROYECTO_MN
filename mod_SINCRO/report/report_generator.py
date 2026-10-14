@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
+from xml.sax.saxutils import escape
 
 import numpy as np
 from reportlab.lib.colors import HexColor, white
@@ -311,6 +312,16 @@ def generate_report(
 	]))
 	story.append(met_table)
 	story.append(Spacer(1, 4 * mm))
+	for stage_label, function_data in (("Estudio", ef), ("Reposo", rest_func_main)):
+		function_notes = list(function_data.get("notes") or [])
+		if function_data.get("normalize_gate_counts"):
+			function_notes.insert(0, "FEVI experimental: compensación de cuentas por gate, no validada clínicamente.")
+		if function_data.get("qc_blocked"):
+			function_notes.insert(0, str(function_data.get("reason") or "FEVI bloqueada por control de calidad."))
+		for note in function_notes:
+			story.append(Paragraph(f"<b>FEVI {stage_label}:</b> {escape(str(note))}", body_style))
+		if function_notes:
+			story.append(Spacer(1, 3 * mm))
 
 	# --- Territorios coronarios, textura de perfusión y delta stress-rest ---
 	def _fmt_deg(v):

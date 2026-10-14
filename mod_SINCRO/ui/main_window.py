@@ -3163,9 +3163,13 @@ class MainWindow(QMainWindow):
 		"""Barra horizontal con el estado de cada paso del pipeline (Fase B)."""
 		bar = QWidget()
 		bar.setObjectName("pipelineStepBar")
-		lay = QHBoxLayout(bar)
-		lay.setContentsMargins(8, 3, 8, 3)
+		root = QVBoxLayout(bar)
+		root.setContentsMargins(8, 3, 8, 3)
+		root.setSpacing(2)
+		lay = QHBoxLayout()
+		lay.setContentsMargins(0, 0, 0, 0)
 		lay.setSpacing(4)
+		root.addLayout(lay)
 		self._step_chip_labels: dict[str, QPushButton] = {}
 		steps = self.pipeline_history.steps()
 		for i, st in enumerate(steps):
@@ -3210,6 +3214,23 @@ class MainWindow(QMainWindow):
 		)
 		self._recompute_btn.clicked.connect(self._recompute_stale_steps)
 		lay.addWidget(self._recompute_btn)
+		matrix_row = QHBoxLayout()
+		matrix_row.setSpacing(8)
+		matrix_row.addWidget(QLabel("Matriz de feta"))
+		self.cine_crudo_matrix_combo = QComboBox()
+		self.cine_crudo_matrix_combo.addItem("Nativa", None)
+		self.cine_crudo_matrix_combo.addItem("128 x 128 (experimental)", 128)
+		self.cine_crudo_matrix_combo.setFixedWidth(204)
+		self.cine_crudo_matrix_combo.setToolTip("128 x 128: opción experimental, sin validación clínica de FEVI/volúmenes. Recon raw: localizador FBP nativo rápido. Reconstruir selección: matriz elegida desde proyecciones, mismo campo de visión. FBP, MLEM/OSEM y NÍTIDA. Sin AC/registro CT ni motion-frozen en matriz fina.")
+		self.cine_crudo_matrix_combo.currentIndexChanged.connect(self._on_reconstruction_matrix_changed)
+		matrix_row.addWidget(self.cine_crudo_matrix_combo)
+		self._apply_fine_matrix_research_preference()
+		self._effective_matrix_label = QLabel("Matriz efectiva: sin reconstrucción")
+		self._effective_matrix_label.setWordWrap(True)
+		self._effective_matrix_label.setMinimumWidth(0)
+		self._effective_matrix_label.setStyleSheet("font-size:9pt; font-weight:600;")
+		matrix_row.addWidget(self._effective_matrix_label, 1)
+		root.addLayout(matrix_row)
 		self._refresh_pipeline_step_bar()
 		return bar
 
@@ -3267,8 +3288,39 @@ class MainWindow(QMainWindow):
 		else:
 			self.statusBar().showMessage(f"La vista '{tab}' no está disponible en este modo")
 
+	def _refresh_effective_matrix_readout(self):
+		readout = getattr(self, "_effective_matrix_label", None)
+		if readout is None:
+			return
+		parts = []
+		for stage, name in (("stress", "Esfuerzo"), ("rest", "Reposo")):
+			state = self._dual_session().stage(stage)
+			result = getattr(state, "recon_result", None)
+			cuts = getattr(state, "cut_study", None)
+			items = []
+			if result is not None:
+				shape = result.gated_volume.shape
+				band = getattr(getattr(result, "config", None), "recon_slice_range", None)
+				items.append(f"recon {shape[-2]} x {shape[-1]} ({'feta' if band is not None else 'volumen'})")
+				if float(getattr(result, "voxel_scale", 1.0)) < 1.0:
+					items.append("experimental")
+				raw = getattr(state, "raw_study_for_recon", None) or getattr(state, "raw_study", None)
+				spacing = getattr(raw, "pixel_spacing", None)
+				if spacing is not None:
+					items.append(f"{float(spacing[0]) * float(getattr(result, 'voxel_scale', 1.0)):.3f} mm/px")
+			if cuts is not None:
+				shape = cuts.cube.shape
+				items.append(f"SA {shape[-2]} x {shape[-1]}")
+				spacing = getattr(cuts, "pixel_spacing", None)
+				if spacing is not None:
+					items.append(f"{float(spacing[0]):.3f} mm/px")
+			if items:
+				parts.append(f"{name}: " + " · ".join(items))
+		readout.setText("   |   ".join(parts) if parts else "Matriz efectiva: sin reconstrucción")
+
 	def _refresh_pipeline_step_bar(self):
 		"""Repinta la barra de pasos según el estado de PipelineHistory."""
+		self._refresh_effective_matrix_readout()
 		chips = getattr(self, "_step_chip_labels", None)
 		if not chips:
 			return
@@ -4829,17 +4881,20 @@ class MainWindow(QMainWindow):
 		window.sync_from_main()
 		return window
 
-	def _polar_perfusion_map_for_3d(self):
+	def _polar_perfusion_map_for_3d(self, study=None, seg=None):
 		"""Construye el mapa polar numérico para 3D aunque el render avanzado esté omitido."""
-		cache = getattr(self, "_polar_perf_cart_cache", None) or {}
+		primary = study is None and seg is None
+		study = self.study if study is None else study
+		seg = self.seg if seg is None else seg
+		cache = (getattr(self, "_polar_perf_cart_cache", None) or {}) if primary else {}
 		cached = cache.get("polar_map")
 		if cached is not None and np.asarray(cached).size:
 			return np.asarray(cached, dtype=np.float64)
-		if self.study is None or self.seg is None:
+		if study is None or seg is None:
 			return None
-		cube = np.asarray(getattr(self.study, "cube", None), dtype=np.float64)
-		mask = np.asarray(getattr(self.seg, "mask", None), dtype=bool)
-		centers = np.asarray(getattr(self.seg, "center_per_slice", None), dtype=np.float64)
+		cube = np.asarray(getattr(study, "cube", None), dtype=np.float64)
+		mask = np.asarray(getattr(seg, "mask", None), dtype=bool)
+		centers = np.asarray(getattr(seg, "center_per_slice", None), dtype=np.float64)
 		if cube.ndim != 4 or mask.ndim != 3 or cube.shape[1:] != mask.shape:
 			return None
 		if centers.shape != (mask.shape[0], 2):
@@ -4904,95 +4959,73 @@ class MainWindow(QMainWindow):
 		rotation = int(getattr(self, "polar_rotation_spin", None).value()) if hasattr(self, "polar_rotation_spin") else 0
 		if rotation:
 			polar_map = np.roll(polar_map, shift=rotation % 360, axis=1)
-		if getattr(self, "_polar_perf_cart_cache", None) is None:
-			self._polar_perf_cart_cache = {}
-		self._polar_perf_cart_cache["polar_map"] = polar_map
+		if primary:
+			if getattr(self, "_polar_perf_cart_cache", None) is None:
+				self._polar_perf_cart_cache = {}
+			self._polar_perf_cart_cache["polar_map"] = polar_map
 		return polar_map
 
-	def open_lv_3d_window(self):
-		"""Abre el panel 3D del VI (miocardio sólido + malla alambre ECTb).
+	def _lv_3d_stage_data(self, study, seg):
+		from core.lv_mesh import lv_meshes_from_ectb
+		if study is None or seg is None:
+			raise ValueError("Falta estudio reconstruido o segmentacion.")
+		cube = np.asarray(study.cube, dtype=np.float64)
+		if cube.ndim != 4 or cube.shape[0] < 2:
+			raise ValueError("El VI 3D necesita un volumen gated procesado.")
+		pixel_spacing = getattr(study, "pixel_spacing", None)
+		slice_mm = getattr(study, "z_spacing_mm", None)
+		if pixel_spacing is None or slice_mm is None:
+			raise ValueError("Falta spacing fisico del estudio.")
+		pixel_mm = (float(pixel_spacing[0]), float(pixel_spacing[1]))
+		spacing = (float(slice_mm), *pixel_mm)
+		if any(not np.isfinite(value) or value <= 0 for value in spacing):
+			raise ValueError("Spacing fisico invalido.")
+		cube, _ = self._apply_gate_dropout_correction(cube, log=False)
+		result = analyze_lv_ectb(cube, seg, pixel_mm, float(slice_mm), self.ectb_config())
+		if not result.available:
+			raise ValueError(str(result.reason or "FEVI ECTb no disponible"))
+		return {
+			"lv_meshes": lv_meshes_from_ectb(result, float(slice_mm), surface="endo", seg=seg,
+				pixel_mm=pixel_mm, volume_shape=tuple(cube.shape[1:])),
+			"myo_volume": cube.sum(axis=0), "spacing_mm": spacing,
+			"ectb_result": result, "seg": seg, "pixel_mm": pixel_mm,
+			"polar_map": self._polar_perfusion_map_for_3d(study=study, seg=seg),
+		}
 
-		Necesita: estudio gated procesado (cube reorientado a eje corto) + FEVI
-		ECTb calculado (el resultado completo queda cacheado en
-		``self._ectb_last_result`` la última vez que corrió ``_estimate_lv_ef_ectb``).
-		Si el cache no existe (p.ej. recién cargado y nunca se refrescó el resumen),
-		se calcula al vuelo acá.
-		"""
+	def open_lv_3d_window(self):
+		"""Abre VI 3D con datos ECTb propios de cada etapa gated procesada."""
 		if self.study is None:
 			self._log("[3D] No hay estudio cargado.")
 			return None
-		res = getattr(self, "_ectb_last_result", None)
-		if res is None or not getattr(res, "available", False):
-			# Calcular FEVI ECTb al vuelo (llena el cache si tiene éxito).
-			self._estimate_lv_ef_ectb()
-			res = getattr(self, "_ectb_last_result", None)
-		if res is None or not getattr(res, "available", False):
-			reason = str(getattr(res, "reason", "") or "FEVI ECTb no disponible")
-			self._log(f"[3D] No se puede abrir el panel 3D: {reason}")
-			QMessageBox.information(
-				self, "SINCRO — VI 3D",
-				"El panel 3D necesita un estudio gated procesado con FEVI (ECTb) calculado.\n"
-				f"Motivo: {reason}",
-			)
-			return None
-
-		cube = getattr(self.study, "cube", None)
-		pixel_spacing = getattr(self.study, "pixel_spacing", None) or (1.0, 1.0)
-		slice_mm = float(getattr(self.study, "z_spacing_mm", None) or 1.0)
-		spacing = (slice_mm, float(pixel_spacing[0]), float(pixel_spacing[1]))
-
-		# El 3D necesita el volumen RECONSTRUIDO (no el crudo). Si el estudio es
-		# crudo y nunca se reconstruyó, no hay volumen para samplear actividad.
-		recon = getattr(self, "cine_crudo_recon_result", None)
-		if recon is None or getattr(recon, "gated_volume", None) is None:
-			self._log("[3D] No hay volumen reconstruido. Reconstruí el estudio primero.")
-			QMessageBox.information(
-				self, "SINCRO — VI 3D",
-				"El panel 3D necesita un estudio RECONSTRUIDO (no crudo).\n"
-				"Usá 'Recon raw' o 'Reconstruir selección' primero, después abrí el 3D."
-			)
-			return None
-
-		from core.lv_mesh import lv_meshes_from_ectb
 		try:
-			# Shape del volumen SA reorientado (para alinear la cáscara al samplear).
-			volume_shape = None
-			if recon is not None and getattr(recon, "gated_volume", None) is not None:
-				volume_shape = tuple(int(v) for v in recon.gated_volume.shape[1:])
-			lv = lv_meshes_from_ectb(
-				res, slice_mm, surface="endo",
-				seg=self.seg, pixel_mm=(float(pixel_spacing[0]), float(pixel_spacing[1])),
-				volume_shape=volume_shape,
-			)
+			primary = self._lv_3d_stage_data(self.study, self.seg)
 		except Exception as exc:
-			self._log(f"[3D] No se pudo construir la malla del VI: {exc}")
+			self._log(f"[3D] No se puede abrir el panel: {exc}")
+			QMessageBox.information(self, "SINCRO — VI 3D", f"El VI 3D necesita un estudio gated procesado.\n{exc}")
 			return None
 
 		from ui.lv_3d_panel import LV3DDialog
 		cmap = str(getattr(self, "cine_crudo_screen_cmap", "odyssey_cool") or "odyssey_cool")
-		# Volumen de actividad para mapear sobre la cáscara: el GATED reconstruido
-		# (suma de gates = ungated) tiene mejor SNR y la misma geometría de pared.
-		myo_volume = None
-		if recon is not None and getattr(recon, "gated_volume", None) is not None:
-			import numpy as _np
-			myo_volume = _np.asarray(recon.gated_volume, dtype=_np.float64).sum(axis=0)
-
-		# Usar el mapa polar REAL ya calculado por el pipeline. No fabricar un
-		# mapa sintético al abrir 3D: además de no representar al paciente, ese
-		# cálculo podía dejar la ventana pesada o inestable.
-		polar_map = self._polar_perfusion_map_for_3d()
-
-		dlg = LV3DDialog(
-			self,
-			lv_meshes=lv,
-			myo_volume=myo_volume,
-			spacing_mm=spacing,
-			cmap_name=cmap,
-			ectb_result=res,
-			seg=self.seg,
-			pixel_mm=(float(pixel_spacing[0]), float(pixel_spacing[1])),
-			polar_map=polar_map,
-		)
+		labels = self._dual_compare_labels()
+		primary["stage_label"] = labels[0]
+		comparison = None
+		bundle = getattr(self, "compare_bundle", None) or {}
+		other_study, other_seg = bundle.get("study"), bundle.get("seg")
+		if other_study is None or other_seg is None:
+			state = self._rest_stage_state()
+			if state is not None:
+				other_study = other_study or state.cut_study
+				other_seg = other_seg or state.seg
+		if other_study is not None and other_study is not self.study:
+			try:
+				comparison = self._lv_3d_stage_data(other_study, other_seg)
+				comparison["stage_label"] = labels[1]
+				if labels[0] == "Reposo" and labels[1] == "Esfuerzo":
+					primary, comparison = comparison, primary
+			except Exception as exc:
+				self._log(f"[3D] Segunda etapa no disponible: {exc}")
+				QMessageBox.information(self, "SINCRO — VI 3D", f"La segunda etapa necesita procesamiento para compararla en 3D.\n{exc}")
+		dlg = LV3DDialog(self, **primary, cmap_name=cmap, comparison=comparison)
 		dlg.show()
 		dlg.raise_()
 		dlg.activateWindow()
@@ -5391,6 +5424,13 @@ class MainWindow(QMainWindow):
 		tab_informe_l.addWidget(integrity_box)
 
 		# --- Datos experimentales / investigación ---
+		fine_matrix_box = QGroupBox("Reconstrucción experimental")
+		fine_matrix_l = QVBoxLayout(fine_matrix_box)
+		fine_matrix_enabled = QCheckBox("Habilitar matriz de feta 128 x 128 (experimental)")
+		fine_matrix_enabled.setChecked(self._research_flag("fine_reconstruction_enabled", False))
+		fine_matrix_enabled.setToolTip("Habilita la selección de 128 x 128 en el pipeline. Sin validación clínica de FEVI/volúmenes. Desactivarla no modifica los volúmenes ya reconstruidos.")
+		fine_matrix_l.addWidget(fine_matrix_enabled)
+		tab_investigacion_l.addWidget(fine_matrix_box)
 		research_box = QGroupBox("Datos experimentales / investigación")
 		research_l = QVBoxLayout(research_box)
 		research_msg = QLabel(
@@ -5555,8 +5595,10 @@ class MainWindow(QMainWindow):
 			settings.setValue("integrity/hash_max_days", int(hash_max_days.value()))
 			settings.setValue("research/show_experimental", bool(show_experimental.isChecked()))
 			settings.setValue("research/collect_data", bool(collect_data.isChecked()))
+			settings.setValue("research/fine_reconstruction_enabled", bool(fine_matrix_enabled.isChecked()))
 			settings.setValue("normals/record_axis", bool(normals_record.isChecked()))
 			settings.sync()
+		self._apply_fine_matrix_research_preference()
 
 		# Zoom por defecto de cada pestaña.
 		if settings:
@@ -10350,8 +10392,9 @@ class MainWindow(QMainWindow):
 		Devolver el mismo diccionario permite que resumen, gráficos, exportación
 		y PDF funcionen igual con cualquiera de los dos métodos.
 		"""
-		def unavailable(reason: str) -> dict[str, object | None]:
-			return {"available": False, "method": "ectb_max_counts", "reason": reason}
+		def unavailable(reason: str, *, qc_blocked: bool = False) -> dict[str, object | None]:
+			return {"available": False, "method": "ectb_max_counts", "reason": reason,
+				"qc_blocked": qc_blocked}
 
 		if self.study is None or self.seg is None:
 			return unavailable("Falta estudio o segmentación.")
@@ -10377,7 +10420,7 @@ class MainWindow(QMainWindow):
 			return unavailable(str(exc))
 
 		if not res.available:
-			return unavailable(res.reason)
+			return unavailable(res.reason, qc_blocked=res.qc_blocked)
 
 		# Cachear el resultado completo (con radios endo/epi por gate) para el
 		# panel 3D del VI: la malla alambre ED/ES se construye de acá.
@@ -10408,6 +10451,10 @@ class MainWindow(QMainWindow):
 			"long_axis_mm": float(res.long_axis_mm),
 			"short_axis_ed_mm": float(res.short_axis_ed_mm),
 			"short_axis_es_mm": float(res.short_axis_es_mm),
+			"normalize_gate_counts": bool(res.config.normalize_gate_counts and res.config.use_thickening),
+			"gate_counts": [float(value) for value in res.gate_counts],
+			"gate_count_scale_factors": [float(value) for value in res.gate_count_scale_factors],
+			"endo_zero_fraction": [float(value) for value in res.endo_zero_fraction],
 			"notes": list(res.notes),
 		}
 		regression = self.fevi_regression()
@@ -10482,13 +10529,15 @@ class MainWindow(QMainWindow):
 		"""Punto único de entrada para la FEVI del informe.
 
 		Si el método ECTb no puede resolver (segmentación pobre, spacing raro),
-		cae al método anterior en vez de dejar el informe sin FEVI.
+		cae al método anterior salvo rechazo explícito por control de calidad.
 		"""
 		if self.fevi_method() == self.FEVI_METHOD_THRESHOLD:
 			return self._augment_with_filling_metrics(self._estimate_lv_ef_preliminary())
 		result = self._estimate_lv_ef_ectb()
 		if result.get("available"):
 			return self._augment_with_filling_metrics(result)
+		if result.get("qc_blocked"):
+			return result
 		fallback = self._estimate_lv_ef_preliminary()
 		if fallback.get("available"):
 			fallback["fallback_from"] = "ectb_max_counts"
@@ -14973,6 +15022,8 @@ class MainWindow(QMainWindow):
 			etapa = {"stress": "Esfuerzo", "rest": "Reposo", "both": "Ambas (esfuerzo + reposo)"}[stage]
 			self._log(f"Etapa activa del crudo: {etapa} — las herramientas actúan sobre esa(s) etapa(s).")
 		self._update_patient_banner()
+		if hasattr(self, "_effective_matrix_label"):
+			self._refresh_effective_matrix_readout()
 		if refresh_view:
 			# Si estamos en la pantalla de límites (Base/Ápex), NO volver al cine:
 			# re-renderizar la misma pantalla con la nueva etapa activa.
@@ -16575,6 +16626,8 @@ class MainWindow(QMainWindow):
 		from core.ct_fusion import resample_volume_to_spect_grid
 
 		st = self._dual_session().stage("rest" if str(stage) == "rest" else "stress")
+		if float(getattr(getattr(st, "recon_result", None), "voxel_scale", 1.0)) != 1.0:
+			raise ValueError("Fusion CT con matriz fina pendiente de adaptar el registro; usar matriz nativa.")
 		ct_native = getattr(st, "ct_volume_native", None)
 		if ct_native is None:
 			ct_native = getattr(st, "mu_map_native", None)
@@ -16611,7 +16664,8 @@ class MainWindow(QMainWindow):
 			for stg in ("stress", "rest"):
 				st = self._dual_session().stage(stg)
 				has_ct = getattr(st, "ct_volume_native", None) is not None or getattr(st, "mu_map_native", None) is not None
-				if getattr(st, "recon_result", None) is not None and has_ct:
+				if (getattr(st, "recon_result", None) is not None and has_ct
+						and float(getattr(st.recon_result, "voxel_scale", 1.0)) == 1.0):
 					ok = True
 					break
 		except Exception:
@@ -16635,6 +16689,9 @@ class MainWindow(QMainWindow):
 			stage = "stress"
 		st = self._dual_session().stage(stage)
 		result = getattr(st, "recon_result", None)
+		if float(getattr(result, "voxel_scale", 1.0)) != 1.0:
+			QMessageBox.information(self, "SINCRO", "Fusion CT con matriz fina no habilitada. Para fusion/registro usar matriz nativa.")
+			return
 		ct_native = getattr(st, "ct_volume_native", None)
 		if ct_native is None:
 			ct_native = getattr(st, "mu_map_native", None)
@@ -16816,6 +16873,9 @@ class MainWindow(QMainWindow):
 		reconstruye ni pisa una selección que el usuario haya tocado a mano.
 
 		Devuelve True si pudo derivar y setear límites válidos desde la máscara."""
+		result = self._dual_session().stage(stage).recon_result
+		if float(getattr(result, "voxel_scale", 1.0)) != 1.0:
+			return False
 		panel = getattr(self, "_perfusion_fusion_panel", None)
 		if panel is None or not hasattr(panel, "get_heart_axial_bounds"):
 			return False
@@ -17236,6 +17296,26 @@ class MainWindow(QMainWindow):
 			kwargs["gated_osem_subsets"] = int(gat[1])
 		return _dc_replace(cfg, **kwargs) if kwargs else cfg
 
+	def _apply_fine_matrix_research_preference(self):
+		combo = getattr(self, "cine_crudo_matrix_combo", None)
+		if combo is None:
+			return
+		enabled = self._research_flag("fine_reconstruction_enabled", False)
+		index = combo.findData(128)
+		if enabled and index < 0:
+			combo.addItem("128 x 128 (experimental)", 128)
+		elif not enabled and index >= 0:
+			combo.setCurrentIndex(0)
+			combo.removeItem(index)
+		combo.setEnabled(enabled)
+
+	def _on_reconstruction_matrix_changed(self, *_):
+		self._reorient_locked_voi = None
+		self._reorient_locked_stage = None
+		self._reorient_seed = None
+		self._reorient_seed_stage = None
+		self._log("Matriz de reconstruccion cambiada: Recon raw localiza en nativa; Reconstruir seleccion aplica matriz elegida en ambas etapas. Reorientacion nueva requerida.")
+
 	def _cine_crudo_recon_config(self, study=None):
 		from core.raw_reconstruction import RawReconConfig
 
@@ -17264,6 +17344,11 @@ class MainWindow(QMainWindow):
 		# Método independiente de la rama gated. NÍTIDA ya NO fuerza OSEM en gated
 		# (es solo-ungated): el gated conserva su propio método/filtro.
 		gated_method = str(self.cine_crudo_gated_method_combo.currentText()).strip().lower() if hasattr(self, "cine_crudo_gated_method_combo") and self.cine_crudo_gated_method_combo is not None else method
+		matrix = self.cine_crudo_matrix_combo.currentData() if hasattr(self, "cine_crudo_matrix_combo") else None
+		if matrix is not None and not self._research_flag("fine_reconstruction_enabled", False):
+			matrix = None
+		if matrix is not None and gated_method == "osem-adj":
+			gated_method = "osem"
 		# Con OSEM/MLEM el Butterworth del combo se aplica POST-recon (3D) dentro
 		# del motor: ya no pelea con la PSF de NÍTIDA ni rompe el modelo Poisson.
 		# Solo lowpass/wiener siguen siendo pre-filtro: con NÍTIDA se anulan.
@@ -17305,6 +17390,7 @@ class MainWindow(QMainWindow):
 			iters = 8
 		return RawReconConfig(
 			reconstruction_method=method,
+			reconstruction_matrix=matrix,
 			gated_method=gated_method,
 			ungated_filter=ungated_filter,
 			gated_filter=gated_filter,
@@ -17749,8 +17835,9 @@ class MainWindow(QMainWindow):
 		``feta_only``: si True, reconstruye SOLO la banda axial (feta) delimitada por
 		los markers Base/Ápex — excluye actividad extracardíaca de arriba/abajo y es
 		más rápido. El volumen resultante es el de trabajo (reorientación/análisis).
-		``force_fbp_localizer``: si True (solo TRUST/B-lite), fuerza FBP rápido en esta
-		recon —usada solo para ubicar los markers—, aunque el método sea OSEM/NÍTIDA.
+		Con matriz fina seleccionada, Recon raw usa FBP nativo solo como localizador;
+		Reconstruir seleccion aplica la matriz y metodo elegidos desde proyecciones.
+		``force_fbp_localizer`` fuerza ese localizador tambien en TRUST/B-lite.
 		"""
 		if _force_stage is None:
 			stages = self._cine_crudo_target_stages()
@@ -17787,19 +17874,23 @@ class MainWindow(QMainWindow):
 			angles = getattr(raw_study, "angles_deg", None)
 			cfg = self._cine_crudo_recon_config(raw_study)
 			cfg = self._apply_stage_iter_overrides(cfg, stage)
-			if force_fbp_localizer:
+			if force_fbp_localizer or (cfg.reconstruction_matrix is not None and not feta_only):
 				# B-lite (TRUST): esta recon solo ubica los markers Base/Ápex, así que
 				# se fuerza FBP rápido y se apagan RR/NÍTIDA/denoisers. El método real
 				# del usuario se aplica después en la recon de la feta.
 				from dataclasses import replace as _dc_replace
 				cfg = _dc_replace(
 					cfg, reconstruction_method="fbp", gated_method="fbp",
+					reconstruction_matrix=None,
 					resolution_recovery=False, rr_ungated=False, rr_gated=False,
 					psf_model=None, nitida2_mode="none", nitida3_enabled=False,
-					nitida4d_enabled=False,
+					nitida4d_enabled=False, fbp_clean_sigma_color=0.0,
+					ungated_denoise_plus=False, gated_denoise_plus=False,
+					attenuation_correction=False, motion_frozen=False,
+					motion_frozen_per_gate=False,
 				)
 				self._use_adjoint_osem = False
-				self._log("[TRUST][B-lite] Localizador rápido: recon FBP solo para ubicar Base/Ápex.")
+				self._log("Localizador rapido: FBP nativo para ubicar Base/Apex; matriz final y metodo elegido se aplican al reconstruir la seleccion.")
 			feta_txt = ""
 			if feta_only:
 				# La feta se define con los markers Base/Ápex de ESTA pantalla, que
@@ -17810,7 +17901,12 @@ class MainWindow(QMainWindow):
 					self._set_progress(100, "Reconstruir selección: falta recon base")
 					return False
 				height = int(projections.shape[2])
-				z0, z1 = self._cine_crudo_cut_bounds(height)
+				previous = self.cine_crudo_recon_result
+				selected_base, selected_apex = self._cine_crudo_stage_limits_get(stage, int(previous.gated_volume.shape[1]))
+				z0, z1 = self._cine_crudo_cut_bounds(int(previous.gated_volume.shape[1]))
+				previous_scale = float(getattr(previous, "voxel_scale", 1.0))
+				z0 = max(0, int(np.floor(z0 * previous_scale)))
+				z1 = min(height - 1, int(np.ceil(z1 * previous_scale)))
 				from dataclasses import replace as _dc_replace
 				cfg = _dc_replace(cfg, recon_slice_range=(z0, z1))
 				feta_txt = f" · feta z=[{z0},{z1}]/{height}"
@@ -17890,7 +17986,7 @@ class MainWindow(QMainWindow):
 					self._log(f"[AC] {_n}")
 
 			# OSEM-Adj: reemplazar el volumen ungated con la recon adyunta.
-			if getattr(self, "_use_adjoint_osem", False):
+			if getattr(self, "_use_adjoint_osem", False) and float(getattr(result, "voxel_scale", 1.0)) == 1.0:
 				try:
 					self._set_progress(85, "OSEM adyunto ray-driven...")
 					from core.osem_adjoint import osem_adjoint_reconstruct_slice
@@ -17929,6 +18025,8 @@ class MainWindow(QMainWindow):
 			try:
 				self._set_progress(99, "Pasajero de fase (FBP)...")
 				phase_cfg = self._phase_passenger_recon_config(raw_study)
+				from dataclasses import replace as _dc_replace
+				phase_cfg = _dc_replace(phase_cfg, reconstruction_matrix=cfg.reconstruction_matrix)
 				if getattr(cfg, "recon_slice_range", None) is not None:
 					from dataclasses import replace as _dc_replace
 					phase_cfg = _dc_replace(phase_cfg, recon_slice_range=cfg.recon_slice_range)
@@ -17999,7 +18097,7 @@ class MainWindow(QMainWindow):
 								if vol_auto is None:
 									vol_auto = result.gated_volume
 							# Margen de seguridad ≥3 cortes a cada lado de la banda.
-							auto = heart_axial_bounds_from_spect(vol_auto, margin=3)
+							auto = heart_axial_bounds_from_spect(vol_auto, margin=int(np.ceil(3 / float(getattr(result, "voxel_scale", 1.0)))))
 						except Exception as exc:
 							self._log(f"[FETA] Auto-detección de corazón no disponible: {exc}")
 							auto = None
@@ -18018,6 +18116,9 @@ class MainWindow(QMainWindow):
 						self.cine_crudo_cut_apex_spin.setValue(apex_1)
 						self._cine_crudo_stage_limits_set(stage, base_1, apex_1, n_slices)
 				else:
+					new_scale = float(getattr(result, "voxel_scale", 1.0))
+					self.cine_crudo_cut_base_spin.setValue(int(round((selected_base - 1) * previous_scale / new_scale)) + 1)
+					self.cine_crudo_cut_apex_spin.setValue(min(n_slices, int(round((selected_apex - 1) * previous_scale / new_scale)) + 1))
 					self._cine_crudo_capture_limits_from_spins(stage)
 			if hasattr(self, "cine_crudo_cut_thickness_spin"):
 				self.cine_crudo_cut_thickness_spin.setEnabled(True)
@@ -18060,12 +18161,21 @@ class MainWindow(QMainWindow):
 		sin depender de re-hacer el motion correction ni de adivinar la banda.
 		"""
 		import json
-		out_dir = os.path.join(self.output_dir, "_feta_harness")
+		from dataclasses import asdict, replace
+		import hashlib
+		stage = str(stage).lower()
+		if stage not in ("stress", "rest"):
+			raise ValueError("Invalid diagnostic stage")
+		out_dir = os.path.join(self.output_dir, "_feta_harness", stage)
 		os.makedirs(out_dir, exist_ok=True)
-		ung_proj = np.asarray(result.ungated_projections, dtype=np.float32)
-		corr_proj = np.asarray(result.corrected_projections, dtype=np.float32)
-		ung_vol = np.asarray(result.ungated_volume, dtype=np.float32)
-		gated_vol = np.asarray(result.gated_volume, dtype=np.float32)
+		for name in ("reorient.json", "reoriented_ungated.npy", "reoriented_gated.npy"):
+			path = os.path.join(out_dir, name)
+			if os.path.exists(path):
+				os.remove(path)
+		ung_proj = np.asarray(result.ungated_projections, dtype=np.float64)
+		corr_proj = np.asarray(result.corrected_projections, dtype=np.float64)
+		ung_vol = np.asarray(result.ungated_volume, dtype=np.float64)
+		gated_vol = np.asarray(result.gated_volume, dtype=np.float64)
 		ang_src = angles if angles is not None else getattr(raw_study, "angles_deg", None)
 		ang = np.asarray(ang_src, dtype=np.float64)
 		np.save(os.path.join(out_dir, "ungated_projections.npy"), ung_proj)
@@ -18073,8 +18183,17 @@ class MainWindow(QMainWindow):
 		np.save(os.path.join(out_dir, "ungated_volume.npy"), ung_vol)
 		np.save(os.path.join(out_dir, "gated_volume.npy"), gated_vol)
 		np.save(os.path.join(out_dir, "angles_deg.npy"), ang)
-		px = getattr(raw_study, "pixel_mm", None)
+		with open(os.path.join(out_dir, "gated_volume.npy"), "rb") as fh:
+			volume_hash = hashlib.file_digest(fh, "sha256").hexdigest()
+		spacing = getattr(raw_study, "pixel_spacing", None)
+		px = float(spacing[0]) if spacing is not None else getattr(raw_study, "pixel_mm", None)
+		voxel_scale = float(getattr(result, "voxel_scale", 1.0))
+		if px is not None:
+			px *= voxel_scale
 		meta = {
+			"schema_version": 2,
+			"reconstruction_sha256": volume_hash,
+			"reconstruction_voxel_scale": voxel_scale,
 			"z0": int(z0), "z1": int(z1), "stage": str(stage),
 			"pixel_mm": float(px) if px else None,
 			"radius_mm": float(getattr(raw_study, "radius_mm", 0.0) or 0.0) or None,
@@ -18086,6 +18205,10 @@ class MainWindow(QMainWindow):
 			"method": str(cfg.reconstruction_method),
 			"iterations": int(cfg.iterative_iterations),
 			"subsets": int(cfg.osem_subsets),
+			"config": asdict(replace(cfg, psf_model=None)),
+			"rr_model_required": cfg.psf_model is not None,
+			"source_path": str(getattr(raw_study, "source_path", "")),
+			"pixel_spacing": [float(value) for value in spacing] if spacing is not None else None,
 		}
 		with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as fh:
 			json.dump(meta, fh, ensure_ascii=False, indent=2)
@@ -18097,8 +18220,17 @@ class MainWindow(QMainWindow):
 		sobre la dona SA que el usuario definió (no sobre un eje automático).
 		"""
 		import json
-		out_dir = os.path.join(self.output_dir, "_feta_harness")
-		os.makedirs(out_dir, exist_ok=True)
+		stage = str(getattr(self, "_cine_crudo_recon_stage", "stress") or "stress").lower()
+		if stage not in ("stress", "rest"):
+			raise ValueError("Invalid diagnostic stage")
+		out_dir = os.path.join(self.output_dir, "_feta_harness", stage)
+		if not os.path.isfile(os.path.join(out_dir, "meta.json")):
+			raise ValueError("Missing stage reconstruction snapshot")
+		with open(os.path.join(out_dir, "meta.json"), encoding="utf-8") as fh:
+			metadata = json.load(fh)
+		if metadata["stage"] != stage:
+			raise ValueError("Diagnostic stage mismatch")
+		sample_scale = float(getattr(dlg, "_reformat_sample_scale", 1.0) or 1.0)
 		u = getattr(dlg, "result_long_axis", None)
 		center = getattr(dlg, "result_center", None)
 		try:
@@ -18106,6 +18238,10 @@ class MainWindow(QMainWindow):
 		except Exception:
 			rz = ry = rx = None
 		payload = {
+			"schema_version": 2, "stage": stage,
+			"reconstruction_sha256": metadata["reconstruction_sha256"],
+			"sample_scale": sample_scale,
+			"voxel_mm": metadata["pixel_mm"] * sample_scale if metadata["pixel_mm"] else None,
 			"long_axis": ([float(x) for x in np.asarray(u, dtype=np.float64).ravel()[:3]] if u is not None else None),
 			"center": ([float(x) for x in np.asarray(center, dtype=np.float64).ravel()[:3]] if center is not None else None),
 			"base_k": int(getattr(dlg, "base_k", 0)),
@@ -18116,7 +18252,10 @@ class MainWindow(QMainWindow):
 		}
 		if getattr(self, "cine_crudo_reoriented_ungated", None) is not None:
 			np.save(os.path.join(out_dir, "reoriented_ungated.npy"),
-					np.asarray(self.cine_crudo_reoriented_ungated, dtype=np.float32))
+						np.asarray(self.cine_crudo_reoriented_ungated, dtype=np.float64))
+		if getattr(self, "cine_crudo_reoriented_gated", None) is not None:
+			np.save(os.path.join(out_dir, "reoriented_gated.npy"),
+						np.asarray(self.cine_crudo_reoriented_gated, dtype=np.float64))
 		with open(os.path.join(out_dir, "reorient.json"), "w", encoding="utf-8") as fh:
 			json.dump(payload, fh, ensure_ascii=False, indent=2)
 		self._log(f"Reorientación volcada para harness -> {out_dir}\\reorient.json  (eje={payload['long_axis']})")
@@ -18241,7 +18380,10 @@ class MainWindow(QMainWindow):
 		base, apex = self._cine_crudo_stage_limits_get(stage, int(n_slices))
 		# Margen de seguridad: 2 cortes extra hacia cada extremo (base y ápex)
 		# para no recortar miocardio si el marker quedó justo sobre la pared.
-		margin = 2
+		voxel_scale = float(getattr(getattr(self, "cine_crudo_recon_result", None), "voxel_scale", 1.0))
+		if getattr(self, "cine_crudo_reoriented_gated", None) is not None:
+			voxel_scale *= float((getattr(self, "cine_crudo_reoriented_voi", None) or {}).get("sample_scale", 1.0))
+		margin = max(2, int(np.ceil(2 / voxel_scale)))
 		z0 = int(np.clip(min(base, apex) - 1 - margin, 0, max(0, int(n_slices) - 1)))
 		z1 = int(np.clip(max(base, apex) - 1 + margin, 0, max(0, int(n_slices) - 1)))
 		if z1 <= z0:
@@ -19158,7 +19300,7 @@ class MainWindow(QMainWindow):
 				self._log(f"[WARN] No se pudo derivar geometría de adquisición ({stage}): {exc}")
 				geometry = None
 		_reo_px = getattr(raw_study, "pixel_spacing", None) if raw_study is not None else None
-		_reo_voxel_mm = float(_reo_px[0]) if _reo_px else None
+		_reo_voxel_mm = float(_reo_px[0]) * float(getattr(result, "voxel_scale", 1.0)) if _reo_px else None
 		phase_res = st.recon_result_phase
 		ct_on_grid = None
 		try:
@@ -19432,6 +19574,7 @@ class MainWindow(QMainWindow):
 			self.cine_crudo_reoriented_voi = {
 				"cz": float(getattr(dlg, "_voi_cz", 0.0)),
 				"rz": float(getattr(dlg, "_voi_rz", 0.0)),
+				"sample_scale": float(getattr(dlg, "_reformat_sample_scale", 1.0) or 1.0),
 			}
 		except Exception:
 			self.cine_crudo_reoriented_voi = None
@@ -19647,6 +19790,11 @@ class MainWindow(QMainWindow):
 			# volúmenes ~6× y da EDV/ESV irreales). Se usa el pixel spacing como
 			# fallback físico correcto. Validado contra Xeleris (EDV/ESV coherentes).
 			raw_px = getattr(raw_study, "pixel_spacing", None)
+			voxel_scale = float(getattr(result, "voxel_scale", 1.0))
+			if self.cine_crudo_reoriented_gated is not None:
+				voxel_scale *= float((getattr(self, "cine_crudo_reoriented_voi", None) or {}).get("sample_scale", 1.0))
+			if raw_px is not None:
+				raw_px = tuple(float(value) * voxel_scale for value in raw_px)
 			try:
 				iso_px_mm = float(raw_px[0]) if raw_px else 0.0
 			except Exception:
@@ -19654,8 +19802,9 @@ class MainWindow(QMainWindow):
 			src_z_mm = float(
 				getattr(raw_study, "z_spacing_mm", None)
 				or getattr(raw_study, "slice_thickness_mm", None)
-				or (iso_px_mm if iso_px_mm > 0.0 else 1.0)
+				or ((iso_px_mm / voxel_scale) if iso_px_mm > 0.0 else 1.0)
 			)
+			src_z_mm *= voxel_scale
 			cut_thickness_mm = src_z_mm * float(thickness)
 			self.cine_crudo_cut_study = dicom_loader.GatedStudy(
 				cube=sa_cube,
@@ -19664,7 +19813,7 @@ class MainWindow(QMainWindow):
 				n_slices=int(sa_cube.shape[1]),
 				rows=int(sa_cube.shape[2]),
 				cols=int(sa_cube.shape[3]),
-				pixel_spacing=getattr(raw_study, "pixel_spacing", None),
+				pixel_spacing=raw_px,
 				source_path=str(getattr(raw_study, "source_path", "") or self.file_edit.text().strip()),
 				z_spacing_mm=src_z_mm,
 				slice_thickness_mm=cut_thickness_mm,
@@ -19691,7 +19840,7 @@ class MainWindow(QMainWindow):
 			)
 			self.cine_crudo_axes_for_export = {"SA": sa_cube, "HLA": hla_cube, "VLA": vla_cube}
 			# Escala física: mm por corte SA (para montaje a escala real).
-			px = getattr(raw_study, "pixel_spacing", None)
+			px = raw_px
 			try:
 				px_mm = float(px[0]) if px is not None and len(px) else 0.0
 			except Exception:

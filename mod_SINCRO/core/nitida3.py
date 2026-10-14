@@ -61,7 +61,7 @@ def edge_preserving_prior(x: np.ndarray, *, kind: str = "median", size: int = 3)
     raise ValueError(f"prior desconocido: {kind}")
 
 
-def huber_prior_grad(x: np.ndarray, *, delta: float = 0.1) -> np.ndarray:
+def huber_prior_grad(x: np.ndarray, *, delta: float = 0.1, voxel_scale: float = 1.0) -> np.ndarray:
     """Gradiente del prior de SUAVIDAD (Huber) sobre las 6 caras vecinas (2D).
 
     A diferencia de ``edge_preserving_prior`` (mediana, cuyo gradiente depende
@@ -80,7 +80,7 @@ def huber_prior_grad(x: np.ndarray, *, delta: float = 0.1) -> np.ndarray:
     # por slice, suficiente para el ruido granular del detector).
     acc = np.zeros_like(v)
     for axis in (-2, -1):
-        diff_p = np.diff(v, axis=axis)
+        diff_p = np.diff(v, axis=axis) / voxel_scale
         diff_m = -diff_p
         # Huber: psi(d) = d si |d|<=delta, sign(d)*delta si no. dU/dx ~ sum psi.
         def _psi(d):
@@ -93,7 +93,7 @@ def huber_prior_grad(x: np.ndarray, *, delta: float = 0.1) -> np.ndarray:
         acc[tuple(sl_p)] += _psi(diff_p)
         acc[tuple(sl_m)] += _psi(diff_m)
     # Normalizar: Huber acotado a delta por arista, 4 aristas -> max ~4*delta.
-    return acc / max(4.0 * delta, 1e-9)
+    return acc / max(4.0 * delta * voxel_scale, 1e-9)
 
 
 def prior_grad_adaptive(
@@ -232,6 +232,8 @@ def nitida3_map_osem_gated_adaptive(
     subsets: int = 4,
     beta0: float = 0.4,
     psf=None,
+    output_size: int | None = None,
+    axial_resample: bool = False,
     slice_range: tuple[int, int] | None = None,
     rescale: bool = True,
     ref_volume: np.ndarray | None = None,
@@ -264,6 +266,7 @@ def nitida3_map_osem_gated_adaptive(
         projection_filter=None, iterations=iterations, subsets=subsets,
         psf=psf, slice_range=slice_range,
         map_adaptive=True, map_beta0=beta0,
+        output_size=output_size, axial_resample=axial_resample,
         progress=progress_callback,
     )
     if not rescale:
@@ -278,6 +281,7 @@ def nitida3_map_osem_gated_adaptive(
             proj, angles_deg, method="osem",
             projection_filter=None, iterations=iterations, subsets=subsets,
             psf=psf, slice_range=slice_range,
+            output_size=output_size, axial_resample=axial_resample,
         )
     n_gates = int(proj.shape[0])
     out = np.empty_like(vol_map)

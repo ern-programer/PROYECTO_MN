@@ -55,8 +55,11 @@ class PsfModel:
         """Sigma (px) de cada fila del corte rotado (fila n-1 = lado detector)."""
         rows = np.arange(int(n_rows), dtype=np.float64)
         center = (n_rows - 1) / 2.0
+        return self.sigma_px_at_depth(rows - center)
+
+    def sigma_px_at_depth(self, depth_px: np.ndarray) -> np.ndarray:
         # Distancia fuente→colimador: filas hacia el detector (row grande) más cerca.
-        b_mm = self.radius_mm - (rows - center) * self.pixel_mm
+        b_mm = self.radius_mm - np.asarray(depth_px, dtype=np.float64) * self.pixel_mm
         b_mm = np.clip(b_mm, 0.0, None)
         r_geom = self.hole_diameter_mm * (self.hole_length_mm + b_mm) / self.hole_length_mm
         r_sys = np.sqrt(r_geom ** 2 + self.intrinsic_fwhm_mm ** 2)

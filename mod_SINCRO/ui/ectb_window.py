@@ -417,6 +417,14 @@ class ECTbWindow(QDialog):
 			"Sin ella el último gate tiene menos cuentas de la cuenta y la curva de volumen no cierra el ciclo."
 		)
 
+		self.normalize_counts_check = QCheckBox("Compensar cuentas por gate (experimental)")
+		self.normalize_counts_check.setChecked(False)
+		self.normalize_counts_check.setToolTip(
+			"Compensa la ganancia global al estimar engrosamiento; puede cambiar volúmenes y FEVI.\n"
+			"Asume actividad total conservada dentro del volumen. Un VI recortado o movimiento\n"
+			"fuera del campo puede invalidar ese supuesto. No validado clínicamente."
+		)
+
 		form.addRow("Espesor de pared en ED", self.thickness_spin)
 		form.addRow("Perfiles radiales", self.angles_combo)
 		form.addRow("Sobremuestreo radial", self.oversample_spin)
@@ -424,6 +432,7 @@ class ECTbWindow(QDialog):
 		form.addRow("Mediana fina", self.median_small_combo)
 		form.addRow(self.thickening_check)
 		form.addRow(self.dropout_check)
+		form.addRow(self.normalize_counts_check)
 
 		self.thickness_spin.valueChanged.connect(self._schedule_recompute)
 		self.oversample_spin.valueChanged.connect(self._schedule_recompute)
@@ -432,6 +441,8 @@ class ECTbWindow(QDialog):
 		self.median_small_combo.currentIndexChanged.connect(self._schedule_recompute)
 		self.thickening_check.toggled.connect(self._schedule_recompute)
 		self.dropout_check.toggled.connect(self._schedule_recompute)
+		self.thickening_check.toggled.connect(self.normalize_counts_check.setEnabled)
+		self.normalize_counts_check.toggled.connect(self._schedule_recompute)
 		return box
 
 	def _build_valve_section(self) -> CollapsibleSection:
@@ -897,6 +908,8 @@ class ECTbWindow(QDialog):
 			self._select_by_data(self.median_large_combo, int(cfg.median_kernel_large))
 			self._select_by_data(self.median_small_combo, int(cfg.median_kernel_small))
 			self.thickening_check.setChecked(bool(cfg.use_thickening))
+			self.normalize_counts_check.setChecked(bool(cfg.normalize_gate_counts))
+			self.normalize_counts_check.setEnabled(bool(cfg.use_thickening))
 			self.valve_check.setChecked(bool(cfg.use_valve_plane))
 			self.valve_offset_spin.setValue(float(cfg.valve_septal_offset_mm))
 			self.valve_angle_spin.setValue(int(round(float(cfg.septal_angle_deg))) % 360)
@@ -930,6 +943,7 @@ class ECTbWindow(QDialog):
 			median_kernel_large=int(self.median_large_combo.currentData()),
 			median_kernel_small=int(self.median_small_combo.currentData()),
 			use_thickening=bool(self.thickening_check.isChecked()),
+			normalize_gate_counts=bool(self.normalize_counts_check.isChecked()),
 			use_valve_plane=bool(self.valve_check.isChecked()),
 			valve_septal_offset_mm=float(self.valve_offset_spin.value()),
 			septal_angle_deg=float(self.valve_angle_spin.value()),
@@ -948,6 +962,7 @@ class ECTbWindow(QDialog):
 			self.median_small_combo,
 			self.thickening_check,
 			self.dropout_check,
+			self.normalize_counts_check,
 			self.valve_check,
 			self.valve_offset_spin,
 			self.valve_angle_spin,
@@ -960,6 +975,8 @@ class ECTbWindow(QDialog):
 		self.median_small_combo.setCurrentText("3×3")
 		self.thickening_check.setChecked(True)
 		self.dropout_check.setChecked(True)
+		self.normalize_counts_check.setChecked(False)
+		self.normalize_counts_check.setEnabled(True)
 		self.valve_check.setChecked(True)
 		self.valve_offset_spin.setValue(10.0)
 		self.valve_angle_spin.setValue(180)
@@ -973,6 +990,7 @@ class ECTbWindow(QDialog):
 			self.median_small_combo,
 			self.thickening_check,
 			self.dropout_check,
+			self.normalize_counts_check,
 			self.valve_check,
 			self.valve_offset_spin,
 			self.valve_angle_spin,

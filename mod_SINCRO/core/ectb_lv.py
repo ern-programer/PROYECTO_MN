@@ -106,6 +106,8 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 from scipy.ndimage import map_coordinates, median_filter
 
+from .gate_dropout import gate_total_counts
+
 #: Espesor telediastólico de pared asumido por ECTb (mm).
 ED_WALL_THICKNESS_MM = 10.0
 
@@ -131,7 +133,12 @@ SEPTAL_ANGLE_DEG = 180.0
 
 @dataclass
 class ECTbLVConfig:
-    """Parámetros del método. Los defaults son los del ECTb 4.0."""
+    """Parámetros ECTb; compensación global experimental desactivada por defecto.
+
+    normalize_gate_counts asume actividad total conservada en el volumen y
+    compensa solo las cuentas usadas para engrosamiento, no la posición del
+    pico ni el cubo. No usar como calibración clínica de FEVI.
+    """
 
     #: Espesor de pared asumido en telediástole (mm). Ancla la escala absoluta
     #: de EDV/ESV. Subirlo achica la cavidad; bajarlo la agranda.
@@ -164,6 +171,7 @@ class ECTbLVConfig:
     valve_septal_offset_mm: float = VALVE_SEPTAL_OFFSET_MM
     #: Ángulo del medio del septum en el corte de eje corto (grados).
     septal_angle_deg: float = SEPTAL_ANGLE_DEG
+    normalize_gate_counts: bool = False
 
 
 @dataclass
@@ -214,6 +222,10 @@ class ECTbLVResult:
     epi_radii_mm: np.ndarray = field(default_factory=lambda: np.zeros(0))
     config: ECTbLVConfig = field(default_factory=ECTbLVConfig)
     notes: list[str] = field(default_factory=list)
+    gate_counts: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    gate_count_scale_factors: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    endo_zero_fraction: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    qc_blocked: bool = False
 
 
 def _valid_slices(mask: np.ndarray, outer: np.ndarray, centers: np.ndarray, min_frac: float) -> list[int]:
@@ -451,6 +463,33 @@ def analyze_lv_ectb(
         return res
 
     n_gates, n_slices, height, width = arr.shape
+    gate_counts = gate_total_counts(arr)
+    if not np.isfinite(gate_counts).all() or np.any(gate_counts <= 0.0):
+        res.qc_blocked = True
+        res.reason = "Hay gates sin cuentas o con valores no finitos: FEVI no interpretable."
+        return res
+    res.gate_counts = gate_counts
+    res.gate_count_scale_factors = np.ones(n_gates, dtype=np.float64)
+    spread_pct = float(100.0 * (gate_counts.max() - gate_counts.min()) / gate_counts.mean())
+    if spread_pct > 10.0:
+        res.notes.append(
+            f"QC: variación de cuentas totales entre gates {spread_pct:.1f}%. "
+            "Revisá exposición/gating y cobertura del VI; puede sesgar el engrosamiento y la FEVI."
+        )
+    if cfg.normalize_gate_counts and cfg.use_thickening:
+        reference_gate = int(np.clip(cfg.ed_gate_index, 0, n_gates - 1))
+        scales = gate_counts[reference_gate] / gate_counts
+        if np.any(scales < 0.5) or np.any(scales > 2.0):
+            res.qc_blocked = True
+            res.reason = "Compensación de cuentas requiere un factor fuera de 0.5-2.0: revisá los gates."
+            return res
+        res.gate_count_scale_factors = scales
+        res.notes.append(
+            "Compensación experimental de cuentas por gate aplicada al engrosamiento "
+            f"(factores {scales.min():.3f}-{scales.max():.3f}). "
+            "Asume exposición uniforme y actividad total conservada dentro del volumen; "
+            "no validada clínicamente."
+        )
     centers_all = np.asarray(getattr(seg, "center_per_slice", np.empty((0, 2))), dtype=np.float64)
     outer_all = np.asarray(getattr(seg, "outer_radius", np.empty((0,))), dtype=np.float64)
     mask_all = np.asarray(getattr(seg, "mask", np.empty((0,))), dtype=bool)
@@ -498,7 +537,7 @@ def analyze_lv_ectb(
         # Las cuentas máximas son proporcionales al espesor mientras la pared sea
         # más fina que ~2xFWHM (volumen parcial). Se ajusta el 1er armónico para
         # quitar ruido antes de derivar el espesor.
-        fitted = _first_harmonic_fit(peak_counts)
+        fitted = _first_harmonic_fit(peak_counts * res.gate_count_scale_factors[:, None, None])
         ref = fitted[ed_idx_cfg]
         with np.errstate(divide="ignore", invalid="ignore"):
             ratio = np.where(ref > 0.0, fitted / ref[None, ...], 1.0)
@@ -519,6 +558,7 @@ def analyze_lv_ectb(
         endo_mm = _median_smooth_radii(endo_mm, kernel)
         epi_mm = _median_smooth_radii(epi_mm, kernel)
     epi_mm = np.maximum(epi_mm, endo_mm)
+    res.endo_zero_fraction = np.mean(endo_mm <= 0.0, axis=(1, 2))
 
     # --- Paso 5: plano valvular y volúmenes ----------------------------------
     endo_wedges = _wedge_areas(endo_mm, n_ang)              # (n_gates, n_valid, n_ang)
@@ -541,14 +581,22 @@ def analyze_lv_ectb(
     # Cuánto sacó el plano valvular, para poder auditarlo desde la UI.
     gate_volumes_flat_ml = endo_wedges.sum(axis=-1).sum(axis=1) * dz_mm / 1000.0
 
-    if not np.isfinite(gate_volumes_ml).all() or gate_volumes_ml.max() <= 0.0:
-        res.reason = "Los volúmenes calculados no son válidos."
+    if not np.isfinite(gate_volumes_ml).all() or gate_volumes_ml.min() <= 0.0:
+        res.qc_blocked = True
+        res.reason = "Cavidad no resuelta o volumen inválido en algún gate: FEVI no interpretable."
         return res
 
     ed_idx = int(np.argmax(gate_volumes_ml))
     es_idx = int(np.argmin(gate_volumes_ml))
     edv = float(gate_volumes_ml[ed_idx])
     esv = float(gate_volumes_ml[es_idx])
+    if res.endo_zero_fraction[ed_idx] > 0.0 or res.endo_zero_fraction[es_idx] > 0.0:
+        res.notes.append(
+            "QC: radio endocárdico cero en "
+            f"{100 * res.endo_zero_fraction[ed_idx]:.1f}% de muestras ED y "
+            f"{100 * res.endo_zero_fraction[es_idx]:.1f}% de muestras ES. "
+            "Revisá los contornos y la resolución de la cavidad antes de interpretar FEVI."
+        )
 
     mean_thickness = thickness_mm.reshape(n_gates, -1).mean(axis=1)
     thk_ed = float(mean_thickness[ed_idx])

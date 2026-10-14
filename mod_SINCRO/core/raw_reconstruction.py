@@ -38,6 +38,7 @@ class RawReconConfig:
     dependiente de profundidad pasando un PsfModel (ver core.resolution_recovery).
     """
     reconstruction_method: str = "fbp"
+    reconstruction_matrix: int | None = None
     fbp_filter_name: str = "ramp"
     # Método independiente para la rama gated. Si es None, la rama gated usa
     # reconstruction_method (que es el método de la rama ungated/perfusión).
@@ -227,6 +228,7 @@ class RawReconResult:
     gated_volume_mf_per_gate: np.ndarray | None = None
     # Volumen ungated ANTES del post-filtro gaussiano (para toggle con/sin filtro).
     ungated_volume_unfiltered: np.ndarray | None = None
+    voxel_scale: float = 1.0
 
 
 def _normalize_filter_kind(kind: str) -> str:
@@ -263,6 +265,13 @@ def _validate_config(config: RawReconConfig) -> RawReconConfig:
     nitida2_mode = str(getattr(config, "nitida2_mode", "none") or "none").strip().lower()
     if nitida2_mode not in {"none", "temporal", "spatiotemporal"}:
         raise ValueError("nitida2_mode debe ser 'none', 'temporal' o 'spatiotemporal'")
+    if config.reconstruction_matrix is not None:
+        if int(config.reconstruction_matrix) < 1 or int(config.reconstruction_matrix) != config.reconstruction_matrix:
+            raise ValueError("reconstruction_matrix must be a positive integer")
+        if config.motion_frozen or config.motion_frozen_per_gate:
+            raise ValueError("La matriz fina no admite motion-frozen todavia")
+        if config.attenuation_correction:
+            raise ValueError("La matriz fina no admite AC/registro CT todavia; usar matriz nativa")
     return config
 
 
@@ -392,15 +401,19 @@ def reconstruct_fbp_volume(
     fbp_filter_name: str = "ramp",
     slice_range: tuple[int, int] | None = None,
     output_size: int | None = None,
+    axial_resample: bool = False,
     progress=None,
 ) -> np.ndarray:
     """Reconstruye un volumen transaxial por FBP desde proyecciones 3D.
 
-    Entrada: (n_angles, H, W). Salida: (H, out, out), un corte por fila axial del detector.
+    Entrada: (n_angles, H, W). Salida: (H, out, out) por defecto.
     ``slice_range`` (opcional): (z0, z1) inclusive; solo reconstruye esa banda
     axial (feta), el resto queda en cero. ``output_size`` (opcional): tamaño de
     la matriz de salida en el plano (default = ancho del detector W). >W =
-    matriz fina (voxel más chico) para resolver la cavidad. ``progress``: callable.
+    matriz fina al mismo FOV, sin agregar resolucion fisica. Con
+    ``axial_resample=True`` la salida es (H*out/W, out, out): se interpolan
+    las filas de proyeccion filtradas antes de retroproyectar. Los limites
+    de feta siguen siendo filas del detector original. ``progress``: callable.
     """
     proj = np.asarray(projections, dtype=np.float64)
     if proj.ndim != 3:
@@ -409,6 +422,10 @@ def reconstruct_fbp_volume(
         proj = filter_projections(proj, projection_filter)
     n_angles, height, width = proj.shape
     out_size = int(output_size) if output_size else width
+    if out_size < width or out_size % width:
+        raise ValueError("FBP output_size must be an integer multiple of detector width")
+    scale = width / float(out_size) if axial_resample else 1.0
+    out_height = int(round(height / scale))
     if angles_deg is None:
         theta = np.linspace(0.0, 360.0, n_angles, endpoint=False)
     else:
@@ -416,11 +433,18 @@ def reconstruct_fbp_volume(
         if theta.size != n_angles:
             raise ValueError(f"angles_deg debe tener {n_angles} valores; recibio {theta.size}")
 
-    volume = np.zeros((height, out_size, out_size), dtype=np.float64)
+    volume = np.zeros((out_height, out_size, out_size), dtype=np.float64)
     z0, z1 = _resolve_slice_range(slice_range, height)
-    n_band = z1 - z0 + 1
-    for done, slice_idx in enumerate(range(z0, z1 + 1), start=1):
-        sinogram = proj[:, slice_idx, :].T
+    indices = [index for index in range(out_height) if z0 <= index * scale < z1 + 1]
+    n_band = len(indices)
+    for done, slice_idx in enumerate(indices, start=1):
+        source_z = slice_idx * scale
+        lower = int(np.floor(source_z))
+        fraction = source_z - lower
+        projection = proj[:, lower, :] * (1.0 - fraction)
+        if fraction > 0 and lower + 1 <= z1:
+            projection = projection + proj[:, lower + 1, :] * fraction
+        sinogram = projection.T
         volume[slice_idx] = _iradon_or_fallback(sinogram, theta, filter_name=str(fbp_filter_name), output_size=out_size)
         if progress is not None and n_band:
             progress(done / n_band)
@@ -546,11 +570,14 @@ def reconstruct_projection_volume(
     angles_deg: np.ndarray | None = None,
     *,
     method: str = "fbp",
+    output_size: int | None = None,
+    axial_resample: bool = False,
     projection_filter: ProjectionFilterConfig | None = None,
     fbp_filter_name: str = "ramp",
     iterations: int = 4,
     subsets: int = 4,
     sensitivity_cache: dict[int, np.ndarray] | None = None,
+    fine_operators: dict | None = None,
     psf=None,
     slice_range: tuple[int, int] | None = None,
     progress=None,
@@ -584,7 +611,7 @@ def reconstruct_projection_volume(
     if method_key == "fbp":
         return reconstruct_fbp_volume(
             projections, angles_deg, projection_filter=projection_filter, fbp_filter_name=fbp_filter_name,
-            slice_range=slice_range, progress=progress,
+            slice_range=slice_range, progress=progress, output_size=output_size, axial_resample=axial_resample,
         )
     if method_key not in {"mlem", "osem"}:
         raise ValueError("method debe ser 'fbp', 'mlem' u 'osem'")
@@ -616,6 +643,42 @@ def reconstruct_projection_volume(
                 f"esperado {(height, width, width)}, recibido {mu_map_3d.shape}"
             )
     effective_subsets = int(subsets) if method_key == "osem" else 1
+    out_size = width if output_size is None else int(output_size)
+    if out_size < width or out_size % width:
+        raise ValueError("output_size must be an integer multiple of detector width")
+    if out_size != width:
+        if mu_map_3d is not None:
+            raise ValueError("Fine iterative AC geometry is not enabled yet")
+        scale = width / float(out_size) if axial_resample else 1.0
+        out_height = int(round(height / scale))
+        if fine_operators is None:
+            fine_operators = _fine_subset_operators(theta, effective_subsets, width, out_size, psf=psf)
+        fine_sensitivity = sensitivity_cache
+        if fine_sensitivity is None:
+            fine_sensitivity = {key: np.asarray(operator.T @ np.ones(operator.shape[0])).reshape(out_size, out_size)
+                                for key, operator in fine_operators.items()}
+        out = np.zeros((out_height, out_size, out_size), dtype=np.float64)
+        z0, z1 = _resolve_slice_range(slice_range, height)
+        indices = [index for index in range(out_height) if z0 <= index * scale < z1 + 1]
+        for done, index in enumerate(indices, start=1):
+            source_z = index * scale
+            lower = int(np.floor(source_z))
+            fraction = source_z - lower
+            projection = proj[:, lower, :] * (1.0 - fraction)
+            if fraction > 0 and lower + 1 <= z1:
+                projection = projection + proj[:, lower + 1, :] * fraction
+            out[index] = _iterative_reconstruct_slice(
+                projection.T, theta, output_size=out_size, iterations=iterations,
+                subsets=effective_subsets, sensitivity_cache=fine_sensitivity,
+                fine_operators=fine_operators, map_beta=map_beta, map_prior=map_prior,
+                map_prior_size=2 * int(round((map_prior_size - 1) * out_size / (2 * width))) + 1,
+                map_adaptive=map_adaptive, map_beta0=map_beta0,
+            )
+            if progress is not None:
+                progress(done / len(indices))
+        band = None if slice_range is None else (indices[0], indices[-1])
+        post_filter = None if post_butterworth is None else (post_butterworth[0] * width / out_size, post_butterworth[1])
+        return _apply_post_butterworth(out, post_filter, band)
     use_map = (float(map_beta) > 0.0 and str(map_prior).lower() not in ("none", "")) or bool(map_adaptive)
     # Camino rápido volumétrico (float32, rotación 3D por ángulo): mismo
     # resultado geométrico que el bucle por corte, sin overhead Python por slice.
@@ -684,12 +747,12 @@ def _apply_post_butterworth(
         return volume
     cutoff, order = post_butterworth
     if slice_range is None:
-        return _butterworth_3d(volume, cutoff, order)
+        return np.clip(_butterworth_3d(volume, cutoff, order), 0.0, None)
     # Filtrar solo la banda reconstruida: fuera de ella el volumen es cero y
     # el FFT 3D sobre el volumen completo metería ringing en los bordes.
     z0, z1 = _resolve_slice_range(slice_range, int(volume.shape[0]))
     out = np.asarray(volume, dtype=np.float64).copy()
-    out[z0:z1 + 1] = _butterworth_3d(out[z0:z1 + 1], cutoff, order)
+    out[z0:z1 + 1] = np.clip(_butterworth_3d(out[z0:z1 + 1], cutoff, order), 0.0, None)
     return out
 
 
@@ -718,8 +781,30 @@ def _iradon_or_fallback(sinogram: np.ndarray, theta: np.ndarray, *, filter_name:
     """Usa scikit-image si está instalado; si no, FBP con rampa Ram-Lak propia."""
     try:
         from skimage.transform import iradon
+        if output_size != sinogram.shape[0]:
+            from skimage.transform.radon_transform import _get_fourier_filter, _sinogram_circle_to_square
+            detector_size = sinogram.shape[0]
+            scale = detector_size / float(output_size)
+            square = _sinogram_circle_to_square(np.asarray(sinogram, dtype=np.float64))
+            length = square.shape[0]
+            padded_size = max(64, int(2 ** np.ceil(np.log2(2 * length))))
+            padded = np.pad(square, ((0, padded_size - length), (0, 0)))
+            response = _get_fourier_filter(padded_size, filter_name)
+            filtered = np.fft.ifft(np.fft.fft(padded, axis=0) * response, axis=0).real[:length]
+            grid_y, grid_x = np.mgrid[:output_size, :output_size]
+            grid_y = (grid_y - output_size // 2) * scale
+            grid_x = (grid_x - output_size // 2) * scale
+            detector = np.arange(length) - length // 2
+            image = np.zeros((output_size, output_size), dtype=np.float64)
+            for profile, angle in zip(filtered.T, np.deg2rad(theta)):
+                coordinates = grid_x * np.cos(angle) - grid_y * np.sin(angle)
+                image += np.interp(coordinates, detector, profile, left=0.0, right=0.0)
+            image[grid_y ** 2 + grid_x ** 2 > (detector_size // 2) ** 2] = 0.0
+            return image * np.pi / (2 * len(theta))
         return np.asarray(iradon(sinogram, theta=theta, filter_name=filter_name, output_size=output_size), dtype=np.float64)
     except ModuleNotFoundError:
+        if output_size != sinogram.shape[0]:
+            raise RuntimeError("Fine-grid FBP requires scikit-image")
         # Fallback: aplicar el filtro rampa (imprescindible en FBP) antes de
         # retroproyectar. Sin rampa la retroproyección rellena la cavidad y el
         # miocardio sale como blob sólido.
@@ -786,6 +871,47 @@ def _simple_backprojection(
     return volume
 
 
+def _fine_subset_operators(theta, subsets, detector_size, output_size, psf=None):
+    subset_count = max(1, min(int(subsets), len(theta)))
+    return {index: _fine_system_matrix(theta[index::subset_count], detector_size, output_size, psf=psf)
+            for index in range(subset_count)}
+
+
+def _fine_system_matrix(theta: np.ndarray, detector_size: int, output_size: int, psf=None):
+    """Voxel-area weighted projection onto acquired bins; transpose is the exact adjoint."""
+    from scipy.sparse import coo_matrix
+    from scipy.special import ndtr
+
+    scale = detector_size / float(output_size)
+    grid_y, grid_x = np.mgrid[:output_size, :output_size]
+    grid_y = (grid_y.ravel() - output_size // 2) * scale
+    grid_x = (grid_x.ravel() - output_size // 2) * scale
+    pixels = np.arange(output_size * output_size)
+    rows, columns, weights = [], [], []
+    for angle_index, angle in enumerate(np.deg2rad(theta)):
+        position = grid_x * np.cos(angle) - grid_y * np.sin(angle) + detector_size // 2
+        lower = np.floor(position).astype(int)
+        fraction = position - lower
+        if psf is None:
+            contributions = ((lower, 1.0 - fraction), (lower + 1, fraction))
+        else:
+            depth = grid_x * np.sin(angle) + grid_y * np.cos(angle)
+            sigma = np.maximum(psf.sigma_px_at_depth(depth), 1e-6)
+            radius = int(np.ceil(4 * sigma.max())) + 1
+            contributions = (
+                (lower + offset, ndtr((lower + offset + 0.5 - position) / sigma)
+                 - ndtr((lower + offset - 0.5 - position) / sigma))
+                for offset in range(-radius, radius + 1)
+            )
+        for detector, weight in contributions:
+            valid = (detector >= 0) & (detector < detector_size) & (weight > 0)
+            rows.append(angle_index * detector_size + detector[valid])
+            columns.append(pixels[valid])
+            weights.append(weight[valid] * scale ** 2)
+    return coo_matrix((np.concatenate(weights), (np.concatenate(rows), np.concatenate(columns))),
+                      shape=(len(theta) * detector_size, output_size ** 2)).tocsr()
+
+
 def _forward_project_slice(
     image: np.ndarray,
     theta: np.ndarray,
@@ -848,6 +974,7 @@ def _iterative_reconstruct_slice(
     iterations: int,
     subsets: int,
     sensitivity_cache: dict[int, np.ndarray] | None = None,
+    fine_operators: dict | None = None,
     psf=None,
     map_beta: float = 0.0,
     map_prior: str = "none",
@@ -899,6 +1026,11 @@ def _iterative_reconstruct_slice(
     if map_adaptive:
         from core.nitida3 import local_snr_map, matched_recovery_weight, huber_prior_grad
 
+    if out_size != detector_size and fine_operators is None:
+        if attenuation_mu_map_2d is not None:
+            raise ValueError("Fine iterative AC geometry is not enabled yet")
+        fine_operators = _fine_subset_operators(theta, subset_count, detector_size, out_size, psf=psf)
+
     def _prior_grad(img: np.ndarray) -> np.ndarray:
         ref = edge_preserving_prior(img, kind=str(map_prior), size=int(map_prior_size))
         # Gradiente del prior (local): cuánto se desvía cada voxel de la referencia
@@ -912,27 +1044,29 @@ def _iterative_reconstruct_slice(
                 continue
             theta_sub = theta[idx]
             measured_sub = measured[:, idx]
-            estimated_sub = _forward_project_slice(
-                image,
-                theta_sub,
-                detector_size=detector_size,
-                psf=psf,
-                attenuation_mu_map_2d=attenuation_mu_map_2d,
-                attenuation_mu_scale=attenuation_mu_scale,
-                attenuation_pixel_size_cm=attenuation_pixel_size_cm,
-            )
-            ratio = measured_sub / np.maximum(estimated_sub, eps)
-            correction = _backproject_slice(
-                ratio,
-                theta_sub,
-                output_size=out_size,
-                psf=psf,
-                attenuation_mu_map_2d=attenuation_mu_map_2d,
-                attenuation_mu_scale=attenuation_mu_scale,
-                attenuation_pixel_size_cm=attenuation_pixel_size_cm,
-            )
+            operator = None if fine_operators is None else fine_operators[subset_id]
+            if operator is not None:
+                estimated_sub = (operator @ image.ravel()).reshape(len(idx), detector_size).T
+                ratio = measured_sub / np.maximum(estimated_sub, eps)
+                correction = (operator.T @ ratio.T.ravel()).reshape(out_size, out_size)
+            else:
+                estimated_sub = _forward_project_slice(
+                    image, theta_sub, detector_size=detector_size, psf=psf,
+                    attenuation_mu_map_2d=attenuation_mu_map_2d,
+                    attenuation_mu_scale=attenuation_mu_scale,
+                    attenuation_pixel_size_cm=attenuation_pixel_size_cm,
+                )
+                ratio = measured_sub / np.maximum(estimated_sub, eps)
+                correction = _backproject_slice(
+                    ratio, theta_sub, output_size=out_size, psf=psf,
+                    attenuation_mu_map_2d=attenuation_mu_map_2d,
+                    attenuation_mu_scale=attenuation_mu_scale,
+                    attenuation_pixel_size_cm=attenuation_pixel_size_cm,
+                )
             if sensitivity_cache is not None and subset_id in sensitivity_cache:
                 sensitivity = sensitivity_cache[subset_id]
+            elif operator is not None:
+                sensitivity = (operator.T @ np.ones(operator.shape[0])).reshape(out_size, out_size)
             else:
                 sensitivity = _backproject_slice(
                     np.ones_like(measured_sub),
@@ -947,9 +1081,10 @@ def _iterative_reconstruct_slice(
             if map_adaptive:
                 # Pilar C: beta espacial (SNR local) x gradiente Huber (suavidad,
                 # no mata el movimiento). denom * (1 + beta0 * w(snr) * dU_huber).
-                snr = local_snr_map(image)
+                scale = detector_size / float(out_size)
+                snr = local_snr_map(image, win=2 * int(round(2 / scale)) + 1)
                 w = matched_recovery_weight(snr)
-                denom = np.maximum(denom * (1.0 + float(map_beta0) * w * huber_prior_grad(image)), 1e-3)
+                denom = np.maximum(denom * (1.0 + float(map_beta0) * w * huber_prior_grad(image, voxel_scale=scale)), 1e-3)
             elif use_map:
                 # Green OSL: la sensibilidad queda atenuada por (1 + beta * dU).
                 # Clamp a un piso positivo para evitar división por ~0 / negativo.
@@ -990,6 +1125,8 @@ def reconstruct_gated_projection_volume(
     angles_deg: np.ndarray | None = None,
     *,
     method: str = "fbp",
+    output_size: int | None = None,
+    axial_resample: bool = False,
     projection_filter: ProjectionFilterConfig | None = None,
     fbp_filter_name: str = "ramp",
     iterations: int = 4,
@@ -1020,6 +1157,7 @@ def reconstruct_gated_projection_volume(
         raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibio {proj.shape}")
     method_key = str(method or "fbp").strip().lower()
     sensitivity_cache: dict[int, np.ndarray] | None = None
+    fine_operators = None
     if method_key in {"mlem", "osem"} and proj.shape[0] > 0:
         # Todos los gates comparten la misma geometría (ángulos + tamaño de
         # detector/salida), así que la sensibilidad se calcula UNA sola vez
@@ -1029,19 +1167,27 @@ def reconstruct_gated_projection_volume(
         width = proj.shape[3]
         theta = np.linspace(0.0, 360.0, n_angles, endpoint=False) if angles_deg is None else np.asarray(angles_deg, dtype=np.float64)
         effective_subsets = int(subsets) if method_key == "osem" else 1
-        sensitivity_cache = _build_sensitivity_cache(
-            theta, subsets=effective_subsets, detector_size=width, output_size=width, psf=psf
-        )
+        if output_size is not None and int(output_size) != width:
+            fine_operators = _fine_subset_operators(theta, effective_subsets, width, int(output_size), psf=psf)
+            sensitivity_cache = {key: (operator.T @ np.ones(operator.shape[0])).reshape(int(output_size), int(output_size))
+                                 for key, operator in fine_operators.items()}
+        else:
+            sensitivity_cache = _build_sensitivity_cache(
+                theta, subsets=effective_subsets, detector_size=width, output_size=width, psf=psf
+            )
     volumes = [
         reconstruct_projection_volume(
             proj[gate],
             angles_deg,
             method=method,
+            output_size=output_size,
+            axial_resample=axial_resample,
             projection_filter=projection_filter,
             fbp_filter_name=fbp_filter_name,
             iterations=iterations,
             subsets=subsets,
             sensitivity_cache=sensitivity_cache,
+            fine_operators=fine_operators,
             psf=psf,
             slice_range=slice_range,
             progress=_sub_progress(progress, gate, int(proj.shape[0])),
@@ -1178,6 +1324,10 @@ def reconstruct_raw_gated_pipeline(
             )
 
     method = str(cfg.reconstruction_method).strip().lower()
+    voxel_scale = 1.0 if cfg.reconstruction_matrix is None else raw.shape[-1] / float(cfg.reconstruction_matrix)
+    fine_kwargs = {} if cfg.reconstruction_matrix is None else {
+        "output_size": int(cfg.reconstruction_matrix), "axial_resample": True,
+    }
     subsets = int(cfg.osem_subsets) if method == "osem" else 1
     # RR NÍTIDA (OmniRes) por rama: rr_ungated/rr_gated (None = hereda el global
     # resolution_recovery). Solo aplica al path iterativo (osem/mlem).
@@ -1287,6 +1437,7 @@ def reconstruct_raw_gated_pipeline(
     ungated_volume = reconstruct_projection_volume(
         ungated_src,
         angles_deg,
+        **fine_kwargs,
         method=method,
         projection_filter=cfg.ungated_filter,
         fbp_filter_name=cfg.fbp_filter_name,
@@ -1302,6 +1453,7 @@ def reconstruct_raw_gated_pipeline(
     gated_volume = reconstruct_gated_projection_volume(
         gated_src,
         angles_deg,
+        **fine_kwargs,
         method=gated_method,
         projection_filter=cfg.gated_filter,
         fbp_filter_name=cfg.fbp_filter_name,
@@ -1329,7 +1481,7 @@ def reconstruct_raw_gated_pipeline(
         blur_sc = float(getattr(cfg, "fbp_clean_blur_sigma_color", 0.24))
         ung_blur = reconstruct_projection_volume(
             denoise_projections_bilateral(ungated_corrected, sigma_color=blur_sc),
-            angles_deg, method=method, projection_filter=cfg.ungated_filter,
+            angles_deg, **fine_kwargs, method=method, projection_filter=cfg.ungated_filter,
             fbp_filter_name=cfg.fbp_filter_name, iterations=int(cfg.iterative_iterations),
             subsets=subsets, psf=rr_psf, slice_range=cfg.recon_slice_range,
             attenuation_mu_map=ac_mu_map if ac_ung_enabled else None,
@@ -1361,6 +1513,7 @@ def reconstruct_raw_gated_pipeline(
         gated_volume = nitida3_map_osem_gated_adaptive(
             gated_src,
             angles_deg,
+            **fine_kwargs,
             iterations=int(getattr(cfg, "nitida3_iterations", 2)),
             subsets=int(getattr(cfg, "nitida3_subsets", 4)),
             beta0=float(getattr(cfg, "nitida3_beta0", 0.6)),
@@ -1393,6 +1546,7 @@ def reconstruct_raw_gated_pipeline(
         gated_volume = nitida4d_osem_gated(
             gated_src,
             angles_deg,
+            **fine_kwargs,
             iterations=int(getattr(cfg, "nitida4d_iterations", 4)),
             subsets=int(getattr(cfg, "nitida4d_subsets", 4)),
             beta_temporal=float(getattr(cfg, "nitida4d_beta_temporal", 0.3)),
@@ -1421,13 +1575,13 @@ def reconstruct_raw_gated_pipeline(
         if method == "fbp":
             ung_blur = reconstruct_projection_volume(
                 denoise_projections_bilateral(ungated_corrected, sigma_color=blur_sc),
-                angles_deg, method="fbp", projection_filter=cfg.ungated_filter,
+                angles_deg, **fine_kwargs, method="fbp", projection_filter=cfg.ungated_filter,
                 fbp_filter_name=cfg.fbp_filter_name, slice_range=cfg.recon_slice_range)
             ungated_volume = sharpen_by_subtraction(ungated_volume, ung_blur, k)
         if gated_fbc:
             gated_blur = reconstruct_gated_projection_volume(
                 denoise_projections_bilateral(corrected, sigma_color=blur_sc),
-                angles_deg, method="fbp", projection_filter=cfg.gated_filter,
+                angles_deg, **fine_kwargs, method="fbp", projection_filter=cfg.gated_filter,
                 fbp_filter_name=cfg.fbp_filter_name, slice_range=cfg.recon_slice_range)
             gated_volume = sharpen_by_subtraction(gated_volume, gated_blur, k)
         notes.append(f"FBP_CLEAN: realce por resta (k={k:.2f}, difuso σc={blur_sc:.2f}).")
@@ -1446,8 +1600,8 @@ def reconstruct_raw_gated_pipeline(
         try:
             gated_blur = reconstruct_gated_projection_volume(
                 denoise_projections_bilateral(corrected, sigma_color=blur_sc),
-                angles_deg, method=gated_method, projection_filter=cfg.gated_filter,
-                fbp_filter_name=cfg.fbp_filter_name, iterations=int(cfg.iterative_iterations),
+                angles_deg, **fine_kwargs, method=gated_method, projection_filter=cfg.gated_filter,
+                fbp_filter_name=cfg.fbp_filter_name, iterations=gated_iters,
                 subsets=gated_subsets, psf=gated_rr_psf, slice_range=cfg.recon_slice_range,
                 attenuation_mu_map=ac_mu_map if ac_gat_enabled else None,
                 attenuation_mu_scale=ac_mu_scale,
@@ -1490,6 +1644,8 @@ def reconstruct_raw_gated_pipeline(
     _post_global = float(getattr(cfg, "post_filter_sigma_px", 0.0) or 0.0)
     post_ung = _post_global if getattr(cfg, "post_filter_sigma_ungated_px", None) is None else float(cfg.post_filter_sigma_ungated_px)
     post_gat = _post_global if getattr(cfg, "post_filter_sigma_gated_px", None) is None else float(cfg.post_filter_sigma_gated_px)
+    post_ung /= voxel_scale
+    post_gat /= voxel_scale
 
     _post_kind = str(getattr(cfg, "post_filter_kind", "gaussian") or "gaussian").strip().lower()
 
@@ -1497,7 +1653,7 @@ def reconstruct_raw_gated_pipeline(
     # del piso, se eleva. La RR amplifica ruido de alta frecuencia; este piso es
     # su contraparte (medido: σ=1.0 => ruido -15%, contraste intacto). Solo con
     # kind gaussiano (con butterworth ese filtro ya suaviza e ignora las sigmas).
-    _rr_floor = float(getattr(cfg, "rr_post_filter_sigma_px", 0.0) or 0.0)
+    _rr_floor = float(getattr(cfg, "rr_post_filter_sigma_px", 0.0) or 0.0) / voxel_scale
     if _rr_floor > 0.0 and _post_kind != "butterworth":
         if rr_psf is not None and post_ung < _rr_floor:
             post_ung = _rr_floor
@@ -1512,7 +1668,7 @@ def reconstruct_raw_gated_pipeline(
     if _post_kind == "butterworth":
         if progress_callback is not None:
             progress_callback(0.96, "Aplicando post-filtro Butterworth 3D...")
-        _bc = float(getattr(cfg, "post_filter_cutoff", 0.35))
+        _bc = float(getattr(cfg, "post_filter_cutoff", 0.35)) * voxel_scale
         _bo = int(getattr(cfg, "post_filter_order", 5))
         ungated_volume = np.clip(_butterworth_3d(ungated_volume, _bc, _bo), 0.0, None)
         for g in range(gated_volume.shape[0]):
@@ -1547,9 +1703,9 @@ def reconstruct_raw_gated_pipeline(
             gated_volume = denoise_spatiotemporal(
                 gated_volume,
                 n_harmonics=n_harm,
-                dc_radius=int(getattr(cfg, "nitida2_dc_radius", 2)),
+                dc_radius=int(round(int(getattr(cfg, "nitida2_dc_radius", 2)) / voxel_scale)),
                 dc_eps=float(getattr(cfg, "nitida2_dc_eps", 0.01)),
-                band_sigma=float(getattr(cfg, "nitida2_band_sigma", 0.7)),
+                band_sigma=float(getattr(cfg, "nitida2_band_sigma", 0.7)) / voxel_scale,
                 guide_volume=ungated_volume / gated_volume.shape[0],
             )
             notes.append(
@@ -1649,6 +1805,10 @@ def reconstruct_raw_gated_pipeline(
         f"gated={cfg.gated_filter.kind}(cutoff={cfg.gated_filter.cutoff}, order={cfg.gated_filter.order})."
     )
     notes.append("Cubo FEVI/fase conserva cortes cada 1 px; display_cube submuestrea solo para visualizacion.")
+    if fine_kwargs:
+        notes.append(f"Matriz fina {cfg.reconstruction_matrix} EXPERIMENTAL: mismo FOV, voxel x{voxel_scale:.3f}; no agrega resolucion fisica. FEVI/volumenes sin validacion clinica.")
+        if method != "fbp" or gated_method != "fbp" or cfg.nitida3_enabled or cfg.nitida4d_enabled:
+            notes.append("Iterativa fina: operador voxel-driven con transpuesta adyunta; matriz nativa conserva motor previo.")
 
     return RawReconResult(
         original_projections=raw,
@@ -1667,4 +1827,5 @@ def reconstruct_raw_gated_pipeline(
         ungated_volume_mf=ungated_volume_mf,
         gated_volume_mf_per_gate=gated_volume_mf_per_gate,
         ungated_volume_unfiltered=_ungated_unfiltered,
+        voxel_scale=voxel_scale,
     )

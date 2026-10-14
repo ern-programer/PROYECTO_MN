@@ -89,6 +89,8 @@ def nitida4d_osem_gated(
     beta_temporal: float = 0.3,
     delta_temporal: float = 0.1,
     psf=None,
+    output_size: int | None = None,
+    axial_resample: bool = False,
     slice_range: tuple[int, int] | None = None,
     rescale: bool = True,
     ref_volume: np.ndarray | None = None,
@@ -119,6 +121,8 @@ def nitida4d_osem_gated(
         _backproject_slice,
         _build_sensitivity_cache,
         _forward_project_slice,
+        _fine_subset_operators,
+        _resolve_slice_range,
         reconstruct_gated_projection_volume,
     )
 
@@ -126,24 +130,34 @@ def nitida4d_osem_gated(
     if proj.ndim != 4:
         raise ValueError(f"projections debe ser 4D (gates,angles,H,W); recibió {proj.shape}")
     n_gates, n_angles, H, W = proj.shape
-    theta = np.asarray(angles_deg, dtype=np.float64)
+    theta = np.linspace(0.0, 360.0, n_angles, endpoint=False) if angles_deg is None else np.asarray(angles_deg, dtype=np.float64)
+    if theta.ndim != 1 or theta.size != n_angles:
+        raise ValueError("angles_deg must match projection angles")
     detector_size = int(W)
-    out_size = int(W)
+    out_size = int(W) if output_size is None else int(output_size)
+    if out_size < W or out_size % W:
+        raise ValueError("output_size must be an integer multiple of detector width")
+    voxel_scale = W / float(out_size)
+    axial_scale = voxel_scale if axial_resample else 1.0
+    out_height = int(round(H / axial_scale))
 
     # Rango axial (feta) a reconstruir.
-    if slice_range is not None:
-        z0, z1 = int(slice_range[0]), int(slice_range[1])
-    else:
-        z0, z1 = 0, int(H) - 1
-    z_indices = list(range(z0, z1 + 1))
+    z0, z1 = _resolve_slice_range(slice_range, int(H))
+    z_indices = [index for index in range(out_height) if z0 <= index * axial_scale < z1 + 1]
     n_slices = len(z_indices)
 
     # Sensibilidad por subset: se calcula UNA vez (todos los gates/slices
     # comparten geometría) y se reutiliza.
     effective_subsets = max(1, min(int(subsets), int(theta.size)))
-    sensitivity_cache = _build_sensitivity_cache(
-        theta, subsets=effective_subsets, detector_size=detector_size, output_size=out_size, psf=psf
-    )
+    fine_operators = None
+    if out_size != W:
+        fine_operators = _fine_subset_operators(theta, effective_subsets, detector_size, out_size, psf=psf)
+        sensitivity_cache = {key: (operator.T @ np.ones(operator.shape[0])).reshape(out_size, out_size)
+                             for key, operator in fine_operators.items()}
+    else:
+        sensitivity_cache = _build_sensitivity_cache(
+            theta, subsets=effective_subsets, detector_size=detector_size, output_size=out_size, psf=psf
+        )
     angle_indices = np.arange(theta.size)
     eps = 1e-6
 
@@ -174,13 +188,25 @@ def nitida4d_osem_gated(
                     temp_grad = temporal_huber_grad(images[:, si, :, :], delta=float(delta_temporal))
                 for g in range(n_gates):
                     # Sinograma del gate g, slice z, ángulos del subset.
-                    sino_sub = proj[g, idx, z, :].T  # (detector, n_angles_sub)
+                    source_z = z * axial_scale
+                    lower = int(np.floor(source_z))
+                    fraction = source_z - lower
+                    projection = proj[g, idx, lower, :] * (1.0 - fraction)
+                    if fraction > 0 and lower + 1 <= z1:
+                        projection = projection + proj[g, idx, lower + 1, :] * fraction
+                    sino_sub = projection.T
                     measured = np.clip(sino_sub, 0.0, None)
                     image = images[g, si]
 
-                    estimated = _forward_project_slice(image, theta_sub, detector_size=detector_size, psf=psf)
-                    ratio = measured / np.maximum(estimated, eps)
-                    correction = _backproject_slice(ratio, theta_sub, output_size=out_size, psf=psf)
+                    if fine_operators is None:
+                        estimated = _forward_project_slice(image, theta_sub, detector_size=detector_size, psf=psf)
+                        ratio = measured / np.maximum(estimated, eps)
+                        correction = _backproject_slice(ratio, theta_sub, output_size=out_size, psf=psf)
+                    else:
+                        operator = fine_operators[subset_id]
+                        estimated = (operator @ image.ravel()).reshape(len(idx), detector_size).T
+                        ratio = measured / np.maximum(estimated, eps)
+                        correction = (operator.T @ ratio.T.ravel()).reshape(out_size, out_size)
 
                     if sensitivity is not None:
                         denom = np.maximum(sensitivity, eps)
@@ -192,7 +218,7 @@ def nitida4d_osem_gated(
                     # Denominador OSL: espacial (opcional) + temporal (este).
                     factor = np.ones_like(image)
                     if use_spatial:
-                        factor = factor + float(beta_spatial) * huber_prior_grad(image)
+                        factor = factor + float(beta_spatial) * huber_prior_grad(image, voxel_scale=voxel_scale)
                     if use_temporal:
                         factor = factor + float(beta_temporal) * temp_grad[g]
                     denom = np.maximum(denom * factor, 1e-3)
@@ -210,14 +236,17 @@ def nitida4d_osem_gated(
         if ref_volume is not None:
             vol_ref = np.asarray(ref_volume, dtype=np.float64)
             # ref puede ser el volumen completo (n_gates, H, W, W): recortar a la feta.
-            ref_slices = vol_ref[:, z0:z1 + 1] if vol_ref.ndim == 4 and vol_ref.shape[1] == H else vol_ref
+            ref_slices = vol_ref[:, z_indices] if vol_ref.ndim == 4 and vol_ref.shape[1] == out_height else vol_ref
         else:
             ref_full = reconstruct_gated_projection_volume(
                 proj, angles_deg, method="osem",
                 projection_filter=None, iterations=iterations, subsets=subsets,
                 psf=psf, slice_range=slice_range,
+                output_size=output_size, axial_resample=axial_resample,
             )
-            ref_slices = ref_full
+            ref_slices = ref_full[:, z_indices]
+        if ref_slices.shape != out.shape:
+            raise ValueError("4D-OSEM reference must match reconstructed grid and feta")
         for g in range(n_gates):
             s_out = float(out[g].sum())
             s_ref = float(ref_slices[g].sum())
@@ -225,8 +254,8 @@ def nitida4d_osem_gated(
                 out[g] = out[g] * (s_ref / s_out)
 
     # Reensamblar al volumen completo (n_gates, H, W, W) si se reconstruyó feta.
-    if slice_range is not None and n_slices != H:
-        full = np.zeros((n_gates, H, out_size, out_size), dtype=np.float64)
+    if slice_range is not None and n_slices != out_height:
+        full = np.zeros((n_gates, out_height, out_size, out_size), dtype=np.float64)
         for si, z in enumerate(z_indices):
             full[:, z] = out[:, si]
         return full

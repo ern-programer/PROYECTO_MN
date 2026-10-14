@@ -24,6 +24,435 @@ def _bind(window, name, **globals_dict):
     setattr(window, name, MethodType(namespace[name], window))
 
 
+@pytest.mark.parametrize("voxel_scale", [1.0, 0.5])
+def test_diagnostic_snapshots_keep_stages_separate_and_invalidate_old_geometry(tmp_path, voxel_scale):
+    import json
+    import numpy as np
+    from core.raw_reconstruction import RawReconConfig
+    window = SimpleNamespace(output_dir=str(tmp_path), _log=lambda *_: None)
+    _bind(window, "_dump_feta_for_harness", np=np)
+    _bind(window, "_dump_reorient_for_harness", np=np)
+    config = RawReconConfig(gated_method="osem", gated_iterations=5, gated_osem_subsets=4)
+    study = SimpleNamespace(pixel_spacing=(6.8, 6.8), source_path="test.dcm")
+    result = SimpleNamespace(voxel_scale=voxel_scale, ungated_projections=np.ones((4, 6, 6)),
+                             corrected_projections=np.ones((8, 4, 6, 6)),
+                             ungated_volume=np.ones((6, 6, 6)), gated_volume=np.ones((8, 6, 6, 6)))
+    dialog = SimpleNamespace(result_long_axis=(1, 0, 0), result_center=(3, 3, 3), _reformat_sample_scale=0.5)
+    for stage, value in (("stress", 1.0), ("rest", 2.0)):
+        window._cine_crudo_recon_stage = stage
+        window._dump_feta_for_harness(result, study, np.arange(4), config, 1, 4, stage)
+        window.cine_crudo_reoriented_gated = np.full((8, 4, 6, 6), value)
+        window._dump_reorient_for_harness(dialog)
+    root = tmp_path / "_feta_harness"
+    for stage, value in (("stress", 1.0), ("rest", 2.0)):
+        folder = root / stage
+        metadata = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+        assert metadata["pixel_mm"] == 6.8 * voxel_scale
+        assert metadata["config"]["gated_iterations"] == 5
+        assert metadata["config"]["gated_osem_subsets"] == 4
+        orientation = json.loads((folder / "reorient.json").read_text())
+        assert orientation["stage"] == stage
+        assert orientation["voxel_mm"] == 3.4 * voxel_scale
+        assert orientation["reconstruction_sha256"] == metadata["reconstruction_sha256"]
+        np.testing.assert_array_equal(np.load(folder / "reoriented_gated.npy"), value)
+    window._dump_feta_for_harness(result, study, np.arange(4), config, 2, 4, "rest")
+    assert not (root / "rest" / "reorient.json").exists()
+    assert not (root / "rest" / "reoriented_gated.npy").exists()
+    assert (root / "stress" / "reorient.json").exists()
+
+
+@pytest.mark.parametrize("matrix", [None, 128])
+def test_reconstruction_config_keeps_fine_grid_opt_in(matrix):
+    from core.raw_reconstruction import ProjectionFilterConfig
+    window = SimpleNamespace(
+        cine_crudo_matrix_combo=SimpleNamespace(currentData=lambda: matrix),
+        _research_flag=lambda key, default: True,
+        _cine_crudo_recon_filter_config=lambda branch: ProjectionFilterConfig(),
+        _cine_crudo_post_filter_sigma_px=lambda study: 0.0,
+        _cine_crudo_post_filter_gated_sigma_px=lambda study: 0.0,
+    )
+    _bind(window, "_cine_crudo_recon_config")
+    config = window._cine_crudo_recon_config()
+    assert config.reconstruction_matrix == matrix
+    assert config.reconstruction_method == config.gated_method == "fbp"
+    assert config.ungated_filter == config.gated_filter == ProjectionFilterConfig()
+
+
+def test_matrix_change_resets_pixel_based_orientation_locks():
+    window = SimpleNamespace(_reorient_locked_voi={"rx": 10}, _reorient_seed={"half_length": 12},
+                             _log=lambda *_: None)
+    _bind(window, "_on_reconstruction_matrix_changed")
+    window._on_reconstruction_matrix_changed(1)
+    assert window._reorient_locked_voi is None
+    assert window._reorient_seed is None
+
+
+def test_feta_matrix_selector_lives_in_visible_pipeline_not_sidebar():
+    def assignments(method):
+        return [node for node in ast.walk(METHODS[method]) if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Attribute) and target.attr == "cine_crudo_matrix_combo"
+                        for target in node.targets)]
+    assert len(assignments("_build_pipeline_step_bar")) == 1
+    assert not assignments("_build_sidebar")
+    source = ast.unparse(METHODS["_build_pipeline_step_bar"])
+    assert "Matriz de feta" in source
+    assert "128 x 128 (experimental)" in source
+    assert "self.cine_crudo_matrix_combo.currentIndexChanged.connect(self._on_reconstruction_matrix_changed)" in source
+    assert "matrix_row.addWidget(self._effective_matrix_label, 1)" in source
+
+
+@pytest.mark.parametrize("size,band,spacing,expected", [
+    (64, None, 6.8, "recon 64 x 64 (volumen) · 6.800 mm/px"),
+    (128, (12, 31), 3.4, "recon 128 x 128 (feta) · experimental · 3.400 mm/px"),
+])
+def test_effective_matrix_readout_uses_volume_not_selected_target(size, band, spacing, expected):
+    import numpy as np
+    result = SimpleNamespace(gated_volume=np.zeros((2, 8, size, size)),
+                             voxel_scale=64 / size, config=SimpleNamespace(recon_slice_range=band))
+    stress = SimpleNamespace(recon_result=result, raw_study=SimpleNamespace(pixel_spacing=(6.8, 6.8)))
+    states = {"stress": stress, "rest": SimpleNamespace()}
+    label = SimpleNamespace(setText=lambda text: setattr(label, "text", text))
+    window = SimpleNamespace(_effective_matrix_label=label,
+                             cine_crudo_matrix_combo=SimpleNamespace(currentData=lambda: 128),
+                             _dual_session=lambda: SimpleNamespace(stage=lambda stage: states[stage]))
+    _bind(window, "_refresh_effective_matrix_readout")
+    window._refresh_effective_matrix_readout()
+    assert label.text == "Esfuerzo: " + expected
+    stress.cut_study = SimpleNamespace(cube=np.zeros((2, 10, 32, 32)), pixel_spacing=(spacing / 2, spacing / 2))
+    window._refresh_effective_matrix_readout()
+    assert f"SA 32 x 32 · {spacing / 2:.3f} mm/px" in label.text
+    states["rest"] = SimpleNamespace(recon_result=SimpleNamespace(
+        gated_volume=np.zeros((2, 8, 64, 64)), config=SimpleNamespace(recon_slice_range=None)))
+    window._refresh_effective_matrix_readout()
+    assert "Reposo: recon 64 x 64 (volumen)" in label.text
+    states["stress"] = states["rest"] = SimpleNamespace()
+    window._refresh_effective_matrix_readout()
+    assert label.text == "Matriz efectiva: sin reconstrucción"
+
+
+@pytest.mark.parametrize("matrix,feta_only,force,expected_matrix,expected_method", [
+    (128, False, False, None, "fbp"),
+    (128, True, False, 128, "osem"),
+    (None, False, False, None, "osem"),
+    (128, False, True, None, "fbp"),
+    (None, False, True, None, "fbp"),
+])
+def test_fine_matrix_applies_only_after_native_fbp_localizer(matrix, feta_only, force,
+                                                          expected_matrix, expected_method):
+    from core.raw_reconstruction import RawReconConfig
+    method = METHODS["_reconstruct_cine_crudo_raw"]
+    body = next(node for node in method.body if isinstance(node, ast.Try)).body
+    localizer = next(node for node in body if isinstance(node, ast.If)
+                     and "force_fbp_localizer" in ast.unparse(node.test))
+    config = RawReconConfig(reconstruction_matrix=matrix, reconstruction_method="osem",
+                            gated_method="osem", nitida3_enabled=True, nitida4d_enabled=True,
+                            resolution_recovery=True, ungated_denoise_plus=True,
+                            gated_denoise_plus=True, fbp_clean_sigma_color=0.04,
+                            attenuation_correction=True)
+    window = SimpleNamespace(_use_adjoint_osem=True, _log=lambda *_: None)
+    namespace = {"self": window, "cfg": config, "feta_only": feta_only, "force_fbp_localizer": force}
+    exec(compile(ast.Module(body=[localizer], type_ignores=[]), "localizer_route", "exec"), namespace)
+    actual = namespace["cfg"]
+    assert actual.reconstruction_matrix == expected_matrix
+    assert actual.reconstruction_method == actual.gated_method == expected_method
+    if expected_method == "fbp":
+        assert not actual.resolution_recovery and not actual.nitida3_enabled and not actual.nitida4d_enabled
+        assert not actual.ungated_denoise_plus and not actual.gated_denoise_plus
+        assert actual.fbp_clean_sigma_color == 0.0 and not actual.attenuation_correction
+        assert not window._use_adjoint_osem
+    else:
+        assert actual == config
+
+
+@pytest.mark.parametrize("method,expected", [("FBP", "fbp"), ("MLEM", "mlem"), ("OSEM", "osem"), ("OSEM-Adj", "osem")])
+def test_fine_matrix_config_accepts_all_visible_reconstruction_methods(method, expected):
+    from core.raw_reconstruction import ProjectionFilterConfig
+    window = SimpleNamespace(
+        cine_crudo_matrix_combo=SimpleNamespace(currentData=lambda: 128),
+        _research_flag=lambda key, default: True,
+        cine_crudo_recon_method_combo=SimpleNamespace(currentText=lambda: method),
+        cine_crudo_gated_method_combo=SimpleNamespace(currentText=lambda: method),
+        _cine_crudo_recon_filter_config=lambda branch: ProjectionFilterConfig(),
+        _cine_crudo_post_filter_sigma_px=lambda study: 0.0,
+        _cine_crudo_post_filter_gated_sigma_px=lambda study: 0.0,
+    )
+    _bind(window, "_cine_crudo_recon_config")
+    config = window._cine_crudo_recon_config()
+    assert config.reconstruction_matrix == 128
+    assert config.reconstruction_method == config.gated_method == expected
+
+
+@pytest.mark.parametrize("gates", [1, 2, 8, 16])
+@pytest.mark.parametrize("voxel_scale", [1.0, 0.5])
+@pytest.mark.parametrize("stage", ["stress", "rest"])
+def test_raw_recon_applies_automatic_feta_for_gated_and_ungated_volumes(
+        monkeypatch, gates, voxel_scale, stage):
+    import numpy as np
+    from core import lv_center
+    block = next(node for node in ast.walk(METHODS["_reconstruct_cine_crudo_raw"])
+                 if isinstance(node, ast.If) and "hasattr(self, 'cine_crudo_cut_base_spin')" in ast.unparse(node.test))
+    result = SimpleNamespace(gated_volume=np.ones((gates, 32, 4, 4)),
+                             ungated_volume=np.ones((32, 4, 4)), voxel_scale=voxel_scale)
+    calls = []
+    values = {}
+    def detect(volume, margin):
+        calls.append((volume, margin))
+        return (8, 22)
+    monkeypatch.setattr(lv_center, "heart_axial_bounds_from_spect", detect)
+    def spin(key):
+        return SimpleNamespace(setEnabled=lambda enabled: None, setRange=lambda lower, upper: None,
+                               setValue=lambda value: values.update({key: value}))
+    window = SimpleNamespace(
+        cine_crudo_cut_base_spin=spin("base"), cine_crudo_cut_apex_spin=spin("apex"),
+        _suggest_feta_limits_from_fusion=lambda stage: False,
+        _cine_crudo_stage_limits_set=lambda stage, base, apex, size: values.update(
+            saved=(stage, base, apex, size)),
+        _log=lambda message: None,
+    )
+    namespace = {"self": window, "result": result, "n_slices": 32,
+                 "feta_only": False, "stage": stage, "np": np}
+    exec(compile(ast.Module(body=[block], type_ignores=[]), "automatic_feta", "exec"), namespace)
+    assert len(calls) == 1
+    assert calls[0][0] is (result.gated_volume if gates >= 3 else result.ungated_volume)
+    assert calls[0][1] == int(np.ceil(3 / voxel_scale))
+    assert values == {"base": 10, "apex": 22, "saved": (stage, 10, 22, 32)}
+
+
+@pytest.mark.parametrize("previous_scale,new_scale,base,apex,expected", [
+    (1.0, 0.5, 12, 24, (23, 47)),
+    (0.5, 0.5, 23, 47, (23, 47)),
+    (0.5, 1.0, 23, 47, (12, 24)),
+])
+def test_feta_matrix_change_preserves_markers_without_accumulating_safety_margin(
+        previous_scale, new_scale, base, apex, expected):
+    local = next(node for node in ast.walk(METHODS["_reconstruct_cine_crudo_raw"])
+                 if isinstance(node, ast.If) and isinstance(node.test, ast.UnaryOp)
+                 and isinstance(node.test.operand, ast.Name) and node.test.operand.id == "feta_only")
+    values = {}
+    window = SimpleNamespace(
+        cine_crudo_cut_base_spin=SimpleNamespace(setValue=lambda value: values.update(base=value)),
+        cine_crudo_cut_apex_spin=SimpleNamespace(setValue=lambda value: values.update(apex=value)),
+        _cine_crudo_capture_limits_from_spins=lambda stage: None,
+    )
+    namespace = {"self": window, "result": SimpleNamespace(voxel_scale=new_scale),
+                 "previous_scale": previous_scale, "selected_base": base, "selected_apex": apex,
+                 "n_slices": int(64 / new_scale), "stage": "stress"}
+    exec(compile(ast.Module(body=local.orelse, type_ignores=[]), "feta_markers", "exec"), namespace)
+    assert (values["base"], values["apex"]) == expected
+
+
+def test_research_preference_controls_fine_selector_and_preserves_existing_volume():
+    class Combo:
+        def __init__(self):
+            self.options = [("Nativa", None), ("128 x 128 (experimental)", 128)]
+            self.index = 1
+        def findData(self, value):
+            return next((index for index, option in enumerate(self.options) if option[1] == value), -1)
+        def addItem(self, text, value):
+            self.options.append((text, value))
+        def setCurrentIndex(self, index):
+            self.index = index
+        def removeItem(self, index):
+            self.options.pop(index)
+        def setEnabled(self, enabled):
+            self.enabled = enabled
+    values = {}
+    volume = object()
+    window = SimpleNamespace(cine_crudo_matrix_combo=Combo(), cine_crudo_recon_result=volume,
+                             _ui_settings=SimpleNamespace(value=lambda key, default, type: values.get(key, default)))
+    _bind(window, "_research_flag")
+    _bind(window, "_apply_fine_matrix_research_preference")
+    window._apply_fine_matrix_research_preference()
+    combo = window.cine_crudo_matrix_combo
+    assert combo.options == [("Nativa", None)] and combo.index == 0
+    assert combo.enabled is False and window.cine_crudo_recon_result is volume
+    values["research/fine_reconstruction_enabled"] = True
+    window._apply_fine_matrix_research_preference()
+    window._apply_fine_matrix_research_preference()
+    assert len(combo.options) == 2 and combo.findData(128) == 1 and combo.enabled
+    fresh_window = SimpleNamespace(_ui_settings=window._ui_settings)
+    _bind(fresh_window, "_research_flag")
+    assert fresh_window._research_flag("fine_reconstruction_enabled", False) is True
+    source = ast.unparse(METHODS["open_ui_preferences_dialog"])
+    assert "research/fine_reconstruction_enabled" in source
+    assert "fine_matrix_enabled.isChecked()" in source
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_research_preference_gates_fine_config_even_with_stale_selector(enabled):
+    from core.raw_reconstruction import ProjectionFilterConfig
+    window = SimpleNamespace(
+        cine_crudo_matrix_combo=SimpleNamespace(currentData=lambda: 128),
+        _research_flag=lambda key, default: enabled,
+        _cine_crudo_recon_filter_config=lambda branch: ProjectionFilterConfig(),
+        _cine_crudo_post_filter_sigma_px=lambda study: 0.0,
+        _cine_crudo_post_filter_gated_sigma_px=lambda study: 0.0,
+    )
+    _bind(window, "_cine_crudo_recon_config")
+    assert window._cine_crudo_recon_config().reconstruction_matrix == (128 if enabled else None)
+
+
+def test_fine_reconstruction_does_not_reuse_native_ct_mask_or_registration():
+    stage = SimpleNamespace(recon_result=SimpleNamespace(voxel_scale=0.5))
+    window = SimpleNamespace(_dual_session=lambda: SimpleNamespace(stage=lambda name: stage))
+    _bind(window, "_suggest_feta_limits_from_fusion")
+    assert window._suggest_feta_limits_from_fusion("stress") is False
+    _bind(window, "_stage_ct_on_recon_grid")
+    with pytest.raises(ValueError, match="matriz fina"):
+        window._stage_ct_on_recon_grid("stress", (128, 128, 128))
+
+
+@pytest.mark.parametrize("scale,base,apex,size,expected", [
+    (1.0, 10, 20, 64, (7, 21)), (0.5, 19, 39, 128, (14, 42)),
+])
+def test_feta_safety_margin_keeps_physical_width(scale, base, apex, size, expected):
+    import numpy as np
+    window = SimpleNamespace(_cine_crudo_stage_limits_get=lambda stage, count: (base, apex),
+                             cine_crudo_recon_result=SimpleNamespace(voxel_scale=scale))
+    _bind(window, "_cine_crudo_cut_bounds", np=np)
+    assert window._cine_crudo_cut_bounds(size) == expected
+
+
+@pytest.mark.parametrize("voxel_scale,sample_scale", [(1.0, 1.0), (0.5, 1.0), (0.5, 0.5)])
+def test_generated_sa_metadata_uses_effective_voxel_not_detector_pixel(voxel_scale, sample_scale):
+    import numpy as np
+    method = METHODS["_generate_cine_crudo_cardiac_cuts"]
+    body = next(node for node in method.body if isinstance(node, ast.Try)).body
+    start = next(index for index, node in enumerate(body)
+                 if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                 and node.targets[0].id == "raw_px")
+    end = next(index for index, node in enumerate(body)
+               if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Attribute)
+               and node.targets[0].attr == "cine_crudo_cut_study")
+    study = SimpleNamespace(pixel_spacing=(6.8, 6.8), source_path="test.dcm")
+    window = SimpleNamespace(cine_crudo_reoriented_gated=np.ones((2, 8, 16, 16)),
+                             cine_crudo_reoriented_voi={"sample_scale": sample_scale},
+                             cine_crudo_cut_source_label="test")
+    namespace = {"self": window, "raw_study": study, "result": SimpleNamespace(voxel_scale=voxel_scale, notes=[]),
+                 "sa_cube": window.cine_crudo_reoriented_gated, "sa_cube_phase": None, "thickness": 2,
+                 "z0": 0, "z1": 7,
+                 "dicom_loader": SimpleNamespace(GatedStudy=lambda **kwargs: SimpleNamespace(**kwargs))}
+    exec(compile(ast.Module(body=body[start:end + 1], type_ignores=[]), "sa_metadata", "exec"), namespace)
+    expected = 6.8 * voxel_scale * sample_scale
+    cuts = window.cine_crudo_cut_study
+    assert cuts.pixel_spacing == (expected, expected)
+    assert cuts.z_spacing_mm == cuts.spacing_between_slices_mm == expected
+    assert cuts.slice_thickness_mm == 2 * expected
+    assert study.pixel_spacing == (6.8, 6.8)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_ectb_count_compensation_config_and_reset(enabled):
+    from core.ectb_lv import ECTbLVConfig
+    source = ast.parse((ROOT / "ui" / "ectb_window.py").read_text(encoding="utf-8"))
+    window_class = next(node for node in source.body if isinstance(node, ast.ClassDef)
+                        and any(isinstance(method, ast.FunctionDef) and method.name == "current_config"
+                                for method in node.body))
+    methods = [node for node in window_class.body if isinstance(node, ast.FunctionDef)
+               and node.name in ("current_config", "reset_to_defaults")]
+    namespace = {"ECTbLVConfig": ECTbLVConfig}
+    exec(compile(ast.Module(body=methods, type_ignores=[]), "ectb_window.py", "exec"), namespace)
+    class Control:
+        def __init__(self, value):
+            self.current = value
+            self.blocked = False
+        def value(self):
+            return self.current
+        currentData = value
+        isChecked = value
+        def setValue(self, value):
+            self.current = value
+        setChecked = setValue
+        setCurrentText = setValue
+        def blockSignals(self, blocked):
+            self.blocked = blocked
+        def setEnabled(self, enabled):
+            self.enabled = enabled
+    values = {
+        "thickness_spin": 10, "oversample_spin": 4, "angles_combo": 64,
+        "median_large_combo": 7, "median_small_combo": 3, "thickening_check": True,
+        "dropout_check": True, "normalize_counts_check": enabled, "valve_check": True,
+        "valve_offset_spin": 10, "valve_angle_spin": 180, "manual_thickness_check": False,
+    }
+    calls = []
+    window = SimpleNamespace(**{name: Control(value) for name, value in values.items()},
+                             recompute=lambda: calls.append("recompute"))
+    config = namespace["current_config"](window)
+    assert config.normalize_gate_counts is enabled
+    assert config.ed_wall_thickness_mm == 10 and config.use_thickening
+    namespace["reset_to_defaults"](window)
+    assert window.normalize_counts_check.isChecked() is False
+    assert window.normalize_counts_check.enabled is True
+    assert not window.normalize_counts_check.blocked
+    assert calls == ["recompute"]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_ectb_report_preserves_count_compensation_audit(enabled):
+    import numpy as np
+    from core.ectb_lv import ECTbLVConfig, ECTbLVResult
+    result = ECTbLVResult(
+        available=True, config=ECTbLVConfig(normalize_gate_counts=enabled),
+        gate_counts=np.array([100., 80., 90.]),
+        gate_count_scale_factors=np.array([1., 1.25, 100 / 90]) if enabled else np.ones(3),
+        notes=["experimental"] if enabled else [],
+    )
+    window = SimpleNamespace(
+        study=SimpleNamespace(cube=np.ones((3, 3, 5, 5)), pixel_spacing=(6.4, 6.4), z_spacing_mm=6.4),
+        seg=object(), ectb_config=lambda: result.config, fevi_regression=lambda: None,
+        _apply_gate_dropout_correction=lambda cube, **kwargs: (cube, {}),
+    )
+    _bind(window, "_estimate_lv_ef_ectb", analyze_lv_ectb=lambda *args: result)
+    payload = window._estimate_lv_ef_ectb()
+    assert payload["normalize_gate_counts"] is enabled
+    assert payload["gate_counts"] == result.gate_counts.tolist()
+    assert payload["gate_count_scale_factors"] == result.gate_count_scale_factors.tolist()
+    assert payload["notes"] == result.notes
+
+
+@pytest.mark.parametrize("qc_blocked", [False, True])
+def test_ectb_qc_rejection_cannot_be_replaced_by_threshold_fevi(qc_blocked):
+    result = {"available": False, "reason": "gate invalid", "qc_blocked": qc_blocked}
+    calls = []
+    window = SimpleNamespace(
+        FEVI_METHOD_THRESHOLD="threshold", fevi_method=lambda: "ectb",
+        _estimate_lv_ef_ectb=lambda: result,
+        _estimate_lv_ef_preliminary=lambda: calls.append("fallback") or {"available": True},
+        _augment_with_filling_metrics=lambda payload: payload, _log=lambda message: None,
+    )
+    _bind(window, "_estimate_lv_ef")
+    payload = window._estimate_lv_ef()
+    assert calls == ([] if qc_blocked else ["fallback"])
+    if qc_blocked:
+        assert payload is result and not payload["available"]
+    else:
+        assert payload["available"] and payload["fallback_from"] == "ectb_max_counts"
+
+
+def test_ectb_pdf_shows_experimental_and_qc_warnings():
+    from xml.sax.saxutils import escape
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph, Spacer
+    source = ast.parse((ROOT / "report" / "report_generator.py").read_text(encoding="utf-8"))
+    generate = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "generate_report")
+    warning_loop = next(node for node in generate.body if isinstance(node, ast.For)
+                        and isinstance(node.target, ast.Tuple)
+                        and any(isinstance(target, ast.Name) and target.id == "stage_label"
+                                for target in node.target.elts))
+    story = []
+    namespace = {
+        "ef": {"normalize_gate_counts": True, "notes": ["QC: cuenta < 5 & revisión"]},
+        "rest_func_main": {"qc_blocked": True, "reason": "gate vacío"},
+        "story": story, "Paragraph": Paragraph, "Spacer": Spacer, "escape": escape,
+        "body_style": getSampleStyleSheet()["BodyText"], "mm": 1,
+    }
+    exec(compile(ast.Module(body=[warning_loop], type_ignores=[]), "report_generator.py", "exec"), namespace)
+    text = " ".join(paragraph.getPlainText() for paragraph in story if isinstance(paragraph, Paragraph))
+    assert "experimental" in text and "no validada clínicamente" in text
+    assert "cuenta < 5 & revisión" in text
+    assert "FEVI Reposo: gate vacío" in text
+
+
 @pytest.mark.parametrize("filename, class_name", [
     ("amyloid_window.py", "AmyloidWindow"),
     ("amyloid_spect_panel.py", "AmyloidSpectPanel"),
@@ -70,6 +499,161 @@ def test_amyloid_window_controls_minimize_and_close(filename, class_name):
         assert button.icon == icon and button.size == (28, 28)
         button.callback()
     assert calls == ["minimize", "close"]
+
+
+@pytest.mark.parametrize("counts", [(8,), (8, 8), (8, 16), (16, 8)])
+def test_lv_3d_stage_context_preserves_data_and_syncs_cycle(counts):
+    source = ast.parse((ROOT / "ui" / "lv_3d_panel.py").read_text(encoding="utf-8"))
+    dialog = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "LV3DDialog")
+    method = next(node for node in dialog.body if isinstance(node, ast.FunctionDef) and node.name == "_for_each_stage")
+    namespace = {}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "lv_3d_panel.py", "exec"), namespace)
+    states = [{"_n_gates": count, "_gate": 0, "_meshes": object(), "_actor_gate": None} for count in counts]
+    window = SimpleNamespace(_STAGE_FIELDS=tuple(states[0]), _stage_states=states, _gate=counts[0] - 1)
+    window._for_each_stage = MethodType(namespace["_for_each_stage"], window)
+    observed = []
+    def render():
+        observed.append((window._stage_index, window._gate, window._meshes))
+        window._actor_gate = f"actor-{window._stage_index}"
+    window._for_each_stage(render, sync_gate=True)
+    assert observed == [(index, (counts[0] - 1) * count // counts[0], states[index]["_meshes"]) for index, count in enumerate(counts)]
+    assert [state["_actor_gate"] for state in states] == [f"actor-{index}" for index in range(len(counts))]
+    assert window._stage_index == 0 and window._meshes is states[0]["_meshes"]
+    assert window._gate == counts[0] - 1
+
+
+@pytest.mark.parametrize("reversed_stages", [False, True])
+def test_lv_3d_open_uses_both_processed_stages(monkeypatch, reversed_stages):
+    calls = []
+    primary_study, other_study = object(), object()
+    primary_seg, other_seg = object(), object()
+    dialog = SimpleNamespace(show=lambda: None, raise_=lambda: None, activateWindow=lambda: None)
+    module = SimpleNamespace(LV3DDialog=lambda parent, **kwargs: calls.append(kwargs) or dialog)
+    monkeypatch.setitem(sys.modules, "ui.lv_3d_panel", module)
+    def stage_data(study, seg):
+        assert (study, seg) in ((primary_study, primary_seg), (other_study, other_seg))
+        return {"lv_meshes": study, "seg": seg}
+    window = SimpleNamespace(
+        study=primary_study, seg=primary_seg, compare_bundle={"study": other_study, "seg": other_seg},
+        _lv_3d_stage_data=stage_data, _dual_compare_labels=lambda: ("Reposo", "Esfuerzo") if reversed_stages else ("Esfuerzo", "Reposo"),
+        _log=lambda message: pytest.fail(message),
+    )
+    _bind(window, "open_lv_3d_window")
+    assert window.open_lv_3d_window() is dialog
+    assert calls[0]["stage_label"] == "Esfuerzo"
+    assert calls[0]["comparison"]["stage_label"] == "Reposo"
+    assert calls[0]["lv_meshes"] is (other_study if reversed_stages else primary_study)
+    assert calls[0]["comparison"]["lv_meshes"] is (primary_study if reversed_stages else other_study)
+
+
+def test_lv_3d_offscreen_comparison_renders_both_stages(tmp_path):
+    import numpy as np
+    import pyvista as pv
+    from core.lv_mesh import lv_meshes_from_ectb
+    source = ast.parse((ROOT / "ui" / "lv_3d_panel.py").read_text(encoding="utf-8"))
+    dialog = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "LV3DDialog")
+    namespace = {"QDialog": object, "np": np}
+    exec(compile(ast.Module(body=[dialog], type_ignores=[]), "lv_3d_panel.py", "exec"), namespace)
+    cls = namespace["LV3DDialog"]
+    window = cls.__new__(cls)
+    window._stage_states = []
+    window._stage_labels = ["Esfuerzo", "Reposo"]
+    window._stage_index = 0
+    window._cmap = "turbo"
+    window._color_low, window._color_high = 0.0, 1.0
+    window.combo_surface = SimpleNamespace(currentData=lambda: "shell")
+    window.epi_opacity_slider = SimpleNamespace(value=lambda: 100)
+    window.lbl_info = SimpleNamespace(setText=lambda value: None)
+    for index, gates in enumerate((8, 16)):
+        radii = np.broadcast_to(np.linspace(10, 24, 6)[None, :, None], (gates, 6, 64)).copy()
+        radii *= (1 - 0.12 * (1 - np.cos(2 * np.pi * np.arange(gates) / gates)))[:, None, None]
+        result = SimpleNamespace(available=True, endo_radii_mm=radii, epi_radii_mm=radii + 7,
+                                 valid_slices=list(range(6)), ed_gate=1, es_gate=gates // 2 + 1)
+        lv = lv_meshes_from_ectb(result, 6.0)
+        state = {name: None for name in cls._STAGE_FIELDS}
+        state.update(_lv=lv, _n_gates=gates, _ed_gate=0, _gate=0, _meshes=lv["meshes"],
+                     _endo_radii=lv["endo_radii_mm"], _epi_radii=lv["epi_radii_mm"],
+                     _z_positions=lv["z_positions_mm"], _center_offsets_mm=lv["center_offsets_mm"],
+                     _polar_map=np.tile(np.linspace(0.2, 1, 360)[::1 if index == 0 else -1], (220, 1)),
+                     _slab_actors=[], _surface_status="", _shell_cache={}, _wireframe_cache={})
+        window._stage_states.append(state)
+    for name, value in window._stage_states[0].items():
+        setattr(window, name, value)
+    window._plotter = pv.Plotter(off_screen=True, shape=(2, 2), window_size=(1200, 800))
+    try:
+        window._for_each_stage(window._init_stage_scene, sync_gate=True)
+        window._plotter.link_views()
+        window._plotter.reset_camera()
+        window._set_view("Anterior")
+        for index, renderer in enumerate(window._plotter.renderers):
+            stage = index % 2
+            side = "left" if index < 2 else "right"
+            assert any(f"anat_{side}_{stage}" in name for name in renderer.actors)
+        image = window._plotter.screenshot(str(tmp_path / "vi_3d_comparison.png"), return_img=True)
+        assert image.shape[:2] == (800, 1200)
+        for top, left in ((0, 0), (0, 600), (400, 0), (400, 600)):
+            region = image[top + 60:top + 370, left + 80:left + 520, :3]
+            assert np.count_nonzero(region.max(axis=2) - region.min(axis=2) > 40) > 500
+        first_surfaces = [state["_shell_cache"][("shell", 0)][0] for state in window._stage_states]
+        window._gate = 4
+        window._update_meshes()
+        assert [state["_gate"] for state in window._stage_states] == [4, 8]
+        systolic_image = window._plotter.screenshot(str(tmp_path / "vi_3d_comparison_systole.png"), return_img=True)
+        assert np.count_nonzero(np.any(systolic_image != image, axis=2)) > 1000
+        window._gate = 0
+        window._update_meshes()
+        assert all(state["_shell_cache"][("shell", 0)][0] is first_surfaces[index] for index, state in enumerate(window._stage_states))
+        assert window._stage_states[0]["_actor_epi"] is not window._stage_states[1]["_actor_epi"]
+    finally:
+        window._plotter.close()
+
+
+def test_lv_3d_polar_maps_are_independent_of_primary_cache():
+    import numpy as np
+    rows, columns = np.mgrid[-4:5, -4:5]
+    angle = np.arctan2(rows, columns)
+    mask = np.broadcast_to((np.hypot(rows, columns) >= 2) & (np.hypot(rows, columns) <= 4), (3, 9, 9))
+    seg = SimpleNamespace(mask=mask, center_per_slice=np.full((3, 2), 4.0))
+    primary = SimpleNamespace(cube=np.broadcast_to(2 + np.cos(angle), (8, 3, 9, 9)))
+    secondary = SimpleNamespace(cube=np.broadcast_to(2 + np.sin(angle), (16, 3, 9, 9)))
+    cached = np.full((220, 360), 0.99)
+    window = SimpleNamespace(study=primary, seg=seg, _polar_perf_cart_cache={"polar_map": cached})
+    _bind(window, "_polar_perfusion_map_for_3d", np=np)
+    assert window._polar_perfusion_map_for_3d() is cached
+    first = window._polar_perfusion_map_for_3d(study=primary, seg=seg)
+    second = window._polar_perfusion_map_for_3d(study=secondary, seg=seg)
+    assert first.shape == second.shape == cached.shape
+    assert not np.allclose(first, second)
+    assert window._polar_perf_cart_cache["polar_map"] is cached
+    assert window.study is primary and window.seg is seg
+
+
+def test_lv_3d_stage_data_uses_each_study_spacing_and_volume(monkeypatch):
+    import numpy as np
+    import core.lv_mesh as mesh_module
+    mesh_calls, analysis_calls = [], []
+    def analyze(cube, seg, pixel_mm, slice_mm, config):
+        analysis_calls.append((cube, seg, pixel_mm, slice_mm))
+        return SimpleNamespace(available=True)
+    def build(result, slice_mm, **kwargs):
+        mesh_calls.append((slice_mm, kwargs))
+        return object()
+    monkeypatch.setattr(mesh_module, "lv_meshes_from_ectb", build)
+    polar = object()
+    window = SimpleNamespace(
+        _apply_gate_dropout_correction=lambda cube, **kwargs: (cube, {}), ectb_config=lambda: None,
+        _polar_perfusion_map_for_3d=lambda **kwargs: polar,
+    )
+    _bind(window, "_lv_3d_stage_data", np=np, analyze_lv_ectb=analyze)
+    for gates, spacing in ((8, (6.4, 4.8, 4.8)), (16, (5.0, 3.2, 3.2))):
+        study = SimpleNamespace(cube=np.ones((gates, 3, 5, 7)), z_spacing_mm=spacing[0], pixel_spacing=spacing[1:])
+        seg = object()
+        data = window._lv_3d_stage_data(study, seg)
+        assert data["seg"] is seg and data["polar_map"] is polar
+        assert data["spacing_mm"] == spacing and data["pixel_mm"] == spacing[1:]
+        assert np.array_equal(data["myo_volume"], study.cube.sum(axis=0))
+        assert analysis_calls[-1][1:] == (seg, spacing[1:], spacing[0])
+        assert mesh_calls[-1] == (spacing[0], {"surface": "endo", "seg": seg, "pixel_mm": spacing[1:], "volume_shape": (3, 5, 7)})
 
 
 def test_montage_selection_does_not_write_png_or_gif():

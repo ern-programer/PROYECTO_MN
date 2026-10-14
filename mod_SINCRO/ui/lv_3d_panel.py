@@ -1,19 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Panel 3D del VI: miocardio sólido + malla alambre ED/ES, con cine sincronizado.
+"""VI 3D con contornos ECTb, textura polar y cine por gate.
 
-Dos paneles PyVista lado a lado, en una ventana flotante:
-
-- **Izquierdo (miocardio):** isosuperficie del volumen SA reorientado del gate
-  actual (o la suma de gates si se quiere estática). Texturizada con el colormap
-  del preview de la app. Rotación/zoom con el mouse (interactor VTK).
-- **Derecho (malla):** "fantasma de alambre" del VI calculado por ECTb. La malla
-  de ED queda fija (gris tenue, referencia del molde telediastólico) y la malla
-  del gate actual se contrae/expande en naranja, sincronizada con el cine.
-
-El cine es compartido: un QTimer avanza el gate en ambos paneles a la vez.
-
-Export: captura frame a frame del cine a GIF (imageio) o AVI (imageio-ffmpeg),
-para embeber en el informe HTML planeado.
+Una etapa: miocardio y malla ED/gate lado a lado. Dos etapas: esfuerzo y
+reposo en columnas, miocardio arriba y malla abajo. Cine, color y vistas
+anatómicas compartidos; geometría, espaciado y perfusión propios por etapa.
+El modelo ventricular ajusta endo y epi completos con cierres separados;
+el modo de contornos conserva el loft medido. Ninguno modifica medidas ECTb.
+Exporta todas las escenas a GIF/AVI y a vistas para el informe.
 """
 from __future__ import annotations
 
@@ -30,6 +23,14 @@ from ui.cine_widget import RangeSlider, VerticalColorStrip
 class LV3DDialog(QDialog):
     """Ventana 3D del VI: miocardio sólido + malla ECTb, con cine."""
 
+    _STAGE_FIELDS = (
+        "_lv", "_n_gates", "_ed_gate", "_gate", "_endo_radii", "_epi_radii",
+        "_z_positions", "_center_offsets_mm", "_origin_mm", "_myo_volume",
+        "_spacing_mm", "_ectb_result", "_seg", "_pixel_mm", "_polar_map",
+        "_meshes", "_actor_myo", "_actor_epi", "_actor_endo", "_actor_ed",
+        "_actor_gate", "_slab_actors", "_surface_status", "_shell_cache", "_wireframe_cache",
+    )
+
     def __init__(
         self,
         parent=None,
@@ -43,6 +44,8 @@ class LV3DDialog(QDialog):
         seg=None,
         pixel_mm: tuple = (1.0, 1.0),
         polar_map: np.ndarray | None = None,
+        stage_label: str = "Esfuerzo",
+        comparison: dict | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("SINCRO — VI 3D")
@@ -94,6 +97,29 @@ class LV3DDialog(QDialog):
         self._slab_actors = []
         self._meshes = lv_meshes["meshes"]
         self._surface_status = "sin mapa polar"
+        self._shell_cache = {}
+        self._wireframe_cache = {}
+        self._stage_index = 0
+        self._stage_states = [{name: getattr(self, name) for name in self._STAGE_FIELDS}]
+        self._stage_labels = [stage_label]
+        if comparison is not None:
+            other_lv = comparison["lv_meshes"]
+            self._stage_states.append({
+                "_lv": other_lv, "_n_gates": int(other_lv["n_gates"]),
+                "_ed_gate": int(other_lv["ed_gate"]), "_gate": int(other_lv["ed_gate"]),
+                "_endo_radii": other_lv.get("endo_radii_mm"), "_epi_radii": other_lv.get("epi_radii_mm"),
+                "_z_positions": other_lv.get("z_positions_mm"), "_center_offsets_mm": other_lv.get("center_offsets_mm"),
+                "_origin_mm": other_lv.get("origin_mm", (0.0, 0.0, 0.0)),
+                "_myo_volume": comparison.get("myo_volume"), "_spacing_mm": comparison["spacing_mm"],
+                "_ectb_result": comparison["ectb_result"], "_seg": comparison["seg"],
+                "_pixel_mm": comparison["pixel_mm"], "_polar_map": comparison.get("polar_map"),
+                "_meshes": other_lv["meshes"], "_actor_myo": None, "_actor_epi": None,
+                "_actor_endo": None, "_actor_ed": None, "_actor_gate": None,
+                "_slab_actors": [], "_surface_status": "sin mapa polar", "_shell_cache": {}, "_wireframe_cache": {},
+            })
+            self._stage_labels.append(comparison.get("stage_label", "Reposo"))
+            self.setWindowTitle("SINCRO — VI 3D · Esfuerzo / Reposo")
+            self.resize(1400, 900)
 
         self._build_ui()
 
@@ -105,6 +131,35 @@ class LV3DDialog(QDialog):
         self._timer = QTimer(self)
         self._timer.setInterval(self._interval_ms)
         self._timer.timeout.connect(self._advance_gate)
+
+    def _for_each_stage(self, callback, *, sync_gate=False):
+        primary_gate, primary_count = self._gate, self._stage_states[0]["_n_gates"]
+        self._stage_rendering = True
+        try:
+            for index, state in enumerate(self._stage_states):
+                self._stage_index = index
+                for name in self._STAGE_FIELDS:
+                    setattr(self, name, state[name])
+                if sync_gate:
+                    self._gate = min(self._n_gates - 1, primary_gate * self._n_gates // primary_count)
+                try:
+                    callback()
+                finally:
+                    state.update({name: getattr(self, name) for name in self._STAGE_FIELDS})
+        finally:
+            self._stage_rendering = False
+            self._stage_index = 0
+            for name in self._STAGE_FIELDS:
+                setattr(self, name, self._stage_states[0][name])
+
+    def _select_stage_panel(self, wireframe=False):
+        if len(self._stage_states) > 1:
+            self._plotter.subplot(int(wireframe), self._stage_index)
+        else:
+            self._plotter.subplot(0, int(wireframe))
+
+    def _all_subplots(self):
+        return ((0, 0), (0, 1), (1, 0), (1, 1)) if len(self._stage_states) > 1 else ((0, 0), (0, 1))
 
     # ------------------------------------------------------------ UI
     def _build_ui(self):
@@ -137,6 +192,7 @@ class LV3DDialog(QDialog):
 
         self.chk_link = QCheckBox("Cámaras vinculadas")
         self.chk_link.setChecked(True)
+        self.chk_link.toggled.connect(self._on_camera_link_changed)
         bar.addWidget(self.chk_link)
 
         # Modo de superficie del miocardio: cáscara ECTb (geométrica, rápida),
@@ -145,14 +201,16 @@ class LV3DDialog(QDialog):
         bar.addSpacing(12)
         bar.addWidget(QLabel("Superficie:"))
         self.combo_surface = QComboBox()
-        self.combo_surface.addItem("Cáscara ECTb (rápida)", "shell")
+        self.combo_surface.addItem("VI elipsoidal (modelo)", "shell")
+        self.combo_surface.addItem("Contornos ECTb", "contours")
         self.combo_surface.addItem("Borde por gradiente (física)", "gradient")
         self.combo_surface.addItem("Reconstrucción Dinámica 3D", "dynamic")
         self.combo_surface.addItem("Reconstrucción (fetas)", "slabs")
         self.combo_surface.setCurrentIndex(0)
         self.combo_surface.setMinimumWidth(180)  # que se lea completo
         self.combo_surface.setToolTip(
-            "Cáscara ECTb: geometría pura endo→epi, rápida, no muestra actividad real.\n"
+            "VI elipsoidal: modelo visual continuo con cierres endo/epi independientes; no modifica FEVI ni volúmenes.\n"
+            "Contornos ECTb: loft de radios medidos con extrapolación apical.\n"
             "Borde por gradiente: detecta el borde del miocardio por máximo gradiente "
             "(el 'borde blanco' de la escala french), más lento pero más preciso y "
             "muestra la actividad real del volumen.\n"
@@ -301,39 +359,62 @@ class LV3DDialog(QDialog):
         layout = QHBoxLayout(self._3d_host)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self._plotter = QtInteractor(self._3d_host, shape=(1, 2))
+        self._plotter = QtInteractor(self._3d_host, shape=(2, 2) if len(self._stage_states) > 1 else (1, 2))
         layout.addWidget(self._plotter.interactor)
-
-        # ---------------- Panel izquierdo: miocardio sólido ----------------
-        self._plotter.subplot(0, 0)
-        self._plotter.set_background("#0b1220")
-        self._rebuild_myo_surface()
-        # Ejes de referencia que giran solidarios con la escena.
-        self._plotter.add_axes(line_width=2, labels_off=False)
-        self._add_anatomical_labels("anat_left")
-
-        # ---------------- Panel derecho: malla alambre ---------------------
-        self._plotter.subplot(0, 1)
-        self._plotter.set_background("#0b1220")
-        mesh_ed = self._meshes[self._ed_gate]
-        self._actor_ed = self._plotter.add_mesh(
-            mesh_ed, style="wireframe", color="#4a6a8a", line_width=1.2,
-            opacity=0.55, name="mesh_ed",
-        )
-        mesh_g = self._meshes[self._gate]
-        self._actor_gate = self._plotter.add_mesh(
-            mesh_g, style="wireframe", color="#ffb020", line_width=2.0,
-            name="mesh_gate",
-        )
-        self._plotter.add_axes(line_width=2, labels_off=False)
-        self._add_anatomical_labels("anat_right")
-
-        # Vincular cámaras (rotás una, la otra sigue).
+        self._for_each_stage(self._init_stage_scene, sync_gate=True)
         if self.chk_link.isChecked():
             self._plotter.link_views()
-
         self._plotter.reset_camera()
         self._update_info()
+
+    def _init_stage_scene(self):
+        # ---------------- Panel izquierdo: miocardio sólido ----------------
+        self._select_stage_panel()
+        self._plotter.set_background("#0b1220")
+        self._rebuild_myo_surface()
+        self._plotter.add_text(f"{self._stage_labels[self._stage_index]} · Miocardio", position="upper_left", font_size=12, color="#f8fafc")
+        # Ejes de referencia que giran solidarios con la escena.
+        self._plotter.add_axes(line_width=2, labels_off=False)
+        self._add_anatomical_labels(f"anat_left_{self._stage_index}")
+
+        # ---------------- Panel derecho: malla alambre ---------------------
+        self._select_stage_panel(wireframe=True)
+        self._plotter.set_background("#0b1220")
+        self._plotter.add_text(f"{self._stage_labels[self._stage_index]} · Malla ED / gate", position="upper_left", font_size=12, color="#f8fafc")
+        mesh_ed = self._wireframe_mesh(self._ed_gate)
+        self._actor_ed = self._plotter.add_mesh(
+            mesh_ed, style="wireframe", color="#4a6a8a", line_width=1.2,
+            opacity=0.55, name=f"mesh_ed_{self._stage_index}",
+        )
+        mesh_g = self._wireframe_mesh(self._gate)
+        self._actor_gate = self._plotter.add_mesh(
+            mesh_g, style="wireframe", color="#ffb020", line_width=2.0,
+            name=f"mesh_gate_{self._stage_index}",
+        )
+        self._plotter.add_axes(line_width=2, labels_off=False)
+        self._add_anatomical_labels(f"anat_right_{self._stage_index}")
+
+    def _on_camera_link_changed(self, linked):
+        if self._plotter is not None:
+            if linked:
+                self._plotter.link_views()
+            else:
+                self._plotter.unlink_views()
+            self._plotter.render()
+
+    def _wireframe_mesh(self, gate):
+        mode = str(self.combo_surface.currentData())
+        if mode != "shell":
+            return self._meshes[gate]
+        if gate not in self._wireframe_cache:
+            from core.lv_mesh import myocardium_shell_mesh, split_myocardium_shell
+            shell = myocardium_shell_mesh(
+                self._endo_radii[gate], self._epi_radii[gate], self._z_positions,
+                centers_mm=self._center_offsets_mm, smooth_angular=1.0,
+                interp_z=3.0, ventricular_shape=True,
+            )
+            self._wireframe_cache[gate] = split_myocardium_shell(shell)[1]
+        return self._wireframe_cache[gate]
 
     def _add_anatomical_labels(self, name: str):
         """Agrega referencias anatómicas solidarias con la malla.
@@ -343,7 +424,7 @@ class LV3DDialog(QDialog):
         """
         if self._plotter is None or not self._meshes:
             return
-        mesh = self._meshes[self._ed_gate]
+        mesh = self._wireframe_mesh(self._ed_gate)
         xmin, xmax, ymin, ymax, zmin, zmax = (float(v) for v in mesh.bounds)
         cx = 0.5 * (xmin + xmax)
         cy = 0.5 * (ymin + ymax)
@@ -386,7 +467,7 @@ class LV3DDialog(QDialog):
         cp = np.asarray(cam.position, dtype=np.float64)
         current_dist = float(np.linalg.norm(cp - fp))
 
-        mesh = self._meshes[self._ed_gate]
+        mesh = self._wireframe_mesh(self._ed_gate)
         xmin, xmax, ymin, ymax, zmin, zmax = (float(v) for v in mesh.bounds)
         cx, cy, cz = 0.5 * (xmin + xmax), 0.5 * (ymin + ymax), 0.5 * (zmin + zmax)
 
@@ -404,7 +485,7 @@ class LV3DDialog(QDialog):
         d /= max(np.linalg.norm(d), 1e-9)
         cam_pos = (cx + d[0] * current_dist, cy + d[1] * current_dist, cz + d[2] * current_dist)
         focal = (cx, cy, cz)
-        for sp in ((0, 0), (0, 1)):
+        for sp in self._all_subplots():
             self._plotter.subplot(*sp)
             self._plotter.camera.position = cam_pos
             self._plotter.camera.focal_point = focal
@@ -426,6 +507,10 @@ class LV3DDialog(QDialog):
         if self._plotter is None:
             return
         mode = str(self.combo_surface.currentData()) if hasattr(self, "combo_surface") else "shell"
+        cache_key = (mode, self._gate)
+        if mode in {"shell", "contours"} and cache_key in self._shell_cache:
+            self._display_shell(*self._shell_cache[cache_key])
+            return
 
         if mode == "gradient":
             # Borde por gradiente: superficie de máximo gradiente del volumen.
@@ -444,7 +529,7 @@ class LV3DDialog(QDialog):
             # El borde por gradiente no tiene actividad sampleada (es una sola
             # superficie del borde, no la pared completa). Se renderiza con color
             # fijo y opacidad para ver la forma.
-            self._plotter.subplot(0, 0)
+            self._select_stage_panel()
             if self._actor_myo is None:
                 self._actor_myo = self._plotter.add_mesh(
                     shell, color="#c0392b", smooth_shading=True, name="myo",
@@ -470,7 +555,7 @@ class LV3DDialog(QDialog):
                 return
             if shell is None or shell.n_points == 0:
                 return
-            self._plotter.subplot(0, 0)
+            self._select_stage_panel()
             if self._actor_myo is None:
                 self._actor_myo = self._plotter.add_mesh(
                     shell, color="#c0392b", smooth_shading=True, name="myo",
@@ -500,8 +585,9 @@ class LV3DDialog(QDialog):
                 smooth_angular=1.0,   # quitar serrucho angular sin borrar asimetría
                 smooth_iter=6,
                 smooth_relax=0.04,
-                apex_virtual_rings=9,
-                apex_taper=0.32,
+                apex_virtual_rings=24,
+                apex_taper=0.0,
+                ventricular_shape=(mode == "shell"),
             )
         except Exception:
             return
@@ -553,7 +639,13 @@ class LV3DDialog(QDialog):
         except Exception:
             return
 
-        self._plotter.subplot(0, 0)
+        if mode == "shell":
+            polar_status += " · modelo ventricular"
+        self._shell_cache[cache_key] = (shell, epi_mesh, endo_mesh, scalar_name, polar_status)
+        self._display_shell(shell, epi_mesh, endo_mesh, scalar_name, polar_status)
+
+    def _display_shell(self, shell, epi_mesh, endo_mesh, scalar_name, polar_status):
+        self._select_stage_panel()
         if self._actor_epi is None or self._actor_endo is None:
             if scalar_name is not None and scalar_name in shell.point_data:
                 vals = np.asarray(shell.point_data[scalar_name], dtype=np.float64)
@@ -619,7 +711,8 @@ class LV3DDialog(QDialog):
                     pass
         self._surface_status = polar_status
         self._update_info()
-        self._plotter.render()
+        if not getattr(self, "_stage_rendering", False):
+            self._plotter.render()
 
     def _perfusion_clim(self, fallback_values: np.ndarray) -> tuple[float, float]:
         """Rango de color fijo para todos los gates del cine."""
@@ -657,10 +750,12 @@ class LV3DDialog(QDialog):
     def _on_epi_opacity_changed(self, value: int):
         value = max(0, min(100, int(value)))
         self.lbl_epi_opacity.setText(f"Epi {value}%")
-        if self._actor_epi is not None:
-            self._actor_epi.GetProperty().SetOpacity(float(value) / 100.0)
-            if self._plotter is not None:
-                self._plotter.render()
+        for state in self._stage_states:
+            actor = state["_actor_epi"]
+            if actor is not None:
+                actor.GetProperty().SetOpacity(float(value) / 100.0)
+        if self._plotter is not None:
+            self._plotter.render()
 
     def _remove_myo_actors(self):
         if self._plotter is not None:
@@ -682,10 +777,21 @@ class LV3DDialog(QDialog):
         self._slab_actors = []
 
     def _recreate_myo_actor(self):
+        self._for_each_stage(self._recreate_stage_actor, sync_gate=True)
         if self._plotter is not None:
-            self._plotter.subplot(0, 0)
+            self._plotter.render()
+        self._update_info()
+
+    def _recreate_stage_actor(self):
+        if self._plotter is not None:
+            self._select_stage_panel()
         self._remove_myo_actors()
         self._rebuild_myo_surface()
+        self._select_stage_panel(wireframe=True)
+        if self._actor_ed is not None:
+            self._actor_ed.mapper.SetInputData(self._wireframe_mesh(self._ed_gate))
+        if self._actor_gate is not None:
+            self._actor_gate.mapper.SetInputData(self._wireframe_mesh(self._gate))
 
     def _on_surface_mode_changed(self, _idx):
         # Al cambiar de modo, recrear la superficie (el actor puede tener
@@ -697,17 +803,14 @@ class LV3DDialog(QDialog):
         if hasattr(self, "epi_opacity_slider"):
             self.epi_opacity_slider.setVisible(not is_slabs)
             self.lbl_epi_opacity.setVisible(not is_slabs)
-        if self._plotter is not None:
-            self._plotter.subplot(0, 0)
-        self._remove_myo_actors()
-        self._rebuild_myo_surface()
+        self._recreate_myo_actor()
 
     def _on_slab_gap_changed(self, _value: int):
         if hasattr(self, "lbl_gap_sa"):
             self.lbl_gap_sa.setText(f"{self.slab_gap_sa.value()}%")
             self.lbl_gap_hla.setText(f"{self.slab_gap_hla.value()}%")
             self.lbl_gap_vla.setText(f"{self.slab_gap_vla.value()}%")
-        self._rebuild_myo_surface()
+        self._recreate_myo_actor()
 
     def _build_cortes_slabs(self):
         """Renderiza la cáscara ECTb separada en fetas por eje.
@@ -747,7 +850,7 @@ class LV3DDialog(QDialog):
         # Construir fetas por eje.
         from core.lv_mesh_slabs import ring_prism_mesh
         slab_actors = []
-        self._plotter.subplot(0, 0)
+        self._select_stage_panel()
         gap_total = max(gap_sa, gap_hla, gap_vla)
 
         # SA (eje Z): anillos de la cáscara, separados en Z.
@@ -807,24 +910,28 @@ class LV3DDialog(QDialog):
     def _update_meshes(self):
         if self._plotter is None:
             return
+        self._for_each_stage(self._update_stage_meshes, sync_gate=True)
+        self._plotter.render()
+        self._update_info()
+
+    def _update_stage_meshes(self):
         # Actualizar la malla del gate actual sin recrear el actor (mismo n° de
         # puntos entre gates: la topología no cambia, solo las coordenadas).
-        self._plotter.subplot(0, 1)
-        new_mesh = self._meshes[self._gate]
+        self._select_stage_panel(wireframe=True)
+        new_mesh = self._wireframe_mesh(self._gate)
         if self._actor_gate is not None:
             # Reemplazo del dataset del actor (rápido, sin re-mapear).
             self._actor_gate.mapper.SetInputData(new_mesh)
         # La cáscara del miocardio también late: recalcularla con el gate actual.
         self._rebuild_myo_surface()
-        self._plotter.render()
-        self._update_info()
 
     def _update_info(self):
-        self.lbl_info.setText(
-            f"Gate {self._gate + 1}/{self._n_gates}   ·   {self._surface_status}   ·   "
-            f"ED = gate {self._ed_gate + 1} "
-            f"(malla gris fija)   ·   Arrastrá para rotar, rueda para zoom."
-        )
+        lines = []
+        for index, state in enumerate(self._stage_states):
+            gate = self._gate if index == self._stage_index else state["_gate"]
+            status = self._surface_status if index == self._stage_index else state["_surface_status"]
+            lines.append(f"{self._stage_labels[index]} · Gate {gate + 1}/{state['_n_gates']} · {status} · ED = gate {state['_ed_gate'] + 1}")
+        self.lbl_info.setText("\n".join(lines))
 
     # ------------------------------------------------------------ export
     def _export_cine(self):
@@ -886,7 +993,7 @@ class LV3DDialog(QDialog):
         """Captura una vista 3D estándar (anterior) + GIF de rotación para el informe."""
         if self._plotter is None:
             return
-        mesh = self._meshes[self._ed_gate] if self._meshes else None
+        mesh = self._wireframe_mesh(self._ed_gate) if self._meshes else None
         if mesh is None:
             return
         import os
@@ -901,7 +1008,7 @@ class LV3DDialog(QDialog):
             from PyQt6.QtWidgets import QApplication
 
             # Vista anterior estática.
-            for sp in ((0, 0), (0, 1)):
+            for sp in self._all_subplots():
                 self._plotter.subplot(*sp)
                 self._plotter.camera.position = (cx, cy - dist, cz)
                 self._plotter.camera.focal_point = (cx, cy, cz)
@@ -921,7 +1028,7 @@ class LV3DDialog(QDialog):
                 angle = 2.0 * math.pi * i / n_frames
                 px = cx + dist * math.sin(angle)
                 py = cy - dist * math.cos(angle)
-                for sp in ((0, 0), (0, 1)):
+                for sp in self._all_subplots():
                     self._plotter.subplot(*sp)
                     self._plotter.camera.position = (px, py, cz)
                     self._plotter.camera.focal_point = (cx, cy, cz)

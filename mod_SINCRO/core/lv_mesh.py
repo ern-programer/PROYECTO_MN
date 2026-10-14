@@ -313,7 +313,7 @@ def _interpolate_radii_z(
     z_positions_mm: np.ndarray,
     z_factor: float = 2.0,
 ):
-    """Interpolación spline cúbica de los radios en el eje Z (cortes).
+    """Interpolación cúbica preservadora de forma de radios en Z.
 
     Genera `z_factor` veces más cortes intermedios, suavizando la geometría
     axial (los "escalones" entre cortes discretos). No toca los ángulos.
@@ -328,15 +328,15 @@ def _interpolate_radii_z(
     -------
     (radii_interp, z_interp) con shape (n_slices*z_factor, n_angles) y (n_slices*z_factor,).
     """
-    from scipy.ndimage import zoom
+    from scipy.interpolate import PchipInterpolator
     radii_mm = np.asarray(radii_mm, dtype=np.float64)
     z_positions_mm = np.asarray(z_positions_mm, dtype=np.float64)
-    if z_factor <= 1.0:
+    if z_factor <= 1.0 or len(z_positions_mm) < 2:
         return radii_mm, z_positions_mm
-    # Interpolar radios en Z (eje 0) con spline cúbico.
-    radii_interp = zoom(radii_mm, (float(z_factor), 1.0), order=3, mode="nearest")
-    # Interpolar posiciones Z linealmente.
-    z_interp = np.linspace(z_positions_mm[0], z_positions_mm[-1], radii_interp.shape[0])
+    order = np.argsort(z_positions_mm)
+    n_samples = max(len(z_positions_mm), int(round(len(z_positions_mm) * float(z_factor))))
+    z_interp = np.linspace(z_positions_mm[0], z_positions_mm[-1], n_samples)
+    radii_interp = PchipInterpolator(z_positions_mm[order], radii_mm[order], axis=0)(z_interp)
     return radii_interp, z_interp
 
 
@@ -368,6 +368,59 @@ def _smooth_radii_temporal(radii_all: np.ndarray, sigma: float = 1.0):
     return gaussian_filter1d(radii_all, sigma=float(sigma), axis=0, mode="nearest")
 
 
+def _ventricular_shell_profiles(endo, epi, z, centers, n_samples):
+    from scipy.optimize import least_squares
+
+    axial = np.asarray(z, dtype=np.float64) - z[0]
+    span = float(axial[-1])
+    if span <= 0 or len(axial) < 2:
+        raise ValueError("Se necesitan dos contornos axiales distintos para el modelo ventricular.")
+    wall = max(0.5, float(np.nanmedian(np.maximum(epi[0] - endo[0], 0.0))))
+
+    def evaluate(positions, parameters):
+        depth, center, radius = parameters
+        half_length = center + depth
+        return radius * np.sqrt(np.clip(1.0 - ((positions - center) / half_length) ** 2, 0.0, 1.0))
+
+    def fit(radii):
+        mean_radius = np.maximum(np.mean(radii, axis=1), 0.1)
+        minimum_depth = max(0.85 * mean_radius[0], 0.25 * span)
+        maximum_depth = max(2.0 * mean_radius[0], span, minimum_depth * 1.1)
+        maximum_radius = float(np.max(mean_radius))
+        initial = (0.5 * (minimum_depth + maximum_depth), 0.8 * span, maximum_radius)
+        result = least_squares(
+            lambda parameters: evaluate(axial, parameters) - mean_radius,
+            initial, bounds=((minimum_depth, 0.5 * span, 0.5 * maximum_radius),
+                             (maximum_depth, 2.0 * span, 2.0 * maximum_radius)),
+            loss="soft_l1", f_scale=max(0.5, 0.05 * maximum_radius), max_nfev=120,
+        )
+        return result.x, mean_radius
+
+    endo_parameters, endo_mean = fit(endo)
+    epi_parameters, epi_mean = fit(epi)
+    epi_parameters[0] = endo_parameters[0] + wall
+    parameter = np.linspace(0.0, 1.0, max(32, int(n_samples)))
+    axial_fraction = parameter ** 2 * (2.0 - parameter)
+
+    def surface(radii, mean_radius, parameters):
+        positions = -parameters[0] + axial_fraction * (span + parameters[0])
+        positions[-1] = span
+        profile = evaluate(positions, parameters)
+        profile *= mean_radius[-1] / max(float(evaluate(np.asarray([span]), parameters)[0]), 1e-6)
+        angular_shape = radii / mean_radius[:, None]
+        shaped = np.column_stack([
+            profile * np.interp(positions, axial, angular_shape[:, angle])
+            for angle in range(radii.shape[1])
+        ])
+        shaped[0] = 0.0
+        path = np.column_stack([np.interp(positions, axial, centers[:, coordinate]) for coordinate in range(2)])
+        return shaped, positions + z[0], path
+
+    endo_surface, endo_z, endo_centers = surface(endo, endo_mean, endo_parameters)
+    epi_surface, epi_z, epi_centers = surface(epi, epi_mean, epi_parameters)
+    return endo_surface, epi_surface, endo_z, epi_z, endo_centers, epi_centers
+
+
 def myocardium_shell_mesh(
     endo_radii_mm: np.ndarray,
     epi_radii_mm: np.ndarray,
@@ -383,13 +436,14 @@ def myocardium_shell_mesh(
     centers_mm: np.ndarray | None = None,
     apex_virtual_rings: int = 3,
     apex_taper: float = 0.0,
+    ventricular_shape: bool = False,
 ):
     """Cáscara del miocardio: superficie cerrada entre epicardio y endocardio.
 
-    A diferencia de la isosuperficie del volumen crudo (que incluye fondo,
-    hígado e intestino si superan el umbral), la cáscara ECTb es EXACTAMENTE
-    la pared del VI: el volumen entre la superficie epicárdica (externa) y la
-    endocárdica (interna). Sale una dona limpia sin importar el fondo.
+    Usa radios ECTb, no una isosuperficie del fondo del volumen. Con
+    ventricular_shape=True ajusta perfiles elipsoidales completos de endo
+    y epi, con polos distintos y base anular abierta hacia la cavidad.
+    Es un modelo visual: no sustituye los radios ni la cuantificación ECTb.
 
     Parameters
     ----------
@@ -412,6 +466,8 @@ def myocardium_shell_mesh(
         c = np.asarray(centers_mm, dtype=np.float64)
         if c.shape == centers.shape:
             centers = c - np.nanmean(c, axis=0, keepdims=True)
+    order = np.argsort(z)
+    endo, epi, z, centers = endo[order], epi[order], z[order], centers[order]
 
     # Suavizado angular (opcional): elimina irregularidades entre ángulos de un
     # mismo corte (el ángulo 0 y 2π son el mismo, por eso mode="wrap").
@@ -461,8 +517,9 @@ def myocardium_shell_mesh(
 
     # Interpolación de radios en Z (opcional): suaviza los escalones axiales.
     if interp_z > 1.0:
+        source_z = z.copy()
         endo, z = _interpolate_radii_z(endo, z, z_factor=interp_z)
-        epi, _ = _interpolate_radii_z(epi, z_positions_mm, z_factor=interp_z)
+        epi, _ = _interpolate_radii_z(epi, source_z, z_factor=interp_z)
         try:
             from scipy.ndimage import zoom
             centers = zoom(centers, (float(interp_z), 1.0), order=3, mode="nearest")
@@ -479,6 +536,12 @@ def myocardium_shell_mesh(
     n_apex = max(0, int(apex_virtual_rings))
     apex_epi_target = None
     apex_endo_target = None
+    centers_endo = None
+    if ventricular_shape:
+        endo, epi, z_endo, z, centers_endo, centers = _ventricular_shell_profiles(
+            endo, epi, z, centers, max(64, len(z) + n_apex),
+        )
+        n_apex = 0
     if n_apex and endo.shape[0] >= 2:
         dz_apex = abs(float(z[1] - z[0])) if len(z) > 1 else 1.0
         wall_apex_mm = float(np.clip(apex_wall_reference_mm, 4.0, 12.0))
@@ -493,14 +556,18 @@ def myocardium_shell_mesh(
         extension = max(2.2 * dz_apex, 1.35 * wall_apex_mm)
         z_epi_tip = float(z[0] - extension)
         z_endo_tip = float(z_epi_tip + wall_apex_mm)
+        epi_slope = (epi[1] - epi[0]) / max(dz_apex, 1e-6)
+        endo_slope = (endo[1] - endo[0]) / max(dz_apex, 1e-6)
+        epi_control = np.clip(epi[0] - extension * epi_slope / 3.0, 0.0, 1.5 * epi[0])
+        endo_extension = float(z[0] - z_endo_tip)
+        endo_control = np.clip(endo[0] - endo_extension * endo_slope / 3.0, 0.0, 1.5 * endo[0])
         for j in range(n_apex):
-            # Casquete circular muestreado por ÁNGULO, no por Z. Así se
-            # concentran anillos cerca del polo y los primeros triángulos no
-            # forman un pincho largo. r=R·sin(phi), z=R·(1-cos(phi)).
+            # Perfil cúbico: tangente radial en el polo y pendiente del
+            # contorno medido en la unión, sin hombro de casquete circular.
             frac = j / float(n_apex)
-            phi = 0.5 * np.pi * frac
-            scale = float(np.sin(phi))
-            axial_frac = float(1.0 - np.cos(phi))
+            axial_frac = frac * frac * (2.0 - frac)
+            first_weight = 3.0 * (1.0 - frac) ** 2 * frac
+            second_weight = 3.0 * (1.0 - frac) * frac ** 2
             if j == 0:
                 # Dos puntos sobre el eje largo: punta epicárdica externa y
                 # cierre endocárdico más proximal. La separación axial es el
@@ -508,15 +575,15 @@ def myocardium_shell_mesh(
                 endo_extra.append(np.zeros_like(endo[0]))
                 epi_extra.append(np.zeros_like(epi[0]))
             else:
-                endo_extra.append(endo[0] * scale)
-                epi_extra.append(epi[0] * scale)
+                endo_extra.append(first_weight * 0.65 * endo[0] + second_weight * endo_control + frac ** 3 * endo[0])
+                epi_extra.append(first_weight * 0.65 * epi[0] + second_weight * epi_control + frac ** 3 * epi[0])
             if j == 0:
                 z_epi_extra.append(z_epi_tip)
                 z_endo_extra.append(z_endo_tip)
             else:
                 z_epi_extra.append(z_epi_tip + axial_frac * (z[0] - z_epi_tip))
                 z_endo_extra.append(z_endo_tip + axial_frac * (z[0] - z_endo_tip))
-            c_extra.append(centers[0] + (centers[0] - centers[1]) * (1.0 - frac) * 0.35)
+            c_extra.append(centers[0] + (centers[0] - centers[1]) * (1.0 - axial_frac) * extension / max(dz_apex, 1e-6))
         tip_center = np.asarray(c_extra[0], dtype=np.float64)
         apex_epi_target = np.array([tip_center[0], tip_center[1], z_epi_tip], dtype=np.float64)
         apex_endo_target = np.array([tip_center[0], tip_center[1], z_endo_tip], dtype=np.float64)
@@ -528,11 +595,11 @@ def myocardium_shell_mesh(
 
     n_slices, n_angles = endo.shape
 
-    pts_endo = radii_to_points(endo, z_endo, n_angles, centers_mm=centers)
+    pts_endo = radii_to_points(endo, z_endo, n_angles, centers_mm=centers if centers_endo is None else centers_endo)
     pts_epi = radii_to_points(epi, z, n_angles, centers_mm=centers)
     n_ring = n_slices * n_angles
-    apex_epi_rings_target = pts_epi[:n_apex * n_angles].copy() if n_apex > 0 else None
-    apex_endo_rings_target = pts_endo[:n_apex * n_angles].copy() if n_apex > 0 else None
+    apex_epi_rings_target = pts_epi[:(n_apex + 2) * n_angles].copy() if n_apex > 0 else None
+    apex_endo_rings_target = pts_endo[:(n_apex + 2) * n_angles].copy() if n_apex > 0 else None
 
     # Puntos: primero todos los epicárdicos, después todos los endocárdicos.
     points = np.vstack([pts_epi, pts_endo])
@@ -550,10 +617,15 @@ def myocardium_shell_mesh(
 
     faces = []
     # Cara EXTERNA (epicardio): normales hacia afuera.
-    faces.append(_lathe_faces(n_slices, n_angles))
+    lathe = _lathe_faces(n_slices, n_angles).reshape(-1, 4)
+    if ventricular_shape:
+        angles = np.arange(n_angles, dtype=np.int64)
+        fan = np.column_stack([np.full(n_angles, 3), np.zeros(n_angles, dtype=np.int64),
+                               n_angles + (angles + 1) % n_angles, n_angles + angles])
+        lathe = np.vstack([fan, lathe[2 * n_angles:]])
+    faces.append(lathe.ravel())
     # Cara INTERNA (endocardio): mismas conexiones pero con winding invertido
     # (normales hacia adentro), desplazada por n_ring.
-    lathe = _lathe_faces(n_slices, n_angles).reshape(-1, 4)
     lathe_flip = lathe.copy()
     lathe_flip[:, [2, 3]] = lathe_flip[:, [3, 2]]  # invertir winding
     faces.append((lathe_flip + np.array([0, n_ring, n_ring, n_ring])).ravel())
@@ -572,7 +644,8 @@ def myocardium_shell_mesh(
             cap.extend([(3, q[0], q[1], q[2]), (3, q[0], q[2], q[3])])
         return np.asarray(cap, dtype=np.int64)
 
-    faces.append(_annular_cap(0, flip=False))            # ápex
+    if not ventricular_shape:
+        faces.append(_annular_cap(0, flip=False))
     faces.append(_annular_cap(n_slices - 1, flip=True))  # base
 
     face_arr = np.hstack([np.asarray(f).ravel() for f in faces])
@@ -580,17 +653,17 @@ def myocardium_shell_mesh(
     mesh.point_data["thickness"] = thickness
     mesh.field_data["shell_n_ring"] = np.asarray([n_ring], dtype=np.int64)
     mesh.field_data["shell_surface_cells"] = np.asarray(
-        [2 * (n_slices - 1) * n_angles], dtype=np.int64,
+        [len(lathe)], dtype=np.int64,
     )
 
     # Ápex redondeado (opcional): reemplaza la tapa plana por una semiesfera
     # que cierra la punta suavemente. Se aplica DESPUÉS de construir la cáscara
     # para no romper la topología anular.
-    if apex_round:
+    if apex_round and not ventricular_shape:
         mesh = _round_apex(mesh, z, endo, epi, n_angles)
 
     # Suavizado Laplaciano (opcional): suaviza la geometría completa.
-    if smooth_iter > 0:
+    if smooth_iter > 0 and not ventricular_shape:
         mesh = _smooth_mesh_laplacian(mesh, n_iter=smooth_iter, relaxation=smooth_relax)
 
     # El suavizado puede abrir cada punto apical degenerado. Volver a colapsar
@@ -600,7 +673,7 @@ def myocardium_shell_mesh(
             and apex_epi_rings_target is not None and apex_endo_rings_target is not None
             and mesh.n_points >= 2 * n_ring):
         pts = np.asarray(mesh.points, dtype=np.float64).copy()
-        apex_count = n_apex * n_angles
+        apex_count = min(n_slices, n_apex + 2) * n_angles
         # Preservar el casquete completo. Si solo se restaura el polo después
         # del Laplaciano, los anillos vecinos suavizados quedan retraídos y se
         # forma visualmente un pincho entre ambos.

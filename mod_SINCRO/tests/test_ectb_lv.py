@@ -12,6 +12,7 @@ import os
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -31,6 +32,131 @@ enable_utf8()
 
 PIXEL_MM = 6.4
 SLICE_MM = 6.4
+
+
+@pytest.mark.parametrize("minimum_mm", [0.0, 3.0, 8.0])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_lv_axial_interpolation_stays_within_neighboring_contours(minimum_mm, reverse):
+    from core.lv_mesh import _interpolate_radii_z
+    z = np.arange(7, dtype=float) * 6.0
+    angles = np.linspace(0, 2 * np.pi, 64, endpoint=False)
+    sector = np.exp(-(np.angle(np.exp(1j * angles)) / 0.5) ** 2)
+    radii = np.full((7, 64), 26.0)
+    radii[2:4] -= (26.0 - minimum_mm) * sector[None, :]
+    original = radii.copy()
+    order = slice(None, None, -1) if reverse else slice(None)
+    interpolated, positions = _interpolate_radii_z(radii[order], z[order], 3.0)
+    left = np.clip(np.searchsorted(z, positions, side="right") - 1, 0, len(z) - 2)
+    lower = np.minimum(radii[left], radii[left + 1])
+    upper = np.maximum(radii[left], radii[left + 1])
+    assert np.all(interpolated >= lower - 1e-10)
+    assert np.all(interpolated <= upper + 1e-10)
+    assert np.array_equal(radii, original)
+    assert np.allclose(interpolated[[0, -1]], radii[order][[0, -1]])
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_lv_model_low_local_radii_do_not_invert_vertices(reverse):
+    from core.lv_mesh import myocardium_shell_mesh
+    z = np.arange(7, dtype=float) * 6.0
+    angles = np.linspace(0, 2 * np.pi, 64, endpoint=False)
+    directions = np.column_stack((np.cos(angles), np.sin(angles)))
+    sector = np.exp(-(np.angle(np.exp(1j * angles)) / 0.5) ** 2)
+    endo = np.full((7, 64), 26.0)
+    epi = np.full((7, 64), 33.0)
+    endo[2:4] -= 25.0 * sector[None, :]
+    epi[2:4] -= 30.0 * sector[None, :]
+    original_endo, original_epi = endo.copy(), epi.copy()
+    order = slice(None, None, -1) if reverse else slice(None)
+    shell = myocardium_shell_mesh(endo[order], epi[order], z[order], interp_z=3.0,
+                                  smooth_angular=1.0, ventricular_shape=True)
+    n_ring = int(shell.field_data["shell_n_ring"][0])
+    for offset in (0, n_ring):
+        rings = np.asarray(shell.points)[offset:offset + n_ring].reshape(-1, 64, 3)
+        signed_radii = np.einsum("raj,aj->ra", rings[:, :, :2], directions)
+        assert np.all(signed_radii >= -1e-10)
+    assert np.all(shell.compute_cell_sizes().cell_data["Area"] > 1e-8)
+    assert np.array_equal(endo, original_endo)
+    assert np.array_equal(epi, original_epi)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("interp_z", [1.0, 3.0])
+@pytest.mark.parametrize("virtual_rings", [24, 80])
+def test_lv_shell_apex_joins_measured_contours_smoothly(reverse, interp_z, virtual_rings):
+    from core.lv_mesh import myocardium_shell_mesh
+    angles = 64
+    z = np.arange(6, dtype=float) * 6.0
+    endo = np.broadcast_to((10.0 + 0.5 * z)[:, None], (6, angles)).copy()
+    epi = endo + 7.0
+    order = slice(None, None, -1) if reverse else slice(None)
+    mesh = myocardium_shell_mesh(endo[order], epi[order], z[order], interp_z=interp_z,
+                                 apex_virtual_rings=virtual_rings, smooth_iter=6, smooth_relax=0.04)
+    points = np.asarray(mesh.points)
+    n_ring = int(mesh.field_data["shell_n_ring"][0])
+    for offset, radii in ((0, epi), (n_ring, endo)):
+        rings = points[offset:offset + n_ring].reshape(-1, angles, 3)
+        radial = np.linalg.norm(rings[:, :, :2], axis=2).mean(axis=1)
+        axial = rings[:, :, 2].mean(axis=1)
+        assert np.all(np.diff(axial) > 0)
+        assert np.isclose(radial[virtual_rings], radii[0, 0])
+        if interp_z == 1:
+            assert np.allclose(radial[virtual_rings:virtual_rings + 2], radii[:2, 0])
+        measured_slope = (radial[virtual_rings + 1] - radial[virtual_rings]) / (axial[virtual_rings + 1] - axial[virtual_rings])
+        join_slope = (radial[virtual_rings] - radial[virtual_rings - 1]) / (axial[virtual_rings] - axial[virtual_rings - 1])
+        assert abs(join_slope - measured_slope) < 0.2
+    assert np.isclose(points[n_ring, 2] - points[0, 2], 7.0)
+    assert np.isfinite(points).all()
+
+
+@pytest.mark.parametrize("wall_mm", [4.0, 7.0, 12.0])
+@pytest.mark.parametrize("asymmetric", [False, True])
+@pytest.mark.parametrize("cylindrical", [False, True])
+def test_ventricular_profiles_close_independently_without_flat_apex(cylindrical, asymmetric, wall_mm):
+    from core.lv_mesh import _ventricular_shell_profiles
+    z = np.linspace(0, 36, 7)
+    endo_radius = np.full(7, 18.0) if cylindrical else 22.0 * np.sqrt(1 - ((z - 24) / 42) ** 2)
+    endo = np.broadcast_to(endo_radius[:, None], (7, 64)).copy()
+    if asymmetric:
+        endo *= 1.0 + 0.12 * np.cos(np.linspace(0, 2 * np.pi, 64, endpoint=False))[None, :]
+    epi = endo + wall_mm
+    original_endo, original_epi = endo.copy(), epi.copy()
+    inner, outer, inner_z, outer_z, inner_centers, outer_centers = _ventricular_shell_profiles(
+        endo, epi, z, np.zeros((7, 2)), 96,
+    )
+    assert np.all(inner[0] == 0) and np.all(outer[0] == 0)
+    assert np.isclose(inner_z[0] - outer_z[0], wall_mm)
+    assert -outer_z[0] >= 0.85 * epi[0].mean()
+    assert outer_z[-1] == inner_z[-1] == z[-1]
+    assert np.allclose(inner[-1], endo[-1]) and np.allclose(outer[-1], epi[-1])
+    for radii, positions in ((inner, inner_z), (outer, outer_z)):
+        assert np.all(np.diff(positions) > 0)
+        assert np.isfinite(radii).all()
+        assert radii[5].mean() < radii[48].mean() * 0.25
+    assert np.array_equal(endo, original_endo) and np.array_equal(epi, original_epi)
+    for angle in range(64):
+        inner_at_outer = np.interp(outer_z, inner_z, inner[:, angle], left=0.0)
+        assert np.all(outer[1:, angle] > inner_at_outer[1:])
+
+
+def test_ventricular_mesh_has_two_separate_poles_and_open_basal_cavity():
+    from core.lv_mesh import myocardium_shell_mesh, split_myocardium_shell
+    z = np.linspace(0, 36, 7)
+    endo = np.full((7, 64), 18.0)
+    epi = endo + 7.0
+    shell = myocardium_shell_mesh(endo, epi, z, ventricular_shape=True, smooth_iter=6)
+    outer, inner = split_myocardium_shell(shell)
+    assert shell.n_open_edges == 0
+    assert inner.n_open_edges == 64
+    assert np.isclose(inner.bounds[4] - outer.bounds[4], 7.0)
+    assert inner.bounds[5] == outer.bounds[5] == z[-1]
+    assert np.all(shell.compute_cell_sizes().cell_data["Area"] > 1e-8)
+    for mesh in (outer, inner):
+        assert np.isfinite(mesh.compute_normals().point_data["Normals"]).all()
+        pole = mesh.points[np.isclose(mesh.points[:, 2], mesh.bounds[4])]
+        assert len(pole) == 1
+        basal = mesh.points[np.isclose(mesh.points[:, 2], z[-1])]
+        assert np.min(np.linalg.norm(basal[:, :2], axis=1)) > 10
 
 
 class _FakeSeg:
@@ -84,6 +210,103 @@ def _make_phantom(n_gates=8, n_slices=12, size=32, ef_target=0.55, wall_ed_mm=10
     centers = np.tile([cy, cx], (n_slices, 1))
     outer = np.full((n_slices,), r_endo_ed_px + wall_ed_px + 2.0)
     return cube, _FakeSeg(mask, centers, outer)
+
+
+@pytest.mark.parametrize("n_gates", [8, 16])
+@pytest.mark.parametrize("amplitude", [0.10, 0.25])
+def test_gate_count_compensation_does_not_invent_contraction(n_gates, amplitude):
+    cube, seg = _make_phantom(n_gates=n_gates, ef_target=0.0)
+    stationary = np.broadcast_to(cube[0], cube.shape).copy()
+    gains = 1.0 + amplitude * (1.0 - np.cos(2 * np.pi * np.arange(n_gates) / n_gates))
+    observed = stationary * gains[:, None, None, None]
+    original = observed.copy()
+    baseline = analyze_lv_ectb(observed, seg, (PIXEL_MM, PIXEL_MM), SLICE_MM)
+    result = analyze_lv_ectb(
+        observed, seg, (PIXEL_MM, PIXEL_MM), SLICE_MM,
+        ECTbLVConfig(normalize_gate_counts=True),
+    )
+    assert baseline.available and result.available
+    assert baseline.ef_pct > 4.0
+    assert result.ef_pct < 1e-8
+    assert np.allclose(result.mean_wall_thickness_mm, 10.0)
+    assert np.allclose(result.gate_count_scale_factors, 1.0 / gains)
+    assert np.array_equal(observed, original)
+    assert any("experimental" in note.lower() for note in result.notes)
+
+
+@pytest.mark.parametrize("ef_target", [0.25, 0.55])
+@pytest.mark.parametrize("n_gates", [8, 16])
+def test_gate_count_compensation_is_gain_invariant_with_moving_wall(ef_target, n_gates):
+    cube, seg = _make_phantom(n_gates=n_gates, ef_target=ef_target)
+    gains = 1.0 + 0.2 * np.sin(2 * np.pi * np.arange(n_gates) / n_gates)
+    config = ECTbLVConfig(normalize_gate_counts=True)
+    reference = analyze_lv_ectb(cube, seg, (PIXEL_MM, PIXEL_MM), SLICE_MM, config)
+    observed = analyze_lv_ectb(
+        cube * gains[:, None, None, None], seg, (PIXEL_MM, PIXEL_MM), SLICE_MM, config,
+    )
+    assert reference.available and observed.available
+    assert reference.ef_pct > 10.0
+    assert np.allclose(observed.gate_volumes_ml, reference.gate_volumes_ml, atol=1e-8)
+    assert np.allclose(observed.mean_wall_thickness_mm, reference.mean_wall_thickness_mm)
+
+
+@pytest.mark.parametrize("invalid_value", [0.0, np.nan, np.inf])
+def test_ectb_rejects_empty_or_nonfinite_gate(invalid_value):
+    cube, seg = _make_phantom()
+    cube[3] = invalid_value
+    result = analyze_lv_ectb(cube, seg, (PIXEL_MM, PIXEL_MM), SLICE_MM)
+    assert not result.available
+    assert "gate" in result.reason.lower()
+
+
+def test_gate_count_compensation_rejects_excessive_rescaling():
+    cube, seg = _make_phantom(ef_target=0.0)
+    cube[3] *= 0.1
+    result = analyze_lv_ectb(
+        cube, seg, (PIXEL_MM, PIXEL_MM), SLICE_MM,
+        ECTbLVConfig(normalize_gate_counts=True),
+    )
+    assert not result.available
+    assert "cuentas" in result.reason.lower()
+
+
+@pytest.mark.parametrize("n_gates", [8, 16])
+@pytest.mark.parametrize("ed_radius_mm", [12.0, 24.0, 36.0])
+def test_count_conserving_blurred_phantom_recovers_known_fevi(n_gates, ed_radius_mm):
+    from scipy.ndimage import gaussian_filter
+    pixel_mm, size, slices, subpixels = 2.0, 64, 6, 4
+    coordinates = (np.arange(size * subpixels) + 0.5) / subpixels - size / 2
+    radius = np.hypot(coordinates[:, None], coordinates[None, :]) * pixel_mm
+    myocardial_area = (ed_radius_mm + 10.0) ** 2 - ed_radius_mm ** 2
+    es_radius_mm = ed_radius_mm * np.sqrt(1.0 - 0.55)
+    images = []
+    for gate in range(n_gates):
+        inner = es_radius_mm + (ed_radius_mm - es_radius_mm) * 0.5 * (1 + np.cos(2 * np.pi * gate / n_gates))
+        outer = np.sqrt(inner ** 2 + myocardial_area)
+        tissue = ((radius >= inner) & (radius <= outer)).astype(float)
+        image = tissue.reshape(size, subpixels, size, subpixels).mean(axis=(1, 3)) * 1000.0
+        images.append(gaussian_filter(image, 10.0 / 2.35482 / pixel_mm, mode="constant"))
+    cube = np.repeat(np.array(images)[:, None], slices, axis=1)
+    mask = np.repeat((images[0] > 0.35 * np.max(images[0]))[None], slices, axis=0)
+    seg = _FakeSeg(mask, np.tile([size / 2 - 0.5, size / 2 - 0.5], (slices, 1)),
+                   np.full(slices, (ed_radius_mm + 10.0) / pixel_mm + 2.0))
+    reference = analyze_lv_ectb(cube, seg, (pixel_mm, pixel_mm), 6.0,
+                                 ECTbLVConfig(use_valve_plane=False))
+    compensated = analyze_lv_ectb(cube, seg, (pixel_mm, pixel_mm), 6.0,
+                                   ECTbLVConfig(use_valve_plane=False, normalize_gate_counts=True))
+    assert reference.available and compensated.available
+    assert abs(reference.ef_pct - 55.0) < 3.0
+    assert abs(compensated.ef_pct - 55.0) < 3.0
+    assert abs(compensated.ef_pct - reference.ef_pct) < 0.2
+
+
+def test_ectb_rejects_fully_collapsed_cavity_in_a_gate():
+    cube, seg = _make_phantom()
+    result = analyze_lv_ectb(cube, seg, (PIXEL_MM, PIXEL_MM), SLICE_MM,
+                              ECTbLVConfig(ed_wall_thickness_mm=65.0))
+    assert not result.available and result.qc_blocked
+    assert "cavidad" in result.reason.lower()
+    assert result.endo_zero_fraction.max() == 1.0
 
 
 def test_recupera_fevi_conocida():
