@@ -82,8 +82,10 @@ class _Handle:
 class CardiacReorientationDialog(QDialog):
     """Reorientacion oblicua interactiva del VI."""
 
-    def __init__(self, ungated_volume, gated_volume=None, source_label="", geometry=None, parent=None, locked_voi=None, initial_orientation=None, phase_gated_volume=None, voxel_mm=None, motion_frozen_volume=None, motion_frozen_gated_volume=None, ct_volume=None):
+    def __init__(self, ungated_volume, gated_volume=None, source_label="", geometry=None, parent=None, locked_voi=None, initial_orientation=None, phase_gated_volume=None, voxel_mm=None, motion_frozen_volume=None, motion_frozen_gated_volume=None, ct_volume=None, stage_label="", study_key=""):
         super().__init__(parent)
+        self._stage_label = str(stage_label or "")
+        self._study_key = str(study_key or "")
         self.setWindowTitle("Reorientar corazón · Rec/Ref")
         self.setWindowFlags(
             self.windowFlags()
@@ -1383,7 +1385,7 @@ class CardiacReorientationDialog(QDialog):
         self._draw_previews(); self.canvas.draw_idle()
 
     # -------------------------------------------------------------- result
-    def _accept(self):
+    def _accept(self, record_normal: bool = True):
         u = self._long_axis_vector()
         center = self._voi_center()
         try:  # DEBUG temporal: capturar eje AUTO vs eje MANUAL (ground truth).
@@ -1407,15 +1409,16 @@ class CardiacReorientationDialog(QDialog):
                 _fh.writelines(_lines)
         except Exception:
             pass
-        try:  # BD de normales: registrar el eje validado (si está habilitado).
+        try:  # BD de normales: solo ejes revisados por el usuario (nunca TRUST automático).
             from PyQt6.QtCore import QSettings
-            if QSettings("Gammasys", "GammaSync").value("normals/record_axis", True, type=bool):
+            if record_normal and QSettings("Gammasys", "GammaSync").value("normals/record_axis", True, type=bool):
                 from core.axis_normals import record_case
                 record_case(
                     u,
                     auto_axis=None if self._auto is None else self._auto["long_axis"],
                     center=center,
-                    stage=str(getattr(self, "_stage_label", "") or ""),
+                    stage=self._stage_label,
+                    study_key=self._study_key,
                 )
         except Exception:
             pass

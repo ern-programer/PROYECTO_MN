@@ -17,6 +17,7 @@ from core.aha_segments import (
 	SECTOR_TO_SEGMENT_APICAL,
 	SECTOR_TO_SEGMENT_BASAL,
 	SECTOR_TO_SEGMENT_MEDIO,
+	segment_display_angles,
 )
 from viz.colormaps import get_phase_cmap, phase_to_rgb
 
@@ -61,9 +62,8 @@ def build_polar_map(
 	for r_in, r_out, step, lut in rings:
 		n = len(lut)
 		for k in range(n):
-			t1 = float(k * step + angle_offset_deg)
-			t2 = float((k + 1) * step + angle_offset_deg)
 			seg_id = int(lut[k])
+			t1, t2 = (float(t + angle_offset_deg) for t in segment_display_angles(seg_id))
 			wedge = Wedge(
 				(0.0, 0.0),
 				r_out,
@@ -93,7 +93,7 @@ def build_polar_map(
 		label = "17\n--" if not np.isfinite(val) else f"17\n{val:.0f}°"
 		ax.text(0.0, 0.0, label, ha="center", va="center", fontsize=8, color="black")
 
-	# TODO calibrar orientación del bullseye vs MyoVation/GE.
+	# Despliegue AHA estándar: 1 arriba (anterior), 2 anteroseptal arriba-izquierda.
 
 	ax.set_xlim(-1.15, 1.35)
 	ax.set_ylim(-1.15, 1.15)
@@ -133,9 +133,8 @@ def build_clinical_phase_panel(
 	]
 	for r_in, r_out, step, sector_lut in rings:
 		for sector_index, seg_id_raw in enumerate(sector_lut):
-			theta_start = float(sector_index * step)
-			theta_end = float((sector_index + 1) * step)
 			seg_id = int(seg_id_raw)
+			theta_start, theta_end = segment_display_angles(seg_id)
 			wedge = Wedge(
 				(0.0, 0.0),
 				r_out,

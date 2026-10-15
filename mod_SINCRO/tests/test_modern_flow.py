@@ -292,6 +292,34 @@ def test_research_preference_gates_fine_config_even_with_stale_selector(enabled)
     assert window._cine_crudo_recon_config().reconstruction_matrix == (128 if enabled else None)
 
 
+def test_perfusion_quant_attaches_reviewed_manual_scores_and_resets():
+    import numpy as np
+    from core.perfusion_quant import perfusion_by_segment, perfusion_quant_summary, perfusion_scores
+    segment_map = (np.arange(192) % 17 + 1).reshape(3, 8, 8)
+    cube = np.ones((2, 3, 8, 8))
+    cube[:, segment_map == 1] = 0.3
+    window = SimpleNamespace(study=SimpleNamespace(cube=cube), aha=SimpleNamespace(segment_map=segment_map),
+                             seg=None, compare_bundle=None, _rest_stage_state=lambda: None)
+    names = dict(np=np, perfusion_by_segment=perfusion_by_segment,
+                 perfusion_quant_summary=perfusion_quant_summary, perfusion_scores=perfusion_scores)
+    _bind(window, "_perfusion_stage_inputs", **names)
+    _bind(window, "_compute_perfusion_quant", **names)
+    _bind(window, "_reset_perfusion_scores")
+    scores = window._compute_perfusion_quant()["scores"]
+    assert scores["rows"][0]["stress_score"] == 4 and scores["sss"] == 4 and not scores["reviewed"]
+    window._perfusion_score_overrides = {"stress": {1: 2}, "rest": {}}
+    window._perfusion_score_reviewed = True
+    scores = window._compute_perfusion_quant()["scores"]
+    assert scores["rows"][0]["stress_edited"] and scores["sss"] == 2 and scores["reviewed"]
+    window._reset_perfusion_scores()
+    assert window._perfusion_score_overrides == {"stress": {}, "rest": {}}
+    assert window._compute_perfusion_quant()["scores"]["sss"] == 4
+    assert "self._reset_perfusion_scores()" in ast.unparse(METHODS["_reset_session_data"])
+    assert "self._reset_perfusion_scores()" in ast.unparse(METHODS["process_current"])
+    exporter = ast.unparse(METHODS["_export_structured_results"])
+    assert "Exporta resultados" in exporter and "Exporta resultados" not in ast.unparse(METHODS["open_perfusion_score_dialog"])
+
+
 def test_fine_reconstruction_does_not_reuse_native_ct_mask_or_registration():
     stage = SimpleNamespace(recon_result=SimpleNamespace(voxel_scale=0.5))
     window = SimpleNamespace(_dual_session=lambda: SimpleNamespace(stage=lambda name: stage))

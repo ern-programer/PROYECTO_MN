@@ -19,6 +19,8 @@ from datetime import datetime
 
 import numpy as np
 
+from core.perfusion_quant import score_summary_text as _score_summary_text
+
 
 # ============================================================
 # Helpers
@@ -741,6 +743,14 @@ def generate_html_report(
     perfusion_quant_html = ""
     if perfusion_quant and perfusion_quant.get("available"):
         has_rest_pq = bool(perfusion_quant.get("has_rest"))
+        scores = perfusion_quant.get("scores") or {}
+        score_rows = {r["segment"]: r for r in scores.get("rows", [])} if scores.get("available") else {}
+
+        def _score_cell(seg_id, stage):
+            srow = score_rows.get(seg_id) or {}
+            value = srow.get(f"{stage}_score")
+            return "—" if value is None else f"{value}{'*' if srow.get(f'{stage}_edited') else ''}"
+
         pq_rows = []
         for r in perfusion_quant.get("rows", []):
             row = [f"{r['segment']}. {r['name']}", str(r.get("territory", "")), f"{_safe_float(r.get('stress_pct'), 0)}%"]
@@ -749,6 +759,10 @@ def generate_html_report(
             row.append(str(r.get("stress_class", "")))
             if has_rest_pq:
                 row.append(str(r.get("reversibility", "") or "—"))
+            if score_rows:
+                row.append(_score_cell(r["segment"], "stress"))
+                if has_rest_pq:
+                    row.append(_score_cell(r["segment"], "rest"))
             pq_rows.append(tuple(row))
         pq_headers = ["Segmento", "Territorio", "Esfuerzo (%máx)"]
         if has_rest_pq:
@@ -756,6 +770,10 @@ def generate_html_report(
         pq_headers.append("Clasificación")
         if has_rest_pq:
             pq_headers.append("Reversibilidad")
+        if score_rows:
+            pq_headers.append("Score esf.")
+            if has_rest_pq:
+                pq_headers.append("Score rep.")
         n_def = len(perfusion_quant.get("stress_defect_segments", []))
         n_sev = len(perfusion_quant.get("stress_severe_segments", []))
         n_rev = len(perfusion_quant.get("reversible_segments", []))
@@ -766,11 +784,16 @@ def generate_html_report(
         )
         if has_rest_pq:
             resumen_pq += f" · Reversibles en reposo: {n_rev}"
-        notes_html = "".join(f"<li>{n}</li>" for n in perfusion_quant.get("notes", []))
+        notes_html = "".join(f"<li>{n}</li>" for n in perfusion_quant.get("notes", []) + (scores.get("notes", []) if score_rows else []))
+        score_html = f"<p style='margin-top:10px;'><b>{_score_summary_text(scores)}</b></p>" if score_rows else ""
+        score_image = perfusion_quant.get("score_image")
+        if score_rows and score_image and os.path.isfile(score_image):
+            score_html += _img_tag(score_image, "Lámina de score de perfusión", "featured-img")
         perfusion_quant_html = (
             "<h3 style='color:var(--accent); margin:24px 0 12px;'>Cuantificación relativa de perfusión (AHA 17)</h3>"
             + f"<p style='margin-bottom:10px;'><b>{resumen_pq}</b></p>"
             + _build_table(pq_headers, pq_rows)
+            + score_html
             + f"<ul style='color:var(--fg-muted); font-size:0.85rem; margin-top:8px;'>{notes_html}</ul>"
         )
 

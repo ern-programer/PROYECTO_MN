@@ -56,6 +56,7 @@ from core.aha_segments import (
 	SECTOR_TO_SEGMENT_APICAL,
 	SECTOR_TO_SEGMENT_BASAL,
 	SECTOR_TO_SEGMENT_MEDIO,
+	segment_display_angles,
 	map_to_17_segments,
 	phase_by_segment,
 	territory_analysis,
@@ -74,7 +75,7 @@ from core.stress_rest import (
 	transient_ischemic_dilation,
 	perfusion_transient_ischemic_dilation,
 )
-from core.perfusion_quant import perfusion_by_segment, perfusion_quant_summary
+from core.perfusion_quant import perfusion_by_segment, perfusion_quant_summary, perfusion_scores
 from core.executive_summary import build_executive_summary
 from core.intestinal_subtraction import apply_intestinal_subtraction
 from core.ectb_lv import (
@@ -1755,6 +1756,11 @@ class MainWindow(QMainWindow):
 				polar_math_apply_btn.setToolTip("Aplicar la operación matemática esfuerzo/reposo al cine polar")
 				polar_math_apply_btn.clicked.connect(self._apply_polar_math)
 				toolbar.addWidget(polar_math_apply_btn)
+				perfusion_score_btn = QToolButton()
+				perfusion_score_btn.setText("Score perfusión…")
+				perfusion_score_btn.setToolTip("Score automático 0-4 por segmento AHA (SSS/SRS/SDS) con corrección manual.")
+				perfusion_score_btn.clicked.connect(self.open_perfusion_score_dialog)
+				toolbar.addWidget(perfusion_score_btn)
 			if name == "cine_crudo":
 				# --- Fila 1 (toolbar principal): zoom + reproducción + navegación + fuente/modo ---
 				self.cine_crudo_play_btn = QToolButton()
@@ -8401,6 +8407,7 @@ class MainWindow(QMainWindow):
 		QSettings)."""
 		self._stop_all_session_timers()
 		self._raw_bg_spec = {}
+		self._reset_perfusion_scores()
 		self._clear_compare_state()
 		# Sesión dual: limpiar AMBAS etapas (los `= None` legacy de abajo solo
 		# alcanzan la etapa del slot activo vía properties).
@@ -8991,6 +8998,7 @@ class MainWindow(QMainWindow):
 				self._preload_acquisition_ecg()
 				# Estudio nuevo en memoria ⇒ resetear pila de undo y estados de pasos.
 				self.pipeline_history.reset()
+				self._reset_perfusion_scores()
 			# Estudio ya en memoria ⇒ habilitar QC aunque falte el resto del pipeline.
 			self._refresh_tab_enabled_states()
 			# --- Modo crudo: proyecciones (no reconstruido) → panel QC + cine + gating ---
@@ -11142,39 +11150,103 @@ class MainWindow(QMainWindow):
 			rest_cavity_ungated_ml=rest_cavity_ml,
 		)
 
-	def _compute_perfusion_quant(self):
-		"""Cuantificación relativa de perfusión por segmento AHA (esf. + rep. si hay)."""
+	def _perfusion_stage_inputs(self) -> dict:
+		"""Perfusión (media de gates), segmentación y mapa AHA por etapa disponible."""
+		inputs = {}
 		if self.study is None or self.aha is None:
-			return None
-		seg_map = getattr(self.aha, "segment_map", None)
-		cube = getattr(self.study, "cube", None)
-		if seg_map is None or cube is None or np.asarray(cube).ndim != 4:
-			return None
-		stress_perf = np.asarray(cube, dtype=np.float64).mean(axis=0)
-		if stress_perf.shape != np.asarray(seg_map).shape:
-			return None
-		stress_pct = perfusion_by_segment(stress_perf, seg_map)
-		rest_pct = None
-		rest_study = rest_aha = None
+			return inputs
+		rest_study = rest_seg = rest_aha = None
 		if self.compare_bundle is not None:
 			rest_study = self.compare_bundle.get("study")
+			rest_seg = self.compare_bundle.get("seg")
 			rest_aha = self.compare_bundle.get("aha")
 		if rest_study is None:
 			state = self._rest_stage_state()
 			if state is not None and state.seg is not None:
-				rest_study = state.cut_study
+				rest_study, rest_seg = state.cut_study, state.seg
 				try:
 					rest_aha = map_to_17_segments(state.seg)
 				except Exception:
 					rest_aha = None
-		if rest_study is not None and rest_aha is not None:
-			r_map = getattr(rest_aha, "segment_map", None)
-			r_cube = getattr(rest_study, "cube", None)
-			if r_map is not None and r_cube is not None and np.asarray(r_cube).ndim == 4:
-				r_perf = np.asarray(r_cube, dtype=np.float64).mean(axis=0)
-				if r_perf.shape == np.asarray(r_map).shape:
-					rest_pct = perfusion_by_segment(r_perf, r_map)
-		return perfusion_quant_summary(stress_pct, rest_pct)
+		for stage, study, seg, aha in (("stress", self.study, self.seg, self.aha), ("rest", rest_study, rest_seg, rest_aha)):
+			seg_map = getattr(aha, "segment_map", None)
+			cube = getattr(study, "cube", None)
+			if seg_map is None or cube is None or np.asarray(cube).ndim != 4:
+				continue
+			perf = np.asarray(cube, dtype=np.float64).mean(axis=0)
+			if perf.shape == np.asarray(seg_map).shape:
+				inputs[stage] = (perf, seg, aha)
+		return inputs
+
+	def _compute_perfusion_quant(self):
+		"""Cuantificación relativa de perfusión por segmento AHA (esf. + rep. si hay)."""
+		inputs = self._perfusion_stage_inputs()
+		if "stress" not in inputs:
+			return None
+		pct = {stage: perfusion_by_segment(perf, aha.segment_map) for stage, (perf, _seg, aha) in inputs.items()}
+		stress_pct, rest_pct = pct["stress"], pct.get("rest")
+		summary = perfusion_quant_summary(stress_pct, rest_pct)
+		if summary.get("available"):
+			scores = perfusion_scores(stress_pct, rest_pct, getattr(self, "_perfusion_score_overrides", None))
+			scores["reviewed"] = bool(getattr(self, "_perfusion_score_reviewed", False))
+			summary["scores"] = scores
+		return summary
+
+	def _reset_perfusion_scores(self):
+		self._perfusion_score_overrides = {"stress": {}, "rest": {}}
+		self._perfusion_score_reviewed = False
+
+	def _write_perfusion_score_image(self, scores: dict) -> str:
+		"""Genera la lámina gráfica del score (mismo diseño que el panel) para los informes."""
+		from core.aha_segments import bullseye_image, bullseye_territory_extent
+		from viz.colormaps import get_phase_cmap
+		from viz.perfusion_score_figure import save_perfusion_score_figure
+		images = {stage: bullseye_image(perf, seg, aha) for stage, (perf, seg, aha) in self._perfusion_stage_inputs().items()}
+		stress_img = images.get("stress")
+		rest_img = images.get("rest") if scores.get("has_rest") else None
+		extent = bullseye_territory_extent(stress_img, rest_img) if stress_img is not None else None
+		return save_perfusion_score_figure(
+			os.path.join(self.output_dir, "perfusion_score.png"), scores,
+			stress_img=stress_img, rest_img=rest_img, extent=extent,
+			cmap=get_phase_cmap(str(getattr(self, "polar_perf_screen_cmap", "odyssey_cool"))),
+		)
+
+	def open_perfusion_score_dialog(self):
+		"""Panel LCARS: mapas polares, score editable por segmento y territorios."""
+		from core.aha_segments import bullseye_image
+		from ui.perfusion_score_window import PerfusionScoreWindow
+		from viz.colormaps import get_phase_cmap
+		try:
+			inputs = self._perfusion_stage_inputs()
+			summary = self._compute_perfusion_quant()
+		except Exception as exc:
+			inputs, summary = {}, None
+			self._log(f"[SCORE] No se pudo calcular la perfusión: {exc}")
+		if not summary or not summary.get("available"):
+			QMessageBox.information(self._dialog_parent(), "Score de perfusión", "Procesá un estudio con segmentación AHA para calcular el score.")
+			return
+		quant_rows = summary["rows"]
+		stress_pct = {r["segment"]: r["stress_pct"] for r in quant_rows}
+		rest_pct = {r["segment"]: r["rest_pct"] for r in quant_rows} if summary.get("has_rest") else None
+		images = {}
+		for stage, (perf, seg, aha) in inputs.items():
+			try:
+				images[stage] = bullseye_image(perf, seg, aha)
+			except Exception as exc:
+				self._log(f"[SCORE] Mapa polar de {stage} no disponible: {exc}")
+		dlg = PerfusionScoreWindow(
+			self._dialog_parent(), stress_pct=stress_pct, rest_pct=rest_pct,
+			stress_img=images.get("stress"), rest_img=images.get("rest"),
+			overrides=getattr(self, "_perfusion_score_overrides", None),
+			cmap=get_phase_cmap(str(getattr(self, "polar_perf_screen_cmap", "odyssey_cool"))),
+			settings=self._ui_settings, accent=self._dialog_accent("#d8bb78"),
+		)
+		if dlg.exec() != int(QDialog.DialogCode.Accepted):
+			return
+		self._perfusion_score_overrides = dlg.edits
+		self._perfusion_score_reviewed = True
+		self._log(f"[SCORE] {dlg.summary_text()}")
+		self.statusBar().showMessage("Score de perfusión revisado; se aplicará en el próximo informe.")
 
 	def _export_structured_results(self):
 		"""Exporta resultados a JSON/CSV/Excel en el directorio de salida."""
@@ -11734,8 +11806,7 @@ class MainWindow(QMainWindow):
 			for seg_ids, r_in, r_out, start in rings:
 				n = len(seg_ids)
 				for i, sid in enumerate(seg_ids):
-					t1 = start - (i + 1) * (360.0 / n)
-					t2 = start - i * (360.0 / n)
+					t1, t2 = segment_display_angles(int(sid))
 					ax.add_patch(Wedge((0.0, 0.0), r_out, t1, t2, width=r_out - r_in,
 						facecolor=_face(sid), edgecolor=_edge(sid), linewidth=_lw(sid)))
 					mid_a = _np.deg2rad((t1 + t2) * 0.5)
@@ -12116,9 +12187,8 @@ class MainWindow(QMainWindow):
 				for r_in, r_out, step, lut in rings:
 					n = len(lut)
 					for k in range(n):
-						t1 = float(k * step)
-						t2 = float((k + 1) * step)
 						seg_id = int(lut[k])
+						t1, t2 = segment_display_angles(seg_id)
 						val = float(values_by_seg.get(seg_id, np.nan))
 						color = (0.35, 0.35, 0.35)
 						if np.isfinite(val):
@@ -12780,8 +12850,7 @@ class MainWindow(QMainWindow):
 		def _draw_ring(seg_ids: list[int], r_inner: float, r_outer: float, start_deg: float = 90.0):
 			n = len(seg_ids)
 			for i, sid in enumerate(seg_ids):
-				theta1 = start_deg - (i + 1) * (360.0 / n)
-				theta2 = start_deg - i * (360.0 / n)
+				theta1, theta2 = segment_display_angles(int(sid))
 				wedge = Wedge((0.0, 0.0), r_outer, theta1, theta2, width=r_outer - r_inner, facecolor=_segment_color(sid), edgecolor=style["grid"], linewidth=1.4)
 				ax_b.add_patch(wedge)
 				mid_a = np.deg2rad((theta1 + theta2) * 0.5)
@@ -13930,6 +13999,11 @@ class MainWindow(QMainWindow):
 			perfusion_quant = self._compute_perfusion_quant()
 		except Exception as exc:
 			self._log(f"Cuantificación de perfusión no disponible: {exc}")
+		if perfusion_quant and (perfusion_quant.get("scores") or {}).get("available"):
+			try:
+				perfusion_quant["score_image"] = self._write_perfusion_score_image(perfusion_quant["scores"])
+			except Exception as exc:
+				self._log(f"[WARN] Lámina de score de perfusión no generada: {exc}")
 		try:
 			self._ensure_pdf_extra_images()
 		except Exception as exc:
@@ -19310,6 +19384,8 @@ class MainWindow(QMainWindow):
 		return {
 			"ungated_volume": ung_vol,
 			"gated_volume": gated_vol,
+			"stage_label": stage,
+			"study_key": str(getattr(raw_study, "study_instance_uid", "") or getattr(raw_study, "source_path", "") or ""),
 			"source_label": st.cut_source_label or "raw recon",
 			"geometry": geometry,
 			"voxel_mm": _reo_voxel_mm,
@@ -19466,7 +19542,7 @@ class MainWindow(QMainWindow):
 				dlg._recompute_and_draw(full=True)  # inicializa límites Base/Ápex al tamaño reorientado
 			except Exception:
 				pass
-			dlg._accept()  # calcula reoriented_* desde la auto-orientación PCA
+			dlg._accept(record_normal=False)  # TRUST: eje automático sin revisión, no alimenta la BD
 			ok = self._apply_reorientation_result(dlg, generate_cuts=True) if dlg.reoriented_gated is not None else False
 		finally:
 			dlg.deleteLater()

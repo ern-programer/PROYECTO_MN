@@ -36,6 +36,11 @@ SEVERE_THRESHOLD_PCT = 50.0
 REVERSIBILITY_DELTA_PCT = 10.0
 MIN_PIXELS_PER_SEGMENT = 8
 
+# Escala 0-4 (0 normal ... 4 ausente) por %máx relativo, sin base de normales.
+SCORE_THRESHOLDS = ((70.0, 0), (60.0, 1), (50.0, 2), (40.0, 3))
+MAX_SEGMENT_SCORE = 4
+N_SEGMENTS = 17
+
 
 def perfusion_by_segment(perfusion: np.ndarray, segment_map: np.ndarray) -> dict[int, float]:
     """Captación media por segmento AHA normalizada al segmento máximo (=100).
@@ -154,4 +159,109 @@ def perfusion_quant_summary(
         "fixed_segments": fixed_ids,
         "has_rest": bool(rest_pct),
         "notes": notes,
+    }
+
+
+def score_summary_text(scores: dict) -> str:
+    """Línea de informe con SSS/SRS/SDS y estado de revisión médica."""
+    def fmt(value):
+        return "incompleto" if value is None else str(value)
+
+    parts = [f"SSS {fmt(scores.get('sss'))}"]
+    if scores.get("has_rest"):
+        parts += [f"SRS {fmt(scores.get('srs'))}", f"SDS {fmt(scores.get('sds'))}"]
+    if scores.get("sss_pct") is not None:
+        parts.append(f"SSS {scores['sss_pct']:.0f}% del miocardio")
+    review = (
+        f"revisado por el médico ({scores.get('n_edited', 0)} corrección(es))"
+        if scores.get("reviewed") else "automático SIN revisión médica"
+    )
+    return "Score de perfusión: " + " · ".join(parts) + f" — {review}"
+
+
+def territory_scores(scores: dict) -> dict[str, dict[str, float | None]]:
+    """SSS/SRS/SDS por territorio y % del máximo posible (4 x segmentos)."""
+    rows = {row["segment"]: row for row in scores.get("rows", [])}
+    out = {}
+    for terr, segs in TERRITORY_MAP.items():
+        entry = {}
+        for stage, key in (("stress", "sss"), ("rest", "srs")):
+            values = [rows.get(seg, {}).get(f"{stage}_score") for seg in segs]
+            complete = scores.get("has_rest") or stage == "stress"
+            entry[key] = int(sum(values)) if complete and None not in values else None
+        entry["sds"] = entry["sss"] - entry["srs"] if None not in (entry["sss"], entry["srs"]) else None
+        entry["sss_pct"] = entry["sss"] / (MAX_SEGMENT_SCORE * len(segs)) * 100.0 if entry["sss"] is not None else None
+        out[terr] = entry
+    return out
+
+
+def auto_segment_score(pct: float) -> int | None:
+    """Score 0-4 de un segmento desde su %máx; None si no hay dato."""
+    if pct is None or not math.isfinite(float(pct)):
+        return None
+    for lower, score in SCORE_THRESHOLDS:
+        if float(pct) >= lower:
+            return score
+    return MAX_SEGMENT_SCORE
+
+
+def perfusion_scores(
+    stress_pct: dict[int, float] | None,
+    rest_pct: dict[int, float] | None = None,
+    overrides: dict[str, dict[int, int | None]] | None = None,
+) -> dict:
+    """Scores por segmento (auto + corrección manual) y SSS/SRS/SDS.
+
+    ``overrides[stage][segmento]`` reemplaza el score automático; ``None``
+    excluye el segmento. Los sumarios se informan solo con los 17 segmentos
+    puntuados, para no presentar un SSS parcial como si fuera completo.
+    """
+    if not stress_pct:
+        return {"available": False, "reason": "sin datos de perfusión de esfuerzo"}
+    overrides = overrides or {}
+    stages = {"stress": stress_pct}
+    if rest_pct:
+        stages["rest"] = rest_pct
+    rows = [{"segment": seg_id, "name": SEGMENT_NAMES[seg_id]} for seg_id in range(1, N_SEGMENTS + 1)]
+    totals: dict[str, int | None] = {}
+    n_scored: dict[str, int] = {}
+    n_edited = 0
+    for stage, pct in stages.items():
+        edits = overrides.get(stage) or {}
+        scores = []
+        for row in rows:
+            seg_id = row["segment"]
+            auto = auto_segment_score(pct.get(seg_id, float("nan")))
+            edited = seg_id in edits
+            final = edits[seg_id] if edited else auto
+            if final is not None:
+                final = int(min(MAX_SEGMENT_SCORE, max(0, int(final))))
+            edited = edited and final != auto
+            n_edited += int(edited)
+            row[f"{stage}_auto"] = auto
+            row[f"{stage}_score"] = final
+            row[f"{stage}_edited"] = edited
+            if final is not None:
+                scores.append(final)
+        n_scored[stage] = len(scores)
+        totals[stage] = int(sum(scores)) if len(scores) == N_SEGMENTS else None
+
+    sss = totals.get("stress")
+    srs = totals.get("rest")
+    sds = sss - srs if sss is not None and srs is not None else None
+    return {
+        "available": True,
+        "has_rest": "rest" in stages,
+        "rows": rows,
+        "sss": sss,
+        "srs": srs,
+        "sds": sds,
+        "sss_pct": (sss / (MAX_SEGMENT_SCORE * N_SEGMENTS) * 100.0) if sss is not None else None,
+        "n_scored": n_scored,
+        "n_edited": n_edited,
+        "notes": [
+            "Score automático 0-4 por %máx relativo: >=70% 0, 60-69% 1, 50-59% 2, 40-49% 3, <40% 4.",
+            "Sin base de datos de normales: orientativo; requiere revisión médica.",
+            "SSS/SRS solo con los 17 segmentos puntuados; SDS = SSS - SRS. * = corregido manualmente.",
+        ],
     }

@@ -14,6 +14,8 @@ from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.platypus import HRFlowable, Image as RLImage, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from core.perfusion_quant import score_summary_text as _score_summary_text
+
 
 def _safe_float(value, ndigits: int = 2) -> str:
 	try:
@@ -511,12 +513,24 @@ def generate_report(
 		# Cuantificación relativa de perfusión por segmento AHA (sin DB de normales).
 		if perfusion_quant and perfusion_quant.get("available"):
 			has_rest_pq = bool(perfusion_quant.get("has_rest"))
+			scores = perfusion_quant.get("scores") or {}
+			score_rows = {r["segment"]: r for r in scores.get("rows", [])} if scores.get("available") else {}
+
+			def _score_cell(seg_id, stage):
+				row = score_rows.get(seg_id) or {}
+				value = row.get(f"{stage}_score")
+				return "—" if value is None else f"{value}{'*' if row.get(f'{stage}_edited') else ''}"
+
 			pq_header = ["Segmento", "Terr.", "Esf. %máx"]
 			if has_rest_pq:
 				pq_header.append("Rep. %máx")
 			pq_header.append("Clasif.")
 			if has_rest_pq:
 				pq_header.append("Reversib.")
+			if score_rows:
+				pq_header.append("Score E")
+				if has_rest_pq:
+					pq_header.append("Score R")
 			pq_rows = [pq_header]
 			for r in perfusion_quant.get("rows", []):
 				row = [
@@ -529,9 +543,17 @@ def generate_report(
 				row.append(str(r.get("stress_class", "")))
 				if has_rest_pq:
 					row.append(str(r.get("reversibility", "") or "—"))
+				if score_rows:
+					row.append(_score_cell(r["segment"], "stress"))
+					if has_rest_pq:
+						row.append(_score_cell(r["segment"], "rest"))
 				pq_rows.append(row)
-			if has_rest_pq:
+			if has_rest_pq and score_rows:
+				pq_widths = [44 * mm, 14 * mm, 19 * mm, 19 * mm, 18 * mm, 22 * mm, 16 * mm, 16 * mm]
+			elif has_rest_pq:
 				pq_widths = [52 * mm, 18 * mm, 24 * mm, 24 * mm, 24 * mm, 24 * mm]
+			elif score_rows:
+				pq_widths = [64 * mm, 24 * mm, 30 * mm, 26 * mm, 22 * mm]
 			else:
 				pq_widths = [72 * mm, 30 * mm, 34 * mm, 30 * mm]
 			pq_table = Table(pq_rows, colWidths=pq_widths)
@@ -557,7 +579,13 @@ def generate_report(
 			story.append(Spacer(1, 1.5 * mm))
 			story.append(pq_table)
 			story.append(Spacer(1, 1.5 * mm))
-			for note in perfusion_quant.get("notes", []):
+			if score_rows:
+				story.append(Paragraph(f"<b>{_score_summary_text(scores)}</b>", body_style))
+				score_image = perfusion_quant.get("score_image")
+				if score_image and os.path.isfile(score_image):
+					story.append(Spacer(1, 1.5 * mm))
+					story.append(_scaled_image(score_image, 174 * mm, 110 * mm))
+			for note in perfusion_quant.get("notes", []) + (scores.get("notes", []) if score_rows else []):
 				story.append(Paragraph(f"• {note}", small_style))
 			story.append(Spacer(1, 3 * mm))
 
