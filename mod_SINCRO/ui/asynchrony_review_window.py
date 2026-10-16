@@ -14,10 +14,11 @@ from PyQt6.QtWidgets import (
 	QComboBox,
 	QDoubleSpinBox,
 	QFormLayout,
-	QGroupBox,
+	QFrame,
 	QHBoxLayout,
 	QLabel,
 	QPushButton,
+	QScrollArea,
 	QSpinBox,
 	QSplitter,
 	QVBoxLayout,
@@ -26,6 +27,40 @@ from PyQt6.QtWidgets import (
 
 from core.ectb_lv import analyze_lv_ectb
 from ui.cine_widget import CineWidget
+from ui.epar_dialog import EParDialog
+from viz.perfusion_score_figure import AMBER, BG, BLUE, PANEL, TEXT
+
+
+STYLE = f"""
+QDialog#asynchronyReviewLcars {{ background:{BG}; color:{TEXT}; }}
+QWidget#asyncReviewBody {{ background:{BG}; color:{TEXT};
+	font-family:'Arial Narrow','Bahnschrift Condensed','Segoe UI'; }}
+QWidget#asyncReviewBody QLabel {{ color:{TEXT}; background:transparent; }}
+QWidget#asyncReviewBody QLabel[asyncCaption="true"] {{ color:{AMBER}; font-weight:800; padding:4px 0; }}
+QFrame#asyncReviewRail {{ background:{PANEL}; border-left:10px solid {BLUE};
+	border-top-left-radius:18px; border-bottom-left-radius:18px; }}
+QWidget#asyncReviewBody QPushButton {{ border:none; border-radius:13px; padding:6px 10px;
+	color:#172028; font-weight:800; background:{BLUE}; }}
+QWidget#asyncReviewBody QPushButton:checked {{ background:{AMBER}; }}
+QWidget#asyncReviewBody QPushButton:hover {{ background:#9bb6bd; }}
+QWidget#asyncReviewBody QPushButton:disabled {{ background:#2a2e36; color:#8a979c; }}
+QWidget#asyncReviewBody QPushButton[asyncAction="true"] {{ background:#90e277; }}
+QWidget#asyncReviewBody QComboBox, QWidget#asyncReviewBody QSpinBox,
+QWidget#asyncReviewBody QDoubleSpinBox, QWidget#asyncReviewBody QLineEdit {{
+	background:#1b2230; color:{TEXT}; border:1px solid {BLUE}; border-radius:6px; padding:3px 6px; }}
+QWidget#asyncReviewBody QComboBox QAbstractItemView {{ background:{PANEL}; color:{TEXT};
+	selection-background-color:{AMBER}; selection-color:#172028; }}
+QWidget#asyncReviewBody QCheckBox {{ color:{TEXT}; spacing:6px; }}
+QWidget#asyncReviewBody QCheckBox::indicator {{ width:14px; height:14px;
+	border:1px solid {BLUE}; border-radius:3px; background:{BG}; }}
+QWidget#asyncReviewBody QCheckBox::indicator:checked {{ background:{AMBER}; border-color:{AMBER}; }}
+QWidget#asyncReviewBody QSlider::groove:horizontal {{ height:6px; background:#2a2e36; border-radius:3px; }}
+QWidget#asyncReviewBody QSlider::sub-page:horizontal {{ background:{BLUE}; border-radius:3px; }}
+QWidget#asyncReviewBody QSlider::handle:horizontal {{ background:{AMBER}; width:14px;
+	margin:-5px 0; border-radius:7px; }}
+QWidget#asyncReviewBody QSplitter::handle {{ background:#343945; }}
+QScrollArea#asyncReviewScroll {{ background:{PANEL}; border:none; }}
+"""
 
 try:
 	from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -35,11 +70,15 @@ except Exception:  # pragma: no cover
 	_MPL_OK = False
 
 
-class AsynchronyReviewWindow(QWidget):
+class AsynchronyReviewWindow(EParDialog):
 	"""Comparador visual principal vs pared/ECTb."""
 
 	def __init__(self, main_window=None, parent=None):
-		super().__init__(parent)
+		super().__init__(parent, title="VISTA ASINCRONÍA · AJUSTE FINO", accent=AMBER,
+			settings=getattr(main_window, "_ui_settings", None),
+			geometry_key="dialogs/asynchrony_review/geometry")
+		self.setObjectName("asynchronyReviewLcars")
+		self.setStyleSheet(self.styleSheet() + STYLE)
 		self._main = main_window
 		self._wall_result = None
 		self._wall_reason = ""
@@ -59,7 +98,7 @@ class AsynchronyReviewWindow(QWidget):
 			"Izquierda: ROI del flujo principal.  Derecha: contornos irregulares ECTb (centro/endo/epi) por gate."
 		)
 		self.help_label.setWordWrap(True)
-		self.help_label.setStyleSheet("color:#5b6470; font-size:10pt;")
+		self.setToolTip(self.help_label.text())
 
 		self.center_check = QCheckBox("Centro")
 		self.center_check.setChecked(True)
@@ -88,7 +127,7 @@ class AsynchronyReviewWindow(QWidget):
 
 		self.status_label = QLabel("—")
 		self.status_label.setWordWrap(True)
-		self.status_label.setStyleSheet("color:#a06000;")
+		self.status_label.setStyleSheet(f"color:{AMBER};")
 
 		# Selector de etapa: sobre cuál se muestra/reprocesa el ajuste fino.
 		# Esfuerzo siempre es la etapa primaria; Reposo se reprocesa por separado
@@ -110,15 +149,17 @@ class AsynchronyReviewWindow(QWidget):
 
 		# Decisión: qué geometría alimenta realmente el análisis de fase.
 		self.apply_combo = QComboBox()
-		self.apply_combo.addItem("Anillo (ROI clásica) — panel izquierdo", "ring")
-		self.apply_combo.addItem("Pared irregular según bordes (considera PVE) — panel derecho", "ectb_wall")
+		self.apply_combo.addItem("Anillo (ROI clásica)", "ring")
+		self.apply_combo.addItem("Pared irregular (ECTb)", "ectb_wall")
+		self.apply_combo.setToolTip("Anillo: panel izquierdo. Pared irregular: bordes ECTb del panel derecho (considera PVE).")
 		self.apply_btn = QPushButton("Aplicar y reprocesar")
+		self.apply_btn.setProperty("asyncAction", True)
 		self.apply_btn.setToolTip(
 			"Usa la geometría elegida como ROI del análisis de fase y vuelve a procesar el estudio."
 		)
 		self.apply_btn.clicked.connect(self._apply_selected_roi_source)
 		self.applied_label = QLabel("—")
-		self.applied_label.setStyleSheet("color:#5b6470;")
+		self.applied_label.setStyleSheet(f"color:{BLUE};")
 		apply_row = QHBoxLayout()
 		apply_row.setContentsMargins(0, 0, 0, 4)
 		apply_row.addWidget(QLabel("ROI que usa el análisis:"))
@@ -171,8 +212,15 @@ class AsynchronyReviewWindow(QWidget):
 		self.cine_wall.set_controls_visible(False)
 
 		splitter = QSplitter(Qt.Orientation.Horizontal, self)
-		splitter.addWidget(self.cine_main)
-		splitter.addWidget(self.cine_wall)
+		for title, cine in (("ANILLO · ROI PRINCIPAL", self.cine_main), ("PARED · CONTORNOS ECTb", self.cine_wall)):
+			viewer = QWidget()
+			viewer_layout = QVBoxLayout(viewer)
+			viewer_layout.setContentsMargins(0, 0, 0, 0)
+			caption = QLabel(title)
+			caption.setProperty("asyncCaption", True)
+			viewer_layout.addWidget(caption)
+			viewer_layout.addWidget(cine, 1)
+			splitter.addWidget(viewer)
 		splitter.setStretchFactor(0, 1)
 		splitter.setStretchFactor(1, 1)
 		splitter.setSizes([650, 650])
@@ -183,7 +231,7 @@ class AsynchronyReviewWindow(QWidget):
 		# y leer un PNG (polar_clinico.png).
 		if _MPL_OK:
 			self._phase_fig = Figure(figsize=(6.2, 3.0))
-			self._phase_fig.patch.set_facecolor("#0b1220")
+			self._phase_fig.patch.set_facecolor(BG)
 			self._phase_ax = self._phase_fig.add_subplot(111)
 			self._phase_canvas = FigureCanvas(self._phase_fig)
 			self._phase_canvas.setMinimumHeight(170)
@@ -194,7 +242,7 @@ class AsynchronyReviewWindow(QWidget):
 			self._phase_canvas = None
 			phase_graph_widget = QLabel("matplotlib no disponible: sin gráfico de fase.")
 			phase_graph_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
-			phase_graph_widget.setStyleSheet("color:#5b6470; background:#0b1220;")
+			phase_graph_widget.setStyleSheet(f"color:{BLUE}; background:{BG};")
 		self._phase_graph_widget = phase_graph_widget
 
 		viewers_split = QSplitter(Qt.Orientation.Vertical, self)
@@ -208,7 +256,7 @@ class AsynchronyReviewWindow(QWidget):
 		content = QWidget(self)
 		content_layout = QVBoxLayout(content)
 		content_layout.setContentsMargins(6, 6, 6, 6)
-		content_layout.addWidget(self.help_label)
+		self.help_label.hide()
 		content_layout.addLayout(self.stage_row)
 		content_layout.addLayout(legend_row)
 		content_layout.addLayout(apply_row)
@@ -219,10 +267,24 @@ class AsynchronyReviewWindow(QWidget):
 
 		sidebar = self._build_sync_sidebar()
 
-		root = QHBoxLayout(self)
-		root.setContentsMargins(0, 0, 0, 0)
+		body = QWidget(self)
+		body.setObjectName("asyncReviewBody")
+		root = QHBoxLayout(body)
+		root.setContentsMargins(6, 0, 0, 0)
+		root.setSpacing(12)
 		root.addWidget(content, 1)
-		root.addWidget(sidebar, 0)
+		scroll = QScrollArea()
+		scroll.setObjectName("asyncReviewScroll")
+		scroll.setWidgetResizable(True)
+		scroll.setFrameShape(QFrame.Shape.NoFrame)
+		scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+		scroll.setMinimumWidth(280)
+		scroll.setMaximumWidth(320)
+		scroll.setWidget(sidebar)
+		root.addWidget(scroll, 0)
+		self.content_layout.addWidget(body, 1)
+		for button in self.findChildren(QPushButton):
+			button.setAutoDefault(False)
 
 		self._wire_sync()
 		self.cine_main.centerPicked.connect(self._on_center_picked)
@@ -564,14 +626,19 @@ class AsynchronyReviewWindow(QWidget):
 		motor). Al tocar 'Reprocesar' se vuelcan los valores al main y se corre
 		process_current; el readout se refresca desde main.metrics y la FEVI.
 		"""
-		panel = QWidget(self)
-		panel.setMaximumWidth(280)
+		panel = QFrame(self)
+		panel.setObjectName("asyncReviewRail")
 		v = QVBoxLayout(panel)
-		v.setContentsMargins(6, 6, 6, 6)
+		v.setContentsMargins(18, 12, 10, 12)
 		v.setSpacing(8)
 
-		phase_box = QGroupBox("Parámetros de fase")
+		phase_title = QLabel("PARÁMETROS DE FASE")
+		phase_title.setProperty("asyncCaption", True)
+		v.addWidget(phase_title)
+		phase_box = QWidget()
 		form = QFormLayout(phase_box)
+		form.setContentsMargins(0, 0, 0, 0)
+		form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
 		self.seg_method_combo = QComboBox()
 		self.seg_method_combo.addItems(["auto", "threshold", "manual"])
@@ -602,6 +669,7 @@ class AsynchronyReviewWindow(QWidget):
 		v.addWidget(phase_box)
 
 		self.reprocess_btn = QPushButton("Reprocesar")
+		self.reprocess_btn.setProperty("asyncAction", True)
 		self.reprocess_btn.setToolTip("Vuelca estos parámetros a la ventana principal y reprocesa el estudio.")
 		self.reprocess_btn.clicked.connect(self._apply_phase_controls_and_reprocess)
 		v.addWidget(self.reprocess_btn)
@@ -609,12 +677,16 @@ class AsynchronyReviewWindow(QWidget):
 		# Colormap es barato: se aplica en vivo sin reprocesar.
 		self.cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
 
-		readout_box = QGroupBox("Resultados en vivo")
+		readout_title = QLabel("RESULTADOS EN VIVO")
+		readout_title.setProperty("asyncCaption", True)
+		v.addWidget(readout_title)
+		readout_box = QWidget()
 		readout_layout = QVBoxLayout(readout_box)
+		readout_layout.setContentsMargins(0, 0, 0, 0)
 		self.metrics_readout = QLabel("—")
 		self.metrics_readout.setWordWrap(True)
 		self.metrics_readout.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-		self.metrics_readout.setStyleSheet("font-size:11pt; color:#1f2937;")
+		self.metrics_readout.setStyleSheet(f"font-size:11pt; color:{TEXT};")
 		readout_layout.addWidget(self.metrics_readout)
 		v.addWidget(readout_box)
 
@@ -773,11 +845,11 @@ class AsynchronyReviewWindow(QWidget):
 			return
 		ax = self._phase_ax
 		ax.clear()
-		self._phase_fig.patch.set_facecolor("#0b1220")
-		ax.set_facecolor("#0b1220")
+		self._phase_fig.patch.set_facecolor(BG)
+		ax.set_facecolor(BG)
 		for spine in ax.spines.values():
-			spine.set_color("#3a4658")
-		ax.tick_params(colors="#9fb0c4", labelsize=8)
+			spine.set_color(BLUE)
+		ax.tick_params(colors=BLUE, labelsize=8)
 
 		main = self._main
 		phase_result = self._active_phase_result() if main is not None else None
@@ -791,7 +863,7 @@ class AsynchronyReviewWindow(QWidget):
 		if phases.size == 0:
 			ax.text(
 				0.5, 0.5, "Sin datos de fase: procesá un estudio.",
-				ha="center", va="center", color="#5b6470", fontsize=10,
+				ha="center", va="center", color=BLUE, fontsize=10,
 				transform=ax.transAxes,
 			)
 			ax.set_xticks([])
@@ -802,19 +874,19 @@ class AsynchronyReviewWindow(QWidget):
 		metrics = self._active_metrics() or {}
 		ax.hist(
 			phases % 360.0, bins=72, range=(0.0, 360.0),
-			color="#2c7fb8", alpha=0.85, edgecolor="#0b1220", linewidth=0.4,
+			color=BLUE, alpha=0.85, edgecolor=BG, linewidth=0.4,
 		)
 		try:
 			from core.metrics import circular_mean_deg
 			mean_phase = float(circular_mean_deg(phases))
-			ax.axvline(mean_phase, color="#d7191c", linewidth=2.0, label=f"Media {mean_phase:.0f}°")
+			ax.axvline(mean_phase, color=AMBER, linewidth=2.0, label=f"Media {mean_phase:.0f}°")
 		except Exception:
 			pass
 
 		ax.set_xlim(0.0, 360.0)
 		ax.set_xticks([0, 60, 120, 180, 240, 300, 360])
-		ax.set_xlabel("Fase (°)", color="#9fb0c4", fontsize=9)
-		ax.set_ylabel("Frecuencia", color="#9fb0c4", fontsize=9)
+		ax.set_xlabel("Fase (°)", color=BLUE, fontsize=9)
+		ax.set_ylabel("Frecuencia", color=BLUE, fontsize=9)
 
 		def _f(val):
 			try:
@@ -1066,7 +1138,7 @@ class AsynchronyReviewWindow(QWidget):
 
 	def _set_status(self, message: str, *, ok: bool = False):
 		self.status_label.setText(str(message))
-		self.status_label.setStyleSheet("color:#2e7d32;" if ok else "color:#a06000;")
+		self.status_label.setStyleSheet(f"color:{'#90e277' if ok else AMBER};")
 
 	def _goto_nearest_valid_slice(self):
 		"""Lleva ambos paneles al corte más cercano que tenga contornos ECTb."""

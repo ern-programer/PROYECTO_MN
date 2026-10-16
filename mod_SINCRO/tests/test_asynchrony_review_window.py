@@ -9,7 +9,31 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ui.asynchrony_review_window import AsynchronyReviewWindow
+from ui.asynchrony_review_window import STYLE
+from ui.epar_dialog import EParDialog
 from ui.main_window import MainWindow
+from viz.perfusion_score_figure import AMBER, BG, BLUE, TEXT
+
+
+def test_asynchrony_review_reuses_lcars_dialog_and_palette():
+    assert issubclass(AsynchronyReviewWindow, EParDialog)
+    for color in (AMBER, BG, BLUE, TEXT):
+        assert color in STYLE
+    assert 'QFrame#asyncReviewRail' in STYLE
+    assert 'QScrollArea#asyncReviewScroll' in STYLE
+
+
+def test_review_status_is_legible_in_lcars_palette():
+    label = SimpleNamespace()
+    label.setText = lambda text: setattr(label, "text", text)
+    label.setStyleSheet = lambda style: setattr(label, "style", style)
+    view = SimpleNamespace(status_label=label)
+    AsynchronyReviewWindow._set_status(view, "Sin contornos")
+    assert label.text == "Sin contornos"
+    assert AMBER in label.style
+    AsynchronyReviewWindow._set_status(view, "Contornos disponibles", ok=True)
+    assert label.text == "Contornos disponibles"
+    assert "#90e277" in label.style
 
 
 class DummyReviewWindow:
