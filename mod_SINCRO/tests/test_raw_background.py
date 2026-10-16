@@ -363,6 +363,7 @@ def test_background_cine_renderer_consumes_applied_visual_spec():
         _cine_crudo_threshold_value=lambda: 0.35, _scale_seed_for_study=lambda value: None,
         _append_cine_crudo_sinogram_panel=lambda rgb, *args: rgb,
         _draw_cine_crudo_reference_line=lambda rgb, *args: rgb, _rgb_frame_to_qpixmap_raw=lambda rgb: rgb,
+        _cine_crudo_seed_segments=lambda *args: [],
         _log=lambda *args: None,
     )
     _bind_background_method(main, "_apply_raw_bg_to_recon_cube", "MainWindow", "main_window.py")

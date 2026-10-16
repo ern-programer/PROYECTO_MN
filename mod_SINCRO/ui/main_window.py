@@ -1883,6 +1883,12 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_compare_check.setEnabled(False)
 				self.cine_crudo_compare_check.toggled.connect(self._refresh_cine_crudo_view)
 				toolbar2.addWidget(self.cine_crudo_compare_check)
+				self.cine_crudo_motion_grid_btn = QToolButton()
+				self.cine_crudo_motion_grid_btn.setText("Grilla")
+				self.cine_crudo_motion_grid_btn.setCheckable(True)
+				self.cine_crudo_motion_grid_btn.setToolTip("Superpone una grilla fija cada 4 y 8 píxeles para revisar la corrección automática o ajustar frames manualmente.")
+				self.cine_crudo_motion_grid_btn.toggled.connect(lambda _=False: self._apply_preview_zoom("cine_crudo"))
+				toolbar2.addWidget(self.cine_crudo_motion_grid_btn)
 				self.cine_crudo_diff_check = QCheckBox("Diferencia\n(resta scatter)")
 				self.cine_crudo_diff_check.setToolTip(
 					"Muestra la DIFERENCIA corregido − original (mismo truco que el "
@@ -14106,6 +14112,9 @@ class MainWindow(QMainWindow):
 		h = max(1, int(base_size.height() * zoom))
 		mode = Qt.TransformationMode.FastTransformation if fast else Qt.TransformationMode.SmoothTransformation
 		scaled = pix.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, mode)
+		if (name == "cine_crudo" and getattr(self, "cine_crudo_preview_mode", None) is None
+				and any(frame is pix for frame in (getattr(self, "cine_crudo_frames", None) or []))):
+			scaled = self._paint_cine_crudo_screen_overlays(scaled, base_size)
 		label.setPixmap(scaled)
 		label.setMinimumSize(scaled.size())
 		label.resize(scaled.size())
@@ -14726,6 +14735,116 @@ class MainWindow(QMainWindow):
 		}
 		return np.array(colors.get(name, colors["arena"]), dtype=np.float64)
 
+	def _cine_crudo_seed_segments(self, seed, H: int, W: int) -> list:
+		"""Caja/Banda Y/cruz de Elegir corazón como segmentos (x1, y1, x2, y2) en centros de píxel."""
+		if seed is None:
+			return []
+		sy, sx = int(round(seed[0])), int(round(seed[1]))
+		clip_x = lambda v: int(np.clip(v, 0, W - 1)) + 0.5
+		clip_y = lambda v: int(np.clip(v, 0, H - 1)) + 0.5
+		segments = []
+
+		def _hline(yy, xa, xb):
+			segments.append((clip_x(xa), clip_y(yy), clip_x(xb), clip_y(yy)))
+
+		def _vline(xx, ya, yb):
+			segments.append((clip_x(xx), clip_y(ya), clip_x(xx), clip_y(yb)))
+
+		roi_r = int(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 0
+		roi_mode = str(self.cine_crudo_roi_mode_combo.currentText()).lower() if hasattr(self, "cine_crudo_roi_mode_combo") else "caja"
+		if roi_r > 0:
+			if "banda" in roi_mode:
+				bounds = self._cine_crudo_band_bounds(H)
+				if bounds is not None:
+					_hline(bounds[0], 0, W - 1)
+					_hline(bounds[1], 0, W - 1)
+			else:
+				y0, y1 = sy - roi_r, sy + roi_r
+				x0, x1 = sx - roi_r, sx + roi_r
+				_hline(y0, x0, x1); _hline(y1, x0, x1)
+				_vline(x0, y0, y1); _vline(x1, y0, y1)
+		_hline(sy, sx - 3, sx + 3)
+		_vline(sx, sy - 3, sy + 3)
+		return segments
+
+	def _paint_cine_crudo_screen_overlays(self, pix: QPixmap, base_size: QSize) -> QPixmap:
+		pix = self._paint_cine_crudo_motion_grid(pix, base_size)
+		segments = getattr(self, "_cine_crudo_seed_segments_base", None)
+		if not segments or base_size.isEmpty():
+			return pix
+		sx, sy = pix.width() / base_size.width(), pix.height() / base_size.height()
+		color = self._cine_crudo_marker_color()
+		pen = QPen(QColor(int(color[0]), int(color[1]), int(color[2]), 200))
+		pen.setWidth(3)
+		pen.setCapStyle(Qt.PenCapStyle.SquareCap)
+		out = QPixmap(pix)
+		p = QPainter(out)
+		p.setPen(pen)
+		for x1, y1, x2, y2 in segments:
+			p.drawLine(round(x1 * sx), round(y1 * sy), round(x2 * sx), round(y2 * sy))
+		p.end()
+		return out
+
+	def _cine_crudo_motion_grid_rects(self, primary, compare=None, meta=None) -> list:
+		"""Paneles de proyección (x, y, ancho, alto) en coordenadas del base_size del cine."""
+		if not primary:
+			return []
+		if not compare or not meta or not meta.get("enabled"):
+			H, W, n = primary
+			return [(k * W, 0.0, W, H) for k in range(n)]
+		ss = float(meta["ss"])
+		canvas_w, bar_h = float(meta["canvas_w"]), float(meta["bar_h"])
+		rects = []
+		for (H, W, n), width_key, top in ((primary, "top_w", bar_h), (compare, "bottom_w", float(meta["split_y"]) + bar_h)):
+			x0 = ((canvas_w - float(meta[width_key])) // 2) / ss
+			rects.extend((x0 + k * W, top / ss, W, H) for k in range(n))
+		return rects
+
+	def _cine_crudo_seed_base_segments(self, rects, primary_grid, primary_seed, compare_seed) -> list:
+		"""Desplaza los segmentos de cada etapa a su primer panel (original) en coords base."""
+		if not rects or not primary_grid:
+			return []
+		stages = [(rects[0], primary_seed)]
+		if compare_seed and len(rects) > primary_grid[2]:
+			stages.append((rects[primary_grid[2]], compare_seed))
+		return [(x0 + a, y0 + b, x0 + c, y0 + d)
+				for (x0, y0, _w, _h), segments in stages for a, b, c, d in (segments or [])]
+
+	def _cine_crudo_motion_grid_lines(self, rects, sx: float, sy: float) -> list:
+		"""Segmentos (alfa, x1, y1, x2, y2) en píxeles de pantalla sobre bordes de píxel cada 4/8."""
+		lines = []
+		for step, alpha in ((4, 70), (8, 140)):
+			for x0, y0, W, H in rects:
+				top, bottom = round(y0 * sy), round((y0 + H) * sy) - 1
+				left, right = round(x0 * sx), round((x0 + W) * sx) - 1
+				for j in range(step, int(W), step):
+					if step == 8 or j % 8:
+						x = round((x0 + j) * sx)
+						lines.append((alpha, x, top, x, bottom))
+				for i in range(step, int(H), step):
+					if step == 8 or i % 8:
+						y = round((y0 + i) * sy)
+						lines.append((alpha, left, y, right, y))
+		return lines
+
+	def _paint_cine_crudo_motion_grid(self, pix: QPixmap, base_size: QSize) -> QPixmap:
+		button = getattr(self, "cine_crudo_motion_grid_btn", None)
+		rects = getattr(self, "_cine_crudo_grid_rects", None)
+		if button is None or not button.isChecked() or not rects or base_size.isEmpty():
+			return pix
+		lines = self._cine_crudo_motion_grid_lines(
+			rects, pix.width() / base_size.width(), pix.height() / base_size.height())
+		color = self._cine_crudo_marker_color()
+		out = QPixmap(pix)
+		p = QPainter(out)
+		for alpha, x1, y1, x2, y2 in lines:
+			pen = QPen(QColor(int(color[0]), int(color[1]), int(color[2]), alpha))
+			pen.setWidth(0)
+			p.setPen(pen)
+			p.drawLine(x1, y1, x2, y2)
+		p.end()
+		return out
+
 	def _draw_cine_crudo_reference_line(self, rgb: np.ndarray, H: int) -> np.ndarray:
 		show_line = bool(hasattr(self, "cine_crudo_compare_line_check") and self.cine_crudo_compare_line_check.isChecked())
 		if not show_line:
@@ -14861,6 +14980,7 @@ class MainWindow(QMainWindow):
 		if diff_on and corrected_frames_arr is not None and corrected_frames_arr.shape == frames_arr.shape:
 			diff_frames_arr = corrected_frames_arr - frames_arr
 			matrix_txt += " [corregido−original]"
+		self._cine_crudo_grid_last = (H, W, 1 + int(corrected_frames_arr is not None and not diff_on) + int(diff_frames_arr is not None))
 
 		p99 = float(np.percentile(frames_arr, 99.0)) or 1.0
 		if corrected_frames_arr is not None:
@@ -14880,6 +15000,7 @@ class MainWindow(QMainWindow):
 		win_lo = float(getattr(self, "cine_crudo_screen_win_low", 0.0)) / 100.0 * p99
 		win_hi = float(getattr(self, "cine_crudo_screen_win_high", 100.0)) / 100.0 * p99
 		win_den = (win_hi - win_lo) if (win_hi - win_lo) > 1e-9 else 1e-9
+		self._cine_crudo_seed_last = self._cine_crudo_seed_segments(seed_stage, H, W)
 		try:
 			import matplotlib
 			try:
@@ -14899,39 +15020,6 @@ class MainWindow(QMainWindow):
 						mask = _select_organ_component(mask, seed=seed_stage, auto=(seed_stage is None))
 					rgb = rgb.copy()
 					rgb[mask] = (0.45 * rgb[mask] + 0.55 * np.array([255, 255, 255])).astype(np.uint8)
-
-				roi_r = int(self.cine_crudo_roi_spin.value()) if hasattr(self, "cine_crudo_roi_spin") else 0
-				roi_mode = str(self.cine_crudo_roi_mode_combo.currentText()).lower() if hasattr(self, "cine_crudo_roi_mode_combo") else "caja"
-				if seed_stage is not None:
-					rgb = rgb.copy()
-					sy, sx = int(round(seed_stage[0])), int(round(seed_stage[1]))
-					H0, W0 = rgb.shape[0], rgb.shape[1]
-					marker = self._cine_crudo_marker_color()
-
-					def _hline(yy, xa, xb):
-						yy = int(np.clip(yy, 0, H0 - 1))
-						xa = int(np.clip(xa, 0, W0 - 1)); xb = int(np.clip(xb, 0, W0 - 1))
-						rgb[yy, xa:xb + 1] = (0.35 * rgb[yy, xa:xb + 1].astype(np.float64) + 0.65 * marker).astype(np.uint8)
-
-					def _vline(xx, ya, yb):
-						xx = int(np.clip(xx, 0, W0 - 1))
-						ya = int(np.clip(ya, 0, H0 - 1)); yb = int(np.clip(yb, 0, H0 - 1))
-						rgb[ya:yb + 1, xx] = (0.35 * rgb[ya:yb + 1, xx].astype(np.float64) + 0.65 * marker).astype(np.uint8)
-
-					if roi_r > 0:
-						if "banda" in roi_mode:
-							bounds = self._cine_crudo_band_bounds(H0)
-							if bounds is not None:
-								y0, y1 = bounds
-								_hline(y0, 0, W0 - 1)
-								_hline(y1, 0, W0 - 1)
-						else:
-							y0, y1 = sy - roi_r, sy + roi_r
-							x0, x1 = sx - roi_r, sx + roi_r
-							_hline(y0, x0, x1); _hline(y1, x0, x1)
-							_vline(x0, y0, y1); _vline(x1, y0, y1)
-					_hline(sy, sx - 3, sx + 3)
-					_vline(sx, sy - 3, sy + 3)
 
 				if corrected_frames_arr is not None and not diff_on:
 					img_corr = np.clip((corrected_frames_arr[a] - win_lo) / win_den, 0, 1)
@@ -15294,6 +15382,10 @@ class MainWindow(QMainWindow):
 		self.cine_crudo_index = 0
 		self._cine_crudo_dual_render_meta = {}
 		self._cine_crudo_frames_ss = 1
+		self._cine_crudo_grid_rects = []
+		self._cine_crudo_grid_last = None
+		self._cine_crudo_seed_segments_base = []
+		self._cine_crudo_seed_last = []
 		if self.study is None or bool(getattr(self.study, "reconstructed", True)):
 			return
 		primary_frames, primary_counts, primary_txt = self._build_cine_crudo_frames_for_study(
@@ -15303,6 +15395,10 @@ class MainWindow(QMainWindow):
 			"Stress",
 			seed_stage=self.cine_crudo_seed,
 		)
+		primary_grid = self._cine_crudo_grid_last
+		primary_seed = self._cine_crudo_seed_last
+		compare_seed = []
+		compare_grid = None
 		self.cine_crudo_counts = primary_counts
 		self.cine_crudo_matrix_txt = primary_txt
 
@@ -15316,6 +15412,8 @@ class MainWindow(QMainWindow):
 				"Rest",
 				seed_stage=seed_secondary,
 			)
+			compare_grid = self._cine_crudo_grid_last
+			compare_seed = self._cine_crudo_seed_last
 			active = getattr(self, "_cine_crudo_active_stage", "stress")
 			top_name = self._cine_crudo_stage_display(self.study) or "Esfuerzo"
 			bottom_name = self._cine_crudo_stage_display(self._secondary_cine_crudo_study()) or "Reposo"
@@ -15331,6 +15429,10 @@ class MainWindow(QMainWindow):
 		else:
 			self.cine_crudo_frames = primary_frames
 			self._cine_crudo_frames_ss = 1
+		self._cine_crudo_grid_rects = self._cine_crudo_motion_grid_rects(
+			primary_grid, compare_grid, self._cine_crudo_dual_render_meta)
+		self._cine_crudo_seed_segments_base = self._cine_crudo_seed_base_segments(
+			self._cine_crudo_grid_rects, primary_grid, primary_seed, compare_seed)
 		self.cine_crudo_timer.setInterval(max(40, int(self.cine_crudo_speed_spin.value() if hasattr(self, "cine_crudo_speed_spin") else 120)))
 		# Preservar el frame actual (el que el usuario eligió con las flechas) en vez de resetear a 0.
 		self._set_cine_crudo_frame(int(getattr(self, "_cine_crudo_current_frame", 0)))

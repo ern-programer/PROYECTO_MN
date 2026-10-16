@@ -24,6 +24,125 @@ def _bind(window, name, **globals_dict):
     setattr(window, name, MethodType(namespace[name], window))
 
 
+@pytest.mark.parametrize("zoom", [1.0, 5.0, 8.0])
+def test_motion_grid_lines_are_one_screen_pixel_on_pixel_borders(zoom):
+    window = SimpleNamespace()
+    _bind(window, "_cine_crudo_motion_grid_rects")
+    _bind(window, "_cine_crudo_motion_grid_lines")
+    rects = window._cine_crudo_motion_grid_rects((64, 64, 2))
+    assert rects == [(0, 0.0, 64, 64), (64, 0.0, 64, 64)]
+    lines = window._cine_crudo_motion_grid_lines(rects, zoom, zoom)
+    assert len(lines) == 2 * 2 * (8 + 7)
+    vertical = {(x1, alpha) for alpha, x1, y1, x2, y2 in lines if x1 == x2 and y1 != y2}
+    assert (round(4 * zoom), 70) in vertical and (round(8 * zoom), 140) in vertical
+    assert (round(72 * zoom), 140) in vertical and (round(68 * zoom), 70) in vertical
+    assert not any(x in (round(2 * zoom), round(64 * zoom)) for x, _ in vertical if zoom > 1)
+    assert all(x1 == x2 or y1 == y2 for _, x1, y1, x2, y2 in lines)
+
+
+def test_motion_grid_rects_follow_dual_supersampled_layout():
+    window = SimpleNamespace()
+    _bind(window, "_cine_crudo_motion_grid_rects")
+    meta = {"enabled": True, "ss": 3, "canvas_w": 300, "bar_h": 30, "split_y": 250,
+            "top_w": 225, "bottom_w": 225}
+    rects = window._cine_crudo_motion_grid_rects((64, 64, 1), (64, 64, 1), meta)
+    assert rects == [(37 / 3, 10.0, 64, 64), (37 / 3, 280 / 3, 64, 64)]
+    assert window._cine_crudo_motion_grid_rects(None) == []
+
+
+@pytest.mark.parametrize("enabled", [False, None])
+def test_motion_grid_disabled_leaves_display_untouched(enabled):
+    window = SimpleNamespace(_cine_crudo_grid_rects=[(0, 0, 64, 64)])
+    if enabled is not None:
+        window.cine_crudo_motion_grid_btn = SimpleNamespace(isChecked=lambda: enabled)
+    _bind(window, "_paint_cine_crudo_motion_grid", QPixmap=object, QSize=object)
+    pix = object()
+    assert window._paint_cine_crudo_motion_grid(pix, SimpleNamespace(isEmpty=lambda: False)) is pix
+
+
+@pytest.mark.parametrize("source", ["UngGat", "Gated"])
+@pytest.mark.parametrize("mode", ["original", "compare", "difference"])
+def test_motion_grid_preview_keeps_data_and_sinogram_unchanged(source, mode):
+    import numpy as np
+    original = np.zeros((2, 3, 64, 64), dtype=np.float64)
+    corrected = np.zeros_like(original)
+    study = SimpleNamespace(cube=original)
+    checked = lambda value: SimpleNamespace(isChecked=lambda: value, isEnabled=lambda: True)
+    window = SimpleNamespace(
+        cine_crudo_motion_grid_btn=checked(True),
+        cine_crudo_compare_check=checked(mode == "compare"),
+        cine_crudo_diff_check=checked(mode == "difference"),
+        cine_crudo_mask_check=checked(False),
+        _cine_crudo_stage_display=lambda study: "Esfuerzo",
+        _cine_crudo_threshold_value=lambda: 0.2,
+        _scale_seed_for_study=lambda study: None,
+        _cine_crudo_marker_color=lambda: np.array([200, 200, 200]),
+        _append_cine_crudo_sinogram_panel=lambda rgb, *args: np.concatenate(
+            [rgb, np.zeros((64, 11, 3), dtype=np.uint8)], axis=1),
+        _draw_cine_crudo_reference_line=lambda rgb, height: rgb,
+        _rgb_frame_to_qpixmap_raw=lambda rgb: rgb,
+        cine_crudo_roi_spin=SimpleNamespace(value=lambda: 6),
+        cine_crudo_roi_mode_combo=SimpleNamespace(currentText=lambda: "Caja"),
+    )
+    _bind(window, "_cine_crudo_seed_segments", np=np)
+    _bind(window, "_build_cine_crudo_frames_for_study", np=np, QPixmap=object)
+    frames, counts, _ = window._build_cine_crudo_frames_for_study(
+        study, corrected, source, "Esfuerzo", seed_stage=(30, 30))
+    assert len(window._cine_crudo_seed_last) == 6
+    assert len(frames) == 3
+    assert not counts.any()
+    assert not original.any() and not corrected.any()
+    assert window._cine_crudo_grid_last == (64, 64, 1 if mode == "original" else 2)
+    window.cine_crudo_motion_grid_btn = checked(False)
+    plain, _, _ = window._build_cine_crudo_frames_for_study(
+        study, corrected, source, "Esfuerzo")
+    assert window._cine_crudo_seed_last == []
+    assert all(np.array_equal(frame, baseline) for frame, baseline in zip(frames, plain))
+
+
+def test_seed_overlay_segments_box_band_and_cross():
+    import numpy as np
+    window = SimpleNamespace(
+        cine_crudo_roi_spin=SimpleNamespace(value=lambda: 6),
+        cine_crudo_roi_mode_combo=SimpleNamespace(currentText=lambda: "Caja"),
+        _cine_crudo_band_bounds=lambda H: (20.0, 41.7),
+    )
+    _bind(window, "_cine_crudo_seed_segments", np=np)
+    assert window._cine_crudo_seed_segments(None, 64, 64) == []
+    box = window._cine_crudo_seed_segments((30, 30), 64, 64)
+    assert box[:4] == [(24.5, 24.5, 36.5, 24.5), (24.5, 36.5, 36.5, 36.5),
+                       (24.5, 24.5, 24.5, 36.5), (36.5, 24.5, 36.5, 36.5)]
+    assert box[4:] == [(27.5, 30.5, 33.5, 30.5), (30.5, 27.5, 30.5, 33.5)]
+    edge = window._cine_crudo_seed_segments((2, 62), 64, 64)
+    assert all(0.5 <= v <= 63.5 for segment in edge for v in segment)
+    window.cine_crudo_roi_mode_combo = SimpleNamespace(currentText=lambda: "Banda Y")
+    band = window._cine_crudo_seed_segments((30, 30), 64, 64)
+    assert band[:2] == [(0.5, 20.5, 63.5, 20.5), (0.5, 41.5, 63.5, 41.5)]
+    window.cine_crudo_roi_spin = SimpleNamespace(value=lambda: 0)
+    assert len(window._cine_crudo_seed_segments((30, 30), 64, 64)) == 2
+
+
+def test_seed_overlay_base_segments_follow_original_panel_of_each_stage():
+    window = SimpleNamespace()
+    _bind(window, "_cine_crudo_seed_base_segments")
+    rects = [(10.0, 5.0, 64, 64), (74.0, 5.0, 64, 64), (12.0, 90.0, 64, 64), (76.0, 90.0, 64, 64)]
+    seg = [(1.5, 2.5, 3.5, 2.5)]
+    assert window._cine_crudo_seed_base_segments(rects, (64, 64, 2), seg, seg) == [
+        (11.5, 7.5, 13.5, 7.5), (13.5, 92.5, 15.5, 92.5)]
+    assert window._cine_crudo_seed_base_segments(rects[:2], (64, 64, 2), seg, []) == [(11.5, 7.5, 13.5, 7.5)]
+    assert window._cine_crudo_seed_base_segments([], None, seg, seg) == []
+
+
+def test_motion_grid_is_available_before_manual_and_painted_after_zoom():
+    source = (ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
+    assert 'toolbar2.addWidget(self.cine_crudo_motion_grid_btn)' in source
+    assert 'self.cine_crudo_motion_grid_btn.toggled.connect(lambda _=False: self._apply_preview_zoom("cine_crudo"))' in source
+    zoom = ast.unparse(METHODS["_apply_preview_zoom"])
+    assert zoom.index("pix.scaled(") < zoom.index("self._paint_cine_crudo_screen_overlays(scaled, base_size)")
+    loader = ast.unparse(METHODS["_load_cine_crudo_frames"])
+    assert "self._cine_crudo_motion_grid_rects(primary_grid, compare_grid, self._cine_crudo_dual_render_meta)" in loader
+
+
 @pytest.mark.parametrize("voxel_scale", [1.0, 0.5])
 def test_diagnostic_snapshots_keep_stages_separate_and_invalidate_old_geometry(tmp_path, voxel_scale):
     import json
