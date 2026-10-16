@@ -1179,6 +1179,7 @@ class CineWidget(QWidget):
 		self.intestinal_scope_combo.addItem("Slice actual", "slice")
 		self.intestinal_scope_combo.addItem("Todos los slices", "all_slices")
 		self.intestinal_scope_combo.addItem("Gate actual + todos slices", "gate_slices")
+		self.intestinal_scope_combo.addItem("Corte + ajuste por gate (QC)", "gate_override")
 		self.intestinal_scope_combo.setCurrentIndex(self.intestinal_scope_combo.findData(self._intestinal_scope_mode))
 		self.intestinal_scope_combo.currentIndexChanged.connect(self._on_intestinal_scope_changed)
 		self.intestinal_atten_slider = QSlider(Qt.Orientation.Horizontal)
@@ -1926,7 +1927,7 @@ class CineWidget(QWidget):
 
 	def set_intestinal_scope(self, scope: str):
 		mode = str(scope or "").strip().lower()
-		if mode not in ("slice", "all_slices", "gate_slices"):
+		if mode not in ("slice", "all_slices", "gate_slices", "gate_override"):
 			mode = "slice"
 		self._intestinal_scope_mode = mode
 		idx = self.intestinal_scope_combo.findData(mode)
@@ -2006,6 +2007,10 @@ class CineWidget(QWidget):
 				if int(gg) == g and any_polys:
 					return any_polys
 			return []
+		if self._intestinal_scope_mode == "gate_override":
+			g = int(self.current_gate_index() if gate_index is None else gate_index)
+			polys = self._intestinal_ref_polygons_by_gate.get((g, sl))
+			return list(polys) if polys else list(self._intestinal_ref_polygons.get(sl, []))
 		return list(self._intestinal_ref_polygons.get(sl, []))
 
 	def intestinal_roi_state(self) -> dict[str, object]:
@@ -2108,6 +2113,9 @@ class CineWidget(QWidget):
 				if int(gg) == g and poly_any:
 					return poly_any
 			return []
+		if self._intestinal_scope_mode == "gate_override":
+			g = int(self.current_gate_index() if gate_index is None else gate_index)
+			return self._intestinal_roi_polygons_by_gate.get((g, sl)) or self._intestinal_roi_polygons.get(sl) or []
 		poly = self._intestinal_roi_polygons.get(sl)
 		if poly:
 			return poly

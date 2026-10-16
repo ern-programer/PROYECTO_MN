@@ -24,6 +24,184 @@ def _bind(window, name, **globals_dict):
     setattr(window, name, MethodType(namespace[name], window))
 
 
+@pytest.mark.parametrize("size", [64, 128])
+@pytest.mark.parametrize("global_enabled,local_enabled", [(False, False), (False, True), (True, False)])
+def test_raw_montage_disabled_intestinal_preserves_original_cuts(size, global_enabled, local_enabled):
+    import numpy as np
+    from core.cardiac_reorientation import anatomical_cuts_gated
+
+    source = np.random.default_rng(42).random((1, 8, size, size))
+    widget = SimpleNamespace(intestinal_apply_enabled=lambda: local_enabled)
+    window = SimpleNamespace(global_intestinal_render_check=SimpleNamespace(isChecked=lambda: global_enabled))
+    _bind(window, "_apply_intestinal_mask_to_cube", np=np, CineWidget=object)
+    _bind(window, "_recut_crudo_stage_with_intestinal", np=np)
+    original = source.copy()
+    window._recut_crudo_stage_with_intestinal("stress", {"gated": source, "ungated": source}, widget)
+    expected = anatomical_cuts_gated(original)
+    for axis in ("SA", "HLA", "VLA"):
+        np.testing.assert_array_equal(window.cine_crudo_axes_for_export_stress[axis], expected[axis.lower()])
+        np.testing.assert_array_equal(window.cine_crudo_axes_for_export_ungated_stress[axis], expected[axis.lower()])
+    np.testing.assert_array_equal(source, original)
+
+
+@pytest.mark.parametrize("primary_stage", ["stress", "rest"])
+@pytest.mark.parametrize("stage", ["stress", "rest"])
+def test_reconstruction_invalidates_only_stage_intestinal_rois_and_montage(primary_stage, stage):
+    from unittest.mock import MagicMock
+
+    primary, compare = MagicMock(), MagicMock()
+    sources = {"stress": object(), "rest": object()}
+    window = SimpleNamespace(study=object(), cine=primary, cine_compare=compare,
+        _cine_crudo_stage_display=lambda study: "Reposo" if primary_stage == "rest" else "Esfuerzo",
+        _crudo_montage_reo_by_stage=sources.copy(), _stop_montage_cine=MagicMock(), _log=MagicMock(),
+        _montage_gray_cache=object(), _montage_volume_cache={1: object()},
+        _montage_cut_cache={1: object()}, _montage_tile_cache={1: object()})
+    other = "rest" if stage == "stress" else "stress"
+    for prefix in ("cine_crudo_axes_for_export", "cine_crudo_axes_for_export_ungated", "cine_crudo_axes_for_export_mf"):
+        setattr(window, f"{prefix}_{stage}", {"SA": object()})
+        setattr(window, f"{prefix}_{other}", sources[other])
+    _bind(window, "_invalidate_reconstructed_intestinal_stage")
+    window._invalidate_reconstructed_intestinal_stage(stage)
+    target, untouched = (primary, compare) if stage == primary_stage else (compare, primary)
+    target.set_intestinal_roi_state.assert_called_once_with(None)
+    untouched.set_intestinal_roi_state.assert_not_called()
+    target.set_intestinal_params.assert_not_called()
+    assert window._crudo_montage_reo_by_stage == {other: sources[other]}
+    for prefix in ("cine_crudo_axes_for_export", "cine_crudo_axes_for_export_ungated", "cine_crudo_axes_for_export_mf"):
+        assert getattr(window, f"{prefix}_{stage}") == {}
+        assert getattr(window, f"{prefix}_{other}") is sources[other]
+    assert window._montage_gray_cache is None
+    assert not window._montage_volume_cache and not window._montage_cut_cache and not window._montage_tile_cache
+    window._stop_montage_cine.assert_called_once_with()
+
+
+def test_reconstruction_invalidates_intestinal_only_after_pipeline_succeeds():
+    method = METHODS["_reconstruct_cine_crudo_raw"]
+    body = next(node for node in method.body if isinstance(node, ast.Try)).body
+    invalidation = next(index for index, node in enumerate(body)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == "_invalidate_reconstructed_intestinal_stage")
+    pipeline = next(index for index, node in enumerate(body)
+        if isinstance(node, ast.Try) and any(isinstance(child, ast.Call)
+        and isinstance(child.func, ast.Name) and child.func.id == "reconstruct_raw_gated_pipeline" for child in ast.walk(node)))
+    assert pipeline < invalidation
+    assert "self.cine_crudo_recon_result = result" == ast.unparse(body[invalidation + 1])
+
+
+@pytest.mark.parametrize("primary_stage", ["stress", "rest"])
+def test_montage_intestinal_editor_sources_raw_use_unmasked_sa_before_processing(primary_stage):
+    import numpy as np
+    stress, rest = np.ones((8, 20, 64, 64)), np.ones((1, 18, 64, 64))
+    primary, compare = object(), object()
+    window = SimpleNamespace(study=SimpleNamespace(reconstructed=False), cine=primary, cine_compare=compare,
+        _cine_crudo_recon_stage=primary_stage,
+        _crudo_montage_reo_by_stage={"stress": {"gated": stress}, "rest": {"ungated": rest}})
+    _bind(window, "_montage_intestinal_sources", np=np)
+    sources = window._montage_intestinal_sources()
+    assert sources[0][0] == "stress" and sources[0][1] is stress
+    assert sources[1][0] == "rest" and sources[1][1] is rest
+    assert sources[0][2] is (primary if primary_stage == "stress" else compare)
+    assert sources[1][2] is (primary if primary_stage == "rest" else compare)
+
+
+@pytest.mark.parametrize("secondary_loaded", [False, True])
+def test_montage_intestinal_editor_sources_direct_sa_support_pending_second_stage(secondary_loaded):
+    import numpy as np
+    first, second = np.ones((8, 20, 64, 64)), np.ones((1, 16, 64, 64))
+    window = SimpleNamespace(study=SimpleNamespace(cube=first), cine=object(), cine_compare=object(),
+        _sa_direct_montage_stages=("rest", "stress" if secondary_loaded else None),
+        _second_stage_study=lambda: SimpleNamespace(cube=second))
+    _bind(window, "_montage_intestinal_sources", np=np)
+    sources = window._montage_intestinal_sources()
+    assert sources[0][0] == "rest" and sources[0][1] is first and sources[0][2] is window.cine
+    assert len(sources) == 1 + int(secondary_loaded)
+    if secondary_loaded:
+        assert sources[1][0] == "stress" and sources[1][1] is second and sources[1][2] is window.cine_compare
+
+
+def test_montage_intestinal_editor_sources_empty_without_montage():
+    import numpy as np
+    window = SimpleNamespace(study=None)
+    _bind(window, "_montage_intestinal_sources", np=np)
+    assert window._montage_intestinal_sources() == []
+    window.study = object()
+    assert window._montage_intestinal_sources() == []
+
+
+@pytest.mark.parametrize("action", ["apply", "close", "stale", "global_off"])
+def test_montage_intestinal_window_applies_explicitly_and_cleans_up(monkeypatch, action):
+    from unittest.mock import MagicMock
+    cube = object()
+    targets = [MagicMock(), MagicMock()]
+    sources = [("stress", cube, targets[0]), ("rest", cube, targets[1])]
+    lcars, engine, results = MagicMock(), object(), []
+    window_cls = MagicMock(return_value=lcars)
+    monkeypatch.setitem(sys.modules, "ui.montage_intestinal_window",
+                        SimpleNamespace(MontageIntestinalWindow=window_cls))
+    window = SimpleNamespace(
+        _montage_intestinal_sources=MagicMock(return_value=sources),
+        _stop_montage_cine=MagicMock(), _dialog_parent=lambda: None,
+        _apply_montage_intestinal_editor=MagicMock(),
+        global_intestinal_render_check=SimpleNamespace(isChecked=lambda: action != "global_off"),
+        cine_crudo_montage_cmap="hot", cine_crudo_montage_win_mode="lineal", _all_cmaps=["gray", "hot"],
+        cine_crudo_montage_win_low=5.0, cine_crudo_montage_win_high=98.0,
+        cine_crudo_montage_lin_low=0.1, cine_crudo_montage_lin_high=1.4,
+    )
+
+    def exercise():
+        if action == "close":
+            return
+        if action == "stale":
+            window._montage_intestinal_sources.return_value = []
+        apply_stage = window_cls.call_args.kwargs["apply_stage"]
+        try:
+            results.append(apply_stage(1, engine))
+        except RuntimeError as exc:
+            results.append(exc)
+
+    lcars.exec.side_effect = exercise
+    _bind(window, "_open_montage_intestinal_editor", QMessageBox=MagicMock())
+    window._open_montage_intestinal_editor()
+    kwargs = window_cls.call_args.kwargs
+    assert kwargs["sources"] is sources
+    assert kwargs["display"] == {"cmap": "hot", "cmaps": ["gray", "hot"], "mode": "lineal", "win_low": 5.0,
+                                 "win_high": 98.0, "lin_low": 0.1, "lin_high": 1.4}
+    if action in ("apply", "global_off"):
+        window._apply_montage_intestinal_editor.assert_called_once_with(engine, targets[1])
+        assert ("desactivada" in results[0]) == (action == "global_off")
+    else:
+        window._apply_montage_intestinal_editor.assert_not_called()
+    if action == "stale":
+        assert isinstance(results[0], RuntimeError)
+    window._stop_montage_cine.assert_called_once()
+    lcars.shutdown.assert_called_once()
+    lcars.deleteLater.assert_called_once()
+
+
+def test_montage_intestinal_apply_updates_only_selected_stage_and_refreshes():
+    calls = []
+    state = {"slice_polygons": [{"slice": 3, "points": [[1, 1], [3, 1], [2, 3]]}],
+             "mode": "attenuate", "background_method": "idw"}
+    editor = SimpleNamespace(intestinal_params=lambda: (70, 2), intestinal_scope=lambda: "all_slices",
+                             intestinal_roi_state=lambda: state, intestinal_apply_enabled=lambda: True)
+    target = SimpleNamespace(
+        set_intestinal_params=lambda *values: calls.append(("params", values)),
+        set_intestinal_scope=lambda value: calls.append(("scope", value)),
+        set_intestinal_roi_state=lambda value: calls.append(("roi", value)),
+        set_intestinal_apply_enabled=lambda value: calls.append(("enabled", value)),
+    )
+    window = SimpleNamespace(
+        _stop_montage_cine=lambda: calls.append("stop"),
+        _maybe_rebuild_sa_direct_montage=lambda: calls.append("sa"),
+        _maybe_rebuild_crudo_montage=lambda: calls.append("raw"),
+        _show_cine_crudo_sa_montage=lambda **kwargs: calls.append(kwargs),
+    )
+    _bind(window, "_apply_montage_intestinal_editor")
+    window._apply_montage_intestinal_editor(editor, target)
+    assert calls == [("params", (70, 2)), ("scope", "all_slices"), ("roi", state), ("enabled", True),
+                     "stop", "sa", "raw", {"navigate": False, "persist": False}]
+
+
 @pytest.mark.parametrize("zoom", [1.0, 5.0, 8.0])
 def test_motion_grid_lines_are_one_screen_pixel_on_pixel_borders(zoom):
     window = SimpleNamespace()

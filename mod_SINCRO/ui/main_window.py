@@ -18154,6 +18154,7 @@ class MainWindow(QMainWindow):
 			finally:
 				recon_dialog.close()
 				recon_dialog.deleteLater()
+			self._invalidate_reconstructed_intestinal_stage(stage)
 			self.cine_crudo_recon_result = result
 			# Las notas de AC del motor son la única evidencia de si la corrección
 			# realmente aplicó (p.ej. FBP no la usa): mostrarlas SIEMPRE en el log.
@@ -21571,6 +21572,73 @@ class MainWindow(QMainWindow):
 			_, high = slider.values()
 			slider.set_values(0, high)
 
+	def _montage_intestinal_sources(self):
+		if self.study is None:
+			return []
+		primary_stage = "rest" if getattr(self, "_cine_crudo_recon_stage", "stress") == "rest" else "stress"
+		stages = getattr(self, "_sa_direct_montage_stages", None)
+		if stages:
+			primary_stage, compare_stage = stages
+			secondary = self._second_stage_study() if compare_stage else None
+			candidates = [(primary_stage, self.study.cube, self.cine)]
+			if secondary is not None:
+				candidates.append((compare_stage, secondary.cube, self.cine_compare))
+		else:
+			candidates = []
+			for stage, source in (getattr(self, "_crudo_montage_reo_by_stage", {}) or {}).items():
+				cube = source.get("gated")
+				if cube is None:
+					cube = source.get("ungated")
+				candidates.append((stage, cube, self.cine if stage == primary_stage else self.cine_compare))
+		return [(stage, cube, target) for stage, cube, target in candidates
+				if cube is not None and np.ndim(cube) == 4 and all(size > 0 for size in cube.shape)]
+
+	def _open_montage_intestinal_editor(self):
+		from ui.montage_intestinal_window import MontageIntestinalWindow
+
+		sources = self._montage_intestinal_sources()
+		if not sources:
+			QMessageBox.information(self._dialog_parent(), "Atenuar intestino", "Prepará primero los cortes del montaje clínico.")
+			return
+		self._stop_montage_cine()
+
+		def apply_stage(index, engine):
+			stage, cube, target = sources[index]
+			if not any(current_stage == stage and current_cube is cube and current_target is target
+					for current_stage, current_cube, current_target in self._montage_intestinal_sources()):
+				raise RuntimeError("El estudio cambió. Cerrá y volvé a abrir el editor.")
+			self._apply_montage_intestinal_editor(engine, target)
+			if not self.global_intestinal_render_check.isChecked():
+				return "ROI guardada; la atenuación intestinal visual global está desactivada."
+			return "Atenuación intestinal aplicada al montaje clínico."
+
+		display = {
+			"cmap": getattr(self, "cine_crudo_montage_cmap", "gray"),
+			"cmaps": getattr(self, "_all_cmaps", None),
+			"mode": getattr(self, "cine_crudo_montage_win_mode", "percentil"),
+			"win_low": getattr(self, "cine_crudo_montage_win_low", 2.0),
+			"win_high": getattr(self, "cine_crudo_montage_win_high", 99.5),
+			"lin_low": getattr(self, "cine_crudo_montage_lin_low", 0.0),
+			"lin_high": getattr(self, "cine_crudo_montage_lin_high", 1.0),
+		}
+		window = MontageIntestinalWindow(self._dialog_parent(), sources=sources, apply_stage=apply_stage,
+			display=display, settings=getattr(self, "_ui_settings", None))
+		try:
+			window.exec()
+		finally:
+			window.shutdown()
+			window.deleteLater()
+
+	def _apply_montage_intestinal_editor(self, editor, target):
+		target.set_intestinal_params(*editor.intestinal_params())
+		target.set_intestinal_scope(editor.intestinal_scope())
+		target.set_intestinal_roi_state(editor.intestinal_roi_state())
+		target.set_intestinal_apply_enabled(editor.intestinal_apply_enabled())
+		self._stop_montage_cine()
+		self._maybe_rebuild_sa_direct_montage()
+		self._maybe_rebuild_crudo_montage()
+		self._show_cine_crudo_sa_montage(navigate=False, persist=False)
+
 	def _build_montage_toolbar_into(self, toolbar):
 		"""Controles de acción del montaje clínico, centralizados en la pestaña
 		Montaje clínico. El montaje se renderiza al entrar a la pestaña; el resto
@@ -21590,6 +21658,11 @@ class MainWindow(QMainWindow):
 			"movimiento (suma de gates).")
 		self.cine_crudo_montage_source_combo.currentIndexChanged.connect(self._on_montage_source_changed)
 		toolbar.addWidget(self.cine_crudo_montage_source_combo)
+		self.montage_intestinal_btn = QToolButton()
+		self.montage_intestinal_btn.setText("Atenuar intestino")
+		self.montage_intestinal_btn.setToolTip("Abre la ventana de atenuación intestinal: ROI manual por corte y QC por gate, con la ventana Base/Top del montaje.")
+		self.montage_intestinal_btn.clicked.connect(self._open_montage_intestinal_editor)
+		toolbar.addWidget(self.montage_intestinal_btn)
 
 		toolbar.addWidget(QLabel("Template"))
 		self.cine_crudo_montage_template_combo = QComboBox()
@@ -23593,6 +23666,26 @@ class MainWindow(QMainWindow):
 		primary_stage, compare_stage = stages
 		self._build_sa_direct_clinical_montage(primary_stage, compare_stage)
 
+	def _invalidate_reconstructed_intestinal_stage(self, stage: str):
+		primary_stage = "rest" if self._cine_crudo_stage_display(getattr(self, "study", None)) == "Reposo" else "stress"
+		widget = getattr(self, "cine" if stage == primary_stage else "cine_compare", None)
+		if widget is not None:
+			widget.set_intestinal_roi_state(None)
+		sources = getattr(self, "_crudo_montage_reo_by_stage", None)
+		if isinstance(sources, dict):
+			sources.pop(stage, None)
+		for prefix in ("cine_crudo_axes_for_export", "cine_crudo_axes_for_export_ungated", "cine_crudo_axes_for_export_mf"):
+			setattr(self, f"{prefix}_{stage}", {})
+			setattr(self, prefix, {})
+		self._crudo_montage_int_sig = None
+		self._montage_last_signature = None
+		self._montage_gray_cache = None
+		self._montage_volume_cache = {}
+		self._montage_cut_cache = {}
+		self._montage_tile_cache = {}
+		self._stop_montage_cine()
+		self._log(f"[INTESTINO] Reconstruccion {stage}: ROI y montaje anteriores invalidados; redibujar ROI tras generar cortes.")
+
 	def _crudo_montage_intestinal_sig(self) -> str:
 		"""Firma de los ROI intestinales de ambos visores para el montaje crudo."""
 		try:
@@ -24582,7 +24675,9 @@ class MainWindow(QMainWindow):
 		if not tid_g.get("available") and not tid_p.get("available"):
 			return
 
-		cur_label = self._study_context().get("phase", "Esfuerzo")
+		cur_label = self._study_context().get("phase")
+		if not cur_label or cur_label == "Estudio":
+			cur_label = "Esfuerzo"
 		cmp_label = self.compare_label or "Reposo"
 
 		def _axis_strips(cube, seg, n_sa=6, n_long=5):
