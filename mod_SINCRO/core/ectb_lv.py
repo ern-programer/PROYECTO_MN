@@ -917,7 +917,7 @@ EF_REGRESSIONS: dict[str, EFRegression] = {
         slope=0.96,
         intercept=-0.053,
         units="fraction",
-        note="ECTb corre alrededor de 7-8 puntos por encima del QGS de 8 gates.",
+        note="PARED corre alrededor de 7-8 puntos por encima del QGS de 8 gates.",
     ),
     "muga": EFRegression(
         key="muga",

@@ -202,7 +202,7 @@ class LV3DDialog(QDialog):
         bar.addWidget(QLabel("Superficie:"))
         self.combo_surface = QComboBox()
         self.combo_surface.addItem("VI elipsoidal (modelo)", "shell")
-        self.combo_surface.addItem("Contornos ECTb", "contours")
+        self.combo_surface.addItem("Contornos PARED", "contours")
         self.combo_surface.addItem("Borde por gradiente (física)", "gradient")
         self.combo_surface.addItem("Reconstrucción Dinámica 3D", "dynamic")
         self.combo_surface.addItem("Reconstrucción (fetas)", "slabs")
@@ -210,12 +210,12 @@ class LV3DDialog(QDialog):
         self.combo_surface.setMinimumWidth(180)  # que se lea completo
         self.combo_surface.setToolTip(
             "VI elipsoidal: modelo visual continuo con cierres endo/epi independientes; no modifica FEVI ni volúmenes.\n"
-            "Contornos ECTb: loft de radios medidos con extrapolación apical.\n"
+            "Contornos PARED: loft de radios medidos con extrapolación apical.\n"
             "Borde por gradiente: detecta el borde del miocardio por máximo gradiente "
             "(el 'borde blanco' de la escala french), más lento pero más preciso y "
             "muestra la actividad real del volumen.\n"
             "Reconstrucción Dinámica 3D: reconstruye el volumen del miocardio desde la "
-            "segmentación ECTb por gate (sin fondo), apila los cortes en Z y genera la "
+            "segmentación PARED por gate (sin fondo), apila los cortes en Z y genera la "
             "isosuperficie. Es la pared exacta del VI latiendo, sin fondo ni hígado.\n"
             "Cortes SA: muestra cada feta tomográfica como un prisma 3D coloreado por "
             "actividad. Permite separar las fetas para ver la distribución interna."

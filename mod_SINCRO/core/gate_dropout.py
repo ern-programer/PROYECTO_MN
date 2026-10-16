@@ -163,7 +163,7 @@ def analyze_gate_dropout(cube: np.ndarray, max_scale: float = DEFAULT_MAX_SCALE)
         )
     else:
         out["message"] = (
-            f"Dropout del último gate {dropout_pct:.1f}% — se corrige con factor {scale:.3f} (ECTb 22.8)."
+            f"Dropout del último gate {dropout_pct:.1f}% — se corrige con factor {scale:.3f}."
         )
     return out
 

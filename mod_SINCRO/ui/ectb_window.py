@@ -184,7 +184,7 @@ class ECTbWindow(QDialog):
 		self._last_slice_mm = 1.0
 		#: Espesor asumido antes de pasar a modo medición, para poder volver.
 		self._assumed_thickness_mm = 10.0
-		self.setWindowTitle("Cuantificación avanzada — Emory Cardiac Toolbox")
+		self.setWindowTitle("Cuantificación avanzada — PARED")
 		self.setMinimumSize(560, 640)
 		self.resize(620, 820)
 		# Sin modalidad: se puede seguir usando la ventana principal.
@@ -260,9 +260,9 @@ class ECTbWindow(QDialog):
 		hint.setStyleSheet("color:#6b7280;")
 		box_layout.addWidget(hint)
 
-		self.method_ectb_radio = QRadioButton("ECTb — máximo de cuentas")
+		self.method_ectb_radio = QRadioButton("PARED — máximo de cuentas")
 		self.method_ectb_radio.setToolTip(
-			"Método del Emory Cardiac Toolbox. Es el que viene por defecto porque sobreestima\n"
+			"Método publicado de máximo de cuentas. Es el que viene por defecto porque sobreestima\n"
 			"bastante menos los volúmenes que el anterior.\n"
 			"Ubica el borde a partir del máximo de cuentas de la pared, sin umbral ni factor de corrección."
 		)
@@ -270,7 +270,7 @@ class ECTbWindow(QDialog):
 		self.method_threshold_radio.setToolTip(
 			"El método que usábamos antes: busca el primer radio donde la actividad supera un porcentaje\n"
 			"del pico y después escala el volumen con un factor empírico.\n"
-			"Queda disponible para comparar y para casos donde el método ECTb no resuelva bien."
+			"Queda disponible para comparar y para casos donde el método PARED no resuelva bien."
 		)
 		self.method_group = QButtonGroup(self)
 		self.method_group.addButton(self.method_ectb_radio, 0)
@@ -315,7 +315,7 @@ class ECTbWindow(QDialog):
 			"corrimiento chico del borde mueve mucho el resultado. Encima hacía falta un factor de "
 			"corrección empírico para que los mililitros dieran fisiológicos, y aun así sobreestimaba "
 			"los volúmenes.<br><br>"
-			"<b>Lo que hace el ECTb.</b> No busca un borde por umbral: busca el <b>máximo de cuentas</b> "
+			"<b>Lo que hace el método PARED.</b> No busca un borde por umbral: busca el <b>máximo de cuentas</b> "
 			"de cada perfil radial, que marca el centro de la pared y es mucho más estable porque no "
 			"depende del nivel de fondo. Después:<br>"
 			"• asume <b>10 mm de espesor en telediástole</b> y pone el endocardio 5 mm hacia adentro del "
@@ -352,11 +352,11 @@ class ECTbWindow(QDialog):
 		self.thickness_spin.setValue(10.0)
 		self.thickness_spin.setSuffix(" mm")
 		self._thickness_tooltip = (
-			"Espesor de pared que se asume en telediástole. Es la convención del ECTb y lo que fija la "
+			"Espesor de pared que se asume en telediástole. Es la convención publicada y lo que fija la "
 			"escala absoluta de los volúmenes.\n"
 			"Subirlo mete el endocardio hacia adentro: cavidad más chica, EDV/ESV menores y más masa.\n"
 			"Bajarlo hace lo contrario. La FEVI cambia poco porque afecta a ED y ES en el mismo sentido.\n"
-			"10 mm es el valor del ECTb. Si tenés una medición de referencia (un ecocardiograma reciente, "
+			"10 mm es el valor publicado. Si tenés una medición de referencia (un ecocardiograma reciente, "
 			"por ejemplo) podés escribirla acá, o medirla sobre la imagen con la cota de más abajo."
 		)
 		self.thickness_spin.setToolTip(self._thickness_tooltip)
@@ -390,7 +390,7 @@ class ECTbWindow(QDialog):
 		self.median_large_combo.setToolTip(
 			"Primera mediana sobre la matriz corte × ángulo.\n"
 			"La mediana elimina outliers (un foco hepático que corre un radio) sin desplazar los bordes\n"
-			"reales, cosa que un suavizado gaussiano sí haría. 7×7 es lo que usa el ECTb."
+			"reales, cosa que un suavizado gaussiano sí haría. 7×7 es el valor publicado."
 		)
 
 		self.median_small_combo = QComboBox()
@@ -405,7 +405,7 @@ class ECTbWindow(QDialog):
 		self.thickening_check.setChecked(True)
 		self.thickening_check.setToolTip(
 			"Con esto activo el espesor de pared varía gate a gate según las cuentas máximas\n"
-			"(la pared engrosa en sístole). Es lo correcto y lo que hace el ECTb.\n"
+			"(la pared engrosa en sístole). Es lo correcto y lo que indica el método publicado.\n"
 			"Desactivalo solo para ver cuánto aporta el engrosamiento: con espesor fijo la FEVI\n"
 			"sale distinta porque el endocardio no se corre hacia adentro en sístole."
 		)
@@ -413,7 +413,7 @@ class ECTbWindow(QDialog):
 		self.dropout_check = QCheckBox("Usar el cubo corregido por dropout del último gate")
 		self.dropout_check.setChecked(True)
 		self.dropout_check.setToolTip(
-			"Aplica la corrección ECTb 22.8 antes de cuantificar (la misma del panel principal).\n"
+			"Aplica la corrección de dropout del último gate antes de cuantificar (la misma del panel principal).\n"
 			"Sin ella el último gate tiene menos cuentas de la cuenta y la curva de volumen no cierra el ciclo."
 		)
 
@@ -462,7 +462,7 @@ class ECTbWindow(QDialog):
 			"que no son cavidad), y del lado lateral llega más arriba. Cortando con un plano perpendicular "
 			"único hay que elegir entre comerse pared lateral o contar como cavidad lo que no lo es, y por "
 			"eso el volumen basal se sobreestima.<br>"
-			"El ECTb lo resuelve con un plano de <b>dos piezas</b>: perpendicular en toda la mitad lateral "
+			"PARED lo resuelve con un plano de <b>dos piezas</b>: perpendicular en toda la mitad lateral "
 			"y angulado en la mitad septal."
 		)
 		hint.setWordWrap(True)
@@ -473,7 +473,7 @@ class ECTbWindow(QDialog):
 		self.valve_check = QCheckBox("Recortar la base con el plano valvular de dos piezas")
 		self.valve_check.setChecked(True)
 		self.valve_check.setToolTip(
-			"Activo: se aplica el corte angulado del lado septal (comportamiento ECTb).\n"
+			"Activo: se aplica el corte angulado del lado septal (comportamiento por defecto).\n"
 			"Desactivado: la base se corta con un plano perpendicular único, como hacíamos antes.\n"
 			"Desactivalo solo para ver cuánto aporta la corrección: los volúmenes suben."
 		)
@@ -862,7 +862,7 @@ class ECTbWindow(QDialog):
 		self.apply_btn.clicked.connect(self._apply_to_report)
 		row.addWidget(self.apply_btn)
 
-		self.reset_btn = QPushButton("Valores ECTb")
+		self.reset_btn = QPushButton("Valores publicados")
 		self.reset_btn.setToolTip("Vuelve a los parámetros publicados por el Emory Cardiac Toolbox 4.0.")
 		self.reset_btn.clicked.connect(self.reset_to_defaults)
 		row.addWidget(self.reset_btn)
@@ -1218,7 +1218,7 @@ class ECTbWindow(QDialog):
 	def _render_conversion(self):
 		result = self._result
 		if not self.conversion_check.isChecked():
-			self.conversion_result.setText("Desactivado: se informa la FEVI en escala ECTb.")
+			self.conversion_result.setText("Desactivado: se informa la FEVI en escala PARED.")
 			self.conversion_detail.setText("")
 			return
 		if result is None:
@@ -1229,7 +1229,7 @@ class ECTbWindow(QDialog):
 		reg = EF_REGRESSIONS[key]
 		converted = convert_ef_pct(result.ef_pct, reg)
 		self.conversion_result.setText(
-			f"FEVI ECTb {result.ef_pct:.1f} %  →  {converted:.1f} % en escala {reg.label} "
+			f"FEVI PARED {result.ef_pct:.1f} %  →  {converted:.1f} % en escala {reg.label} "
 			f"({converted - result.ef_pct:+.1f} puntos)"
 		)
 		self.conversion_detail.setText(f"{regression_equation_text(reg)}\n{reg.note}")
@@ -1447,10 +1447,10 @@ class ECTbWindow(QDialog):
 		mark_ectb = "▶ " if uses_ectb else "   "
 		mark_old = "   " if uses_ectb else "▶ "
 		self.compare_label.setText(
-			f"{mark_ectb}ECTb (máx. cuentas):  FEVI {result.ef_pct:.1f} %   EDV {result.edv_ml:.1f} mL   "
+			f"{mark_ectb}PARED (máx. cuentas):  FEVI {result.ef_pct:.1f} %   EDV {result.edv_ml:.1f} mL   "
 			f"ESV {result.esv_ml:.1f} mL\n"
 			f"{mark_old}Anterior (umbral):  FEVI {ef_old:.1f} %   EDV {edv_old:.1f} mL   ESV {esv_old:.1f} mL\n"
-			f"   Diferencia ECTb − anterior:  FEVI {result.ef_pct - ef_old:+.1f} puntos   "
+			f"   Diferencia PARED − anterior:  FEVI {result.ef_pct - ef_old:+.1f} puntos   "
 			f"EDV {result.edv_ml - edv_old:+.1f} mL   ESV {result.esv_ml - esv_old:+.1f} mL\n"
 			f"   (▶ marca el que está usando el informe)"
 		)

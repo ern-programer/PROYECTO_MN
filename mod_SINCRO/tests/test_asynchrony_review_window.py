@@ -8,8 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ui.asynchrony_review_window import AsynchronyReviewWindow
-from ui.asynchrony_review_window import STYLE
+from ui.asynchrony_review_window import AsynchronyReviewWindow, STAGES, STYLE, _StageView
 from ui.epar_dialog import EParDialog
 from ui.main_window import MainWindow
 from viz.perfusion_score_figure import AMBER, BG, BLUE, TEXT
@@ -19,8 +18,58 @@ def test_asynchrony_review_reuses_lcars_dialog_and_palette():
     assert issubclass(AsynchronyReviewWindow, EParDialog)
     for color in (AMBER, BG, BLUE, TEXT):
         assert color in STYLE
-    assert 'QFrame#asyncReviewRail' in STYLE
-    assert 'QScrollArea#asyncReviewScroll' in STYLE
+    for selector in ('QFrame#asyncReviewRail', 'QFrame#asyncStageRow', 'QScrollArea#asyncReviewScroll'):
+        assert selector in STYLE
+    assert STAGES == ("stress", "rest")
+
+
+def test_shared_navigation_clamps_each_stage_like_main_window():
+    assert AsynchronyReviewWindow._clamped_position((8, 33, 64, 64), 5, 30) == (5, 30)
+    assert AsynchronyReviewWindow._clamped_position((8, 28, 64, 64), 9, 30) == (7, 27)
+    assert AsynchronyReviewWindow._clamped_position((1, 28, 64, 64), 4, -2) == (0, 0)
+
+
+def _routing_view(edit_stage="stress"):
+    calls = []
+    view = AsynchronyReviewWindow.__new__(AsynchronyReviewWindow)
+    view._edit_stage = edit_stage
+    view._views = {stage: _StageView(stage) for stage in STAGES}
+    view._push_manual_centers = lambda: calls.append("push")
+    view._set_status = lambda *args, **kwargs: calls.append(("status", args))
+    view._main = SimpleNamespace(
+        compare_bundle={"study": object()},
+        study=object(),
+        _on_center_picked=lambda sl, c: calls.append(("stress", sl, c)),
+        _on_compare_center_picked=lambda sl, c: calls.append(("rest", sl, c)),
+        _clear_manual_centers=lambda: calls.append("clear_stress"),
+        _clear_compare_manual_centers=lambda: calls.append("clear_rest"),
+        reprocess_async_stage=lambda stage: calls.append(("reprocess", stage)),
+    )
+    return view, calls
+
+
+def test_center_click_goes_to_stage_of_clicked_viewer():
+    view, calls = _routing_view(edit_stage="stress")
+    view._on_center_picked(3, (10.0, 12.0), stage="rest")
+    view._on_center_picked(4, None, stage="stress")
+    assert calls == [("rest", 3, (10.0, 12.0)), "push", ("stress", 4, None), "push"]
+
+
+def test_clear_centers_follows_selected_processing_stage():
+    for stage, expected in (("stress", ["clear_stress"]), ("rest", ["clear_rest"]), ("both", ["clear_stress", "clear_rest"])):
+        view, calls = _routing_view(edit_stage=stage)
+        view._on_manual_center_clear()
+        assert [call for call in calls if isinstance(call, str) and call.startswith("clear")] == expected
+
+
+def test_metrics_summary_keeps_psd_first_and_never_diagnoses():
+    big, detail = AsynchronyReviewWindow._metrics_summary(
+        {"phase_sd": 18.24, "bandwidth": 52, "entropy_normalized_pct": 41, "technical_classification": "normal"},
+        {"available": True, "ef_pct": 63.0},
+    )
+    assert big == "PSD 18.2°"
+    assert "BW 52.0°" in detail and "FEVI 63.0%" in detail and "(no dx)" in detail
+    assert AsynchronyReviewWindow._metrics_summary(None, None)[0] == "—"
 
 
 def test_review_status_is_legible_in_lcars_palette():
@@ -109,6 +158,7 @@ def test_contours_for_gate_slice_change_with_gate():
 
     c0 = view._contours_for_gate_slice(result, seg, 0, 0)
     c1 = view._contours_for_gate_slice(result, seg, 0, 1)
+    assert len(view._contours_for_gate_slice(result, seg, 0, 0, px_mm=2.0)) == 3
 
     assert len(c0) == 3
     assert len(c1) == 3

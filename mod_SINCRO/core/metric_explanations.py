@@ -37,7 +37,7 @@ _EXPLANATIONS: dict[str, dict[str, str]] = {
             "se normaliza por el VTD."
         ),
         "units": (
-            "Doble convención ECTb: 'VTD/s' (fracción del VTD por segundo, requiere "
+            "Doble convención publicada: 'VTD/s' (fracción del VTD por segundo, requiere "
             "intervalo RR) y 'VTD/RR' (fracción del VTD por intervalo RR, geométrica). "
             "Se muestra como 'X.XX VTD/s [Y.YY VTD/RR]'."
         ),
@@ -138,7 +138,7 @@ _EXPLANATIONS: dict[str, dict[str, str]] = {
         ),
         "how": (
             "Versión GATILLADA: cociente del volumen de fin de diástole (EDV) del "
-            "mismo método (ECTb) entre esfuerzo y reposo: TID = EDV_esfuerzo / "
+            "mismo método (PARED) entre esfuerzo y reposo: TID = EDV_esfuerzo / "
             "EDV_reposo. Al ser un cociente del mismo método, cancela el sesgo del "
             "volumen absoluto. (El TID clásico se mide sobre perfusión ungated "
             "sumada; esa variante queda como desarrollo futuro.)"
@@ -163,7 +163,7 @@ _EXPLANATIONS: dict[str, dict[str, str]] = {
         ),
         "how": (
             "Se suman los gates (ungate) y se mide el tamaño de cavidad con la "
-            "geometría ECTb sin engrosamiento, en esfuerzo y reposo: TID = "
+            "geometría PARED sin engrosamiento, en esfuerzo y reposo: TID = "
             "cavidad_esfuerzo / cavidad_reposo. El volumen absoluto tiene un sesgo "
             "sistemático (espesor de pared fijo) pero al ser un cociente del mismo "
             "método el sesgo se cancela. No mezclar con volúmenes gatillados ni por TC."

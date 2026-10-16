@@ -890,7 +890,7 @@ class MainWindow(QMainWindow):
 		self.seg_method.setToolTip("auto: segmentación automática; threshold: umbral simple; manual: usa los ROIs que dibujes o pegues.")
 		self.roi_source_combo.setToolTip(
 			"Geometría que alimenta el análisis de fase.\n"
-			"Contornos Irregulares (default): traza endo/epi por ángulo con espesor variable, estilo ECTb.\n"
+			"Contornos Irregulares (default): traza endo/epi por ángulo con espesor variable (método PARED).\n"
 			"Anillo: ROI circular clásica (centro + radio interno/externo).\n"
 			"Podés comparar ambas en 'Vista asincronía' antes de decidir."
 		)
@@ -900,7 +900,7 @@ class MainWindow(QMainWindow):
 			"hacia el sector que más capta (pared lateral caliente, defecto, intestino pegado).\n"
 			"Encendido: el centro se recalcula sobre la cavidad (hueco del anillo o zona "
 			"hipocaptante interna).\n"
-			"Afecta radios, contornos ECTb y la asignación angular a segmentos AHA, "
+			"Afecta radios, contornos de pared y la asignación angular a segmentos AHA, "
 			"así que cambia los valores de fase. Reprocesa para verlo."
 		)
 		self.manual_center_check.setToolTip(
@@ -1200,7 +1200,7 @@ class MainWindow(QMainWindow):
 		self.ectb_window_btn = QPushButton("Cuantificación Avanzada")
 		self.ectb_window_btn.clicked.connect(self._open_ectb_for_selected_stage)
 		self.ectb_window_btn.setToolTip(
-			"Abre la ventana de cuantificación del Emory Cardiac Toolbox: FEVI por máximo de cuentas, "
+			"Abre la ventana de cuantificación PARED: FEVI por máximo de cuentas, "
 			"volúmenes, masa miocárdica y engrosamiento.\n"
 			"Es el método que usa el informe por defecto. Desde ahí también se puede volver al método "
 			"anterior (umbral endocárdico), que queda disponible para comparar.\n"
@@ -1227,9 +1227,9 @@ class MainWindow(QMainWindow):
 		self.lv_3d_btn.clicked.connect(self.open_lv_3d_window)
 		self.lv_3d_btn.setToolTip(
 			"Abre el panel 3D del ventrículo: miocardio sólido (isosuperficie del SA reorientado) "
-			"a la izquierda y la malla alambre del VI (ECTb) a la derecha, con ED fija y el gate "
+			"a la izquierda y la malla alambre del VI (PARED) a la derecha, con ED fija y el gate "
 			"actual animado en cine sincronizado. Rotación/zoom con el mouse. Exporta GIF/AVI.\n"
-			"Requiere estudio gated procesado con FEVI (ECTb) calculado."
+			"Requiere estudio gated procesado con FEVI (PARED) calculado."
 		)
 		button_row.addWidget(self.process_btn, 0, 0)
 		button_row.addWidget(self.pdf_btn, 0, 1)
@@ -2127,7 +2127,7 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_ung_filter_combo.addItems(["none", "lowpass", "butterworth", "wiener"])
 				self.cine_crudo_ung_filter_combo.setCurrentText("butterworth")
 				self.cine_crudo_ung_filter_combo.setMaximumWidth(104)
-				self.cine_crudo_ung_filter_combo.setToolTip("Filtro rama UngGat/perfusión. FBP: pre-filtro del sinograma (calco Xeleris). OSEM/MLEM: el Butterworth se aplica POST-reconstrucción (suavizado 3D).")
+				self.cine_crudo_ung_filter_combo.setToolTip("Filtro rama UngGat/perfusión. FBP: pre-filtro del sinograma. OSEM/MLEM: el Butterworth se aplica POST-reconstrucción (suavizado 3D).")
 				toolbar6_r1.addWidget(self.cine_crudo_ung_filter_combo)
 				self.cine_crudo_ung_cutoff_spin = QDoubleSpinBox()
 				self.cine_crudo_ung_cutoff_spin.setRange(0.01, 1.00)
@@ -2135,13 +2135,13 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_ung_cutoff_spin.setDecimals(2)
 				self.cine_crudo_ung_cutoff_spin.setValue(0.52)
 				self.cine_crudo_ung_cutoff_spin.setMaximumWidth(60)
-				self.cine_crudo_ung_cutoff_spin.setToolTip("Cutoff normalizado (fracción de Nyquist) del filtro UngGat. Default cardíaco (matriz 64² · órbita 180°) calcado de Xeleris ECToolbox: 0.52. Con OSEM/MLEM el Butterworth se aplica post-recon (no es pre-filtro FBP).")
+				self.cine_crudo_ung_cutoff_spin.setToolTip("Cutoff normalizado (fracción de Nyquist) del filtro UngGat. Default cardíaco (matriz 64² · órbita 180°): 0.52. Con OSEM/MLEM el Butterworth se aplica post-recon (no es pre-filtro FBP).")
 				toolbar6_r1.addWidget(self.cine_crudo_ung_cutoff_spin)
 				self.cine_crudo_ung_order_spin = QSpinBox()
 				self.cine_crudo_ung_order_spin.setRange(1, 20)
 				self.cine_crudo_ung_order_spin.setValue(5)
 				self.cine_crudo_ung_order_spin.setMaximumWidth(50)
-				self.cine_crudo_ung_order_spin.setToolTip("Orden del filtro UngGat. Default cardíaco calcado de Xeleris ECToolbox: 5.")
+				self.cine_crudo_ung_order_spin.setToolTip("Orden del filtro UngGat. Default cardíaco: 5.")
 				toolbar6_r1.addWidget(self.cine_crudo_ung_order_spin)
 				toolbar6_r1.addWidget(QLabel("Gated"))
 				self.cine_crudo_gated_method_combo = QComboBox()
@@ -2154,7 +2154,7 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_gated_filter_combo.addItems(["none", "lowpass", "butterworth", "wiener"])
 				self.cine_crudo_gated_filter_combo.setCurrentText("butterworth")
 				self.cine_crudo_gated_filter_combo.setMaximumWidth(104)
-				self.cine_crudo_gated_filter_combo.setToolTip("Filtro rama gated. FBP: pre-filtro del sinograma (calco Xeleris). OSEM/MLEM: el Butterworth se aplica POST-reconstrucción (suavizado 3D).")
+				self.cine_crudo_gated_filter_combo.setToolTip("Filtro rama gated. FBP: pre-filtro del sinograma. OSEM/MLEM: el Butterworth se aplica POST-reconstrucción (suavizado 3D).")
 				toolbar6_r1.addWidget(self.cine_crudo_gated_filter_combo)
 				self.cine_crudo_gated_cutoff_spin = QDoubleSpinBox()
 				self.cine_crudo_gated_cutoff_spin.setRange(0.01, 1.00)
@@ -2162,13 +2162,13 @@ class MainWindow(QMainWindow):
 				self.cine_crudo_gated_cutoff_spin.setDecimals(2)
 				self.cine_crudo_gated_cutoff_spin.setValue(0.40)
 				self.cine_crudo_gated_cutoff_spin.setMaximumWidth(60)
-				self.cine_crudo_gated_cutoff_spin.setToolTip("Cutoff normalizado (fracción de Nyquist) del filtro gated. Default cardíaco (matriz 64² · órbita 180°) calcado de Xeleris ECToolbox: 0.40. Con OSEM/MLEM el Butterworth se aplica post-recon (no es pre-filtro FBP).")
+				self.cine_crudo_gated_cutoff_spin.setToolTip("Cutoff normalizado (fracción de Nyquist) del filtro gated. Default cardíaco (matriz 64² · órbita 180°): 0.40. Con OSEM/MLEM el Butterworth se aplica post-recon (no es pre-filtro FBP).")
 				toolbar6_r1.addWidget(self.cine_crudo_gated_cutoff_spin)
 				self.cine_crudo_gated_order_spin = QSpinBox()
 				self.cine_crudo_gated_order_spin.setRange(1, 20)
 				self.cine_crudo_gated_order_spin.setValue(10)
 				self.cine_crudo_gated_order_spin.setMaximumWidth(50)
-				self.cine_crudo_gated_order_spin.setToolTip("Orden del filtro gated. Default cardíaco calcado de Xeleris ECToolbox: 10.")
+				self.cine_crudo_gated_order_spin.setToolTip("Orden del filtro gated. Default cardíaco: 10.")
 				toolbar6_r1.addWidget(self.cine_crudo_gated_order_spin)
 				toolbar6_r1.addStretch(1)
 
@@ -4995,7 +4995,7 @@ class MainWindow(QMainWindow):
 		cube, _ = self._apply_gate_dropout_correction(cube, log=False)
 		result = analyze_lv_ectb(cube, seg, pixel_mm, float(slice_mm), self.ectb_config())
 		if not result.available:
-			raise ValueError(str(result.reason or "FEVI ECTb no disponible"))
+			raise ValueError(str(result.reason or "FEVI PARED no disponible"))
 		return {
 			"lv_meshes": lv_meshes_from_ectb(result, float(slice_mm), surface="endo", seg=seg,
 				pixel_mm=pixel_mm, volume_shape=tuple(cube.shape[1:])),
@@ -7867,15 +7867,15 @@ class MainWindow(QMainWindow):
 			"Es una corrección de ganancia global: NO deforma el miocardio, NO mueve bordes, NO "
 			"cambia la forma espacial. Solo restituye la estadística perdida.\n\n"
 			"ORIGEN\n"
-			"Emory Cardiac Toolbox 4.0 — Technical Overview, sección 22.8. Es el mismo paso que "
-			"aplica el ECTb antes de calcular volúmenes y fase.\n\n"
+			"Emory Cardiac Toolbox 4.0 — Technical Overview, sección 22.8. Es el paso publicado que "
+			"se aplica antes de calcular volúmenes y fase.\n\n"
 			"EL SUPUESTO\n"
 			"Se asume que el primer y el último gate son adyacentes en el ciclo (ambos en "
 			"telediastole) y que por lo tanto deberían tener cuentas comparables. Es razonable en un "
 			"gated normal, pero no exacto: si el último gate tuviera legítimamente algo menos de "
 			"cuentas, la corrección mete un error pequeño en sentido contrario. Ese residuo es mucho "
 			"menor que el dropout que corrige (10-20% de déficit por R-R vs pocos % de diferencia "
-			"fisiológica), por eso el ECTb lo aplica por defecto.\n\n"
+			"fisiológica), por eso se aplica por defecto.\n\n"
 			"CUÁNDO APAGARLA\n"
 			"• Si el estudio ya viene corregido por la consola: el cartel del sidebar va a mostrar "
 			"un dropout de ~0% y la corrección no se aplica sola.\n"
@@ -9372,7 +9372,7 @@ class MainWindow(QMainWindow):
 			try:
 				self._refresh_ectb_window()
 			except Exception as exc:
-				self._log(f"[WARN] Refresco de la ventana ECTb falló: {exc}")
+				self._log(f"[WARN] Refresco de Cuantificación avanzada falló: {exc}")
 			try:
 				self._refresh_gqc_window()
 			except Exception as exc:
@@ -10322,7 +10322,7 @@ class MainWindow(QMainWindow):
 	FEVI_METHOD_THRESHOLD = "umbral"
 
 	FEVI_METHOD_LABELS = {
-		FEVI_METHOD_ECTB: "ECTb (máximo de cuentas)",
+		FEVI_METHOD_ECTB: "PARED (máximo de cuentas)",
 		FEVI_METHOD_THRESHOLD: "Anterior (umbral endocárdico)",
 	}
 
@@ -10430,7 +10430,7 @@ class MainWindow(QMainWindow):
 				self.ectb_config(),
 			)
 		except Exception as exc:
-			self._log(f"[WARN] FEVI ECTb falló: {exc}")
+			self._log(f"[WARN] FEVI PARED falló: {exc}")
 			return unavailable(str(exc))
 
 		if not res.available:
@@ -10557,7 +10557,7 @@ class MainWindow(QMainWindow):
 			fallback["fallback_from"] = "ectb_max_counts"
 			fallback["fallback_reason"] = str(result.get("reason") or "")
 			self._log(
-				"[FEVI] ECTb no pudo cuantificar "
+				"[FEVI] PARED no pudo cuantificar "
 				f"({fallback['fallback_reason']}); se usó el método anterior."
 			)
 		return self._augment_with_filling_metrics(fallback)
@@ -11578,7 +11578,7 @@ class MainWindow(QMainWindow):
 				)
 			if ef.get("fallback_from"):
 				clinical.append(
-					f"  Aviso: el método ECTb no pudo cuantificar ({ef.get('fallback_reason')}); "
+					f"  Aviso: el método PARED no pudo cuantificar ({ef.get('fallback_reason')}); "
 					"se usó el método anterior."
 				)
 			clinical.append("  Nota: estimación preliminar de investigación.")

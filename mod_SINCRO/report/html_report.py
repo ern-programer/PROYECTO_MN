@@ -1049,7 +1049,7 @@ def generate_html_report(
       <li><b>Bandwidth (°):</b> ancho del histograma de fase (percentil 95%). Complementa Phase SD para evaluar dispersión.</li>
       <li><b>Entropy (%):</b> entropía normalizada de Shannon del histograma de fase. Mide desorganización; mayor valor = peor sincronía.</li>
       <li><b>FEVI:</b> fracción de eyección del ventrículo izquierdo (preliminar en SINCRO; no reemplaza software validado para cuantificación).</li>
-      <li><b>ECTb:</b> método de contorno elíptico para segmentación del VI y cálculo de volúmenes/FEVI.</li>
+      <li><b>PARED:</b> método de contorno elíptico para segmentación del VI y cálculo de volúmenes/FEVI.</li>
       <li><b>Bullseye:</b> representación circular de los17segmentos AHA (ápex en el centro, base en el borde).</li>
       <li><b>Denoise+:</b> filtro propio de SINCRO que aplica denoise bilateral del sinograma + realce por resta para abrir la cavidad y limpiar el fondo.</li>
       <li><b>FBP CLEAR:</b> filtro exclusivo de SINCRO para imágenes gated: denoise Poisson del sinograma + doble recon (nítida + difusa) + resta ponderada. Limpia el ruido de bajo conteo por gate sin perder la cavidad.</li>

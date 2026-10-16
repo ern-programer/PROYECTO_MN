@@ -180,7 +180,7 @@ def lv_meshes_from_ectb(
     import pyvista as pv  # noqa: F401  (importación perezosa, por si no está)
 
     if not getattr(result, "available", False):
-        raise ValueError("ECTbLVResult no disponible: " + str(getattr(result, "reason", "?")))
+        raise ValueError("Resultado PARED no disponible: " + str(getattr(result, "reason", "?")))
 
     radii_all = result.endo_radii_mm if surface == "endo" else result.epi_radii_mm
     radii_all = np.asarray(radii_all, dtype=np.float64)
